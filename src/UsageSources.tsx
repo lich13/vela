@@ -74,6 +74,9 @@ export default function Sources({
             {!!state.reports[id]?.errors && (
               <span className="form-error">
                 {state.reports[id].errors} 项未同步
+                {state.reports[id].lastError
+                  ? `：${state.reports[id].lastError}`
+                  : ""}
               </span>
             )}
           </div>

@@ -454,6 +454,7 @@ describe("usage overview", () => {
         pending: 3,
         skipped: 0,
         errors: 0,
+        lastError: null,
         completedAt: timestamp,
       },
     };

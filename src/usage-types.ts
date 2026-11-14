@@ -354,6 +354,7 @@ export type UsageState = {
       imported: number;
       skipped: number;
       errors: number;
+      lastError: string | null;
       completedAt: number | null;
     }
   >;

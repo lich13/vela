@@ -386,6 +386,7 @@ export function usagePreview(
         imported: 16,
         skipped: 0,
         errors: 0,
+        lastError: null,
         completedAt: Date.now(),
       },
       claude: {
@@ -393,6 +394,7 @@ export function usagePreview(
         imported: 9,
         skipped: 0,
         errors: 0,
+        lastError: null,
         completedAt: Date.now(),
       },
     },

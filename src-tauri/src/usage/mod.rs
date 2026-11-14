@@ -554,7 +554,7 @@ impl Service {
                         let report = reports.entry(client.clone()).or_default();
                         report.phase = "failed".into();
                         report.completed_at = None;
-                        report.errors = report.errors.saturating_add(1);
+                        report.failed(&error);
                         first_error.get_or_insert(error);
                     }
                 }

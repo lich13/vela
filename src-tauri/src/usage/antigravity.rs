@@ -1160,7 +1160,13 @@ impl Api {
                 .await
             {
                 Ok(all) => {
-                    let Some(map) = all["trajectorySummaries"].as_object() else {
+                    // The app omits the map when it has no conversation
+                    // loaded, so an empty reply is a complete, empty catalog.
+                    let none = serde_json::Map::new();
+                    let Some(map) = all["trajectorySummaries"]
+                        .as_object()
+                        .or_else(|| all.as_object().filter(|o| o.is_empty()).map(|_| &none))
+                    else {
                         last_error = Some(failure("Antigravity 会话目录不完整"));
                         continue;
                     };
@@ -1205,9 +1211,7 @@ impl Api {
                 .await
             {
                 Ok(()) => report.files += 1,
-                Err(_) => {
-                    report.errors += 1;
-                }
+                Err(error) => report.failed(&error),
             }
             store.progress(report);
         }
@@ -1848,7 +1852,7 @@ pub fn sync(
                     match api.quota(data, home).await {
                         Ok(Some((id, periods))) => store.save_antigravity_quota(&id, &periods)?,
                         Ok(None) => {}
-                        Err(_) => report.errors += 1,
+                        Err(error) => report.failed(&error),
                     }
                 }
                 api.collect_with_files(

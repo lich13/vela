@@ -77,6 +77,14 @@ export function syncStatus(state: UsageState | null, client: string) {
     return "部分未同步";
   return reports.every((r) => r.completedAt != null) ? "已同步" : "";
 }
+/** Why the shown sources are not fully synced, for the status tooltip. */
+export function syncReason(state: UsageState | null, client: string) {
+  if (!state) return undefined;
+  const reports = client
+    ? [state.reports[client]].filter(Boolean)
+    : Object.values(state.reports);
+  return reports.find((r) => r.lastError)?.lastError ?? undefined;
+}
 const local = (n: number) => {
   const d = new Date(n);
   return new Date(n - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -470,7 +478,11 @@ export default function Usage({
       <header className="usage-heading">
         <h1>用量</h1>
         <div className="usage-actions">
-          <span className="usage-sync-status" aria-live="polite">
+          <span
+            className="usage-sync-status"
+            aria-live="polite"
+            title={syncReason(state, client)}
+          >
             {syncStatus(state, client)}
           </span>
           <select

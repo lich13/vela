@@ -580,6 +580,11 @@ async fn failed_session_does_not_block_other_sessions_or_advance_its_cursor() {
     .await
     .unwrap();
     assert_eq!((report.errors, report.files, report.imported), (1, 1, 2));
+    // The reason of the skipped session is kept for the sources page.
+    assert!(report
+        .last_error
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("Antigravity")));
     assert_eq!(
         store.cursor(&safe_id("antigravity:rpc:a-broken")).unwrap(),
         None
@@ -2340,4 +2345,76 @@ fn antigravity_cache_hit_rate_is_computed_without_cache_write_for_new_and_legacy
         .rows
         .iter()
         .all(|item| item.tokens().cache_sample().is_some()));
+}
+
+/// One loopback window answering every read with `reply`.
+async fn window(reply: Value) -> (Api, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |_: hyper::Request<hyper::body::Incoming>| {
+                    let bytes = Bytes::from(serde_json::to_vec(&reply).unwrap());
+                    async move { Ok::<_, std::convert::Infallible>(Response::new(Full::new(bytes))) }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(socket), service)
+                    .await;
+            });
+        }
+    });
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    (Api::from_single(http, origin, "fixture".into()), server)
+}
+
+#[tokio::test]
+async fn an_app_without_loaded_conversations_is_an_empty_catalog_not_a_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir
+        .path()
+        .join("antigravity/brain/local-only/transcript.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(
+        &transcript,
+        "{\"type\":\"PLANNER_RESPONSE\",\"step_index\":0,\"created_at\":\"2026-01-01T00:00:00Z\",\"input_tokens\":50}\n",
+    )
+    .unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+
+    // The app answers `{}` when it has no conversation loaded.
+    let (api, server) = window(json!({})).await;
+    let mut report = Report::default();
+    collect_home(
+        &api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .await
+    .unwrap();
+    server.abort();
+    assert_eq!((report.errors, report.files), (0, 1));
+    assert_eq!(report.last_error, None);
+
+    // Any other shape still is an incomplete catalog.
+    let (api, server) = window(json!({"unexpected":"fixture"})).await;
+    let error = collect_home(
+        &api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut Report::default(),
+        false,
+    )
+    .await
+    .unwrap_err();
+    server.abort();
+    assert_eq!(error.message, "Antigravity 会话目录不完整");
 }

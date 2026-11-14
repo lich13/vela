@@ -1149,12 +1149,15 @@ describe("usage records", () => {
           imported: 2,
           skipped: 0,
           errors: 2,
+          lastError: "Antigravity 用量关联步骤不完整",
           completedAt: timestamp,
         },
       },
     };
     await act(async () => vi.advanceTimersByTime(5_000));
-    expect(within(dialog).getByText("2 项未同步")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("2 项未同步：Antigravity 用量关联步骤不完整"),
+    ).toBeInTheDocument();
     expect(recording).not.toBeChecked();
     expect(autoSync).not.toBeChecked();
     expect(calls("set_usage_settings")).toHaveLength(0);
@@ -1632,6 +1635,7 @@ it("reports the selected source's latest outcome and exposes mixed failures", ()
     imported: 1,
     skipped: 0,
     errors: 0,
+    lastError: null,
     completedAt: 100,
     phase: "done",
   };
@@ -1673,11 +1677,16 @@ it("requests fresh state after showing and ignores an older hidden response", as
     imported: 1,
     skipped: 0,
     errors: 1,
+    lastError: "未找到 Antigravity app 窗口",
     phase: "failed",
     completedAt: null,
   };
   await act(async () => reads[1](fresh));
   expect(screen.getByText("同步失败")).toBeInTheDocument();
+  expect(screen.getByText("同步失败")).toHaveAttribute(
+    "title",
+    "未找到 Antigravity app 窗口",
+  );
   await act(async () => reads[0](structuredClone(state)));
   expect(screen.getByText("同步失败")).toBeInTheDocument();
 });

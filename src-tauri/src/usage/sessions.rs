@@ -52,7 +52,15 @@ pub struct Report {
     pub imported: u64,
     pub skipped: u64,
     pub errors: u64,
+    /// Why the first item of this run could not be synced.
+    pub last_error: Option<String>,
     pub completed_at: Option<i64>,
+}
+impl Report {
+    pub(super) fn failed(&mut self, error: &storage::AppError) {
+        self.errors += 1;
+        self.last_error.get_or_insert_with(|| error.message.clone());
+    }
 }
 fn timestamp(v: &Value) -> Option<i64> {
     v.as_str()
