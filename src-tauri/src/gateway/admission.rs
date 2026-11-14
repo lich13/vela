@@ -17,6 +17,17 @@ use tokio::{
 
 #[derive(Clone)]
 pub struct Scheduler(Arc<Shared>);
+/// Whether a provider can take a request right now, in the order admission
+/// checks it. Admission, the failure preview and the failover evidence all
+/// read this one rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Gate {
+    Ready,
+    /// The circuit is unavailable; seconds until it may recover.
+    Health(u64),
+    Capacity,
+    Rpm(Duration),
+}
 struct Shared {
     state: Mutex<State>,
     wake: Notify,
@@ -252,8 +263,26 @@ impl Scheduler {
         let s = self.0.state.lock();
         (s.active.clone(), s.waiting.len() + s.capacity_waits.len())
     }
-    pub(super) fn capacity_available(&self, id: &str) -> bool {
-        Self::available(&self.0.state.lock(), id)
+    fn gate(s: &mut State, route: &Route, requirement: &Requirement) -> Gate {
+        let id = &route.provider.id;
+        let health = route.health_for(requirement);
+        if !health.available {
+            return Gate::Health(health.retry_in);
+        }
+        if !Self::available(s, id) {
+            return Gate::Capacity;
+        }
+        let limit = s.rpm_limits.get(id).copied().unwrap_or_default();
+        s.rpm.gate(id, limit).map_or(Gate::Ready, Gate::Rpm)
+    }
+    /// The gates of `routes` under one lock. It reserves nothing: a later
+    /// admission checks again before it takes a slot.
+    pub(super) fn peek(&self, routes: &[&Route], requirement: &Requirement) -> Vec<Gate> {
+        let mut s = self.0.state.lock();
+        routes
+            .iter()
+            .map(|route| Self::gate(&mut s, route, requirement))
+            .collect()
     }
     pub fn capacity_retries(&self) -> Vec<CapacityRetry> {
         let mut retries = self.retries(WaitKind::Capacity);
@@ -610,9 +639,8 @@ impl Scheduler {
                     .is_some_and(|(intake, _)| *intake == super::compaction::Intake::NewThread);
                 for route in &eligible {
                     let id = &route.provider.id;
-
-                    let health = route.health_for(requirement);
-                    if !health.available {
+                    let gate = Self::gate(&mut s, route, requirement);
+                    if let Gate::Health(recovers_in) = gate {
                         if first_turn && route.provider.take_new_threads {
                             intake_skip = Some(if route.provider_circuit.health().available {
                                 crate::usage::model::RoutingDecision::NewThreadModelCooling
@@ -620,11 +648,11 @@ impl Scheduler {
                                 crate::usage::model::RoutingDecision::NewThreadProviderUnavailable
                             });
                         }
-                        retry_in = retry_in.min(health.retry_in.max(1));
+                        retry_in = retry_in.min(recovers_in.max(1));
                         continue;
                     }
                     any_ready = true;
-                    if !Self::available(&s, id) {
+                    if gate == Gate::Capacity {
                         if first_turn && route.provider.take_new_threads {
                             intake_skip =
                                 Some(crate::usage::model::RoutingDecision::NewThreadCapacityFull);
@@ -644,8 +672,7 @@ impl Scheduler {
                         // A FIFO follower also waits for this provider's RPM
                         // budget. It must not time out before the head waiter
                         // gets a chance to send when the minute rolls forward.
-                        let limit = s.rpm_limits.get(id).copied().unwrap_or_default();
-                        if let Some(delay) = s.rpm.gate(id, limit) {
+                        if let Gate::Rpm(delay) = gate {
                             rate_retry = Some(rate_retry.unwrap_or(0).max(seconds(delay)));
                         }
                         if first_turn && route.provider.take_new_threads {
@@ -654,8 +681,7 @@ impl Scheduler {
                         }
                         continue;
                     }
-                    let rpm_limit = s.rpm_limits.get(id).copied().unwrap_or_default();
-                    if let Some(delay) = s.rpm.gate(id, rpm_limit) {
+                    if let Gate::Rpm(delay) = gate {
                         rate_retry = Some(seconds(delay));
                         break;
                     }
@@ -673,7 +699,8 @@ impl Scheduler {
                             drop(permits);
                             continue 'admission;
                         }
-                        let rpm = (rpm_limit > 0).then(|| RpmReservation {
+                        let limited = s.rpm_limits.get(id).is_some_and(|limit| *limit > 0);
+                        let rpm = limited.then(|| RpmReservation {
                             scheduler: self.clone(),
                             id: id.clone(),
                             token: s.rpm.charge(id),

@@ -1,5 +1,5 @@
 //! Bounded routing metadata. Request and response content never enter this record.
-use super::{routing::Requirement, Gateway, Route};
+use super::{admission::Gate, routing::Requirement, Gateway, Route};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -120,28 +120,32 @@ impl Tracker {
         self.evidence.exit = None;
         self.evidence.exclusions.clear();
         self.evidence.eligible_candidates = 0;
+        let mut admissible = Vec::new();
         for route in all {
             let p = &route.provider;
             let excluded = if !route.accepts_protocol(path) {
-                Some(Exclusion::Protocol)
+                Exclusion::Protocol
             } else if !requirement.allows(p.allowed_models.as_deref()) {
-                Some(Exclusion::Model)
+                Exclusion::Model
             } else if !eligible.iter().any(|r| r.provider.id == p.id) {
-                Some(Exclusion::ConversationPolicy)
-            } else if !route.health_for(requirement).available {
-                Some(Exclusion::Health)
-            } else if !gateway.0.admission.capacity_available(&p.id) {
-                Some(Exclusion::Capacity)
-            } else if gateway.0.admission.rpm_status(&p.id, p.max_rpm).2 {
-                Some(Exclusion::Rpm)
+                Exclusion::ConversationPolicy
             } else {
-                None
+                admissible.push(route);
+                continue;
             };
-            if let Some(reason) = excluded {
-                *self.evidence.exclusions.entry(reason).or_default() += 1;
-            } else {
-                self.evidence.eligible_candidates += 1;
-            }
+            *self.evidence.exclusions.entry(excluded).or_default() += 1;
+        }
+        for gate in gateway.0.admission.peek(&admissible, requirement) {
+            let excluded = match gate {
+                Gate::Ready => {
+                    self.evidence.eligible_candidates += 1;
+                    continue;
+                }
+                Gate::Health(_) => Exclusion::Health,
+                Gate::Capacity => Exclusion::Capacity,
+                Gate::Rpm(_) => Exclusion::Rpm,
+            };
+            *self.evidence.exclusions.entry(excluded).or_default() += 1;
         }
         self.publish();
     }

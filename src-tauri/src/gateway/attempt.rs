@@ -85,8 +85,9 @@ impl DownstreamEnd {
     }
 }
 
-/// A diagnostic preview of the existing fallback policy; it reserves nothing.
-/// The real admission still performs its atomic version/queue/capacity check.
+/// Whether another queued provider could take this request now. It reads the
+/// admission gate without reserving anything; the next admission checks the
+/// same gate again when it takes a slot.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fallback_action(
     gateway: &super::Gateway,
@@ -132,12 +133,11 @@ pub(super) fn fallback_action(
             .filter(|route| queued.contains(&route.provider.id) && matches_request(route))
             .collect(),
     );
-    if candidates.iter().any(|route| {
-        let p = &route.provider;
-        route.health_for(requirement).available
-            && gateway.0.admission.capacity_available(&p.id)
-            && !gateway.0.admission.rpm_status(&p.id, p.max_rpm).2
-    }) {
+    let gates = gateway
+        .0
+        .admission
+        .peek(&candidates.iter().collect::<Vec<_>>(), requirement);
+    if gates.contains(&super::admission::Gate::Ready) {
         Action::TryingNext
     } else {
         Action::Returned
