@@ -823,3 +823,60 @@ fn current_account_and_timeline_do_not_fall_back_across_credential_kinds() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn keyring_values_decode_from_both_encodings_and_round_trip() {
+    let raw = r#"{"auth_method":"google-oauth","id_token_email":"user@example.invalid","token":{"access_token":"fixture","refresh_token":"fixture"}}"#;
+    let stored = encode_keyring(raw);
+    assert!(stored.starts_with("go-keyring-base64:"));
+    assert_eq!(decode_keyring(&format!("{stored}\n")).as_deref(), Some(raw));
+    assert_eq!(
+        decode_keyring("go-keyring-encoded:7b7d").as_deref(),
+        Some("{}")
+    );
+    // A value stored without a prefix is the credential itself.
+    assert_eq!(decode_keyring(" {} \n").as_deref(), Some("{}"));
+    for broken in [
+        "go-keyring-base64:***",
+        "go-keyring-encoded:7",
+        "go-keyring-encoded:zz",
+        "go-keyring-base64:",
+        "",
+    ] {
+        assert_eq!(decode_keyring(broken), None, "{broken}");
+    }
+    let (method, email) = parse_oauth_metadata(&decode_keyring(&stored).unwrap()).unwrap();
+    assert_eq!(method, "google-oauth");
+    assert_eq!(email.as_deref(), Some("user@example.invalid"));
+}
+
+#[test]
+fn fixture_homes_never_reach_the_keychain() {
+    let (_tmp, paths) = setup_paths();
+    assert!(!paths.keychain());
+    assert!(read_oauth(&paths).unwrap().is_none());
+    write_oauth(&paths, r#"{"access_token":"fixture"}"#).unwrap();
+    assert_eq!(
+        fs::read_to_string(paths.oauth_file()).unwrap(),
+        r#"{"access_token":"fixture"}"#
+    );
+}
+
+#[test]
+fn a_new_login_is_saved_even_when_a_later_file_is_unreadable() {
+    let (_tmp, paths) = setup_paths();
+    write_private_file(
+        &paths.oauth_file(),
+        br#"{"auth_method":"google-oauth","id_token_email":"new@example.invalid","token":{"access_token":"fixture","refresh_token":"fixture"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(paths.app_settings_file().parent().unwrap()).unwrap();
+    fs::write(paths.app_settings_file(), b"{ not json").unwrap();
+    assert!(state_at(&paths).is_err());
+    let (vault, _) = load_vault(&paths).unwrap();
+    assert_eq!(vault.entries.len(), 1);
+    assert_eq!(
+        vault.entries[0].email.as_deref(),
+        Some("new@example.invalid")
+    );
+}

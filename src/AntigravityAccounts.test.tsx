@@ -172,6 +172,31 @@ describe("AntigravityAccounts", () => {
     expect(
       (await screen.findAllByText("user3@example.invalid")).length,
     ).toBeGreaterThan(0);
+    expect(notify).toHaveBeenCalledWith("新账号已自动加入切换列表");
+    notify.mockClear();
+    // The same accounts arriving again are not new.
+    act(() => {
+      listeners.get("antigravity-auth-state")?.({
+        ...initialState,
+        revision: "rev-auto-2",
+        mode: "mixed_adc_file_without_flag",
+        accounts: [
+          ...initialState.accounts,
+          {
+            id: "oauth-3",
+            name: "user3@example.invalid",
+            kind: "oauth",
+            email: "user3@example.invalid",
+            projectId: null,
+            sourceType: "google-oauth",
+            updatedAt: 1710000100,
+            current: true,
+            credentialRevision: "cred-auto-2",
+          },
+        ],
+      });
+    });
+    expect(notify).not.toHaveBeenCalled();
     expect(
       screen.getByText(/不一致（存在 ADC 文件但未启用设置）/),
     ).toBeTruthy();

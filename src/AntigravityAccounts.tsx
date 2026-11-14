@@ -86,6 +86,10 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
   const [quotaProjectId, setQuotaProjectId] = useState("");
   const [activate, setActivate] = useState(true);
   const sequence = useRef(0);
+  const known = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    known.current = state && new Set(state.accounts.map((a) => a.id));
+  }, [state]);
 
   const [importType, setImportType] = useState<"adc" | "vertex_key">("adc");
   const [apiKey, setApiKey] = useState("");
@@ -118,13 +122,20 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
     const events = subscriptions((e) => setError(errorOf(e).message));
     events.watch("antigravity-auth-state", (next) => {
       sequence.current++;
+      const ids = known.current;
+      // A login made in Antigravity itself shows up here on its own.
+      if (
+        ids &&
+        next.accounts.some((a) => a.kind === "oauth" && !ids.has(a.id))
+      )
+        notify("新账号已自动加入切换列表");
       setState(next);
     });
     return () => {
       sequence.current++;
       events.dispose();
     };
-  }, [load, setError]);
+  }, [load, notify, setError]);
 
   const runAction = async (
     fn: () => Promise<AntigravityAuthState>,

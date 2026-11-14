@@ -1855,11 +1855,13 @@ pub fn run() {
                                 agy_config_version = Some(rev);
                             }
                         }
-                        if let Some(stamp) = antigravity::auth::disk_stamp() {
-                            if agy_auth_stamp.as_ref() != Some(&stamp) {
-                                if let Ok((auth_state, clean)) =
-                                    antigravity::auth::poll_state(&runtime.data)
-                                {
+                    }
+                    // Like the Codex account, a new Antigravity login is picked
+                    // up whether or not a window is open.
+                    if let Some(stamp) = antigravity::auth::disk_stamp() {
+                        if agy_auth_stamp.as_ref() != Some(&stamp) {
+                            match antigravity::auth::poll_state(&runtime.data) {
+                                Ok((auth_state, clean)) => {
                                     if agy_auth_revision.as_ref() != Some(&auth_state.revision) {
                                         agy_auth_revision = Some(auth_state.revision.clone());
                                         let _ = handle.emit("antigravity-auth-state", auth_state);
@@ -1867,6 +1869,20 @@ pub fn run() {
                                     if clean {
                                         agy_auth_stamp = Some(stamp);
                                     }
+                                }
+                                Err(_) => {
+                                    // Reported once; the next change on disk
+                                    // tries again.
+                                    agy_auth_stamp = Some(stamp);
+                                    runtime.diagnostics.emit(events::Record::new(
+                                        None,
+                                        None,
+                                        None,
+                                        events::Reason::AccountSync,
+                                        events::Action::Stopped,
+                                        None,
+                                        None,
+                                    ));
                                 }
                             }
                         }

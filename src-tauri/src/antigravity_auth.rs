@@ -4,7 +4,10 @@ use crate::{
     storage::{self, AppError, Result},
     Runtime,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -246,6 +249,13 @@ impl Paths {
             .with_file_name(".antigravity")
             .join("settings.json")
     }
+    /// Antigravity keeps the OAuth login in the macOS keychain. Only the real
+    /// home directory maps to it, so fixtures never read or write that item.
+    fn keychain(&self) -> bool {
+        cfg!(target_os = "macos")
+            && !cfg!(test)
+            && dirs::home_dir().is_some_and(|home| home.join(".gemini") == self.gemini_home)
+    }
     pub fn watched_files(&self) -> [PathBuf; 6] {
         [
             self.oauth_file(),
@@ -433,6 +443,123 @@ fn read_text_optional(path: &Path) -> Result<Option<String>> {
     let text =
         String::from_utf8(bytes).map_err(|_| err(code::UTF8, "凭据文件不是有效的 UTF-8 文本"))?;
     Ok((!text.trim().is_empty()).then_some(text))
+}
+const KEYCHAIN_ITEM: [&str; 4] = ["-s", "gemini", "-a", "antigravity"];
+const KEYRING_BASE64: &str = "go-keyring-base64:";
+const KEYRING_HEX: &str = "go-keyring-encoded:";
+/// `security -i` rejects longer command lines.
+const KEYCHAIN_COMMAND_LIMIT: usize = 4096;
+
+/// The credential inside a keychain value written by Antigravity's keyring
+/// library, which prefixes the encoding it used.
+fn decode_keyring(stored: &str) -> Option<String> {
+    let stored = stored.trim();
+    let bytes = if let Some(encoded) = stored.strip_prefix(KEYRING_BASE64) {
+        STANDARD.decode(encoded).ok()?
+    } else if let Some(encoded) = stored.strip_prefix(KEYRING_HEX) {
+        (0..encoded.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(encoded.get(i..i + 2)?, 16).ok())
+            .collect::<Option<_>>()?
+    } else {
+        stored.as_bytes().to_vec()
+    };
+    String::from_utf8(bytes)
+        .ok()
+        .filter(|text| !text.trim().is_empty())
+}
+fn encode_keyring(raw: &str) -> String {
+    format!("{KEYRING_BASE64}{}", STANDARD.encode(raw))
+}
+/// Runs `/usr/bin/security`. A locked keychain asks for its password in a
+/// dialog, so the wait is bounded and cannot hold the credential lock.
+fn security(args: &[&str], input: Option<&str>) -> Result<std::process::Output> {
+    use std::{io::Write, process::Stdio};
+    let fail = || err(code::AUTH, "无法访问 macOS 钥匙串中的 Antigravity 登录凭据");
+    let mut child = std::process::Command::new("/usr/bin/security")
+        .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| fail())?;
+    if let Some(input) = input {
+        let mut stdin = child.stdin.take().ok_or_else(fail)?;
+        stdin.write_all(input.as_bytes()).map_err(|_| fail())?;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while child.try_wait().map_err(|_| fail())?.is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(fail());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().map_err(|_| fail())
+}
+fn keychain_oauth() -> Result<Option<String>> {
+    let mut args = vec!["find-generic-password"];
+    args.extend(KEYCHAIN_ITEM);
+    args.push("-w");
+    let output = security(&args, None)?;
+    match output.status.code() {
+        Some(0) => Ok(decode_keyring(&String::from_utf8_lossy(&output.stdout))),
+        // errSecItemNotFound: nobody is signed in.
+        Some(44) => Ok(None),
+        _ => Err(err(
+            code::AUTH,
+            "无法读取 macOS 钥匙串中的 Antigravity 登录凭据",
+        )),
+    }
+}
+/// Replaces the keychain login, or removes it when `raw` is `None`.
+fn set_keychain_oauth(raw: Option<&str>) -> Result<()> {
+    let fail = || err(code::AUTH, "无法写入 macOS 钥匙串中的 Antigravity 登录凭据");
+    let Some(raw) = raw else {
+        let mut args = vec!["delete-generic-password"];
+        args.extend(KEYCHAIN_ITEM);
+        security(&args, None)?;
+        return keychain_oauth()?.is_none().then_some(()).ok_or_else(fail);
+    };
+    // The command goes through stdin so the credential never shows up in the
+    // process arguments.
+    let command = format!(
+        "add-generic-password -U {} -w {}\n",
+        KEYCHAIN_ITEM.join(" "),
+        encode_keyring(raw)
+    );
+    if command.len() > KEYCHAIN_COMMAND_LIMIT {
+        return Err(err(code::AUTH, "Antigravity 登录凭据过大，无法写入钥匙串"));
+    }
+    security(&["-i"], Some(&command))?;
+    (keychain_oauth()?.as_deref().map(str::trim) == Some(raw.trim()))
+        .then_some(())
+        .ok_or_else(fail)
+}
+/// The OAuth login Antigravity is using: the keychain item on macOS, else the
+/// token file older versions wrote.
+fn read_oauth(paths: &Paths) -> Result<Option<String>> {
+    if paths.keychain() {
+        if let Some(raw) = keychain_oauth()? {
+            return Ok(Some(raw));
+        }
+    }
+    read_text_optional(&paths.oauth_file())
+}
+fn write_oauth(paths: &Paths, raw: &str) -> Result<()> {
+    if !paths.keychain() {
+        return write_private_file(&paths.oauth_file(), raw.as_bytes());
+    }
+    set_keychain_oauth(Some(raw))?;
+    if paths.oauth_file().exists() {
+        write_private_file(&paths.oauth_file(), raw.as_bytes())?;
+    }
+    Ok(())
 }
 fn load_vault(paths: &Paths) -> Result<(Vault, String)> {
     storage::private_dir(&paths.data_dir)?;
@@ -697,7 +824,11 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
     let (mut vault, mut vault_rev) = load_vault(paths)?;
     let (mut dirty, mut clean) = (false, true);
     let (mut oauth_auth_method, mut oauth_email, mut oauth_digest) = (None, None, None);
-    if let Some(raw) = read_checked(&paths.oauth_file(), &mut clean) {
+    let oauth_raw = read_oauth(paths).unwrap_or_else(|_| {
+        clean = false;
+        None
+    });
+    if let Some(raw) = oauth_raw {
         match parse_oauth_metadata(&raw) {
             Ok((auth_method, email)) => {
                 let (digest, disk_rt) = (payload_digest(&raw), oauth_refresh_token(&raw));
@@ -729,6 +860,11 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
             Err(e) if e.code == code::JSON => clean = false,
             Err(_) => {}
         }
+    }
+    // A newly seen login is kept even when a later file cannot be read.
+    if dirty {
+        vault_rev = save_vault(paths, &vault)?;
+        dirty = false;
     }
     let (mut adc_type, mut adc_project, mut adc_digest) = (None, None, None);
     let adc_opt = [
@@ -896,9 +1032,10 @@ fn with_lifecycle(
             .chain(std::iter::once(paths.vault_file()))
             .map(|f| storage::read_optional(&f).map(|b| (f, b)))
             .collect::<Result<_>>()?;
+        let keychain = paths.keychain().then(keychain_oauth).transpose()?;
         let next = mutate().and_then(|_| state_at(paths));
         if let Err(e) = next {
-            let res: Vec<_> = snapshots
+            let mut res: Vec<_> = snapshots
                 .iter()
                 .filter_map(|(f, p)| {
                     restore_file(f, p.as_deref())
@@ -906,6 +1043,13 @@ fn with_lifecycle(
                         .map(|_| f.display().to_string())
                 })
                 .collect();
+            if let Some(before) = &keychain {
+                if keychain_oauth().ok().as_ref() != Some(before)
+                    && set_keychain_oauth(before.as_deref()).is_err()
+                {
+                    res.push("钥匙串登录凭据".into());
+                }
+            }
             let msg = format!("{}（回滚残留未恢复：{}）", e.message, res.join(", "));
             return Err(if res.is_empty() {
                 e
@@ -1027,7 +1171,7 @@ fn switch_account_at(
         restore_gateway_settings(paths)?;
         match entry.kind {
             AccountKind::Oauth => {
-                write_private_file(&paths.oauth_file(), entry.payload.as_bytes())?;
+                write_oauth(paths, &entry.payload)?;
                 disable_adc(paths)
             }
             AccountKind::Adc => write_active_adc(paths, entry.payload.as_bytes()),
@@ -1042,7 +1186,7 @@ pub fn set_mode_at(
     rev: &str,
 ) -> Result<AntigravityAuthState> {
     let use_adc = matches!(mode, TargetMode::Adc);
-    if !use_adc && !paths.oauth_file().exists() {
+    if !use_adc && read_oauth(paths)?.is_none() {
         return Err(err(
             code::AUTH,
             "未检测到 Antigravity OAuth 登录令牌，请先在 Antigravity 内登录账号",
@@ -1128,7 +1272,15 @@ pub fn delete_account_at(paths: &Paths, id: &str, rev: &str) -> Result<Antigravi
 }
 pub fn disk_stamp() -> Option<String> {
     let mut stamp = String::new();
-    for path in Paths::from_roots(&dirs::home_dir()?, Path::new("")).watched_files() {
+    let home = dirs::home_dir()?;
+    // The keychain file changes whenever an item in it does, which is how a
+    // new Antigravity login becomes visible here.
+    let keychain = home.join("Library/Keychains/login.keychain-db");
+    for path in Paths::from_roots(&home, Path::new(""))
+        .watched_files()
+        .into_iter()
+        .chain(cfg!(target_os = "macos").then_some(keychain))
+    {
         if let Ok(m) = fs::metadata(&path) {
             let ns = m.modified().ok().map_or(0, |t| epoch_dur(t).as_nanos());
             stamp.push_str(&format!("1:{}:{ns};", m.len()));
@@ -1155,7 +1307,7 @@ pub(crate) fn current_oauth_identity(data: &Path, home: &Path) -> Result<Option<
         {
             return Ok(None);
         }
-        let Some(raw) = read_text_optional(&paths.oauth_file())? else {
+        let Some(raw) = read_oauth(&paths)? else {
             return Ok(None);
         };
         let Some(email) = parse_oauth_metadata(&raw)?.1 else {
@@ -1232,8 +1384,12 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
         {
             return ProviderTimeline { spans };
         }
-        let f = if en { p.adc_file() } else { p.oauth_file() };
-        if let Some(raw) = read_text_optional(&f).ok().flatten() {
+        let credential = if en {
+            read_text_optional(&p.adc_file())
+        } else {
+            read_oauth(&p)
+        };
+        if let Some(raw) = credential.ok().flatten() {
             let d = payload_digest(&raw);
             let em = (!en).then(|| parse_oauth_metadata(&raw).ok()?.1).flatten();
             if let Some(e) = vault.entries.iter().find(|e| {
