@@ -1031,3 +1031,204 @@ async fn unavailable_usage_database_does_not_interrupt_http_or_sse() {
     assert_eq!(fixture.gateway.view().providers[0].health.failures, 0);
     fixture.stop().await;
 }
+
+/// One protocol's wire fixtures for a stream that opens a reasoning block.
+struct OpenedBlock {
+    client: ClientId,
+    path: &'static str,
+    request: &'static [u8],
+    /// Stream start up to an opened reasoning block that has no content yet.
+    opened: &'static [u8],
+    /// A non-empty generated delta.
+    delta: &'static [u8],
+    /// An in-stream service error event.
+    error: &'static [u8],
+    /// The complete stream of the backup provider.
+    backup: &'static [u8],
+}
+const MESSAGES_BLOCK: OpenedBlock = OpenedBlock {
+    client: ClientId::Claude,
+    path: "/v1/messages",
+    request: br#"{"model":"claude-request-fixture","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"fixture"}]}"#,
+    opened: b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_first\",\"type\":\"message\",\"model\":\"claude-response-fixture\",\"stop_reason\":null}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+    delta: b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"visible fixture\"}}\n\n",
+    error: b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"fixture stream failure\"}}\n\n",
+    backup: b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_backup\",\"type\":\"message\",\"model\":\"claude-response-fixture\",\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"backup\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+};
+const RESPONSES_BLOCK: OpenedBlock = OpenedBlock {
+    client: ClientId::Codex,
+    path: "/v1/responses",
+    request: br#"{"model":"gpt-request-fixture","stream":true,"input":[{"role":"user","content":"fixture"}]}"#,
+    opened: b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_first\",\"status\":\"in_progress\"}}\n\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_fixture\"}}\n\n",
+    delta: b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"visible fixture\"}\n\n",
+    error: b"data: {\"type\":\"error\",\"error\":{\"code\":\"server_error\"}}\n\n",
+    backup: b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"backup\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_backup\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+};
+
+/// What the first provider does after the reasoning block has opened.
+#[derive(Clone, Copy)]
+enum AfterOpenedBlock {
+    /// An in-stream error event before any generated content.
+    Error,
+    /// A non-empty delta in its own frame, then the error event once released.
+    DeltaThenError,
+    /// The connection drops before any generated content.
+    Reset,
+}
+
+/// Two providers: the first opens a reasoning block and then fails as `then`
+/// says, the second completes. Returns which providers were asked.
+async fn failing_pair(
+    wire: &'static OpenedBlock,
+    then: AfterOpenedBlock,
+    release: Arc<tokio::sync::Notify>,
+) -> (
+    Fixture,
+    Arc<Mutex<Vec<&'static str>>>,
+    (LoopbackServer, LoopbackServer),
+) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let first_seen = seen.clone();
+    let first = server(move |_, _| {
+        first_seen.lock().push("P1");
+        let release = release.clone();
+        async move {
+            let stream = async_stream::try_stream! {
+                yield Frame::data(Bytes::from_static(wire.opened));
+                match then {
+                    AfterOpenedBlock::Error => {
+                        yield Frame::data(Bytes::from_static(wire.error));
+                    }
+                    AfterOpenedBlock::DeltaThenError => {
+                        yield Frame::data(Bytes::from_static(wire.delta));
+                        release.notified().await;
+                        yield Frame::data(Bytes::from_static(wire.error));
+                    }
+                    AfterOpenedBlock::Reset => {
+                        // Let the opened block reach the gateway first; an
+                        // immediate error would drop it before it is sent.
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        Err::<(), std::io::Error>(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "fixture disconnect",
+                        ))?;
+                    }
+                }
+            };
+            Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(
+                    StreamBody::new(stream)
+                        .map_err(|error: std::io::Error| -> BoxError { error.into() })
+                        .boxed_unsync(),
+                )
+                .unwrap()
+        }
+    })
+    .await;
+    let second_seen = seen.clone();
+    let second = server(move |_, _| {
+        second_seen.lock().push("P2");
+        async move {
+            Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(full(wire.backup))
+                .unwrap()
+        }
+    })
+    .await;
+    let fixture = Fixture::new(wire.client, &[first.url("/a/v1"), second.url("/b/v1")]).await;
+    fixture.edit(Edit::Mode {
+        mode: "auto".into(),
+    });
+    fixture.start().await;
+    (fixture, seen, (first, second))
+}
+
+#[tokio::test]
+async fn stream_error_after_an_opened_reasoning_block_still_fails_over() {
+    for wire in [&MESSAGES_BLOCK, &RESPONSES_BLOCK] {
+        let (fixture, seen, _servers) =
+            failing_pair(wire, AfterOpenedBlock::Error, Default::default()).await;
+        let response = request(&fixture.gateway, wire.path, wire.request).await;
+        assert_eq!(response.status(), 200);
+        // Nothing of the first provider's private prefix reaches the client.
+        assert_eq!(response_bytes(response).await.as_ref(), wire.backup);
+        assert_eq!(*seen.lock(), vec!["P1", "P2"]);
+        let rows = recorded(&fixture.usage, 1).await;
+        let row = &rows[0];
+        assert!(row.completed);
+        assert_eq!(row.attempts.len(), 2);
+        assert_ne!(row.attempts[0].outcome, "success");
+        assert_eq!(row.attempts[1].outcome, "success");
+        // The opened block started the first-token clock without closing the
+        // replay window; that separation is what let the request move on.
+        assert!(row.attempts[0].first_token_ms.is_some());
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn stream_error_after_a_delivered_delta_is_not_replayed() {
+    for wire in [&MESSAGES_BLOCK, &RESPONSES_BLOCK] {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (fixture, seen, _servers) =
+            failing_pair(wire, AfterOpenedBlock::DeltaThenError, release.clone()).await;
+        let response = request(&fixture.gateway, wire.path, wire.request).await;
+        assert_eq!(response.status(), 200);
+        let mut body = response.into_body();
+        let mut delivered = Vec::new();
+        while !String::from_utf8_lossy(&delivered).contains("visible fixture") {
+            let frame = tokio::time::timeout(WAIT, body.frame())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            delivered.extend_from_slice(frame.data_ref().unwrap());
+        }
+        release.notify_one();
+        let rest = tokio::time::timeout(WAIT, body.collect())
+            .await
+            .unwrap()
+            .unwrap()
+            .to_bytes();
+        delivered.extend_from_slice(&rest);
+        assert_eq!(delivered, [wire.opened, wire.delta, wire.error].concat());
+        assert_eq!(*seen.lock(), vec!["P1"]);
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn reset_after_an_opened_reasoning_block_is_not_replayed() {
+    for wire in [&MESSAGES_BLOCK, &RESPONSES_BLOCK] {
+        let (fixture, seen, _servers) =
+            failing_pair(wire, AfterOpenedBlock::Reset, Default::default()).await;
+        let response = request(&fixture.gateway, wire.path, wire.request).await;
+        assert_eq!(response.status(), 200);
+        let mut body = response.into_body();
+        let mut delivered = Vec::new();
+        let failed = loop {
+            match tokio::time::timeout(WAIT, body.frame()).await.unwrap() {
+                Some(Ok(frame)) => delivered.extend_from_slice(frame.data_ref().unwrap()),
+                Some(Err(_)) => break true,
+                None => break false,
+            }
+        };
+        // The provider may already be working on the request: any response
+        // byte closes the transport replay window, whatever the block holds.
+        assert_eq!(delivered, wire.opened);
+        assert!(failed, "the cut must reach the client as a stream error");
+        settled(|| {
+            fixture
+                .gateway
+                .view()
+                .providers
+                .iter()
+                .all(|p| p.active_requests == 0)
+        })
+        .await;
+        assert_eq!(*seen.lock(), vec!["P1"]);
+        fixture.stop().await;
+    }
+}
