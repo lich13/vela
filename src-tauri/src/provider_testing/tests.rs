@@ -1448,6 +1448,7 @@ async fn search_only_connection_uses_ordinary_chat_and_streamed_text() {
                 quota_access_token: None,
                 name: None,
                 search_only: Some(true),
+                end_on_message_stop: None,
             },
             &previous.revision,
             dir.path(),

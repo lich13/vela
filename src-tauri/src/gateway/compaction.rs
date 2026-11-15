@@ -1563,6 +1563,7 @@ mod tests {
                     handoff_after_compaction: true,
                     take_new_threads: false,
                     search_only: false,
+                    end_on_message_stop: false,
                 })
                 .collect();
             self.prepare_inner(

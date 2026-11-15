@@ -56,6 +56,7 @@ fn provider(id: &str, base: &str, token: &str) -> Provider {
         handoff_after_compaction: true,
         take_new_threads: false,
         search_only: false,
+        end_on_message_stop: false,
     }
 }
 
@@ -322,6 +323,7 @@ async fn v020_gateway_api_mode_owns_only_base_and_auth_through_select_start_swit
         &home,
         Edit::SaveProvider {
             search_only: None,
+            end_on_message_stop: None,
             quota_access_token: None,
             id: None,
             base_url: second_base.into(),

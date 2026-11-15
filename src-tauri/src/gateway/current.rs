@@ -206,6 +206,7 @@ pub(super) mod tests {
             .edit(
                 super::super::Edit::SaveProvider {
                     search_only: None,
+                    end_on_message_stop: None,
                     quota_access_token: None,
                     id: None,
                     base_url: "https://relay.example.invalid/v1".into(),

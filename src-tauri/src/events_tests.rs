@@ -423,3 +423,56 @@ fn sync_claude_logs_reads_api_errors_from_nested_session_files_once() {
     });
     assert_eq!(page.total, 3);
 }
+
+#[test]
+fn claude_log_scan_covers_all_recent_sessions_and_keeps_incremental_cursors() {
+    use std::{
+        io::Write,
+        time::{Duration, SystemTime},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("claude");
+    let project = home.join("projects/fixture");
+    fs::create_dir_all(&project).unwrap();
+    let recent = chrono::Utc::now().to_rfc3339();
+    let old = (chrono::Utc::now() - chrono::Duration::days(8)).to_rfc3339();
+    let line = |id: usize, at: &str| {
+        serde_json::json!({
+        "type":"assistant", "isApiErrorMessage":true,"uuid":format!("fixture-{id}"),
+        "sessionId":"fixture", "timestamp":at, "apiErrorStatus":429,
+        "error":"rate_limit", "message":{"content":[{"type":"text","text":"API Error: fixture"}]}
+    }).to_string() + "\n"
+    };
+    for i in 0..64 {
+        fs::write(project.join(format!("{i}.jsonl")), line(i, &recent)).unwrap();
+    }
+    fs::write(project.join("old-event.jsonl"), line(64, &old)).unwrap();
+    let stale = project.join("old-file.jsonl");
+    fs::write(&stale, line(65, &recent)).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(8 * 86400))
+        .unwrap();
+    let service = Service::new(&dir.path().join("data"));
+    let filter = || Filter {
+        origin: Some(crate::events::Origin::ClaudeCode),
+        ..Filter::default()
+    };
+    service.sync_claude_logs(&home);
+    assert_eq!(service.query(filter()).total, 64);
+    service.sync_claude_logs(&home);
+    assert_eq!(service.query(filter()).total, 64);
+    let path = project.join("0.jsonl");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(line(66, &recent).as_bytes())
+        .unwrap();
+    service.sync_claude_logs(&home);
+    assert_eq!(service.query(filter()).total, 65);
+    service.sync_claude_logs(&home);
+    assert_eq!(service.query(filter()).total, 65);
+}

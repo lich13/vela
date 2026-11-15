@@ -1365,5 +1365,6 @@ fn search_only_edit(gateway: &Gateway, id: &str) -> Edit {
         quota_access_token: None,
         name: None,
         search_only: Some(true),
+        end_on_message_stop: None,
     }
 }

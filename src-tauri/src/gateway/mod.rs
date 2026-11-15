@@ -161,6 +161,7 @@ pub struct ProviderView {
     pub handoff_after_compaction: bool,
     pub take_new_threads: bool,
     pub search_only: bool,
+    pub end_on_message_stop: bool,
 }
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -744,6 +745,7 @@ impl Gateway {
             next.edit(
                 Edit::SaveProvider {
                     search_only: None,
+                    end_on_message_stop: None,
                     quota_access_token: None,
                     id: None,
                     base_url,
@@ -940,6 +942,7 @@ impl Gateway {
                         handoff_after_compaction: p.handoff_after_compaction,
                         take_new_threads: p.take_new_threads,
                         search_only: p.search_only,
+                        end_on_message_stop: p.end_on_message_stop,
                         active_requests: occupied.get(&p.id).copied().unwrap_or(0),
                         quota_checking,
                         quota_check,
@@ -1413,6 +1416,7 @@ impl Gateway {
                 next.edit(
                     Edit::SaveProvider {
                         search_only: None,
+                        end_on_message_stop: None,
                         quota_access_token: None,
                         id: None,
                         base_url,

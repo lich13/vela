@@ -61,6 +61,7 @@ fn codex_identity_is_atomic_success_only_private_and_bound_to_home() {
                 token: "fixture-provider-key".into(),
                 quota_access_token: None,
                 search_only: None,
+                end_on_message_stop: None,
             },
             &gateway.view().revision,
             &home,
@@ -192,6 +193,7 @@ fn v02523_search_only_is_excluded_from_model_union_exit_and_generation_routes() 
                 .edit(
                     Edit::SaveProvider {
                         search_only: None,
+                        end_on_message_stop: None,
                         id: None,
                         name: Some(name.into()),
                         base_url: format!("https://{name}.example.invalid/v1"),

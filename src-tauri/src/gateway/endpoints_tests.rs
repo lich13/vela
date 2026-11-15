@@ -23,6 +23,7 @@ fn v0212_provider(base_url: &str) -> Provider {
         handoff_after_compaction: false,
         take_new_threads: false,
         search_only: false,
+        end_on_message_stop: false,
     }
 }
 
@@ -34,6 +35,7 @@ fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_pr
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: primary_raw.into(),
@@ -137,6 +139,7 @@ fn v0212_gateway_rejects_stale_edit_revision_and_persists_endpoints_across_resta
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://primary.example.invalid/v1".into(),
@@ -308,6 +311,7 @@ async fn v0212_loopback_probe_sends_no_authorization_or_business_rpm_and_keeps_e
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: format!("http://127.0.0.1:{upstream_port}/v1"),

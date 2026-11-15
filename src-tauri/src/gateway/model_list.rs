@@ -497,6 +497,7 @@ mod tests {
                     .edit(
                         super::super::Edit::SaveProvider {
                             search_only: None,
+                            end_on_message_stop: None,
                             quota_access_token: None,
                             id: None,
                             name: Some(format!("Fixture {n}")),

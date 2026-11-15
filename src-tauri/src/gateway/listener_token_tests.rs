@@ -78,6 +78,7 @@ fn add_codex_provider(gateway: &Gateway, home: &Path) {
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://provider.fixture.invalid/v1".to_owned(),

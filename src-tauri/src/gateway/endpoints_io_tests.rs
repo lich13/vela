@@ -35,6 +35,7 @@ fn fixture_provider(base_url: &str) -> Provider {
         handoff_after_compaction: false,
         take_new_threads: false,
         search_only: false,
+        end_on_message_stop: false,
     }
 }
 
@@ -201,6 +202,7 @@ async fn first_affinity_persist_failure_returns_before_sending_to_upstream() {
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: base_url.clone(),

@@ -36,6 +36,7 @@ fn provider_secrets_never_appear_in_view() {
     let update = |edit| g.edit(edit, &g.view().revision, temp.path()).unwrap();
     update(Edit::SaveProvider {
         search_only: None,
+        end_on_message_stop: None,
         quota_access_token: Some("fixture-account-access-token".into()),
         id: None,
         base_url: "https://example.test/custom/v1".into(),
@@ -140,6 +141,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
             &t,
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url,
@@ -540,6 +542,7 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
         &t,
         Edit::SaveProvider {
             search_only: None,
+            end_on_message_stop: None,
             quota_access_token: None,
             id: Some(first.clone()),
             base_url: format!("http://127.0.0.1:{closed_port}/v1"),
@@ -574,6 +577,7 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
         &t,
         Edit::SaveProvider {
             search_only: None,
+            end_on_message_stop: None,
             quota_access_token: None,
             id: Some(first),
             base_url: format!("http://127.0.0.1:{never}"),
@@ -824,6 +828,7 @@ async fn real_codex_cli_with_isolated_home() {
         &t,
         Edit::SaveProvider {
             search_only: None,
+            end_on_message_stop: None,
             quota_access_token: None,
             id: None,
             base_url: private["baseUrl"].as_str().unwrap().into(),
@@ -1210,6 +1215,7 @@ async fn quota_late_response_is_discarded_after_provider_edit() {
         &t,
         Edit::SaveProvider {
             search_only: None,
+            end_on_message_stop: None,
             quota_access_token: None,
             id: Some(id),
             base_url: format!("http://127.0.0.1:{port}"),

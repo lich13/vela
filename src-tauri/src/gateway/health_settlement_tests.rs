@@ -20,6 +20,7 @@ fn fixture() -> (tempfile::TempDir, Gateway, Route) {
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://example.invalid/v1".into(),
@@ -69,8 +70,7 @@ fn default_settings_match_current_serialization() {
             "retryBudgetSeconds": 300,
             "connectSeconds": 300,
             "queueSeconds": 300,
-            "maxWaiting": 100,
-            "endOnMessageStop": false
+            "maxWaiting": 100
         })
     );
 }

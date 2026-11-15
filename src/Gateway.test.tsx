@@ -713,7 +713,7 @@ describe("client isolation", () => {
     ).toHaveValue(state.settings.port);
   });
 
-  it("restores Claude selection and saves only its two credential fields with the Claude revision", async () => {
+  it("restores Claude selection and saves its credentials and stream setting with the Claude revision", async () => {
     localStorage.setItem("vela.main.client", "claude");
     const user = userEvent.setup();
     render(<Gateway notify={() => {}} />);
@@ -723,7 +723,9 @@ describe("client isolation", () => {
     });
     await user.click(screen.getByRole("button", { name: "添加" }));
     const dialog = screen.getByRole("dialog", { name: "添加供应商" });
-    expect(dialog.querySelectorAll("input")).toHaveLength(4);
+    expect(within(dialog).getByRole("checkbox", {
+      name: "收到 message_stop 后立即结束响应",
+    })).not.toBeChecked();
     const base = within(dialog).getByLabelText("ANTHROPIC_BASE_URL");
     const token = within(dialog).getByLabelText("ANTHROPIC_AUTH_TOKEN");
     expect(token).toHaveAttribute("type", "password");
@@ -752,6 +754,7 @@ describe("client isolation", () => {
         name: "",
         baseUrl: "https://claude.fixture.invalid/deployment",
         token: "claude-form-fixture",
+        endOnMessageStop: false,
       },
       expectedRevision: claudeState.revision,
     });

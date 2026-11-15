@@ -82,6 +82,7 @@ async fn v0233_fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
             &dir,
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url,

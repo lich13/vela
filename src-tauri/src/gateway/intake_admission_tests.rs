@@ -181,6 +181,7 @@ fn takeover_edit_updates_one_field_and_rejects_an_empty_operation() {
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://fixture.example.invalid/v1".into(),

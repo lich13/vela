@@ -1580,10 +1580,9 @@ impl Service {
         let cutoff = now().saturating_sub(RETENTION);
         let mut sessions = Vec::new();
         session_files(&claude_home.join("projects"), 0, cutoff, &mut sessions);
-        sessions.sort_by_key(|(secs, _, _)| std::cmp::Reverse(*secs));
         let mut cursors = self.file_cursors.lock();
         let mut discovered = Vec::new();
-        for (file_secs, file_len, path) in sessions.into_iter().take(48) {
+        for (file_secs, file_len, path) in sessions {
             // The whole week is wanted and a session file can be large, so
             // the first scan reads all of it; later scans read what was added.
             scan_new_lines(

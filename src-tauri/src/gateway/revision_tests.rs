@@ -19,6 +19,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         for (url, token) in [("https://a.invalid", "a"), ("https://b.invalid", "b")] {
             edit(Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url.into(),
@@ -61,6 +62,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         g.edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://c.invalid/sub".into(),
@@ -178,6 +180,7 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
         quota_access_token: None,
         name: None,
         search_only: role,
+        end_on_message_stop: None,
     };
     assert!(gateway
         .edit(edit("invalid", Some(true)), &initial.revision, dir.path())
@@ -228,6 +231,7 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
                 quota_access_token: None,
                 name: None,
                 search_only: Some(true),
+                end_on_message_stop: None,
             },
             &claude.view().revision,
             dir.path()

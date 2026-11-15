@@ -397,6 +397,20 @@ export function usagePreview(
         lastError: null,
         completedAt: Date.now(),
       },
+      ...(densePreview
+        ? {
+            antigravity: {
+              files: 52,
+              imported: 98,
+              skipped: 0,
+              errors: 2,
+              lastError:
+                "Antigravity 历史用量缺少请求标识、模型或时间，请启动 app 后重新同步",
+              completedAt: Date.now(),
+              phase: "partial" as const,
+            },
+          }
+        : {}),
     },
     error: null,
   });

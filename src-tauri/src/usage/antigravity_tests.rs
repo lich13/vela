@@ -2418,3 +2418,125 @@ async fn an_app_without_loaded_conversations_is_an_empty_catalog_not_a_failure()
     server.abort();
     assert_eq!(error.message, "Antigravity 会话目录不完整");
 }
+
+#[tokio::test]
+async fn pending_rpc_usage_completes_without_errors_or_duplicate_accounting() {
+    let f = fixture(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+    let mut pending = entry("pending", 0);
+    pending["executionId"] = json!("pending-execution");
+    pending["stepIndices"] = json!([]);
+    pending["chatModel"]["startedAt"] = json!("2026-01-01T00:00:00Z");
+    pending["chatModel"]
+        .as_object_mut()
+        .unwrap()
+        .remove("streamingDuration");
+    *f.entries.lock() = vec![pending];
+    let cursor_id = safe_id("antigravity:rpc:z-good");
+    let row_id = safe_id("antigravity:request:pending");
+    for completed in [false, true, true] {
+        if completed {
+            f.entries.lock()[0]["chatModel"]["completedAt"] = json!("2026-01-01T00:00:02Z");
+        }
+        let mut report = Report::default();
+        collect_home(
+            &f.api,
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.errors, 0);
+        assert_eq!(report.last_error, None);
+        let row = store.detail(&row_id).unwrap();
+        assert_eq!(row.known_success(), completed.then_some(true));
+        assert_eq!(row.tokens().total(), Some(160));
+        assert_eq!(store.logs(&Filter::default()).unwrap().total, 1);
+        let cursor: Cursor =
+            serde_json::from_str(&store.cursor(&cursor_id).unwrap().unwrap()).unwrap();
+        assert_eq!(cursor.count, usize::from(completed));
+    }
+}
+
+#[tokio::test]
+async fn malformed_rpc_request_reports_the_first_concrete_reason() {
+    let f = fixture(false).await;
+    {
+        let mut entries = f.entries.lock();
+        entries[0].as_object_mut().unwrap().remove("executionId");
+        entries[0]["chatModel"]
+            .as_object_mut()
+            .unwrap()
+            .remove("customMetadata");
+        entries[1]["executionId"] = json!("missing-time");
+        entries[1]["stepIndices"] = json!([]);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+    let mut report = Report::default();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.errors, 2);
+    assert_eq!(
+        report.last_error.as_deref(),
+        Some("Antigravity 用量缺少可靠请求标识，未计入账单")
+    );
+}
+
+#[test]
+fn history_read_and_line_failures_keep_the_first_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let brain = dir.path().join("antigravity/brain");
+    let path = brain.join("fixture/transcript.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{invalid}\n{\"input_tokens\":10}\n").unwrap();
+    let mut store = Store::open(&dir.path().join("db")).unwrap();
+    let pricing = Pricing::new(&dir.path().join("db")).unwrap();
+    let settings = Settings::default();
+    let missing = brain.join("missing/transcript.jsonl");
+    let mut report = Report::default();
+    scan_file_list(
+        &mut store,
+        &brain,
+        &[path, missing.clone()],
+        &pricing,
+        &settings,
+        &mut report,
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.errors, 3);
+    assert_eq!(
+        report.last_error.as_deref(),
+        Some("Antigravity 历史文件存在无效完整行")
+    );
+    let mut report = Report::default();
+    scan_file_list(
+        &mut store,
+        &brain,
+        &[missing],
+        &pricing,
+        &settings,
+        &mut report,
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.errors, 1);
+    assert!(report.last_error.is_some());
+}

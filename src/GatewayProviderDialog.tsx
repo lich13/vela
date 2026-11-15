@@ -42,6 +42,9 @@ export default function GatewayDialog({
   const [searchOnly, setSearchOnly] = useState(
     Boolean(dialog.item?.searchOnly),
   );
+  const [endOnMessageStop, setEndOnMessageStop] = useState(
+    Boolean(dialog.item?.endOnMessageStop),
+  );
   const [revealed, setRevealed] = useState<{
     value: string;
     revision: string;
@@ -114,6 +117,7 @@ export default function GatewayDialog({
       protocol,
       quotaAccessToken,
       searchOnly,
+      endOnMessageStop,
     ]),
   );
   useEffect(() => {
@@ -125,6 +129,7 @@ export default function GatewayDialog({
         protocol,
         quotaAccessToken,
         searchOnly,
+        endOnMessageStop,
       ]) !== initialDraft.current,
     );
   }, [
@@ -134,6 +139,7 @@ export default function GatewayDialog({
     protocol,
     quotaAccessToken,
     searchOnly,
+    endOnMessageStop,
     onDirtyChange,
   ]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
@@ -164,6 +170,7 @@ export default function GatewayDialog({
               : {
                   op: "saveProvider",
                   ...draft,
+                  ...(clientId === "claude" ? { endOnMessageStop } : {}),
                   ...(clientId === "codex" && dialog.item
                     ? { searchOnly }
                     : {}),
@@ -204,7 +211,9 @@ export default function GatewayDialog({
           )}
           <label>
             <span className="field-label-row">
-              <span>{clientId === "claude" ? "ANTHROPIC_BASE_URL" : "base_url"}</span>
+              <span>
+                {clientId === "claude" ? "ANTHROPIC_BASE_URL" : "base_url"}
+              </span>
               {clientId === "dsh" && !dialog.item && (
                 <button
                   type="button"
@@ -316,6 +325,17 @@ export default function GatewayDialog({
               onChange={(e) => setSearchOnly(e.target.checked)}
             />
             <span>仅网络搜索</span>
+          </label>
+        )}
+        {clientId === "claude" && (
+          <label className="provider-search-setting">
+            <input
+              type="checkbox"
+              checked={endOnMessageStop}
+              disabled={busy}
+              onChange={(e) => setEndOnMessageStop(e.target.checked)}
+            />
+            <span>收到 message_stop 后立即结束响应</span>
           </label>
         )}
         {error && (

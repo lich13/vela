@@ -130,6 +130,7 @@ pub(crate) fn policy_provider(id: &str, handoff: bool, take: bool) -> Provider {
         handoff_after_compaction: handoff,
         take_new_threads: take,
         search_only: false,
+        end_on_message_stop: false,
     }
 }
 
@@ -305,6 +306,7 @@ pub(crate) mod loopback {
                 &dir,
                 Edit::SaveProvider {
                     search_only: None,
+                    end_on_message_stop: None,
                     quota_access_token: None,
                     id: None,
                     base_url: url,

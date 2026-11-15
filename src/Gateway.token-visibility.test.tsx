@@ -172,6 +172,7 @@ describe("gateway provider token visibility", () => {
             id: null,
             baseUrl,
             token: `fixture-user-${clientId}-token`,
+            ...(clientId === "claude" ? { endOnMessageStop: false } : {}),
             name,
           },
           expectedRevision: gateways[clientId].revision,

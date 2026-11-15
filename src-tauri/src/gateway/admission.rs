@@ -214,6 +214,8 @@ impl Scheduler {
             .iter()
             .map(|p| (p.id.clone(), p.version.clone()))
             .collect();
+        s.rpm
+            .retain_providers(|id| providers.iter().any(|p| p.id == id));
         if s.running != running {
             s.epoch += 1;
         }

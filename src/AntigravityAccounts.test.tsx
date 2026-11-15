@@ -79,6 +79,38 @@ describe("AntigravityAccounts", () => {
     listeners.clear();
   });
 
+  it("keeps account state on credential read failure and retries manually", async () => {
+    const setError = vi.fn();
+    mockCommand.mockResolvedValue(initialState);
+    render(<AntigravityAccounts notify={() => {}} setError={setError} />);
+    await screen.findByText("OAuth 主号");
+    mockCommand.mockRejectedValueOnce({
+      code: "AUTH",
+      message: "无法读取 macOS 钥匙串中的 Antigravity 登录凭据",
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "刷新 Antigravity 认证状态" }),
+    );
+    await waitFor(() =>
+      expect(setError).toHaveBeenCalledWith(
+        "无法读取 macOS 钥匙串中的 Antigravity 登录凭据",
+      ),
+    );
+    expect(screen.getByText("OAuth 主号")).toBeInTheDocument();
+    expect(screen.getByText("OAuth 备号")).toBeInTheDocument();
+    mockCommand.mockResolvedValue({
+      ...initialState,
+      accounts: initialState.accounts.map((a) => ({
+        ...a,
+        name: a.id === "oauth-1" ? "刷新后的主号" : a.name,
+      })),
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "刷新 Antigravity 认证状态" }),
+    );
+    await screen.findByText("刷新后的主号");
+  });
+
   it("renders multi-OAuth and multi-ADC credentials and switches modes and accounts without redundant manual buttons", async () => {
     const notify = vi.fn();
     const setError = vi.fn();

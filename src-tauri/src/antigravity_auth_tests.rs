@@ -880,3 +880,49 @@ fn a_new_login_is_saved_even_when_a_later_file_is_unreadable() {
         Some("new@example.invalid")
     );
 }
+
+#[test]
+fn oauth_keychain_precedes_file_and_only_missing_items_allow_fallback() {
+    let (_tmp, paths) = setup_paths();
+    let file = paths.oauth_file();
+    fs::write(&file, "fixture-file").unwrap();
+    let read = |status, bytes: &[u8]| oauth_or_file(decode_keychain_oauth(status, bytes), &file);
+    assert_eq!(
+        read(Some(0), encode_keyring("fixture-keychain").as_bytes())
+            .unwrap()
+            .as_deref(),
+        Some("fixture-keychain")
+    );
+    assert_eq!(
+        read(Some(44), b"").unwrap().as_deref(),
+        Some("fixture-file")
+    );
+    for (status, bytes) in [
+        (Some(36), b"".as_slice()),
+        (None, b"".as_slice()),
+        (Some(0), b"go-keyring-base64:***".as_slice()),
+    ] {
+        assert_eq!(read(status, bytes).unwrap_err().code, code::AUTH);
+    }
+    fs::remove_file(&file).unwrap();
+    assert_eq!(read(Some(44), b"").unwrap(), None);
+}
+
+#[test]
+fn credential_read_failure_keeps_the_saved_account_and_can_be_retried() {
+    let (_tmp, paths) = setup_paths();
+    let raw = br#"{"auth_method":"google-oauth","user":{"email":"fixture@example.invalid"},"token":{"access_token":"fixture"}}"#;
+    fs::write(paths.oauth_file(), raw).unwrap();
+    let before = state_at(&paths).unwrap();
+    let vault = fs::read(paths.vault_file()).unwrap();
+    fs::remove_file(paths.oauth_file()).unwrap();
+    fs::create_dir(paths.oauth_file()).unwrap();
+    assert!(state_with_health(&paths).is_err());
+    assert_eq!(fs::read(paths.vault_file()).unwrap(), vault);
+    fs::remove_dir(paths.oauth_file()).unwrap();
+    fs::write(paths.oauth_file(), raw).unwrap();
+    let after = state_at(&paths).unwrap();
+    assert_eq!(after.accounts.len(), before.accounts.len());
+    assert_eq!(after.accounts[0].id, before.accounts[0].id);
+    assert!(after.accounts[0].current);
+}

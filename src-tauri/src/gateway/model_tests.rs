@@ -1,6 +1,8 @@
 use super::*;
 use crate::gateway::routing::Requirement;
 use crate::gateway::test_support::settle;
+use serde_json::json;
+use std::fs;
 
 fn allow(g: &Gateway, t: &tempfile::TempDir, n: usize, models: Option<Vec<&str>>) {
     update(
@@ -23,6 +25,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://api.example.invalid/deployment".into(),
@@ -38,6 +41,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://fallback.example.invalid/v1".into(),
@@ -52,6 +56,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
     let invalid = store.edit(
         Edit::SaveProvider {
             search_only: None,
+            end_on_message_stop: None,
             quota_access_token: None,
             id: None,
             base_url: "https://invalid.example.invalid".into(),
@@ -347,6 +352,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
         &t,
         Edit::SaveProvider {
             search_only: None,
+            end_on_message_stop: None,
             quota_access_token: None,
             id: None,
             base_url: format!("http://127.0.0.1:{port}"),
@@ -401,6 +407,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
         &t,
         Edit::SaveProvider {
             search_only: None,
+            end_on_message_stop: None,
             quota_access_token: None,
             id: Some(id.clone()),
             base_url: format!("http://127.0.0.1:{blocked}"),
@@ -469,6 +476,7 @@ async fn catalog_errors_and_changed_credentials_do_not_expose_raw_responses() {
         &t,
         Edit::SaveProvider {
             search_only: None,
+            end_on_message_stop: None,
             quota_access_token: None,
             id: Some(id),
             base_url: format!("http://127.0.0.1:{port}"),
@@ -554,4 +562,71 @@ async fn catalog_limits_response_size_and_request_duration() {
         .error
         .unwrap()
         .contains("超时"));
+}
+
+#[test]
+fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
+    for legacy in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.json");
+        let mut value = serde_json::to_value(Store::default()).unwrap();
+        value["settings"]["endOnMessageStop"] = json!(legacy);
+        value["providers"] = json!([
+            {"id":"inherited","name":"Inherited","baseUrl":"https://one.example.invalid","token":"fixture","queued":true,"version":"one"},
+            {"id":"explicit","name":"Explicit","baseUrl":"https://two.example.invalid","token":"fixture","queued":true,"version":"two","endOnMessageStop":!legacy}
+        ]);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let (mut store, revision) = Store::load(&path).unwrap();
+        assert_eq!(store.providers[0].end_on_message_stop, legacy);
+        assert_eq!(store.providers[1].end_on_message_stop, !legacy);
+        store
+            .edit(
+                Edit::SaveProvider {
+                    id: None,
+                    name: None,
+                    base_url: "https://new.example.invalid".into(),
+                    token: "fixture".into(),
+                    quota_access_token: None,
+                    search_only: None,
+                    end_on_message_stop: None,
+                },
+                false,
+            )
+            .unwrap();
+        assert!(!store.providers[2].end_on_message_stop);
+        store
+            .edit(
+                Edit::SaveProvider {
+                    id: Some("inherited".into()),
+                    name: None,
+                    base_url: "https://one.example.invalid".into(),
+                    token: String::new(),
+                    quota_access_token: None,
+                    search_only: None,
+                    end_on_message_stop: Some(!legacy),
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(store.providers[0].end_on_message_stop, !legacy);
+        assert_eq!(store.providers[1].end_on_message_stop, !legacy);
+        store.persist(&path, &revision).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(saved["settings"].get("endOnMessageStop").is_none());
+        let (reloaded, _) = Store::load(&path).unwrap();
+        assert_eq!(reloaded.providers[0].end_on_message_stop, !legacy);
+        assert!(!reloaded.providers[2].end_on_message_stop);
+    }
+}
+
+#[test]
+fn provider_setting_migration_rejects_malformed_store_without_modifying_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gateway.json");
+    for value in [json!([]), json!({"settings":{"endOnMessageStop":"true"}})] {
+        let raw = serde_json::to_vec(&value).unwrap();
+        fs::write(&path, &raw).unwrap();
+        assert!(Store::load(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), raw);
+    }
 }

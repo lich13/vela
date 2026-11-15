@@ -98,7 +98,6 @@ export type GatewaySettings = {
   connectSeconds: number;
   queueSeconds: number;
   maxWaiting: number;
-  endOnMessageStop: boolean;
 };
 export type Health = {
   state: "closed" | "open" | "half_open";
@@ -158,6 +157,7 @@ export type Provider = {
   handoffAfterCompaction: boolean;
   takeNewThreads: boolean;
   searchOnly: boolean;
+  endOnMessageStop: boolean;
 };
 export type GatewayListener = {
   port: number;

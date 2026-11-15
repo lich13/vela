@@ -33,6 +33,7 @@ const idle = {
   rpmWaitReason: null,
   dshModels: null,
   searchOnly: false,
+  endOnMessageStop: false,
 } satisfies Partial<Provider>;
 export const gatewayDemo: GatewayState = {
   clientId: "codex",
@@ -70,7 +71,6 @@ export const gatewayDemo: GatewayState = {
     connectSeconds: 300,
     queueSeconds: 300,
     maxWaiting: 100,
-    endOnMessageStop: false,
   },
   providers: [
     {
@@ -268,8 +268,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           ? grokGatewayDemo
           : gatewayDemo;
   if (name === "cancel_gateway_wait") {
-    const found =
-      s.pendingRequests.some((r) => r.requestId === args.requestId);
+    const found = s.pendingRequests.some((r) => r.requestId === args.requestId);
     s.pendingRequests = s.pendingRequests.filter(
       (r) => r.requestId !== args.requestId,
     );
@@ -707,10 +706,13 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       if (p) {
         p.baseUrl = String(e.baseUrl);
         if (e.searchOnly !== undefined) p.searchOnly = Boolean(e.searchOnly);
+        if (e.endOnMessageStop !== undefined)
+          p.endOnMessageStop = Boolean(e.endOnMessageStop);
       } else
         s.providers.push({
           ...structuredClone(idle),
           id: crypto.randomUUID(),
+          endOnMessageStop: Boolean(e.endOnMessageStop),
           name: new URL(String(e.baseUrl)).hostname,
           baseUrl: String(e.baseUrl),
           preferredBaseUrl: String(e.baseUrl),
@@ -771,5 +773,4 @@ if (densePreview) {
     phase: ["compaction", "capacity", "retry", "ws_wait"][i],
   }));
   gatewayDemo.waitingRequests = 4;
-
 }

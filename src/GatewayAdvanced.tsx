@@ -11,10 +11,7 @@ import {
 } from "./types";
 import type { EditRevision } from "./gateway-edit";
 
-type NumberField = Exclude<
-  keyof GatewaySettings,
-  "customFailureRules" | "endOnMessageStop"
->;
+type NumberField = Exclude<keyof GatewaySettings, "customFailureRules">;
 
 export default function Advanced({
   clientId,
@@ -107,7 +104,8 @@ export default function Advanced({
             disabled={
               busy ||
               (key === "port" &&
-                (!!listener.runningClients.length || listener.antigravityActive))
+                (!!listener.runningClients.length ||
+                  listener.antigravityActive))
             }
             required
             min={
@@ -184,22 +182,6 @@ export default function Advanced({
         <summary>高级设置</summary>
         {children}
         {fields(basic)}
-        {clientId === "claude" && (
-          <label className="check-label">
-            <input
-              type="checkbox"
-              disabled={busy}
-              checked={draft.endOnMessageStop}
-              onChange={(e) => {
-                if (!editing) baseRevision.current = revision;
-                setEditing(true);
-                onDirtyChange?.(true);
-                setDraft({ ...draft, endOnMessageStop: e.target.checked });
-              }}
-            />
-            收到 message_stop 后立即结束响应
-          </label>
-        )}
       </details>
       <form
         id={formId}

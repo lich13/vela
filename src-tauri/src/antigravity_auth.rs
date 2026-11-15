@@ -507,8 +507,13 @@ fn keychain_oauth() -> Result<Option<String>> {
     args.extend(KEYCHAIN_ITEM);
     args.push("-w");
     let output = security(&args, None)?;
-    match output.status.code() {
-        Some(0) => Ok(decode_keyring(&String::from_utf8_lossy(&output.stdout))),
+    decode_keychain_oauth(output.status.code(), &output.stdout)
+}
+fn decode_keychain_oauth(status: Option<i32>, stdout: &[u8]) -> Result<Option<String>> {
+    match status {
+        Some(0) => decode_keyring(&String::from_utf8_lossy(stdout))
+            .map(Some)
+            .ok_or_else(|| err(code::AUTH, "无法解码 macOS 钥匙串中的 Antigravity 登录凭据")),
         // errSecItemNotFound: nobody is signed in.
         Some(44) => Ok(None),
         _ => Err(err(
@@ -544,12 +549,18 @@ fn set_keychain_oauth(raw: Option<&str>) -> Result<()> {
 /// The OAuth login Antigravity is using: the keychain item on macOS, else the
 /// token file older versions wrote.
 fn read_oauth(paths: &Paths) -> Result<Option<String>> {
-    if paths.keychain() {
-        if let Some(raw) = keychain_oauth()? {
-            return Ok(Some(raw));
-        }
+    let keychain = if paths.keychain() {
+        keychain_oauth()
+    } else {
+        Ok(None)
+    };
+    oauth_or_file(keychain, &paths.oauth_file())
+}
+fn oauth_or_file(keychain: Result<Option<String>>, file: &Path) -> Result<Option<String>> {
+    match keychain? {
+        Some(raw) => Ok(Some(raw)),
+        None => read_text_optional(file),
     }
-    read_text_optional(&paths.oauth_file())
 }
 fn write_oauth(paths: &Paths, raw: &str) -> Result<()> {
     if !paths.keychain() {
@@ -824,10 +835,7 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
     let (mut vault, mut vault_rev) = load_vault(paths)?;
     let (mut dirty, mut clean) = (false, true);
     let (mut oauth_auth_method, mut oauth_email, mut oauth_digest) = (None, None, None);
-    let oauth_raw = read_oauth(paths).unwrap_or_else(|_| {
-        clean = false;
-        None
-    });
+    let oauth_raw = read_oauth(paths)?;
     if let Some(raw) = oauth_raw {
         match parse_oauth_metadata(&raw) {
             Ok((auth_method, email)) => {

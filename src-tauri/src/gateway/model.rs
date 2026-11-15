@@ -27,6 +27,8 @@ pub struct Provider {
     pub take_new_threads: bool,
     #[serde(default)]
     pub search_only: bool,
+    #[serde(default)]
+    pub end_on_message_stop: bool,
 }
 // Existing defaults: three retries allow four total upstream attempts.
 const DEFAULT_MAX_RETRIES: usize = 3;
@@ -71,10 +73,6 @@ pub struct Settings {
     pub queue_seconds: u64,
     #[serde(default = "default_max_waiting")]
     pub max_waiting: usize,
-    /// End a Messages stream at `message_stop` instead of waiting for the
-    /// upstream to close the connection.
-    #[serde(default)]
-    pub end_on_message_stop: bool,
 }
 fn default_endpoint_probe_seconds() -> u64 {
     300
@@ -118,7 +116,6 @@ impl Default for Settings {
             connect_seconds: DEFAULT_CONNECT_SECONDS,
             queue_seconds: default_wait_seconds(),
             max_waiting: default_max_waiting(),
-            end_on_message_stop: false,
         }
     }
 }
@@ -241,6 +238,8 @@ pub enum Edit {
     SaveProvider {
         #[serde(default)]
         search_only: Option<bool>,
+        #[serde(default)]
+        end_on_message_stop: Option<bool>,
         id: Option<String>,
         base_url: String,
         token: String,
@@ -422,7 +421,28 @@ impl Store {
         let raw = storage::read_optional(path)?;
         let invalid = || AppError::new(code::STORE, "网关存储无法读取，请保留原文件");
         let mut store: Self = match &raw {
-            Some(raw) => serde_json::from_slice(raw).map_err(|_| invalid())?,
+            Some(raw) => {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(raw).map_err(|_| invalid())?;
+                if let Some(legacy) = value
+                    .get_mut("settings")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .and_then(|settings| settings.remove("endOnMessageStop"))
+                {
+                    let enabled: bool = serde_json::from_value(legacy).map_err(|_| invalid())?;
+                    if let Some(providers) = value
+                        .get_mut("providers")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for provider in providers {
+                            if let Some(provider) = provider.as_object_mut() {
+                                provider.entry("endOnMessageStop").or_insert(enabled.into());
+                            }
+                        }
+                    }
+                }
+                serde_json::from_value(value).map_err(|_| invalid())?
+            }
             None => Self::default(),
         };
         if store.schema != 2 {
@@ -499,6 +519,7 @@ impl Store {
                 self.edit(
                     Edit::SaveProvider {
                         search_only: None,
+                        end_on_message_stop: None,
                         id,
                         base_url,
                         token,
@@ -549,6 +570,7 @@ impl Store {
                 self.edit(
                     Edit::SaveProvider {
                         search_only: None,
+                        end_on_message_stop: None,
                         id: None,
                         base_url: raw.clone(),
                         token,
@@ -571,6 +593,7 @@ impl Store {
             }
             Edit::SaveProvider {
                 search_only,
+                end_on_message_stop,
                 id,
                 base_url: raw,
                 token,
@@ -612,6 +635,9 @@ impl Store {
                     if let Some(value) = search_only {
                         p.search_only = value;
                     }
+                    if let Some(value) = end_on_message_stop {
+                        p.end_on_message_stop = value;
+                    }
                     p.base_url = base_url.to_owned();
                     if !token.is_empty() {
                         p.token = token;
@@ -640,6 +666,7 @@ impl Store {
                         handoff_after_compaction: false,
                         take_new_threads: false,
                         search_only: search_only.unwrap_or(false),
+                        end_on_message_stop: end_on_message_stop.unwrap_or(false),
                     });
                     if self.selected.is_none() {
                         self.selected = Some(id);

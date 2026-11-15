@@ -171,6 +171,7 @@ impl Fixture {
         for (index, url) in urls.iter().enumerate() {
             fixture.edit(Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url.clone(),
@@ -1330,11 +1331,15 @@ async fn lingering(
     })
     .await;
     let fixture = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
-    fixture.edit(Edit::Settings {
-        settings: Settings {
-            end_on_message_stop,
-            ..fixture.gateway.view().settings
-        },
+    let provider = &fixture.gateway.view().providers[0];
+    fixture.edit(Edit::SaveProvider {
+        id: Some(provider.id.clone()),
+        base_url: provider.base_url.clone(),
+        token: String::new(),
+        name: None,
+        quota_access_token: None,
+        search_only: None,
+        end_on_message_stop: Some(end_on_message_stop),
     });
     fixture.start().await;
     (fixture, release, closed, sent, upstream)
@@ -1406,6 +1411,85 @@ async fn a_lingering_upstream_is_awaited_unless_the_stream_may_end_at_message_st
         let attempt = &rows[0].attempts[0];
         assert_eq!(attempt.outcome, "success");
         assert!(attempt.transfer.as_ref().unwrap().upstream_eof);
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn message_stop_uses_the_failover_target_provider_setting() {
+    for enabled in [false, true] {
+        let (fixture, release, closed, (head, all), _target) =
+            lingering(Lingering::Whole, enabled).await;
+        let failed = server(|_, _| async {
+            Response::builder()
+                .status(503)
+                .header("content-type", "application/json")
+                .body(full(
+                    br#"{"error":{"type":"api_error","message":"fixture unavailable"}}"#.as_slice(),
+                ))
+                .unwrap()
+        })
+        .await;
+        fixture.edit(Edit::SaveProvider {
+            id: None,
+            name: Some("Failing provider".into()),
+            base_url: failed.url("/v1"),
+            token: FIXTURE_KEY.into(),
+            quota_access_token: None,
+            search_only: None,
+            end_on_message_stop: Some(!enabled),
+        });
+        let providers = fixture.gateway.view().providers;
+        let target_id = providers[0].id.clone();
+        fixture.edit(Edit::Reorder {
+            ids: vec![providers[1].id.clone(), target_id.clone()],
+        });
+        fixture.edit(Edit::Mode {
+            mode: "auto".into(),
+        });
+        let response = request(
+            &fixture.gateway,
+            MESSAGES_BLOCK.path,
+            MESSAGES_BLOCK.request,
+        )
+        .await;
+        let mut body = std::pin::pin!(response.into_body().collect());
+        if !enabled {
+            assert!(tokio::time::timeout(Duration::from_millis(400), &mut body)
+                .await
+                .is_err());
+            assert!(!closed.load(Ordering::Acquire));
+            release.notify_one();
+        }
+        let bytes = tokio::time::timeout(WAIT, body)
+            .await
+            .unwrap()
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            if enabled {
+                head.as_slice()
+            } else {
+                all.as_slice()
+            }
+        );
+        let rows = recorded(&fixture.usage, 1).await;
+        assert_eq!(rows[0].attempts.len(), 2);
+        assert_eq!(
+            rows[0].final_attempt().unwrap().provider.as_deref(),
+            Some(target_id.as_str())
+        );
+        assert_eq!(
+            rows[0]
+                .final_attempt()
+                .unwrap()
+                .transfer
+                .as_ref()
+                .unwrap()
+                .upstream_eof,
+            !enabled
+        );
         fixture.stop().await;
     }
 }

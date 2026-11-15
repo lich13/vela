@@ -1375,16 +1375,20 @@ impl Api {
                         .collect();
                     let parsed = match record(id, entry, &steps, offset) {
                         Ok(parsed) => parsed,
-                        Err(_) => {
+                        Err(error) => {
                             failed_steps.extend(indices);
                             for s in &failed_steps {
                                 cursor.covered.remove(s);
                             }
-                            report.errors += 1;
+                            report.failed(&error);
                             offset += 1;
                             continue;
                         }
                     };
+                    let in_progress = parsed
+                        .as_ref()
+                        .and_then(Record::final_attempt)
+                        .is_some_and(|attempt| attempt.outcome == "in_progress");
                     let complete = match parsed {
                         Some(mut r) => {
                             let complete = r.finished_at.is_some()
@@ -1433,7 +1437,9 @@ impl Api {
                             for s in &failed_steps {
                                 cursor.covered.remove(s);
                             }
-                            report.errors += 1;
+                            if !in_progress {
+                                report.failed(&failure("Antigravity 请求缺少完成状态"));
+                            }
                         } else {
                             for step_idx in
                                 indices.into_iter().filter(|i| !failed_steps.contains(i))
@@ -1538,12 +1544,10 @@ pub(super) fn scan_file_list(
         })
         .unwrap_or_default();
     for path in files {
-        if scan_file(
+        if let Err(error) = scan_file(
             store, brain, path, pricing, settings, report, repair, &timeline,
-        )
-        .is_err()
-        {
-            report.errors += 1;
+        ) {
+            report.failed(&error);
         }
     }
     Ok(())
@@ -1788,9 +1792,9 @@ fn scan_file(
         match parsed {
             Ok(Some(row)) => rows.push(row),
             Ok(None) => {}
-            Err(_) => {
+            Err(error) => {
                 gap = true;
-                report.errors += 1;
+                report.failed(&error);
             }
         }
         if !gap {

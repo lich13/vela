@@ -43,6 +43,7 @@ fn provider(id: &str, handoff: bool, take: bool) -> Provider {
         handoff_after_compaction: handoff,
         take_new_threads: take,
         search_only: false,
+        end_on_message_stop: false,
     }
 }
 
@@ -166,6 +167,7 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://fixture.example.invalid/v1".into(),
@@ -457,6 +459,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
             &dir,
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url,

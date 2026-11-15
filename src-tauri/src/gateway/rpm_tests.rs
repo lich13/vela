@@ -50,6 +50,7 @@ fn provider(version: &str, queued: bool, max_rpm: u32) -> Provider {
         handoff_after_compaction: false,
         take_new_threads: false,
         search_only: false,
+        end_on_message_stop: false,
     }
 }
 
@@ -309,6 +310,7 @@ async fn started_http_gateway(
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url,
@@ -374,6 +376,7 @@ async fn started_native_gateway(upstream_port: u16, max_rpm: u32) -> (tempfile::
         .edit(
             Edit::SaveProvider {
                 search_only: None,
+                end_on_message_stop: None,
                 quota_access_token: None,
                 id: None,
                 base_url,
@@ -932,4 +935,21 @@ async fn native_websocket_two_rounds_reuse_one_handshake_and_preserve_request_by
     drop(client);
     gateway.stop().await.unwrap();
     drop(dir);
+}
+
+#[tokio::test(start_paused = true)]
+async fn configuring_providers_preserves_sends_and_removes_deleted_ledgers() {
+    let dir = tempfile::tempdir().unwrap();
+    let scheduler = scheduler(dir.path());
+    let p = provider("first", true, 1);
+    scheduler.configure(std::slice::from_ref(&p), true);
+    fill_failed_rpm_requests(&scheduler, &route(p.clone()), 1).await;
+    let mut changed = p.clone();
+    changed.version = "updated".into();
+    changed.max_rpm = 2;
+    scheduler.configure(std::slice::from_ref(&changed), true);
+    assert_eq!(scheduler.rpm_status(PROVIDER, 2), (1, 0, false));
+    scheduler.configure(&[], true);
+    scheduler.configure(&[p], true);
+    assert_eq!(scheduler.rpm_status(PROVIDER, 1), (0, 0, false));
 }

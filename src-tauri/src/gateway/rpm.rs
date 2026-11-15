@@ -19,17 +19,22 @@ pub(super) struct Ledger {
     starts: HashMap<String, VecDeque<(u64, Instant)>>,
 }
 impl Ledger {
-    fn prune(&mut self) {
+    fn prune(&mut self, id: &str) {
         let now = Instant::now();
-        self.starts.retain(|_, starts| {
+        if let Some(starts) = self.starts.get_mut(id) {
             while starts
                 .front()
                 .is_some_and(|(_, at)| now.duration_since(*at) >= WINDOW)
             {
                 starts.pop_front();
             }
-            !starts.is_empty()
-        });
+            if starts.is_empty() {
+                self.starts.remove(id);
+            }
+        }
+    }
+    pub(super) fn retain_providers(&mut self, ids: impl Fn(&str) -> bool) {
+        self.starts.retain(|id, _| ids(id));
     }
     /// When the oldest counted send leaves the window.
     pub(super) fn next_change(&self, id: &str) -> Option<Instant> {
@@ -39,7 +44,7 @@ impl Ledger {
             .map(|(_, at)| *at + WINDOW)
     }
     pub(super) fn used(&mut self, id: &str) -> usize {
-        self.prune();
+        self.prune(id);
         self.starts.get(id).map_or(0, VecDeque::len)
     }
     /// How long until one more send fits under `limit`; `None` when it fits now.
@@ -47,7 +52,7 @@ impl Ledger {
         if limit == 0 {
             return None;
         }
-        self.prune();
+        self.prune(id);
         let starts = self.starts.get(id)?;
         let blocking = starts.len().checked_sub(limit as usize)?;
         let (_, at) = starts[blocking];

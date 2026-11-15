@@ -16,6 +16,7 @@ fn provider(id: &str, model: Option<&str>, special: bool) -> Provider {
         handoff_after_compaction: special,
         take_new_threads: special,
         search_only: false,
+        end_on_message_stop: false,
     }
 }
 fn hints(model: &str, compacted: bool) -> RequestHints {

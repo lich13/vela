@@ -761,6 +761,28 @@ export async function run(
 
 let demoEvents: EventRecord[] = [
   {
+    id: "fixture-claude-session-error",
+    firstAt: Math.floor(Date.now() / 1000) - 60,
+    lastAt: Math.floor(Date.now() / 1000) - 60,
+    count: 1,
+    clientId: "claude_code",
+    providerId: null,
+    model: null,
+    reason: "rate_limit",
+    action: "stopped",
+    level: "warning",
+    status: 429,
+    errorCode: "RATE_LIMIT",
+    origin: "claude_code",
+    category: "ordinary_error",
+    attempt: null,
+    details: {
+      upstreamType: "rate_limit_error",
+      message: "API Error: fixture rate limit reached",
+      countedFailure: false,
+    },
+  },
+  {
     id: "fixture-event-1",
     firstAt: Math.floor(Date.now() / 1000) - 180,
     lastAt: Math.floor(Date.now() / 1000) - 20,

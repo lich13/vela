@@ -449,6 +449,7 @@ export type GatewayEdit =
   | {
       op: "saveProvider";
       searchOnly?: boolean;
+      endOnMessageStop?: boolean;
       id?: string | null;
       baseUrl: string;
       token: string;

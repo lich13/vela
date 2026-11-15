@@ -91,6 +91,7 @@ async fn dual_fixture(codex_urls: Vec<String>, claude_urls: Vec<String>) -> Dual
                 home,
                 Edit::SaveProvider {
                     search_only: None,
+                    end_on_message_stop: None,
                     quota_access_token: None,
                     id: None,
                     base_url,
@@ -616,6 +617,7 @@ async fn peer_gateway_urls_are_rejected_when_saved() {
                 .edit(
                     Edit::SaveProvider {
                         search_only: None,
+                        end_on_message_stop: None,
                         quota_access_token: None,
                         id: None,
                         base_url: format!("http://{host}:{}/loop", peer.view().settings.port),

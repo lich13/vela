@@ -2,6 +2,7 @@ use super::{
     admission::{Admission, Budget, CapacitySource, Rejected},
     attempt::{DeliveryGuard, DownstreamEnd},
     circuit,
+    client::ClientId,
     connector::{self, BoxError},
     health_settlement::observe_protocol,
     model::Settings,
@@ -294,8 +295,9 @@ struct Relay {
 }
 /// Whether a response may be ended at `message_stop`: only an uncompressed
 /// event stream whose length was never promised can be cut short unnoticed.
-fn ends_at_message_stop(settings: &Settings, status: StatusCode, headers: &HeaderMap) -> bool {
-    settings.end_on_message_stop
+fn ends_at_message_stop(route: &Route, status: StatusCode, headers: &HeaderMap) -> bool {
+    route.client_id == ClientId::Claude
+        && route.provider.end_on_message_stop
         && status.as_u16() < 400
         && !headers.contains_key(header::CONTENT_LENGTH)
         && headers
@@ -2797,7 +2799,7 @@ impl Exchange<'_> {
         let g = self.gateway.clone();
         let cfg = self.settings.clone();
         let neutral = status.as_u16() >= 400;
-        let end_at_stop = ends_at_message_stop(&cfg, status, &response_parts.headers);
+        let end_at_stop = ends_at_message_stop(&route, status, &response_parts.headers);
         if rerouted {
             self.gateway.record(
                 Some(&route.provider.id),

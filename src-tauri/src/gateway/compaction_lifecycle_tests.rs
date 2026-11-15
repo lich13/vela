@@ -34,6 +34,7 @@ fn provider(id: &str, allowed_models: Option<&str>, handoff: bool) -> Provider {
         handoff_after_compaction: handoff,
         take_new_threads: handoff,
         search_only: false,
+        end_on_message_stop: false,
     }
 }
 
