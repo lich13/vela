@@ -142,6 +142,7 @@ pub enum Origin {
     Upstream,
     Gateway,
     Antigravity,
+    ClaudeCode,
 }
 // External identities must not become executable gateway clients.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -154,6 +155,11 @@ pub enum JournalClient {
 #[serde(rename_all = "lowercase")]
 pub enum ExternalClient {
     Antigravity,
+    /// Errors Claude Code wrote to its own session files. The name differs
+    /// from the gateway client `claude`, which would otherwise win the
+    /// untagged match and make these records look like gateway traffic.
+    #[serde(rename = "claude_code")]
+    ClaudeCode,
 }
 impl From<ClientId> for JournalClient {
     fn from(value: ClientId) -> Self {
@@ -171,6 +177,7 @@ impl JournalClient {
         match self {
             Self::Active(client) => client.name(),
             Self::External(ExternalClient::Antigravity) => "Antigravity app",
+            Self::External(ExternalClient::ClaudeCode) => "Claude Code",
         }
     }
 }
@@ -277,8 +284,12 @@ impl Record {
         })
     }
     pub fn origin(&self) -> Origin {
-        if self.client_id == Some(JournalClient::External(ExternalClient::Antigravity)) {
-            return Origin::Antigravity;
+        match self.client_id {
+            Some(JournalClient::External(ExternalClient::Antigravity)) => {
+                return Origin::Antigravity
+            }
+            Some(JournalClient::External(ExternalClient::ClaudeCode)) => return Origin::ClaudeCode,
+            _ => {}
         }
         let response_error = matches!(
             self.reason,
@@ -340,19 +351,92 @@ impl Record {
         } else {
             (Reason::UpstreamService, Some(502), "ANTIGRAVITY_ERROR")
         };
-        let digest = storage::digest(format!("antigravity-event:{key}").as_bytes());
+        Self::external(
+            ExternalClient::Antigravity,
+            &format!("antigravity-event:{key}"),
+            timestamp,
+            model,
+            reason,
+            status,
+            Details {
+                upstream_code: Some(code_label.into()),
+                message: raw_log_message(raw_error),
+                ..Default::default()
+            },
+        )
+    }
+    /// An error Claude Code recorded in a session file, classified from the
+    /// structured fields of that line. `None` for any other line.
+    pub fn claude_session_error(line: &serde_json::Value) -> Option<Self> {
+        if line["isApiErrorMessage"] != true {
+            return None;
+        }
+        let text = |v: &serde_json::Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+        let timestamp = line["timestamp"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .and_then(|at| u64::try_from(at.timestamp()).ok())?;
+        let key = format!(
+            "claude-code-event:{}:{}",
+            line["sessionId"].as_str()?,
+            line["uuid"].as_str()?
+        );
+        let status = line["apiErrorStatus"]
+            .as_u64()
+            .and_then(|s| u16::try_from(s).ok())
+            .filter(|s| (100..600).contains(s));
+        let kind = line["error"].as_str().unwrap_or_default();
+        let reason = if kind == "rate_limit" || status == Some(429) {
+            Reason::RateLimit
+        } else if matches!(kind, "authentication_failed" | "billing_error")
+            || matches!(status, Some(401 | 403))
+        {
+            Reason::Authentication
+        } else if !line["streamCutCause"].is_null() {
+            Reason::RequestInterrupted
+        } else if line["apiError"] == "connection_failed" {
+            Reason::Network
+        } else {
+            Reason::UpstreamService
+        };
+        let message = line["message"]["content"]
+            .as_array()
+            .and_then(|blocks| blocks.iter().find_map(|block| block["text"].as_str()))
+            .and_then(raw_log_message);
+        Some(Self::external(
+            ExternalClient::ClaudeCode,
+            &key,
+            timestamp,
+            None,
+            reason,
+            status,
+            Details {
+                upstream_code: text(&line["error"]),
+                upstream_type: text(&line["apiError"]),
+                upstream_reason: text(&line["streamCutCause"]),
+                message,
+                ..Default::default()
+            },
+        ))
+    }
+    /// A record read from another application's own files. The id derives
+    /// from `key`, so reading the same line again does not add a second one.
+    fn external(
+        client: ExternalClient,
+        key: &str,
+        timestamp: u64,
+        model: Option<&str>,
+        reason: Reason,
+        status: Option<u16>,
+        details: Details,
+    ) -> Self {
+        let digest = storage::digest(key.as_bytes());
         let mut bytes = [0u8; 16];
         for (i, slot) in bytes.iter_mut().enumerate() {
             *slot = u8::from_str_radix(&digest[i * 2..i * 2 + 2], 16).unwrap_or(0);
         }
         bytes[6] = (bytes[6] & 0x0f) | 0x40;
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
-        let details = Details {
-            upstream_type: None,
-            upstream_code: Some(code_label.into()),
-            message: raw_log_message(raw_error),
-            ..Default::default()
-        };
         let t = timestamp.min(now());
         Self {
             notification_message: None,
@@ -361,7 +445,7 @@ impl Record {
             first_at: t,
             last_at: t,
             count: 1,
-            client_id: Some(JournalClient::External(ExternalClient::Antigravity)),
+            client_id: Some(JournalClient::External(client)),
             provider_id: None,
             model: model.and_then(safe_model),
             reason,
@@ -550,11 +634,14 @@ fn raw_log_message(value: &str) -> Option<String> {
     let text = value.split_whitespace().collect::<Vec<_>>().join(" ");
     (!text.is_empty()).then(|| text.chars().take(4096).collect())
 }
-fn scan_antigravity_file_lines(
+/// Feeds `on_line` the complete lines appended to `path` since the last scan.
+/// The first scan of a file starts at most `backlog` bytes before its end.
+fn scan_new_lines(
     path: &Path,
     file_len: u64,
     file_secs: u64,
-    cursors: &mut std::collections::HashMap<std::path::PathBuf, (u64, u64, u64)>,
+    backlog: u64,
+    cursors: &mut FileCursors,
     mut on_line: impl FnMut(u64, &[u8]),
 ) {
     use std::io::{Seek, SeekFrom};
@@ -572,8 +659,8 @@ fn scan_antigravity_file_lines(
     };
     let mut offset = start_offset;
     let mut discard_first = false;
-    if start_offset == 0 && file_len > 4 * 1024 * 1024 {
-        offset = file_len - 4 * 1024 * 1024;
+    if start_offset == 0 && file_len > backlog {
+        offset = file_len - backlog;
         discard_first = true;
     }
     if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
@@ -601,6 +688,41 @@ fn scan_antigravity_file_lines(
         line.clear();
     }
     cursors.insert(path.to_path_buf(), (file_len, file_secs, offset));
+}
+/// Session files under `dir` modified since `cutoff`, as (modified, length,
+/// path). Claude Code nests subagent sessions a few directories deep.
+fn session_files(
+    dir: &Path,
+    depth: usize,
+    cutoff: u64,
+    out: &mut Vec<(u64, u64, std::path::PathBuf)>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if kind.is_dir() {
+            if depth < 6 {
+                session_files(&path, depth + 1, cutoff, out);
+            }
+        } else if kind.is_file() && path.extension().is_some_and(|e| e == "jsonl") {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            let secs = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            if secs >= cutoff {
+                out.push((secs, meta.len(), path));
+            }
+        }
+    }
 }
 fn has_status_token(lower: &str, code: &str) -> bool {
     let bytes = lower.as_bytes();
@@ -795,7 +917,10 @@ enum Job {
     Prune,
     NotificationAccepted(String),
 }
-type AntigravityCursors = std::collections::HashMap<std::path::PathBuf, (u64, u64, u64)>;
+/// Per file: its length and modification time when last scanned, and the
+/// offset scanned up to.
+type FileCursors = std::collections::HashMap<std::path::PathBuf, (u64, u64, u64)>;
+const ANTIGRAVITY_BACKLOG: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Service {
@@ -803,7 +928,7 @@ pub struct Service {
     journal: Arc<Mutex<Journal>>,
     events: broadcast::Sender<Change>,
     raw_directory: Arc<std::path::PathBuf>,
-    antigravity_cursors: Arc<Mutex<AntigravityCursors>>,
+    file_cursors: Arc<Mutex<FileCursors>>,
 }
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1238,7 +1363,7 @@ impl Service {
             journal,
             events,
             raw_directory,
-            antigravity_cursors: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            file_cursors: Default::default(),
         }
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Change> {
@@ -1314,7 +1439,7 @@ impl Service {
     }
     pub fn sync_antigravity_logs(&self, home: &Path) {
         let cutoff = now().saturating_sub(RETENTION);
-        let mut cursors = self.antigravity_cursors.lock();
+        let mut cursors = self.file_cursors.lock();
         let mut discovered = Vec::new();
         let brain = home.join(".gemini/antigravity/brain");
         if let Ok(entries) = std::fs::read_dir(&brain) {
@@ -1336,10 +1461,11 @@ impl Service {
             transcripts.sort_by_key(|(secs, _, _, _)| std::cmp::Reverse(*secs));
             for (file_secs, file_len, conv_name, path) in transcripts.into_iter().take(48) {
                 let conv = conv_name.to_string_lossy();
-                scan_antigravity_file_lines(
+                scan_new_lines(
                     &path,
                     file_len,
                     file_secs,
+                    ANTIGRAVITY_BACKLOG,
                     &mut cursors,
                     |line_offset, line| {
                         if line.len() <= 512 * 1024 {
@@ -1418,10 +1544,11 @@ impl Service {
                 let file_len = meta.len();
                 let fname = entry.file_name();
                 let fname = fname.to_string_lossy();
-                scan_antigravity_file_lines(
+                scan_new_lines(
                     &path,
                     file_len,
                     file_secs,
+                    ANTIGRAVITY_BACKLOG,
                     &mut cursors,
                     |line_offset, line| {
                         if line.len() <= 64 * 1024 {
@@ -1444,19 +1571,56 @@ impl Service {
             }
         }
         drop(cursors);
-        if !discovered.is_empty() {
-            let mut guard = self.journal.lock();
-            let mut added = false;
-            for r in discovered {
-                if !guard.records.iter().any(|existing| existing.id == r.id) {
-                    guard.records.push_back(Arc::new(r));
-                    added = true;
-                }
+        self.add_external(discovered);
+    }
+    /// Reads the API errors Claude Code wrote to its session files in the
+    /// last week. Only lines marked as an API error are parsed.
+    pub fn sync_claude_logs(&self, claude_home: &Path) {
+        const MARK: &[u8] = br#""isApiErrorMessage":true"#;
+        let cutoff = now().saturating_sub(RETENTION);
+        let mut sessions = Vec::new();
+        session_files(&claude_home.join("projects"), 0, cutoff, &mut sessions);
+        sessions.sort_by_key(|(secs, _, _)| std::cmp::Reverse(*secs));
+        let mut cursors = self.file_cursors.lock();
+        let mut discovered = Vec::new();
+        for (file_secs, file_len, path) in sessions.into_iter().take(48) {
+            // The whole week is wanted and a session file can be large, so
+            // the first scan reads all of it; later scans read what was added.
+            scan_new_lines(
+                &path,
+                file_len,
+                file_secs,
+                u64::MAX,
+                &mut cursors,
+                |_, line| {
+                    if line.len() > 64 * 1024 || !line.windows(MARK.len()).any(|w| w == MARK) {
+                        return;
+                    }
+                    let record = serde_json::from_slice(line)
+                        .ok()
+                        .and_then(|line| Record::claude_session_error(&line));
+                    discovered.extend(record.filter(|r| r.last_at >= cutoff));
+                },
+            );
+        }
+        drop(cursors);
+        self.add_external(discovered);
+    }
+    fn add_external(&self, discovered: Vec<Record>) {
+        if discovered.is_empty() {
+            return;
+        }
+        let mut guard = self.journal.lock();
+        let mut added = false;
+        for r in discovered {
+            if !guard.records.iter().any(|existing| existing.id == r.id) {
+                guard.records.push_back(Arc::new(r));
+                added = true;
             }
-            if added {
-                guard.dirty = true;
-                let _ = self.sender.try_send(Job::Prune);
-            }
+        }
+        if added {
+            guard.dirty = true;
+            let _ = self.sender.try_send(Job::Prune);
         }
     }
     pub fn detail(&self, id: &str) -> Option<ClassifiedRecord> {
@@ -1538,6 +1702,87 @@ mod diagnostic_record_tests {
         assert_eq!(serde_json::to_string(&client).unwrap(), r#""antigravity""#);
         assert!(serde_json::from_str::<ClientId>(r#""antigravity""#).is_err());
         assert!(serde_json::from_str::<JournalClient>(r#""agy""#).is_err());
+    }
+    #[test]
+    fn claude_code_session_identity_never_reads_as_the_gateway_client() {
+        let external = JournalClient::External(ExternalClient::ClaudeCode);
+        let wire = serde_json::to_string(&external).unwrap();
+        assert_eq!(wire, r#""claude_code""#);
+        let read: JournalClient = serde_json::from_str(&wire).unwrap();
+        assert_eq!(read, external);
+        assert_eq!(read.active(), None);
+        // The gateway client keeps its own name and stays executable.
+        let gateway: JournalClient = serde_json::from_str(r#""claude""#).unwrap();
+        assert_eq!(gateway.active(), Some(ClientId::Claude));
+        assert!(serde_json::from_str::<ClientId>(&wire).is_err());
+    }
+    #[test]
+    fn claude_session_errors_are_classified_from_structured_fields() {
+        let line = |extra: serde_json::Value| {
+            let mut line = serde_json::json!({
+                "type": "assistant",
+                "isApiErrorMessage": true,
+                "uuid": "00000000-0000-4000-8000-000000000001",
+                "sessionId": "00000000-0000-4000-8000-000000000002",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "cwd": "/fixture/private/path",
+                "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "API Error: fixture"}]},
+            });
+            line.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            line
+        };
+        for (extra, reason, status) in [
+            (
+                serde_json::json!({"error": "rate_limit", "apiErrorStatus": 429}),
+                Reason::RateLimit,
+                Some(429),
+            ),
+            (
+                serde_json::json!({"error": "authentication_failed", "apiErrorStatus": 401}),
+                Reason::Authentication,
+                Some(401),
+            ),
+            (
+                serde_json::json!({"error": "server_error", "apiError": "connection_failed"}),
+                Reason::Network,
+                None,
+            ),
+            (
+                serde_json::json!({"error": "server_error", "apiError": "connection_failed", "streamCutCause": "stream_truncated"}),
+                Reason::RequestInterrupted,
+                None,
+            ),
+            (
+                serde_json::json!({"error": "server_error", "apiErrorStatus": 529}),
+                Reason::UpstreamService,
+                Some(529),
+            ),
+        ] {
+            let record = Record::claude_session_error(&line(extra.clone())).unwrap();
+            assert_eq!((record.reason, record.status), (reason, status), "{extra}");
+            assert_eq!(record.origin(), Origin::ClaudeCode);
+            assert_eq!(record.action, Action::Returned);
+            assert_eq!(
+                record.details.message.as_deref(),
+                Some("API Error: fixture")
+            );
+            assert_eq!(
+                record.details.upstream_code.as_deref(),
+                extra["error"].as_str()
+            );
+            // Only the listed fields are kept; the working directory is not.
+            assert!(!serde_json::to_string(&record)
+                .unwrap()
+                .contains("fixture/private"));
+            // The same line always yields the same record.
+            let again = Record::claude_session_error(&line(extra)).unwrap();
+            assert_eq!(again.id, record.id);
+        }
+        let mut ordinary = line(serde_json::json!({}));
+        ordinary["isApiErrorMessage"] = false.into();
+        assert!(Record::claude_session_error(&ordinary).is_none());
     }
     #[test]
     fn configuration_diagnostics_preserve_actual_codes_and_safe_causes() {

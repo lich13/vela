@@ -156,7 +156,8 @@
   color: var(--accent);
 }
 
-.event-table td:nth-child(2) span[data-client="claude"] {
+.event-table td:nth-child(2) span[data-client="claude"],
+.event-table td:nth-child(2) span[data-client="claude_code"] {
   color: var(--accent-blue);
 }
 

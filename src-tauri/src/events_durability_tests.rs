@@ -188,7 +188,7 @@ fn emit_checked_returns_false_and_reports_a_full_bounded_queue() {
         journal: Arc::new(Mutex::new(Journal::default())),
         events,
         raw_directory: Arc::new(std::env::temp_dir().join("unused-event-fixture")),
-        antigravity_cursors: Default::default(),
+        file_cursors: Default::default(),
     };
 
     let accepted = Record::new(

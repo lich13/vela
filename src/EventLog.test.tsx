@@ -455,6 +455,20 @@ it("separates origins, resets pagination, and hides policy actions for internal 
       message: "stream was interrupted after 5m0s",
     },
   };
+  const claudeError: EventRecord = {
+    ...record,
+    id: "claude-err",
+    clientId: "claude_code",
+    providerId: null,
+    model: null,
+    reason: "rate_limit",
+    status: 429,
+    origin: "claude_code",
+    details: {
+      upstreamCode: "rate_limit",
+      message: "API Error: fixture rate limit",
+    },
+  };
   const original = mock.command.getMockImplementation()!;
   mock.command.mockImplementation(async (name, args) => {
     if (name === "get_app_events")
@@ -464,7 +478,9 @@ it("separates origins, resets pagination, and hides policy actions for internal 
             ? [internal]
             : args.filter.origin === "antigravity"
               ? [agyError]
-              : [record],
+              : args.filter.origin === "claude_code"
+                ? [claudeError]
+                : [record],
         total: 51,
         page: args.filter.page,
         error: null,
@@ -474,7 +490,9 @@ it("separates origins, resets pagination, and hides policy actions for internal 
         ? internal
         : args.id === "agy-err"
           ? agyError
-          : record;
+          : args.id === "claude-err"
+            ? claudeError
+            : record;
     return original(name, args);
   });
   render(<EventLog />);
@@ -503,6 +521,22 @@ it("separates origins, resets pagination, and hides policy actions for internal 
   expect(
     await screen.findByText(/stream was interrupted after 5m0s/),
   ).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Claude Code" }));
+  await waitFor(() =>
+    expect(eventCalls().at(-1)?.[1]).toEqual({
+      filter: { origin: "claude_code", page: 1, from: null, to: null },
+    }),
+  );
+  // Session errors are not gateway traffic: the gateway filters do not apply
+  // and no failure rule can be built from them.
+  expect(screen.getByLabelText("客户端")).toBeDisabled();
+  expect(screen.getByLabelText("供应商")).toBeDisabled();
+  await user.click(await screen.findByRole("button", { name: "上游限流" }));
+  const sessionError = await screen.findByRole("dialog");
+  expect(within(sessionError).getByText("Claude Code")).toBeInTheDocument();
+  expect(
+    within(sessionError).queryByRole("button", { name: "加入故障规则" }),
+  ).not.toBeInTheDocument();
 });
 
 it("opens the internal tab and clears incompatible filters when a gateway event is focused", async () => {

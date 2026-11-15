@@ -338,3 +338,88 @@ fn sync_antigravity_logs_ingests_and_deduplicates_app_errors() {
         .any(|r| r.reason == Reason::UpstreamService));
     assert!(page.items.iter().any(|r| r.reason == Reason::RateLimit));
 }
+
+#[test]
+fn sync_claude_logs_reads_api_errors_from_nested_session_files_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("claude-home");
+    let project = home.join("projects/fixture-project");
+    let nested = project.join("fixture-session/subagents");
+    fs::create_dir_all(&nested).unwrap();
+    let at = chrono::Utc::now().to_rfc3339();
+    let error = |uuid: &str, extra: &str| {
+        format!(
+            r#"{{"type":"assistant","isApiErrorMessage":true,"uuid":"{uuid}","sessionId":"fixture-session","timestamp":"{at}","message":{{"model":"<synthetic>","content":[{{"type":"text","text":"API Error: fixture"}}]}}{extra}}}"#
+        )
+    };
+    fs::write(
+        project.join("fixture-session.jsonl"),
+        [
+            r#"{"type":"user","message":{"content":"mentions \"isApiErrorMessage\":true in text"}}"#.to_owned(),
+            r#"{"type":"assistant","message":{"id":"msg_fixture","usage":{"output_tokens":1}}}"#.to_owned(),
+            error("uuid-1", r#","error":"rate_limit","apiErrorStatus":429"#),
+            "{ not json \"isApiErrorMessage\":true".to_owned(),
+            String::new(),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    fs::write(
+        nested.join("agent-fixture.jsonl"),
+        error(
+            "uuid-2",
+            r#","error":"server_error","apiError":"connection_failed""#,
+        ) + "\n",
+    )
+    .unwrap();
+    fs::write(project.join("notes.txt"), error("uuid-3", "") + "\n").unwrap();
+
+    let service = Service::new(&temp.path().join("data"));
+    service.sync_claude_logs(&home);
+    service.sync_claude_logs(&home);
+
+    let page = service.query(Filter {
+        origin: Some(crate::events::Origin::ClaudeCode),
+        ..Filter::default()
+    });
+    assert_eq!(page.total, 2);
+    assert!(page.items.iter().any(|r| r.reason == Reason::RateLimit));
+    assert!(page.items.iter().any(|r| r.reason == Reason::Network));
+    // They stay out of the gateway's own views and of the Claude gateway client.
+    for origin in [
+        crate::events::Origin::Upstream,
+        crate::events::Origin::Gateway,
+        crate::events::Origin::Antigravity,
+    ] {
+        let other = service.query(Filter {
+            origin: Some(origin),
+            ..Filter::default()
+        });
+        assert_eq!(other.total, 0);
+    }
+    let gateway_client = service.query(Filter {
+        client_id: Some(ClientId::Claude.into()),
+        ..Filter::default()
+    });
+    assert_eq!(gateway_client.total, 0);
+
+    // A line appended later is picked up without re-reading the old ones.
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(nested.join("agent-fixture.jsonl"))
+        .unwrap();
+    use std::io::Write;
+    writeln!(
+        file,
+        "{}",
+        error("uuid-4", r#","error":"rate_limit","apiErrorStatus":429"#)
+    )
+    .unwrap();
+    drop(file);
+    service.sync_claude_logs(&home);
+    let page = service.query(Filter {
+        origin: Some(crate::events::Origin::ClaudeCode),
+        ..Filter::default()
+    });
+    assert_eq!(page.total, 3);
+}

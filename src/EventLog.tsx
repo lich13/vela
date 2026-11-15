@@ -70,7 +70,22 @@ const categories = {
   status: "状态记录",
 } as const;
 
-export type EventOrigin = "upstream" | "gateway" | "antigravity";
+export type EventOrigin =
+  | "upstream"
+  | "gateway"
+  | "antigravity"
+  | "claude_code";
+/** Identities of applications whose own error files the log page reads. */
+type ExternalClient = "agy" | "antigravity" | "claude_code";
+/** Whether the tab lists another application's errors, not gateway events. */
+const external = (origin: EventOrigin) =>
+  origin === "antigravity" || origin === "claude_code";
+const origins = {
+  upstream: "上游报错",
+  gateway: "网关内部",
+  antigravity: "Antigravity app",
+  claude_code: "Claude Code",
+} as const satisfies Record<EventOrigin, string>;
 
 export type EventRecord = {
   id: string;
@@ -78,7 +93,7 @@ export type EventRecord = {
   firstAt: number;
   lastAt: number;
   count: number;
-  clientId: ClientId | "agy" | "antigravity" | null;
+  clientId: ClientId | ExternalClient | null;
   providerId: string | null;
   model: string | null;
   reason: keyof typeof reasons;
@@ -150,14 +165,14 @@ type StatusGroup =
   | "server_error"
   | "no_status";
 
-const client = (id: ClientId | "agy" | "antigravity" | null) =>
+const client = (id: ClientId | ExternalClient | null) =>
   id === "antigravity"
     ? "Antigravity app"
     : id === "agy"
       ? "Antigravity CLI"
       : id === "codex"
         ? "Codex"
-        : id === "claude"
+        : id === "claude" || id === "claude_code"
           ? "Claude Code"
           : id === "dsh"
             ? "DSH"
@@ -444,7 +459,7 @@ export default function EventLog({
   }, [visible, load]);
 
   useEffect(() => {
-    if (!visible || origin !== "antigravity") return;
+    if (!visible || !external(origin)) return;
     const timer = window.setInterval(() => void load(), 5_000);
     return () => window.clearInterval(timer);
   }, [visible, origin, load]);
@@ -584,7 +599,7 @@ export default function EventLog({
         </div>
       </div>
       <div className="policy-tabs" role="tablist" aria-label="日志来源">
-        {(["upstream", "gateway", "antigravity"] as const).map((value) => (
+        {(Object.keys(origins) as EventOrigin[]).map((value) => (
           <button
             type="button"
             role="tab"
@@ -596,7 +611,7 @@ export default function EventLog({
               setPage(1);
               setFilters((old) => ({
                 ...old,
-                ...(value === "antigravity" ? { clientId: "", providerId: "" } : {}),
+                ...(external(value) ? { clientId: "", providerId: "" } : {}),
                 reason: "",
                 category: "",
                 level: "",
@@ -606,11 +621,7 @@ export default function EventLog({
               setSelected(null);
             }}
           >
-            {value === "upstream"
-              ? "上游报错"
-              : value === "gateway"
-                ? "网关内部"
-                : "Antigravity app"}
+            {origins[value]}
           </button>
         ))}
       </div>
@@ -636,7 +647,7 @@ export default function EventLog({
         <select
           aria-label="客户端"
           value={filters.clientId}
-          disabled={origin === "antigravity"}
+          disabled={external(origin)}
           onChange={(e) => change("clientId", e.target.value)}
         >
           <option value="">全部客户端</option>
@@ -648,7 +659,7 @@ export default function EventLog({
         <select
           aria-label="供应商"
           value={filters.providerId}
-          disabled={origin === "antigravity"}
+          disabled={external(origin)}
           onChange={(e) => change("providerId", e.target.value)}
         >
           <option value="">全部供应商</option>
@@ -917,7 +928,8 @@ function EventDetail({
         {addingRule &&
           r.clientId &&
           r.clientId !== "agy" &&
-          r.clientId !== "antigravity" && (
+          r.clientId !== "antigravity" &&
+          r.clientId !== "claude_code" && (
           <FailureRuleDialog
             clientId={r.clientId}
             initial={{

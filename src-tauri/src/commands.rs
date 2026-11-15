@@ -92,19 +92,25 @@ pub async fn get_app_events(
     r: R<'_>,
     filter: crate::events::Filter,
 ) -> Result<crate::events::Page> {
+    use crate::events::{ExternalClient, JournalClient, Origin};
     let service = r.diagnostics.clone();
+    let claude_home = r.home(crate::gateway::ClientId::Claude);
     tauri::async_runtime::spawn_blocking(move || {
-        if filter
-            .origin
-            .is_none_or(|o| o == crate::events::Origin::Antigravity)
-            && filter.client_id.is_none_or(|c| {
-                c == crate::events::JournalClient::External(
-                    crate::events::ExternalClient::Antigravity,
-                )
-            })
-        {
+        // Each external source is read only when the page shows it.
+        let wanted = |origin, client| {
+            filter.origin.is_none_or(|o| o == origin)
+                && filter
+                    .client_id
+                    .is_none_or(|c| c == JournalClient::External(client))
+        };
+        if wanted(Origin::Antigravity, ExternalClient::Antigravity) {
             if let Some(home) = dirs::home_dir() {
                 service.sync_antigravity_logs(&home);
+            }
+        }
+        if wanted(Origin::ClaudeCode, ExternalClient::ClaudeCode) {
+            if let Ok(home) = claude_home {
+                service.sync_claude_logs(&home);
             }
         }
         service.query(filter)
