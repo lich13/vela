@@ -1240,6 +1240,9 @@ enum Lingering {
     Whole,
     /// `message_stop` arrives in a later frame than the stream start.
     Split,
+    /// So much precedes the message that the gateway inspects `message_stop`
+    /// before it has relayed anything.
+    Padded,
     /// The declared length covers bytes sent only after the release.
     Sized,
     /// Gzip, flushed after `message_stop` but not finished. The flush marker
@@ -1249,7 +1252,7 @@ enum Lingering {
 
 /// A Claude gateway whose only provider sends the whole message, then keeps
 /// the connection open until `release`; `closed` flips once the gateway lets
-/// go of it. Also returns everything the upstream would eventually send.
+/// go of it. Also returns what the upstream sends before and with the wait.
 async fn lingering(
     shape: Lingering,
     end_on_message_stop: bool,
@@ -1257,7 +1260,7 @@ async fn lingering(
     Fixture,
     Arc<tokio::sync::Notify>,
     Arc<std::sync::atomic::AtomicBool>,
-    Vec<u8>,
+    (Vec<u8>, Vec<u8>),
     LoopbackServer,
 ) {
     struct Closed(Arc<std::sync::atomic::AtomicBool>);
@@ -1277,9 +1280,17 @@ async fn lingering(
         let tail = all[head.len()..].to_vec();
         (head, tail)
     } else {
-        (message.to_vec(), b": fixture tail\n\n".to_vec())
+        let padding = if shape == Lingering::Padded {
+            b": fixture padding\n\n".repeat(3 * 1024 * 1024 / 19)
+        } else {
+            Vec::new()
+        };
+        (
+            [padding.as_slice(), message].concat(),
+            b": fixture tail\n\n".to_vec(),
+        )
     };
-    let all = [head.as_slice(), tail.as_slice()].concat();
+    let sent = (head.clone(), [head.as_slice(), tail.as_slice()].concat());
     let release = Arc::new(tokio::sync::Notify::new());
     let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (released, dropped) = (release.clone(), closed.clone());
@@ -1290,8 +1301,12 @@ async fn lingering(
             let length = head.len() + tail.len();
             let stream = async_stream::stream! {
                 let _guard = guard;
-                if matches!(shape, Lingering::Split | Lingering::Gzip) {
-                    let start = if shape == Lingering::Gzip { head.len() - 1 } else { head.len() / 2 };
+                if shape != Lingering::Whole && shape != Lingering::Sized {
+                    let start = match shape {
+                        Lingering::Gzip => head.len() - 1,
+                        Lingering::Padded => head.len() - MESSAGES_BLOCK.backup.len(),
+                        _ => head.len() / 2,
+                    };
                     yield Ok::<_, BoxError>(Frame::data(head.slice(..start)));
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     yield Ok(Frame::data(head.slice(start..)));
@@ -1322,13 +1337,13 @@ async fn lingering(
         },
     });
     fixture.start().await;
-    (fixture, release, closed, all, upstream)
+    (fixture, release, closed, sent, upstream)
 }
 
 #[tokio::test]
 async fn message_stop_ends_the_response_while_the_upstream_lingers() {
-    for shape in [Lingering::Whole, Lingering::Split] {
-        let (fixture, _release, closed, _, _upstream) = lingering(shape, true).await;
+    for shape in [Lingering::Whole, Lingering::Split, Lingering::Padded] {
+        let (fixture, _release, closed, (head, _), _upstream) = lingering(shape, true).await;
         let response = request(
             &fixture.gateway,
             MESSAGES_BLOCK.path,
@@ -1340,7 +1355,7 @@ async fn message_stop_ends_the_response_while_the_upstream_lingers() {
             .expect("the response must end at message_stop")
             .unwrap()
             .to_bytes();
-        assert_eq!(bytes.as_ref(), MESSAGES_BLOCK.backup);
+        assert!(bytes.as_ref() == head.as_slice(), "the message was cut");
         settled(|| closed.load(Ordering::Acquire)).await;
 
         let rows = recorded(&fixture.usage, 1).await;
@@ -1364,7 +1379,7 @@ async fn a_lingering_upstream_is_awaited_unless_the_stream_may_end_at_message_st
         (Lingering::Sized, true),
         (Lingering::Gzip, true),
     ] {
-        let (fixture, release, closed, all, _upstream) = lingering(shape, enabled).await;
+        let (fixture, release, closed, (_, all), _upstream) = lingering(shape, enabled).await;
         let response = request(
             &fixture.gateway,
             MESSAGES_BLOCK.path,

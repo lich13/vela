@@ -398,8 +398,9 @@ async fn relay(relay: Relay) {
         return;
     }
     loop {
-        if end_at_stop && !disconnected && protocol.message_stopped() {
-            // The client holds the whole message. Some upstreams keep the
+        if end_at_stop && !disconnected && inspected_bytes == 0 && protocol.message_stopped() {
+            // The client holds the whole message: bytes inspected ahead of
+            // the relay have all been sent. Some upstreams keep the
             // connection open long after it; stop reading and release it.
             protocol.finish_at_terminal(Some(status.as_u16()));
             break;
