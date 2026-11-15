@@ -10,13 +10,11 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-#[cfg(any(target_os = "macos", test))]
-use std::time::Duration;
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
