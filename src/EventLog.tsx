@@ -559,7 +559,7 @@ export default function EventLog({
   ];
 
   const clear = async () => {
-    if (!(await confirmAction("清空全部日志（上游报错与网关内部）？"))) return;
+    if (!(await confirmAction("清空全部日志（包含全部来源）？"))) return;
     setBusy(true);
     try {
       await command("clear_app_events");

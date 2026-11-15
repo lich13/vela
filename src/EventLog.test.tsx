@@ -397,7 +397,7 @@ describe("event log", () => {
     await screen.findByRole("button", { name: /模型不支持/ });
     await user.click(screen.getByRole("button", { name: "清空全部日志" }));
     expect(mock.confirm).toHaveBeenCalledWith(
-      "清空全部日志（上游报错与网关内部）？",
+      "清空全部日志（包含全部来源）？",
     );
     await waitFor(() =>
       expect(mock.command).toHaveBeenCalledWith("clear_app_events"),
