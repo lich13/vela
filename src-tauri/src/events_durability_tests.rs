@@ -356,3 +356,70 @@ async fn duplicate_errors_merge_before_attachment_io_and_distinct_bodies_remain_
         "fixture second complete error"
     );
 }
+
+#[test]
+fn source_import_during_snapshot_write_remains_pending_until_next_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("diagnostics.jsonl");
+    let (sender, _receiver) = mpsc::sync_channel(8);
+    let service = Service {
+        sender,
+        journal: Arc::new(Mutex::new(Journal::default())),
+        events: broadcast::channel(8).0,
+        raw_directory: Arc::new(dir.path().join("diagnostic-errors")),
+        file_cursors: Default::default(),
+    };
+    let record = |model| {
+        Record::new(
+            Some(ClientId::Claude),
+            None,
+            Some(model),
+            Reason::Capacity,
+            Action::Returned,
+            Some(429),
+            None,
+        )
+    };
+    service.add_external(vec![record("fixture-before")]);
+    let snapshot = service
+        .journal
+        .lock()
+        .prepare_rewrite(&path, false)
+        .unwrap();
+    assert!(!service.journal.lock().dirty);
+    service.add_external(vec![record("fixture-during")]);
+    let written = super::write_records_stream(&path, &snapshot);
+    service.journal.lock().finish_write(written, Ok(()));
+    assert!(service.journal.lock().needs_write(&path));
+    assert_eq!(super::load(&path).records.len(), 1);
+    let snapshot = service
+        .journal
+        .lock()
+        .prepare_rewrite(&path, false)
+        .unwrap();
+    service
+        .journal
+        .lock()
+        .finish_write(super::write_records_stream(&path, &snapshot), Ok(()));
+    assert!(!service.journal.lock().needs_write(&path));
+    assert_eq!(super::load(&path).records.len(), 2);
+    let snapshot = service.journal.lock().prepare_rewrite(&path, true).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    service
+        .journal
+        .lock()
+        .finish_write(super::write_records_stream(&path, &snapshot), Ok(()));
+    assert!(service.journal.lock().dirty);
+    std::fs::remove_dir(&path).unwrap();
+    let snapshot = service
+        .journal
+        .lock()
+        .prepare_rewrite(&path, false)
+        .unwrap();
+    service
+        .journal
+        .lock()
+        .finish_write(super::write_records_stream(&path, &snapshot), Ok(()));
+    assert_eq!(super::load(&path).records.len(), 2);
+}

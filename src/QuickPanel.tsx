@@ -99,7 +99,7 @@ function QuickContent({
         setGateway(s);
       }
     });
-    let frozen = false;
+    let frozen: boolean | null = null;
     watch("gateway-freeze", (state) => {
       const selectedFrozen = state.clients.find(
         (c) => c.clientId === clientId,

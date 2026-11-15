@@ -1681,7 +1681,7 @@ pub fn run() {
                 runtime.grok.clone(),
                 runtime.dsh.clone(),
             ] {
-                let mut probe_freeze = probe_gateway.freeze_gate().subscribe();
+                let mut probe_freeze = probe_gateway.freeze_gate().subscribe_control();
                 tauri::async_runtime::spawn(async move {
                     loop {
                         if probe_gateway

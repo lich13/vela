@@ -99,6 +99,14 @@ pub fn git_blob_digest(raw: &[u8]) -> String {
     format!("{:x}", hash.finalize())
 }
 
+fn compatible_blob(manifest: &Value, name: &str, blob: &Value) -> bool {
+    let file = &manifest["files"][name];
+    blob == &file["gitBlob"]
+        || file["compatibleGitBlobs"]
+            .as_array()
+            .is_some_and(|known| known.contains(blob))
+}
+
 fn cached(saved: &super::types::SavedBank) -> Option<(Value, Value)> {
     if let (Some(data), Some(version), Some(provenance)) =
         (&saved.data, &saved.version, &saved.provenance)
@@ -108,7 +116,7 @@ fn cached(saved: &super::types::SavedBank) -> Option<(Value, Value)> {
             && version["analyzer_version"] == manifest["analyzerVersion"]
             && ["core", "challenge"]
                 .iter()
-                .all(|key| provenance[format!("{key}_blob")] == manifest["files"][key]["gitBlob"]);
+                .all(|key| compatible_blob(&manifest, key, &provenance[format!("{key}_blob")]));
         if valid {
             return Some((data.clone(), version.clone()));
         }
@@ -222,7 +230,7 @@ pub async fn update() -> Result<super::types::SavedBank> {
             .iter()
             .find(|f| f["path"] == manifest["files"][name]["path"] && f["type"] == "blob")
             .ok_or_else(|| failure("上游指纹库缺少校验文件"))?;
-        if name != "bank" && file["sha"] != manifest["files"][name]["gitBlob"] {
+        if name != "bank" && !compatible_blob(&manifest, name, &file["sha"]) {
             return Err(failure("上游指纹算法已变化，请升级应用后更新指纹库"));
         }
         provenance[format!("{name}_blob")] = file["sha"].clone();

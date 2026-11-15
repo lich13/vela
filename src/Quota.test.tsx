@@ -41,10 +41,11 @@ function quotaFixture(
 }
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
+  freeze: vi.fn(),
   listeners: new Map<string, (s: unknown) => void>(),
 }));
 vi.mock("./bridge", () => ({
-  command: mock.command,
+  command: (name: string, args: unknown) => name === "get_gateway_freeze" ? mock.freeze() : mock.command(name, args),
   subscribe: vi.fn(async (name: string, fn: (s: unknown) => void) => {
     mock.listeners.set(name, fn);
     return () => mock.listeners.delete(name);
@@ -180,6 +181,8 @@ beforeEach(() => {
   localStorage.clear();
   provider = structuredClone(gatewayDemo.providers[0]);
   mock.command.mockReset();
+  mock.freeze.mockReset();
+  mock.freeze.mockResolvedValue({ clients: ["codex", "claude", "grok", "dsh"].map((clientId) => ({ clientId, frozen: false })) });
   mock.listeners.clear();
   mock.command.mockImplementation(async () => result());
   Object.defineProperty(document, "visibilityState", {
@@ -956,4 +959,46 @@ it("keeps a failed compact query in the refresh control without hiding cached qu
   expect(screen.getByText("—")).toBeInTheDocument();
   fireEvent.click(screen.getByText("—"));
   expect(screen.getByText(error)).toBeInTheDocument();
+});
+
+it.each(["app-visibility", "panel-visibility"] as const)("pauses automatic quota work while frozen on %s and rechecks after visibility", async (visibilityEvent) => {
+  vi.useFakeTimers();
+  let frozen = true;
+  const state = () => ({ clients: ["codex", "claude", "grok", "dsh"].map((clientId) => ({ clientId, frozen: clientId === "codex" && frozen })) });
+  mock.freeze.mockImplementation(async () => state());
+  function FrozenQuota() {
+    const q = useProviderQuota([provider], true, visibilityEvent, "codex", 60);
+    return <button onClick={() => void q.refresh(provider.id)}>manual</button>;
+  }
+  render(<FrozenQuota />); await flush();
+  await act(async () => vi.advanceTimersByTimeAsync(120_000));
+  expect(mock.command).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByText("manual")); await flush();
+  expect(mock.command).toHaveBeenLastCalledWith("query_provider_quota", { clientId: "codex", providerId: provider.id, force: true });
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  expect(mock.command).toHaveBeenCalledTimes(1);
+  frozen = false;
+  await act(async () => mock.listeners.get("gateway-freeze")!(state()));
+  expect(mock.command).toHaveBeenCalledTimes(2);
+  frozen = true;
+  await act(async () => mock.listeners.get("gateway-freeze")!(state()));
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  expect(mock.command).toHaveBeenCalledTimes(2);
+  act(() => mock.listeners.get(visibilityEvent)!(false));
+  frozen = false;
+  await act(async () => mock.listeners.get(visibilityEvent)!(true));
+  await flush();
+  expect(mock.command).toHaveBeenCalledTimes(3);
+});
+
+it("ignores a stale initial freeze read after a newer event", async () => {
+  let resolve!: (state: unknown) => void;
+  mock.freeze.mockImplementation(() => new Promise((done) => { resolve = done; }));
+  render(<Harness />); await flush();
+  const state = (frozen: boolean) => ({ clients: [{ clientId: "codex", frozen }] });
+  await act(async () => mock.listeners.get("gateway-freeze")!(state(true)));
+  await act(async () => resolve(state(false)));
+  expect(mock.command).not.toHaveBeenCalled();
+  await act(async () => mock.listeners.get("gateway-freeze")!(state(false)));
+  expect(mock.command).toHaveBeenCalledTimes(1);
 });

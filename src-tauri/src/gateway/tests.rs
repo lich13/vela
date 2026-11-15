@@ -1410,3 +1410,56 @@ fn view_reads_without_routing_lock_and_retries_only_once_on_configuration_change
     assert_eq!(error.code, code::CONFLICT);
     assert_eq!(reads.get(), 2);
 }
+
+#[tokio::test]
+async fn quota_freeze_suppresses_automatic_queries_but_preserves_manual_and_started_queries() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let port = server({
+        let hits = hits.clone();
+        let entered = entered.clone();
+        let release = release.clone();
+        move |_| {
+            let hits = hits.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                if hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    entered.notify_one();
+                    release.acquire().await.unwrap().forget();
+                }
+                Response::new(full(
+                    r#"{"isValid":true,"quota":{"limit":10,"used":2,"remaining":8}}"#,
+                ))
+            }
+        }
+    })
+    .await;
+    let (_dir, g) = fixture(vec![format!("http://127.0.0.1:{port}/v1")]).await;
+    let id = g.view().providers[0].id.clone();
+    let gate = g.freeze_gate();
+    gate.set_selected(Some(ClientId::Codex), true).unwrap();
+    assert_eq!(g.query_quota(&id, false).await.unwrap().state, "idle");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    gate.set_selected(Some(ClientId::Codex), false).unwrap();
+    let pending = tokio::spawn({
+        let g = g.clone();
+        let id = id.clone();
+        async move { g.query_quota(&id, false).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    gate.set_selected(Some(ClientId::Codex), true).unwrap();
+    release.add_permits(1);
+    let result = pending.await.unwrap().unwrap();
+    assert_eq!(result.plans[0].remaining, Some(8.));
+    assert_eq!(
+        g.query_quota(&id, false).await.unwrap().checked_at,
+        result.checked_at
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    g.query_quota(&id, true).await.unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}

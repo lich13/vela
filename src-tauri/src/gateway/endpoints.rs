@@ -462,7 +462,10 @@ impl Gateway {
                         .acquire()
                         .await
                         .expect("probe semaphore stays open");
-                    measure(client, url).await
+                    if !force && self.freeze_gate().is_frozen(self.client_id()) {
+                        return None;
+                    }
+                    Some(measure(client, url).await)
                 }
             })
             .buffered(4)
@@ -479,6 +482,9 @@ impl Gateway {
         let rows = tokio::select! {
             rows = probes => rows,
             _ = stopping => return Err(AppError::new(code::GATEWAY_STOPPED, "网关已停止，测速已取消")),
+        };
+        let Some(rows) = rows.into_iter().collect::<Option<Vec<_>>>() else {
+            return self.try_view();
         };
         let s = self.request_state();
         if let Some(current) = s.store.providers.iter().find(|p| p.id == id) {

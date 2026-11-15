@@ -75,7 +75,7 @@ pub struct QuotaView {
     pub total_usage: Option<Usage>,
 }
 impl QuotaView {
-    fn empty(id: &str, version: &str) -> Self {
+    pub(super) fn empty(id: &str, version: &str) -> Self {
         Self {
             provider_id: id.into(),
             version: version.into(),

@@ -139,6 +139,7 @@ impl State {
 struct Shared {
     state: Mutex<State>,
     changes: watch::Sender<()>,
+    control_changes: watch::Sender<()>,
 }
 #[derive(Clone)]
 pub struct Gate(Arc<Shared>);
@@ -147,6 +148,7 @@ impl Default for Gate {
         Self(Arc::new(Shared {
             state: Mutex::default(),
             changes: watch::channel(()).0,
+            control_changes: watch::channel(()).0,
         }))
     }
 }
@@ -189,6 +191,9 @@ impl Gate {
     pub fn subscribe(&self) -> watch::Receiver<()> {
         self.0.changes.subscribe()
     }
+    pub fn subscribe_control(&self) -> watch::Receiver<()> {
+        self.0.control_changes.subscribe()
+    }
     pub fn set(&self, frozen: bool) -> crate::storage::Result<View> {
         self.set_selected(None, frozen)
     }
@@ -214,6 +219,7 @@ impl Gate {
             }
         }
         if changed {
+            self.0.control_changes.send_replace(());
             self.0.changes.send_replace(());
         }
         Ok(Self::view_locked(&s))
@@ -271,6 +277,7 @@ impl Gate {
             }
         }
         if changed {
+            self.0.control_changes.send_replace(());
             self.0.changes.send_replace(());
         }
     }
@@ -483,4 +490,33 @@ mod tests {
         assert_eq!(gate.view().queued, 0);
         assert_eq!(gate.view().draining, 0);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn control_subscribers_only_wake_on_freeze_and_thaw() {
+    let gate = Gate::default();
+    let mut control = gate.subscribe_control();
+    let mut traffic = gate.subscribe();
+    let ticket = gate.request(Scope::Client(ClientId::Codex));
+    ticket.waiting();
+    ticket.dispatch();
+    ticket.streaming();
+    ticket.finishing();
+    ticket.finish();
+    drop(ticket);
+    assert!(!control.has_changed().unwrap());
+    assert!(traffic.has_changed().unwrap());
+    traffic.borrow_and_update();
+    gate.set_selected(Some(ClientId::Codex), true).unwrap();
+    assert!(control.has_changed().unwrap());
+    control.borrow_and_update();
+    assert!(traffic.has_changed().unwrap());
+    gate.schedule(ClientId::Codex, Some(2000), 1000).unwrap();
+    assert!(!control.has_changed().unwrap());
+    gate.resume_due(2000);
+    assert!(control.has_changed().unwrap());
+    control.borrow_and_update();
+    gate.set_selected(Some(ClientId::Codex), false).unwrap();
+    assert!(!control.has_changed().unwrap());
 }

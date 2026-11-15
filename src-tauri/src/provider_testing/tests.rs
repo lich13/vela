@@ -204,6 +204,10 @@ fn analyzer_and_collector_match_reference_fixtures() {
     for case in fixture["modeltrace"]["scoring_cases"].as_array().unwrap() {
         let numbers: Vec<usize> = serde_json::from_value(case["numbers"].clone()).unwrap();
         let actual = modeltrace::scores(&numbers, &snapshot.0);
+        assert_eq!(
+            actual.len(),
+            case["expected_scores"].as_array().unwrap().len()
+        );
         for (a, b) in actual
             .iter()
             .zip(case["expected_scores"].as_array().unwrap())
@@ -217,6 +221,18 @@ fn analyzer_and_collector_match_reference_fixtures() {
         assert_eq!(actual["prediction"], case["expected"]["prediction"]);
         assert_eq!(actual["used_outputs"], case["expected"]["used_outputs"]);
         if !actual.is_null() {
+            let rows = actual["results"].as_array().unwrap();
+            let expected = case["expected"]["results"].as_array().unwrap();
+            assert_eq!(rows.len(), expected.len());
+            for (row, expected) in rows.iter().zip(expected) {
+                assert_eq!(row["model"], expected["model"]);
+                for field in ["score", "probability"] {
+                    assert!(
+                        (row[field].as_f64().unwrap() - expected[field].as_f64().unwrap()).abs()
+                            < 1e-12
+                    );
+                }
+            }
             assert!(
                 (actual["probability"].as_f64().unwrap()
                     - case["expected"]["probability"].as_f64().unwrap())
@@ -3437,4 +3453,133 @@ fn relaxed_verdict_mode_validates_target_model_and_active_bank_support() {
         .err()
         .expect("unrecognized model in relaxed mode should be rejected");
     assert!(err.message.contains("当前检测库无法识别指定的降智模型"));
+}
+
+#[tokio::test]
+async fn frozen_detection_cancels_queued_dispatch_and_restarts_the_interval() {
+    for tick_while_frozen in [false, true] {
+        let (dir, service) = fixture();
+        let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
+        ua(&service, ClientId::Codex);
+        let at = service.now();
+        enable_detection(&service, dir.path(), &id, "fixed", 5);
+        let permit = service.0.jobs.clone().acquire_many_owned(2).await.unwrap();
+        service.tick(at + 60_000, false).unwrap();
+        let job = service.state(ClientId::Codex, &id).unwrap().jobs[0].clone();
+        assert_eq!(job.status, "queued");
+        let gate = service.gateway(ClientId::Codex).freeze_gate();
+        gate.set_selected(Some(ClientId::Codex), true).unwrap();
+        if tick_while_frozen {
+            service.tick(at + 65_000, false).unwrap();
+        }
+        drop(permit);
+        let done = completed(&service, &job.id).await;
+        assert_eq!(done.job.status, "cancelled");
+        assert!(done.job.started_at.is_none());
+        service.tick(at + 70_000, false).unwrap();
+        assert_eq!(status(&service, &id).status, "frozen");
+        assert_eq!(status(&service, &id).next_at, None);
+        gate.set_selected(Some(ClientId::Codex), false).unwrap();
+        service.tick(at + 600_000, false).unwrap();
+        assert_eq!(status(&service, &id).status, "waiting");
+        assert_eq!(status(&service, &id).next_at, Some(at + 660_000));
+        assert_eq!(service.state(ClientId::Codex, &id).unwrap().jobs.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn freezing_keeps_started_detection_rounds_and_manual_tests_running() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let port = server({
+        let entered = entered.clone();
+        let release = release.clone();
+        let calls = calls.clone();
+        move |_| {
+            let entered = entered.clone();
+            let release = release.clone();
+            let calls = calls.clone();
+            async move {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    entered.notify_one();
+                    release.acquire().await.unwrap().forget();
+                }
+                fingerprint_response(&sample("above_99", n % 3))
+            }
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    let at = service.now();
+    enable_detection(&service, dir.path(), &id, "fixed", 5);
+    service.tick(at + 60_000, false).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let job = service.state(ClientId::Codex, &id).unwrap().jobs[0].clone();
+    service
+        .gateway(ClientId::Codex)
+        .freeze_gate()
+        .set_selected(Some(ClientId::Codex), true)
+        .unwrap();
+    service.tick(at + 65_000, false).unwrap();
+    assert_eq!(status(&service, &id).status, "running");
+    release.add_permits(1);
+    let done = completed(&service, &job.id).await;
+    assert_eq!(done.job.status, "completed");
+    assert_eq!(done.job.report.unwrap()["used_outputs"], 3);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    let manual = service
+        .start(fingerprint_request(&service, &id, 1))
+        .unwrap();
+    assert_eq!(
+        completed(&service, &manual.id).await.job.status,
+        "completed"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 6);
+}
+
+#[test]
+fn modeltrace_accepts_verified_compatible_cache_and_rejects_unknown_algorithms() {
+    let manifest = modeltrace::manifest();
+    let (data, version) = modeltrace::bundled().unwrap();
+    assert_eq!(data["models"].as_array().unwrap().len(), 36);
+    let raw = include_bytes!("../../resources/modeltrace/unified_bank.json");
+    assert_eq!(compat::sha256(raw), manifest["files"]["bank"]["sha256"]);
+    assert_eq!(
+        bank::git_blob_digest(raw),
+        manifest["files"]["bank"]["gitBlob"]
+    );
+    for blob in [
+        manifest["files"]["core"]["gitBlob"].clone(),
+        manifest["files"]["core"]["compatibleGitBlobs"][0].clone(),
+    ] {
+        let mut saved = SavedBank {
+            data: Some(data.clone()),
+            version: Some(version.clone()),
+            provenance: Some(
+                json!({ "core_blob": blob, "challenge_blob": manifest["files"]["challenge"]["gitBlob"] }),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            bank::Resource::load(&saved).status(None, None, false)["source"],
+            "cache"
+        );
+        saved.provenance.as_mut().unwrap()["core_blob"] = "unverified-core".into();
+        assert_eq!(
+            bank::Resource::load(&saved).status(None, None, false)["source"],
+            "builtin"
+        );
+        saved.provenance.as_mut().unwrap()["core_blob"] = blob;
+        saved.provenance.as_mut().unwrap()["challenge_blob"] = "unverified-challenge".into();
+        assert_eq!(
+            bank::Resource::load(&saved).status(None, None, false)["source"],
+            "builtin"
+        );
+    }
 }

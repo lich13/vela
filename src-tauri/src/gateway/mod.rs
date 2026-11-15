@@ -852,7 +852,7 @@ impl Gateway {
         let listener = self.0.registry.listener.view()?;
         let s = self.request_state();
         let (occupied, waiting) = self.0.admission.counts();
-        let health = |key: String| s.circuits.get(&key).cloned().unwrap_or_default().health();
+        let health = |key: &str| s.circuits.get(key).cloned().unwrap_or_default().health();
         let view = View {
             listener: listener.clone(),
             grok_managed: s.store.grok_api_model.is_some(),
@@ -894,10 +894,12 @@ impl Gateway {
                 .map(|p| {
                     let (rpm_used, rpm_retry_in, rpm_limited) =
                         self.0.admission.rpm_status(&p.id, p.max_rpm);
-                    let (quota_checking, quota_check) = self
-                        .0
-                        .quota
-                        .probe_view(&p.id, &Self::quota_version(&s.store, p));
+                    let quota_version = Self::quota_version(&s.store, p);
+                    let urls = Self::endpoint_urls(&s.store, p);
+                    let key = pkey(p);
+                    let (quota_checking, quota_check) =
+                        self.0.quota.probe_view(&p.id, &quota_version);
+                    let quota = self.0.quota.cached(&p.id, &quota_version);
                     ProviderView {
                         protocol: (matches!(self.0.client, ClientId::Grok | ClientId::Dsh)).then(
                             || {
@@ -918,22 +920,16 @@ impl Gateway {
                             .get(&p.id)
                             .cloned()
                             .unwrap_or_default(),
-                        endpoint_measurements: self
-                            .0
-                            .endpoints
-                            .measurements(p, &Self::endpoint_urls(&s.store, p)),
-                        preferred_base_url: self
-                            .0
-                            .endpoints
-                            .preferred(p, &Self::endpoint_urls(&s.store, p)),
+                        endpoint_measurements: self.0.endpoints.measurements(p, &urls),
+                        preferred_base_url: self.0.endpoints.preferred(p, &urls),
                         queued: p.queued,
-                        health: health(pkey(p)),
+                        health: health(&key),
                         model_health: s
                             .model_circuits
-                            .get(&pkey(p))
+                            .get(&key)
                             .map(|m| m.states())
                             .unwrap_or_default(),
-                        quota_version: Self::quota_version(&s.store, p),
+                        quota_version,
                         max_concurrency: p.max_concurrency,
                         max_rpm: p.max_rpm,
                         allowed_models: p.allowed_models.clone(),
@@ -951,10 +947,7 @@ impl Gateway {
                         rpm_limited,
                         rpm_wait_reason: rpm_limited
                             .then_some(crate::events::RpmWaitReason::SendWindow),
-                        quota: self
-                            .0
-                            .quota
-                            .cached(&p.id, &Self::quota_version(&s.store, p)),
+                        quota,
                     }
                 })
                 .collect(),
@@ -1951,6 +1944,13 @@ impl Gateway {
     pub async fn query_quota(&self, id: &str, force: bool) -> Result<QuotaView> {
         let input = self.query_input(id)?;
         let version = input.version.clone();
+        if !force && self.freeze_gate().is_frozen(self.client_id()) {
+            return Ok(self
+                .0
+                .quota
+                .cached(id, &version)
+                .unwrap_or_else(|| QuotaView::empty(id, &version)));
+        }
         let result = self.0.quota.query(input, force).await?;
         let s = self.0.inner.lock();
         if !s

@@ -258,6 +258,7 @@ impl Service {
             .unwrap_or_default();
         let minutes = period(&data, client, &config, provider);
         let valid = current
+            && !self.gateway(client).freeze_gate().is_frozen(client)
             && context.detection_revision.as_deref()
                 == Some(config_revision(&data.saved, client, provider).as_str())
             && config.model == context.request.model
@@ -298,12 +299,19 @@ impl Service {
     }
     pub fn run_scheduler(&self) {
         let weak = Arc::downgrade(&self.0);
+        let mut freeze = self
+            .gateway(ClientId::Codex)
+            .freeze_gate()
+            .subscribe_control();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last_wall = now();
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {},
+                    changed = freeze.changed() => if changed.is_err() { break; },
+                }
                 let Some(shared) = weak.upgrade() else {
                     break;
                 };
@@ -440,6 +448,7 @@ impl Service {
     fn tick_client(&self, client: ClientId, at: i64, suspended: bool) -> Result<()> {
         let gateway = self.gateway(client);
         let candidates = gateway.test_candidates()?;
+        let frozen = gateway.freeze_gate().is_frozen(client);
         let mut launch = vec![];
         {
             let mut data = lock(&self.0.data);
@@ -510,6 +519,8 @@ impl Service {
                     "outOfQueue"
                 } else if started {
                     "running"
+                } else if frozen {
+                    "frozen"
                 } else if config.mode == "smart"
                     && data.frequency_error.contains_key(client_key(client))
                 {
@@ -563,7 +574,7 @@ impl Service {
                 if matches!(status, "disabled" | "degraded" | "outOfQueue") {
                     timing.paused = true;
                     Self::cancel_automatic(&data, client, &provider.id, false);
-                } else if status == "idle" {
+                } else if frozen || status == "idle" {
                     timing.paused = true;
                     Self::cancel_automatic(&data, client, &provider.id, true);
                 } else if matches!(status, "statsUnavailable" | "modelsUnavailable") {

@@ -55,6 +55,7 @@ const statuses: Record<string, string> = {
   pending: "待执行",
   queued: "排队中",
   running: "运行中",
+  frozen: "已冻结",
   completed: "已完成",
   failed: "失败",
   cancelled: "已停止",

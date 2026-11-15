@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import Modal from "./Modal";
 import { command } from "./bridge";
+import type { GatewayFreeze } from "./bridge-contracts";
 import { compact as compactNumber } from "./usage-types";
 import {
   errorOf,
@@ -29,6 +30,44 @@ export function useProviderQuota(
   const visible = useVisible(visibilityEvent, (message) =>
     failure.current?.(message),
   );
+  const [freeze, setFreeze] = useState<{
+    clientId: ClientId;
+    frozen: boolean;
+  } | null>(null);
+  useEffect(() => {
+    setFreeze(null);
+    if (!visible) return;
+    let disposed = false;
+    let version = 0;
+    const accept = (state: GatewayFreeze) => {
+      const frozen = state.clients.find((c) => c.clientId === clientId)!.frozen;
+      setFreeze((previous) =>
+        previous?.clientId === clientId && previous.frozen === frozen
+          ? previous
+          : { clientId, frozen },
+      );
+    };
+    const events = subscriptions((e) => failure.current?.(errorOf(e).message));
+    const ready = events.watch("gateway-freeze", (state) => {
+      version++;
+      accept(state);
+    });
+    void ready.then(async () => {
+      if (disposed) return;
+      const request = version;
+      try {
+        const state = await command("get_gateway_freeze");
+        if (!disposed && version === request) accept(state);
+      } catch (e) {
+        if (!disposed) failure.current?.(errorOf(e).message);
+      }
+    });
+    return () => {
+      disposed = true;
+      events.dispose();
+    };
+  }, [clientId, visible]);
+  const frozen = freeze?.clientId === clientId ? freeze.frozen : true;
   const flights = useRef(new Map<string, Promise<void>>());
   const snapshots = useRef<Record<string, ProviderQuota>>({});
   const mounted = useRef(true);
@@ -117,7 +156,7 @@ export function useProviderQuota(
     })
     .join("|");
   useEffect(() => {
-    if (!active || !visible || !identity || refreshSeconds === 0) return;
+    if (!active || !visible || frozen || !identity || refreshSeconds === 0) return;
     let cancelled = false;
     let timer: number;
     const delayFor = (q: ProviderQuota | null | undefined) =>
@@ -158,7 +197,7 @@ export function useProviderQuota(
     };
     void tick();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [active, visible, identity, schedule, refreshSeconds, refresh]);
+  }, [active, visible, frozen, identity, schedule, refreshSeconds, refresh]);
   return { quotaFor, refresh };
 }
 function emptyQuota(p: Provider): ProviderQuota {

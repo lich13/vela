@@ -255,3 +255,119 @@ async fn first_affinity_persist_failure_returns_before_sending_to_upstream() {
     assert_eq!(upstream_hits, 0);
     assert_eq!(owner_count, 0);
 }
+
+#[tokio::test]
+async fn frozen_queued_probes_preserve_complete_samples_and_manual_probes_still_run() {
+    use super::super::ClientId;
+    use super::{Batch, Measurement};
+    use std::time::Instant;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let port = super::super::tests::server({
+        let hits = hits.clone();
+        let entered = entered.clone();
+        let release = release.clone();
+        move |_| {
+            let hits = hits.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                if hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    entered.notify_one();
+                    release.acquire().await.unwrap().forget();
+                }
+                Response::builder()
+                    .status(204)
+                    .body(replay::empty())
+                    .unwrap()
+            }
+        }
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
+    let primary = format!("http://127.0.0.1:{port}/v1");
+    gateway
+        .edit(
+            Edit::SaveProvider {
+                id: None,
+                name: None,
+                base_url: primary.clone(),
+                token: "fixture-token".into(),
+                quota_access_token: None,
+                search_only: None,
+                end_on_message_stop: None,
+            },
+            &gateway.view().revision,
+            dir.path(),
+        )
+        .unwrap();
+    let id = gateway.view().providers[0].id.clone();
+    let urls = vec![primary, format!("http://127.0.0.1:{port}/secondary/v1")];
+    gateway
+        .edit(
+            Edit::EndpointsProvider {
+                id: id.clone(),
+                base_urls: urls.clone(),
+            },
+            &gateway.view().revision,
+            dir.path(),
+        )
+        .unwrap();
+    let provider = gateway.0.inner.lock().store.providers[0].clone();
+    let checked = Instant::now() - Duration::from_secs(600);
+    gateway.0.endpoints.samples.lock().insert(
+        id.clone(),
+        Batch {
+            config: Service::config(&provider, &urls),
+            checked,
+            rows: urls
+                .iter()
+                .map(|url| Measurement {
+                    base_url: url.clone(),
+                    latency_ms: Some(123),
+                    status: Some(200),
+                    error: None,
+                    checked_at: 1,
+                })
+                .collect(),
+        },
+    );
+    let permits = gateway.0.endpoints.permits.acquire_many(3).await.unwrap();
+    let pending = tokio::spawn({
+        let g = gateway.clone();
+        let id = id.clone();
+        async move { g.probe_endpoints(&id, false).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    gateway
+        .freeze_gate()
+        .set_selected(Some(ClientId::Codex), true)
+        .unwrap();
+    release.add_permits(1);
+    drop(permits);
+    pending.await.unwrap().unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    {
+        let samples = gateway.0.endpoints.samples.lock();
+        let batch = &samples[&id];
+        assert_eq!(batch.checked, checked);
+        assert_eq!(batch.rows.len(), 2);
+        assert!(batch.rows.iter().all(|r| r.checked_at == 1));
+    }
+    gateway
+        .freeze_gate()
+        .set_selected(Some(ClientId::Codex), false)
+        .unwrap();
+    gateway.probe_endpoints(&id, false).await.unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 6);
+    gateway
+        .freeze_gate()
+        .set_selected(Some(ClientId::Codex), true)
+        .unwrap();
+    gateway.probe_endpoints(&id, true).await.unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 10);
+}

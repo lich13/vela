@@ -649,14 +649,22 @@ fn source_identity(path: &Path, meta: &std::fs::Metadata) -> String {
 
 fn scan_new_lines(
     path: &Path,
-    file_len: u64,
-    file_secs: u64,
+    meta: &std::fs::Metadata,
     (backlog, line_limit): (u64, usize),
     cursors: &mut FileCursors,
     cleared: Option<&ClearMark>,
     mut on_line: impl FnMut(u64, &[u8]),
 ) {
     use std::io::{Read, Seek, SeekFrom};
+    let identity = source_identity(path, meta);
+    if cursors.get(path).is_some_and(|c| {
+        c.identity == identity
+            && c.len == meta.len()
+            && c.modified == meta.modified().ok()
+            && c.offset == meta.len()
+    }) {
+        return;
+    }
     let Ok(mut file) = std::fs::File::open(path) else {
         return;
     };
@@ -664,14 +672,11 @@ fn scan_new_lines(
         return;
     };
     let identity = source_identity(path, &meta);
+    let file_len = meta.len();
+    let modified = meta.modified().ok();
     let previous = cursors
         .get(path)
         .filter(|c| c.identity == identity && file_len >= c.offset);
-    if previous
-        .is_some_and(|c| c.len == file_len && c.modified == file_secs && c.offset == file_len)
-    {
-        return;
-    }
     let mut offset = previous.map_or_else(
         || {
             cleared
@@ -735,21 +740,16 @@ fn scan_new_lines(
         path.to_path_buf(),
         FileCursor {
             len: file_len,
-            modified: file_secs,
+            modified,
             offset,
             discarding,
             identity,
         },
     );
 }
-/// Session files under `dir` modified since `cutoff`, as (modified, length,
-/// path). Claude Code nests subagent sessions a few directories deep.
-fn session_files(
-    dir: &Path,
-    depth: usize,
-    cutoff: u64,
-    out: &mut Vec<(u64, u64, std::path::PathBuf)>,
-) {
+/// Session files under `dir` modified since `cutoff`, retaining enumeration metadata.
+/// Claude Code nests subagent sessions a few directories deep.
+fn session_files(dir: &Path, depth: usize, cutoff: u64, out: &mut Vec<SourceFile>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -772,12 +772,12 @@ fn session_files(
                 .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs());
             if secs >= cutoff {
-                out.push((secs, meta.len(), path));
+                out.push((secs, meta, path));
             }
         }
     }
 }
-type SourceFile = (u64, u64, std::path::PathBuf);
+type SourceFile = (u64, std::fs::Metadata, std::path::PathBuf);
 fn recent_file(path: std::path::PathBuf, cutoff: u64) -> Option<SourceFile> {
     let meta = std::fs::metadata(&path).ok()?;
     let secs = meta
@@ -786,7 +786,7 @@ fn recent_file(path: std::path::PathBuf, cutoff: u64) -> Option<SourceFile> {
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_secs();
-    (meta.is_file() && secs >= cutoff).then_some((secs, meta.len(), path))
+    (meta.is_file() && secs >= cutoff).then_some((secs, meta, path))
 }
 fn antigravity_files(home: &Path, cutoff: u64) -> (Vec<SourceFile>, [Vec<SourceFile>; 2]) {
     let mut transcripts = Vec::new();
@@ -1006,11 +1006,20 @@ impl Journal {
             return None;
         }
         self.retain_since(now().saturating_sub(RETENTION));
-        self.dirty = true;
+        self.dirty = false;
         Some(JournalSnapshot {
             cleared: self.cleared.clone(),
             records: self.records.iter().cloned().collect(),
         })
+    }
+    fn finish_write(&mut self, written: Result<()>, pruned: std::io::Result<()>) {
+        // A source import can mark the journal dirty while this snapshot is written.
+        if written.is_err() {
+            self.dirty = true;
+            self.error = Some("日志写入失败，请检查文件权限与空间".into());
+        } else if pruned.is_err() {
+            self.error = Some("日志原文清理失败，请重试".into());
+        }
     }
     fn retained_raw_ids(&self) -> HashSet<String> {
         self.records
@@ -1031,7 +1040,7 @@ enum Job {
 }
 struct FileCursor {
     len: u64,
-    modified: u64,
+    modified: Option<SystemTime>,
     offset: u64,
     discarding: bool,
     identity: String,
@@ -1251,17 +1260,7 @@ impl Service {
                     } else {
                         Ok(())
                     };
-                    let mut initial = j.lock();
-                    if written.is_err() {
-                        initial.error = Some("日志写入失败，请检查文件权限与空间".into());
-                    } else {
-                        if snapshot.is_some() {
-                            initial.dirty = false;
-                        }
-                        if pruned.is_err() {
-                            initial.error = Some("日志原文清理失败，请重试".into());
-                        }
-                    }
+                    j.lock().finish_write(written, pruned);
                 }
             }
             let mut pending = None;
@@ -1505,17 +1504,7 @@ impl Service {
                 };
                 let error = {
                     let mut journal = j.lock();
-                    if result.is_ok() {
-                        if snapshot.is_some() {
-                            journal.dirty = false;
-                        }
-                        if raw_pruned.is_err() {
-                            journal.error = Some("日志原文清理失败，请重试".into());
-                        }
-                    } else {
-                        journal.dirty = true;
-                        journal.error = Some("日志写入失败，请检查文件权限与空间".into());
-                    }
+                    journal.finish_write(result, raw_pruned);
                     journal.error.clone()
                 };
                 for (record, notify) in changes {
@@ -1613,7 +1602,7 @@ impl Service {
         let cleared = self.journal.lock().cleared.clone();
         let cutoff = cutoff.max(cleared.as_ref().map_or(0, |c| c.at));
         let (transcripts, logs) = antigravity_files(home, cutoff);
-        for (file_secs, file_len, path) in transcripts {
+        for (file_secs, meta, path) in transcripts {
             let conv = path
                 .parent()
                 .and_then(Path::parent)
@@ -1623,8 +1612,7 @@ impl Service {
                 .to_string_lossy();
             scan_new_lines(
                 &path,
-                file_len,
-                file_secs,
+                &meta,
                 (ANTIGRAVITY_BACKLOG, 512 * 1024),
                 &mut cursors,
                 cleared.as_deref(),
@@ -1670,12 +1658,11 @@ impl Service {
                 },
             );
         }
-        for (file_secs, file_len, path) in logs.into_iter().flatten() {
+        for (file_secs, meta, path) in logs.into_iter().flatten() {
             let fname = path.file_name().unwrap_or_default().to_string_lossy();
             scan_new_lines(
                 &path,
-                file_len,
-                file_secs,
+                &meta,
                 (ANTIGRAVITY_BACKLOG, 64 * 1024),
                 &mut cursors,
                 cleared.as_deref(),
@@ -1709,13 +1696,12 @@ impl Service {
         let mut sessions = Vec::new();
         session_files(&claude_home.join("projects"), 0, cutoff, &mut sessions);
         let mut discovered = Vec::new();
-        for (file_secs, file_len, path) in sessions {
+        for (_, meta, path) in sessions {
             // The whole week is wanted and a session file can be large, so
             // the first scan reads all of it; later scans read what was added.
             scan_new_lines(
                 &path,
-                file_len,
-                file_secs,
+                &meta,
                 (u64::MAX, 64 * 1024),
                 &mut cursors,
                 cleared.as_deref(),
@@ -2006,8 +1992,9 @@ mod routing_visibility_tests {
 
     fn persist(j: &mut Journal, path: &Path, changed: bool) -> Result<()> {
         if let Some(snapshot) = j.prepare_rewrite(path, changed) {
-            write_records_stream(path, &snapshot)?;
-            j.dirty = false;
+            let written = write_records_stream(path, &snapshot);
+            j.finish_write(written.clone(), Ok(()));
+            written?;
         }
         Ok(())
     }
@@ -2400,11 +2387,10 @@ mod external_scan_tests {
         let mut cursors = FileCursors::new();
         let mut lines = Vec::new();
         let mut scan = |cursors: &mut FileCursors| {
-            let len = std::fs::metadata(&path).unwrap().len();
+            let meta = std::fs::metadata(&path).unwrap();
             scan_new_lines(
                 &path,
-                len,
-                now(),
+                &meta,
                 (u64::MAX, limit),
                 cursors,
                 None,
@@ -2440,8 +2426,7 @@ mod external_scan_tests {
         std::fs::write(&path, b"short\n").unwrap();
         scan_new_lines(
             &path,
-            6,
-            now(),
+            &std::fs::metadata(&path).unwrap(),
             (u64::MAX, limit),
             &mut cursors,
             None,
@@ -2453,8 +2438,7 @@ mod external_scan_tests {
         let mut rotated = Vec::new();
         scan_new_lines(
             &path,
-            6,
-            now(),
+            &std::fs::metadata(&path).unwrap(),
             (u64::MAX, limit),
             &mut cursors,
             None,

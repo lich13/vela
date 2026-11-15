@@ -9,8 +9,12 @@ vi.mock("./bridge", () => ({
   preview: true,
   command: mock.command,
   subscribe: async (name: string, fn: (v: unknown) => void) => {
-    mock.listeners.set(name, fn);
-    return () => mock.listeners.delete(name);
+    const previous = mock.listeners.get(name);
+    const listener = (v: unknown) => { previous?.(v); fn(v); };
+    mock.listeners.set(name, listener);
+    return () => { if (mock.listeners.get(name) === listener) {
+      if (previous) mock.listeners.set(name, previous); else mock.listeners.delete(name);
+    } };
   },
 }));
 import QuickPanel from "./QuickPanel";
@@ -30,6 +34,7 @@ beforeEach(() => {
   );
   mock.command.mockImplementation(
     async (name: string, args: Record<string, unknown>) => {
+      if (name === "get_gateway_freeze") return { clients: ["codex", "claude", "grok", "dsh"].map((clientId) => ({ clientId, frozen: false })) };
       if (name === "get_state" || name === "switch_account")
         return structuredClone(demo);
       if (name === "get_gateway" || name === "update_gateway")
@@ -179,16 +184,16 @@ it("refreshes the waiting budget once on freeze and thaw", async () => {
       ],
     }),
   );
-  expect(reads()).toBe(before);
+  expect(reads()).toBe(before + 1);
   await act(async () => mock.listeners.get("panel-visibility")?.(false));
-  expect(reads()).toBe(before);
+  expect(reads()).toBe(before + 1);
   await act(async () =>
     mock.listeners.get("gateway-freeze")?.({
       frozen: false,
       clients: [{ clientId: "codex", frozen: true }],
     }),
   );
-  expect(reads()).toBe(before + 1);
+  expect(reads()).toBe(before + 2);
   await act(async () =>
     mock.listeners.get("gateway-freeze")?.({
       frozen: true,
@@ -196,14 +201,14 @@ it("refreshes the waiting budget once on freeze and thaw", async () => {
       clients: [{ clientId: "codex", frozen: true }],
     }),
   );
-  expect(reads()).toBe(before + 1);
+  expect(reads()).toBe(before + 2);
   await act(async () =>
     mock.listeners.get("gateway-freeze")?.({
       frozen: false,
       clients: [{ clientId: "codex", frozen: false }],
     }),
   );
-  expect(reads()).toBe(before + 2);
+  expect(reads()).toBe(before + 3);
 });
 
 it("uses current revisions for quick actions without initializing the main window", async () => {
@@ -574,4 +579,27 @@ it("refreshes the shown panel and ignores a resumed read older than a gateway ev
   await act(async () => mock.listeners.get("gateway-state")!(latest));
   await act(async () => resolve(structuredClone(gatewayDemo)));
   expect(screen.getByText("Fixture shown provider")).toBeInTheDocument();
+});
+
+it("refreshes a frozen wait when the panel first observes thaw", async () => {
+  const original = mock.command.getMockImplementation()!;
+  let thawed = false;
+  mock.command.mockImplementation(async (name, args) => {
+    const value = await original(name, args);
+    if (name === "get_gateway") return { ...value, pendingRequests: [{
+      requestId: "fixture-frozen-wait", phase: thawed ? "capacity" : "frozen",
+      startedAt: Date.now() / 1000 - 90, elapsedSeconds: 90, remainingSeconds: 60,
+      providerId: value.providers[0].id, providerName: value.providers[0].name,
+      model: "fixture-model",
+    }] };
+    return value;
+  });
+  render(<QuickPanel />);
+  expect(await screen.findByText("已暂存")).toBeInTheDocument();
+  const before = mock.command.mock.calls.filter(([name]) => name === "get_gateway").length;
+  thawed = true;
+  await act(async () => mock.listeners.get("gateway-freeze")!({ clients: [{ clientId: "codex", frozen: false }] }));
+  expect(mock.command.mock.calls.filter(([name]) => name === "get_gateway")).toHaveLength(before + 1);
+  expect(screen.getByText("容量等待")).toBeInTheDocument();
+  expect(screen.getByText("剩余 60 秒")).toBeInTheDocument();
 });
