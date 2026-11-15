@@ -16,7 +16,15 @@ const mock = vi.hoisted(() => ({
   confirmAction: vi.fn(async () => true),
 }));
 vi.mock("./bridge", () => ({
-  command: mock.command,
+  command: (name: string, args: unknown) =>
+    name === "get_gateway_freeze"
+      ? Promise.resolve({
+          clients: ["codex", "claude", "grok", "dsh"].map((clientId) => ({
+            clientId,
+            frozen: false,
+          })),
+        })
+      : mock.command(name, args),
   subscribe: vi.fn(async <T,>(name: string, listener: (value: T) => void) => {
     let listeners = mock.listeners.get(name);
     if (!listeners) {
