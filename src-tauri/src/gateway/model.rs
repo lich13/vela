@@ -71,6 +71,10 @@ pub struct Settings {
     pub queue_seconds: u64,
     #[serde(default = "default_max_waiting")]
     pub max_waiting: usize,
+    /// End a Messages stream at `message_stop` instead of waiting for the
+    /// upstream to close the connection.
+    #[serde(default)]
+    pub end_on_message_stop: bool,
 }
 fn default_endpoint_probe_seconds() -> u64 {
     300
@@ -114,6 +118,7 @@ impl Default for Settings {
             connect_seconds: DEFAULT_CONNECT_SECONDS,
             queue_seconds: default_wait_seconds(),
             max_waiting: default_max_waiting(),
+            end_on_message_stop: false,
         }
     }
 }

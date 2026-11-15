@@ -288,7 +288,25 @@ struct Relay {
     body: WireBody,
     inspected_bytes: u64,
     neutral: bool,
+    /// The response may end at `message_stop` rather than the upstream's EOF.
+    end_at_stop: bool,
     operation: crate::usage::model::Operation,
+}
+/// Whether a response may be ended at `message_stop`: only an uncompressed
+/// event stream whose length was never promised can be cut short unnoticed.
+fn ends_at_message_stop(settings: &Settings, status: StatusCode, headers: &HeaderMap) -> bool {
+    settings.end_on_message_stop
+        && status.as_u16() < 400
+        && !headers.contains_key(header::CONTENT_LENGTH)
+        && headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.split(';').next())
+            .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+        && headers.get(header::CONTENT_ENCODING).is_none_or(|h| {
+            let encoding = h.as_bytes().trim_ascii();
+            encoding.is_empty() || encoding.eq_ignore_ascii_case(b"identity")
+        })
 }
 /// Relays the inspected prefix and the rest of the upstream body to the
 /// client, settling usage, health and delivery when the stream ends.
@@ -317,6 +335,7 @@ async fn relay(relay: Relay) {
         mut body,
         mut inspected_bytes,
         neutral,
+        end_at_stop,
         operation,
     } = relay;
     let mut active = Some(active);
@@ -379,6 +398,12 @@ async fn relay(relay: Relay) {
         return;
     }
     loop {
+        if end_at_stop && !disconnected && protocol.message_stopped() {
+            // The client holds the whole message. Some upstreams keep the
+            // connection open long after it; stop reading and release it.
+            protocol.finish_at_terminal(Some(status.as_u16()));
+            break;
+        }
         if disconnected || sender.is_closed() {
             disconnected = true;
             DownstreamEnd::Closed.record(&delivery, &mut protocol);
@@ -2771,6 +2796,7 @@ impl Exchange<'_> {
         let g = self.gateway.clone();
         let cfg = self.settings.clone();
         let neutral = status.as_u16() >= 400;
+        let end_at_stop = ends_at_message_stop(&cfg, status, &response_parts.headers);
         if rerouted {
             self.gateway.record(
                 Some(&route.provider.id),
@@ -2824,6 +2850,7 @@ impl Exchange<'_> {
             body,
             inspected_bytes,
             neutral,
+            end_at_stop,
             operation: self.plan.operation,
         }));
         // Hyper may drop a Content-Length body immediately after its last frame,

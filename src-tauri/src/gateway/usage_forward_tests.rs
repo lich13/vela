@@ -1232,3 +1232,165 @@ async fn reset_after_an_opened_reasoning_block_is_not_replayed() {
         fixture.stop().await;
     }
 }
+
+/// How an upstream delivers a complete Messages stream it then leaves open.
+#[derive(Clone, Copy, PartialEq)]
+enum Lingering {
+    /// One frame, no declared length.
+    Whole,
+    /// `message_stop` arrives in a later frame than the stream start.
+    Split,
+    /// The declared length covers bytes sent only after the release.
+    Sized,
+    /// Gzip, flushed after `message_stop` but not finished. The flush marker
+    /// is split so the decoder hands the gateway the whole message.
+    Gzip,
+}
+
+/// A Claude gateway whose only provider sends the whole message, then keeps
+/// the connection open until `release`; `closed` flips once the gateway lets
+/// go of it. Also returns everything the upstream would eventually send.
+async fn lingering(
+    shape: Lingering,
+    end_on_message_stop: bool,
+) -> (
+    Fixture,
+    Arc<tokio::sync::Notify>,
+    Arc<std::sync::atomic::AtomicBool>,
+    Vec<u8>,
+    LoopbackServer,
+) {
+    struct Closed(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Closed {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let message = MESSAGES_BLOCK.backup;
+    let (head, tail) = if shape == Lingering::Gzip {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(message).unwrap();
+        encoder.flush().unwrap();
+        let head = encoder.get_ref().clone();
+        let all = encoder.finish().unwrap();
+        let tail = all[head.len()..].to_vec();
+        (head, tail)
+    } else {
+        (message.to_vec(), b": fixture tail\n\n".to_vec())
+    };
+    let all = [head.as_slice(), tail.as_slice()].concat();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (released, dropped) = (release.clone(), closed.clone());
+    let upstream = server(move |_, _| {
+        let (head, tail) = (Bytes::from(head.clone()), Bytes::from(tail.clone()));
+        let (released, guard) = (released.clone(), Closed(dropped.clone()));
+        async move {
+            let length = head.len() + tail.len();
+            let stream = async_stream::stream! {
+                let _guard = guard;
+                if matches!(shape, Lingering::Split | Lingering::Gzip) {
+                    let start = if shape == Lingering::Gzip { head.len() - 1 } else { head.len() / 2 };
+                    yield Ok::<_, BoxError>(Frame::data(head.slice(..start)));
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    yield Ok(Frame::data(head.slice(start..)));
+                } else {
+                    yield Ok(Frame::data(head));
+                }
+                released.notified().await;
+                yield Ok(Frame::data(tail));
+            };
+            let mut response = Response::builder().header("content-type", "text/event-stream");
+            if shape == Lingering::Sized {
+                response = response.header("content-length", length);
+            }
+            if shape == Lingering::Gzip {
+                response = response.header("content-encoding", "gzip");
+            }
+            response
+                .body(StreamBody::new(stream).boxed_unsync())
+                .unwrap()
+        }
+    })
+    .await;
+    let fixture = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
+    fixture.edit(Edit::Settings {
+        settings: Settings {
+            end_on_message_stop,
+            ..fixture.gateway.view().settings
+        },
+    });
+    fixture.start().await;
+    (fixture, release, closed, all, upstream)
+}
+
+#[tokio::test]
+async fn message_stop_ends_the_response_while_the_upstream_lingers() {
+    for shape in [Lingering::Whole, Lingering::Split] {
+        let (fixture, _release, closed, _, _upstream) = lingering(shape, true).await;
+        let response = request(
+            &fixture.gateway,
+            MESSAGES_BLOCK.path,
+            MESSAGES_BLOCK.request,
+        )
+        .await;
+        let bytes = tokio::time::timeout(Duration::from_secs(1), response.into_body().collect())
+            .await
+            .expect("the response must end at message_stop")
+            .unwrap()
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), MESSAGES_BLOCK.backup);
+        settled(|| closed.load(Ordering::Acquire)).await;
+
+        let rows = recorded(&fixture.usage, 1).await;
+        assert!(rows[0].completed);
+        let attempt = &rows[0].attempts[0];
+        assert_eq!(attempt.outcome, "success");
+        assert_eq!(attempt.tokens.input, Some(3));
+        assert_eq!(attempt.tokens.output, Some(2));
+        let transfer = attempt.transfer.as_ref().unwrap();
+        assert!(!transfer.upstream_eof);
+        assert_eq!(transfer.upstream_end, None);
+        assert_eq!(transfer.terminal_event.as_deref(), Some("message_stop"));
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_lingering_upstream_is_awaited_unless_the_stream_may_end_at_message_stop() {
+    for (shape, enabled) in [
+        (Lingering::Whole, false),
+        (Lingering::Sized, true),
+        (Lingering::Gzip, true),
+    ] {
+        let (fixture, release, closed, all, _upstream) = lingering(shape, enabled).await;
+        let response = request(
+            &fixture.gateway,
+            MESSAGES_BLOCK.path,
+            MESSAGES_BLOCK.request,
+        )
+        .await;
+        let mut body = std::pin::pin!(response.into_body().collect());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), &mut body)
+                .await
+                .is_err(),
+            "the response ended before the upstream did"
+        );
+        assert!(!closed.load(Ordering::Acquire));
+        release.notify_one();
+        let bytes = tokio::time::timeout(WAIT, body)
+            .await
+            .unwrap()
+            .unwrap()
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), all.as_slice());
+
+        let rows = recorded(&fixture.usage, 1).await;
+        let attempt = &rows[0].attempts[0];
+        assert_eq!(attempt.outcome, "success");
+        assert!(attempt.transfer.as_ref().unwrap().upstream_eof);
+        fixture.stop().await;
+    }
+}

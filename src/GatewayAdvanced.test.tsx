@@ -128,6 +128,11 @@ describe("gateway advanced settings", () => {
     expect(
       screen.queryByRole("checkbox", { name: "压缩后接管" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", {
+        name: "收到 message_stop 后立即结束响应",
+      }),
+    ).not.toBeInTheDocument();
     const retry = screen.getByRole("spinbutton", {
       name: "WebSocket 断开等待 / 秒",
     });
@@ -186,6 +191,11 @@ describe("gateway advanced settings", () => {
     expect(transient).toHaveValue(6);
     await user.clear(transient);
     await user.type(transient, "8");
+    const stop = screen.getByRole("checkbox", {
+      name: "收到 message_stop 后立即结束响应",
+    });
+    expect(stop).not.toBeChecked();
+    await user.click(stop);
     await user.click(screen.getByRole("button", { name: "保存参数" }));
     await waitFor(() =>
       expect(mock.command).toHaveBeenCalledWith(
@@ -194,7 +204,10 @@ describe("gateway advanced settings", () => {
           clientId: "claude",
           edit: expect.objectContaining({
             op: "settings",
-            settings: expect.objectContaining({ transientFailureThreshold: 8 }),
+            settings: expect.objectContaining({
+              transientFailureThreshold: 8,
+              endOnMessageStop: true,
+            }),
           }),
         }),
       ),

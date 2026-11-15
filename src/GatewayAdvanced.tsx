@@ -11,6 +11,11 @@ import {
 } from "./types";
 import type { EditRevision } from "./gateway-edit";
 
+type NumberField = Exclude<
+  keyof GatewaySettings,
+  "customFailureRules" | "endOnMessageStop"
+>;
+
 export default function Advanced({
   clientId,
   onDirtyChange,
@@ -42,17 +47,14 @@ export default function Advanced({
     }
   }, [settings, revision, editing]);
   const formId = useId();
-  const basic: [
-    Exclude<keyof GatewaySettings, "customFailureRules">,
-    string,
-  ][] = [
+  const basic: [NumberField, string][] = [
     ["port", "共享本地端口"],
     ["endpointProbeSeconds", "端点测速间隔 / 秒"],
   ];
   const groups: {
     name: string;
     tone: "rate" | "quota" | "service";
-    fields: [Exclude<keyof GatewaySettings, "customFailureRules">, string][];
+    fields: [NumberField, string][];
   }[] = [
     {
       name: "限流与容量",
@@ -85,7 +87,7 @@ export default function Advanced({
         ...(clientId === "codex"
           ? [
               ["websocketRetrySeconds", "WebSocket 断开等待 / 秒"] as [
-                Exclude<keyof GatewaySettings, "customFailureRules">,
+                NumberField,
                 string,
               ],
             ]
@@ -93,9 +95,7 @@ export default function Advanced({
       ],
     },
   ];
-  const fields = (
-    items: [Exclude<keyof GatewaySettings, "customFailureRules">, string][],
-  ) => (
+  const fields = (items: [NumberField, string][]) => (
     <div className="policy-parameters">
       {items.map(([key, label]) => (
         <label key={key} className="policy-parameter">
@@ -184,6 +184,22 @@ export default function Advanced({
         <summary>高级设置</summary>
         {children}
         {fields(basic)}
+        {clientId === "claude" && (
+          <label className="check-label">
+            <input
+              type="checkbox"
+              disabled={busy}
+              checked={draft.endOnMessageStop}
+              onChange={(e) => {
+                if (!editing) baseRevision.current = revision;
+                setEditing(true);
+                onDirtyChange?.(true);
+                setDraft({ ...draft, endOnMessageStop: e.target.checked });
+              }}
+            />
+            收到 message_stop 后立即结束响应
+          </label>
+        )}
       </details>
       <form
         id={formId}

@@ -98,6 +98,7 @@ export type GatewaySettings = {
   connectSeconds: number;
   queueSeconds: number;
   maxWaiting: number;
+  endOnMessageStop: boolean;
 };
 export type Health = {
   state: "closed" | "open" | "half_open";

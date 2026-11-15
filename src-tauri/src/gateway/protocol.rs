@@ -4,6 +4,9 @@ use crate::errors::code;
 use serde_json::Value;
 use std::io::Write;
 
+/// `finish` reason for a stream the gateway ended at its terminal event.
+const ENDED_AT_TERMINAL: &str = "ENDED_AT_TERMINAL";
+
 #[derive(Default, Clone, Debug)]
 pub struct Observation {
     pub failure_rules: Vec<super::failure_rules::Rule>,
@@ -1364,6 +1367,15 @@ impl Protocol {
     pub fn succeeded(&self) -> bool {
         matches!(self.terminal(), Some(Terminal::Success | Terminal::Limited))
     }
+    /// True once a Messages stream has delivered its `message_stop` event.
+    pub fn message_stopped(&self) -> bool {
+        self.terminal_received && self.observation.terminal_event.as_deref() == Some("message_stop")
+    }
+    /// Settles a stream the gateway ends right after its terminal event while
+    /// the upstream is still open: no EOF was read and nothing went wrong.
+    pub fn finish_at_terminal(&mut self, status: Option<u16>) {
+        self.finish(status, ENDED_AT_TERMINAL);
+    }
     /// True only for a transport-level failure. Application/protocol errors
     /// received in an otherwise successful HTTP response must not trip a
     /// provider circuit.
@@ -1381,7 +1393,10 @@ impl Protocol {
         } else {
             reason
         };
-        self.routing_fault |= !matches!(reason, code::OK | code::CLIENT_DISCONNECTED | "UNSETTLED");
+        self.routing_fault |= !matches!(
+            reason,
+            code::OK | code::CLIENT_DISCONNECTED | "UNSETTLED" | ENDED_AT_TERMINAL
+        );
         if self.finished {
             if matches!(
                 reason,
@@ -1407,6 +1422,7 @@ impl Protocol {
             code::GATEWAY_STOPPED => "gateway_stopping",
             code::CANCELLED => "request_cancelled",
             code::CLIENT_DISCONNECTED => "response_consumer_closed",
+            ENDED_AT_TERMINAL => "ended_at_terminal",
             _ => "upstream_observation_ended",
         });
         self.transfer.upstream_eof = reason == code::OK;

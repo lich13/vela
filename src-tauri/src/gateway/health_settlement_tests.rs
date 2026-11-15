@@ -69,7 +69,8 @@ fn default_settings_match_current_serialization() {
             "retryBudgetSeconds": 300,
             "connectSeconds": 300,
             "queueSeconds": 300,
-            "maxWaiting": 100
+            "maxWaiting": 100,
+            "endOnMessageStop": false
         })
     );
 }
