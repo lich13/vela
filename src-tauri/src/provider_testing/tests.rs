@@ -2669,8 +2669,6 @@ fn detection_controls_and_marks_are_isolated_for_identical_provider_ids() {
                 scope_key(client, &id),
                 Degradation {
                     provider_id: id.clone(),
-                    job_id: "fixture".into(),
-                    detected_at: 1,
                     requested_model: "fixture".into(),
                     predicted_model: "fixture".into(),
                     probability: None,

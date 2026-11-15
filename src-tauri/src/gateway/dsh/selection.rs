@@ -158,7 +158,6 @@ pub(super) fn read_provider(
         base_url: None,
         token: None,
     };
-    let mut credential_source = None;
     let protocol = route
         .as_ref()
         .and_then(|r| match string(r.get("api")).as_deref() {
@@ -183,26 +182,17 @@ pub(super) fn read_provider(
             .get_mapping("records")
             .and_then(|r| r.get_mapping(format!("llm-pi-ai/{provider}")));
         let mut token = string(route.get("apiKey"));
-        if token.is_some() {
-            credential_source = Some("provider apiKey".into());
-        }
         if token.is_none() {
             token = record
                 .as_ref()
                 .filter(|r| string(r.get("kind")).as_deref() == Some("api-key"))
                 .and_then(|r| string(r.get("key")));
-            if token.is_some() {
-                credential_source = Some("凭据库 records".into());
-            }
         }
         if token.is_none() {
             if let Some(key) = string(route.get("apiKeyEnv")) {
                 token = credential
                     .get_mapping("refs")
                     .and_then(|r| string(r.get(&key)));
-                if token.is_some() {
-                    credential_source = Some("凭据库 refs".into());
-                }
                 // A launch/project environment is not observable in another process.
                 // Preserve a known mismatch; warn when a launch/project environment
                 // could differ from the visible fallback.
@@ -219,9 +209,6 @@ pub(super) fn read_provider(
                             .push_str("；环境凭据匹配仅适用于当前可见环境，启动环境或项目可能覆盖");
                     }
                     token = fallback;
-                    if token.is_some() {
-                        credential_source = Some("环境变量".into());
-                    }
                 }
             }
         }
@@ -258,7 +245,6 @@ pub(super) fn read_provider(
     result.provider_name = crate::events::safe_message(&provider_name);
     result.address_source = Some("llm-pi-ai.providers".into());
     result.address = super::super::grok_import::safe_address(selected_pair.base_url.as_deref());
-    result.credential_source = credential_source;
     result.protocol = protocol;
     Ok(Selection {
         current: result,

@@ -45,7 +45,6 @@ export type PriceComparison = {
   model: string;
   context: number;
   referenceAt: number | null;
-  sourceModel: string | null;
   reason: string | null;
   fields: {
     field: string;
@@ -53,7 +52,6 @@ export type PriceComparison = {
     modelsDev: string;
     deviationPercent: string | null;
     level: "equal" | "close" | "deviation" | "severe" | "zero_conflict";
-    contextThreshold: number | null;
   }[];
 };
 export type RoutingEvidence = {
@@ -315,7 +313,6 @@ export type ClaudeUsageQuota = {
   error: string | null;
 };
 export type Dashboard = {
-  dataVersion?: number;
   totals: Totals;
   providers: Group[];
   models: Group[];
@@ -323,7 +320,6 @@ export type Dashboard = {
   sources: Record<string, number>;
 };
 export type UsagePage = {
-  dataVersion?: number;
   rows: UsageRecord[];
   total: number;
   page: number;

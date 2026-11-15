@@ -636,58 +636,111 @@ fn raw_log_message(value: &str) -> Option<String> {
 }
 /// Feeds `on_line` the complete lines appended to `path` since the last scan.
 /// The first scan of a file starts at most `backlog` bytes before its end.
+fn source_identity(path: &Path, meta: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    let id = {
+        use std::os::unix::fs::MetadataExt;
+        format!("{}:{}", meta.dev(), meta.ino())
+    };
+    #[cfg(not(unix))]
+    let id = format!("{:?}", meta.created().ok());
+    storage::digest(format!("{}:{id}", path.to_string_lossy()).as_bytes())
+}
+
 fn scan_new_lines(
     path: &Path,
     file_len: u64,
     file_secs: u64,
-    backlog: u64,
+    (backlog, line_limit): (u64, usize),
     cursors: &mut FileCursors,
+    cleared: Option<&ClearMark>,
     mut on_line: impl FnMut(u64, &[u8]),
 ) {
-    use std::io::{Seek, SeekFrom};
-    let start_offset = match cursors.get(path) {
-        Some(&(prev_len, prev_secs, prev_off))
-            if prev_len == file_len && prev_secs == file_secs && prev_off == file_len =>
-        {
-            return;
-        }
-        Some(&(_, _, prev_off)) if file_len >= prev_off => prev_off,
-        _ => 0,
-    };
+    use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(path) else {
         return;
     };
-    let mut offset = start_offset;
-    let mut discard_first = false;
-    if start_offset == 0 && file_len > backlog {
-        offset = file_len - backlog;
-        discard_first = true;
-    }
-    if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
+    let Ok(meta) = file.metadata() else {
+        return;
+    };
+    let identity = source_identity(path, &meta);
+    let previous = cursors
+        .get(path)
+        .filter(|c| c.identity == identity && file_len >= c.offset);
+    if previous
+        .is_some_and(|c| c.len == file_len && c.modified == file_secs && c.offset == file_len)
+    {
         return;
     }
-    let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
-    if discard_first {
-        let Ok(discarded) = reader.read_until(b'\n', &mut line) else {
-            return;
-        };
-        if discarded == 0 || !line.ends_with(b"\n") {
+    let mut offset = previous.map_or_else(
+        || {
+            cleared
+                .and_then(|c| c.files.get(&identity))
+                .copied()
+                .filter(|n| *n <= file_len)
+                .unwrap_or(0)
+        },
+        |c| c.offset,
+    );
+    let mut discarding = previous.is_some_and(|c| c.discarding);
+    if previous.is_none() && offset > 0 {
+        // A clear can occur while a source is halfway through writing a line.
+        let mut last = [0];
+        if file.seek(SeekFrom::Start(offset - 1)).is_err() || file.read_exact(&mut last).is_err() {
             return;
         }
-        offset = offset.saturating_add(discarded as u64);
-        line.clear();
+        discarding = last[0] != b'\n';
     }
-    while let Ok(read_bytes) = reader.read_until(b'\n', &mut line) {
-        if read_bytes == 0 || !line.ends_with(b"\n") {
+    if offset == 0 && file_len > backlog {
+        offset = file_len - backlog;
+        discarding = true;
+    }
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return;
+    }
+    let mut reader = BufReader::new(file.take(file_len - offset));
+    let mut line = Vec::new();
+    let mut line_offset = offset;
+    while let Ok(bytes) = reader.fill_buf() {
+        if bytes.is_empty() {
             break;
         }
-        let line_offset = offset;
-        offset = offset.saturating_add(read_bytes as u64);
-        on_line(line_offset, &line);
-        line.clear();
+        let end = memchr::memchr(b'\n', bytes);
+        let count = end.map_or(bytes.len(), |i| i + 1);
+        if !discarding {
+            if line.len() + count <= line_limit {
+                line.extend_from_slice(&bytes[..count]);
+            } else {
+                line.clear();
+                discarding = true;
+            }
+        }
+        reader.consume(count);
+        offset += count as u64;
+        if end.is_some() {
+            if !discarding {
+                on_line(line_offset, &line);
+            }
+            discarding = false;
+            line.clear();
+            line_offset = offset;
+        }
     }
-    cursors.insert(path.to_path_buf(), (file_len, file_secs, offset));
+    // Short partial lines are reread after completion. Oversized lines keep
+    // their discard position so neither allocation nor scanning repeats.
+    if !discarding && !line.is_empty() {
+        offset = line_offset;
+    }
+    cursors.insert(
+        path.to_path_buf(),
+        FileCursor {
+            len: file_len,
+            modified: file_secs,
+            offset,
+            discarding,
+            identity,
+        },
+    );
 }
 /// Session files under `dir` modified since `cutoff`, as (modified, length,
 /// path). Claude Code nests subagent sessions a few directories deep.
@@ -723,6 +776,45 @@ fn session_files(
             }
         }
     }
+}
+type SourceFile = (u64, u64, std::path::PathBuf);
+fn recent_file(path: std::path::PathBuf, cutoff: u64) -> Option<SourceFile> {
+    let meta = std::fs::metadata(&path).ok()?;
+    let secs = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    (meta.is_file() && secs >= cutoff).then_some((secs, meta.len(), path))
+}
+fn antigravity_files(home: &Path, cutoff: u64) -> (Vec<SourceFile>, [Vec<SourceFile>; 2]) {
+    let mut transcripts = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(home.join(".gemini/antigravity/brain")) {
+        for entry in entries.flatten() {
+            if let Some(file) = recent_file(
+                entry.path().join(".system_generated/logs/transcript.jsonl"),
+                cutoff,
+            ) {
+                transcripts.push(file);
+            }
+        }
+    }
+    transcripts.sort_by_key(|(secs, _, _)| std::cmp::Reverse(*secs));
+    let mut logs = [Vec::new(), Vec::new()];
+    for (logs, root) in logs.iter_mut().zip([
+        home.join("Library/Logs/Antigravity"),
+        home.join(".gemini/antigravity/logs"),
+    ]) {
+        if let Ok(entries) = std::fs::read_dir(root) {
+            logs.extend(
+                entries
+                    .flatten()
+                    .filter_map(|entry| recent_file(entry.path(), cutoff)),
+            );
+        }
+    }
+    (transcripts, logs)
 }
 fn has_status_token(lower: &str, code: &str) -> bool {
     let bytes = lower.as_bytes();
@@ -869,8 +961,22 @@ pub struct Change {
     #[serde(skip)]
     pub notify: bool,
 }
+#[derive(Clone, Serialize, Deserialize)]
+struct ClearMark {
+    at: u64,
+    files: std::collections::BTreeMap<String, u64>,
+}
+struct JournalSnapshot {
+    cleared: Option<Arc<ClearMark>>,
+    records: Vec<Arc<Record>>,
+}
+#[derive(Deserialize)]
+struct JournalHeader {
+    cleared: ClearMark,
+}
 #[derive(Default)]
 struct Journal {
+    cleared: Option<Arc<ClearMark>>,
     records: VecDeque<Arc<Record>>,
     // Runtime health can refer to a just-merged event. Keep bounded aliases for
     // those links; persisted terminal events use the canonical row ID.
@@ -896,13 +1002,16 @@ impl Journal {
             .retain(|(_, target)| retained.contains(target.as_str()));
         pruned
     }
-    fn prepare_rewrite(&mut self, path: &Path, force: bool) -> Option<Vec<Arc<Record>>> {
+    fn prepare_rewrite(&mut self, path: &Path, force: bool) -> Option<JournalSnapshot> {
         if !force && !self.needs_write(path) {
             return None;
         }
         self.retain_since(now().saturating_sub(RETENTION));
         self.dirty = true;
-        Some(self.records.iter().cloned().collect())
+        Some(JournalSnapshot {
+            cleared: self.cleared.clone(),
+            records: self.records.iter().cloned().collect(),
+        })
     }
     fn retained_raw_ids(&self) -> HashSet<String> {
         self.records
@@ -913,13 +1022,22 @@ impl Journal {
 }
 enum Job {
     Append(Box<Record>),
-    Clear(oneshot::Sender<Result<()>>),
+    Clear(
+        Option<std::path::PathBuf>,
+        Option<std::path::PathBuf>,
+        oneshot::Sender<Result<()>>,
+    ),
     Prune,
     NotificationAccepted(String),
 }
-/// Per file: its length and modification time when last scanned, and the
-/// offset scanned up to.
-type FileCursors = std::collections::HashMap<std::path::PathBuf, (u64, u64, u64)>;
+struct FileCursor {
+    len: u64,
+    modified: u64,
+    offset: u64,
+    discarding: bool,
+    identity: String,
+}
+type FileCursors = std::collections::HashMap<std::path::PathBuf, FileCursor>;
 const ANTIGRAVITY_BACKLOG: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -987,6 +1105,7 @@ fn load(path: &Path) -> Journal {
         Ok(Some(file)) => {
             let mut reader = BufReader::new(file);
             let mut line = Vec::new();
+            let mut first_line = true;
             loop {
                 line.clear();
                 match reader.read_until(b'\n', &mut line) {
@@ -999,6 +1118,12 @@ fn load(path: &Path) -> Journal {
                 }
                 if line == b"\n" {
                     continue;
+                }
+                if std::mem::take(&mut first_line) {
+                    if let Ok(header) = serde_json::from_slice::<JournalHeader>(&line) {
+                        j.cleared = Some(Arc::new(header.cleared));
+                        continue;
+                    }
                 }
                 match serde_json::from_slice::<Record>(&line) {
                     Ok(r) => {
@@ -1078,9 +1203,16 @@ where
             .map(|cause| cause.id.clone());
     }
 }
-fn write_records_stream(path: &Path, records: &[Arc<Record>]) -> Result<()> {
+fn write_records_stream(path: &Path, snapshot: &JournalSnapshot) -> Result<()> {
     storage::atomic_write_stream(path, |writer| {
-        for record in records {
+        if let Some(cleared) = &snapshot.cleared {
+            serde_json::to_writer(
+                &mut *writer,
+                &serde_json::json!({"cleared": cleared.as_ref()}),
+            )?;
+            writer.write_all(b"\n")?;
+        }
+        for record in &snapshot.records {
             serde_json::to_writer(&mut *writer, record.as_ref())?;
             writer.write_all(b"\n")?;
         }
@@ -1097,6 +1229,8 @@ impl Service {
         let (sender, receiver) = mpsc::sync_channel(256);
         let j = journal.clone();
         let events_copy = events.clone();
+        let file_cursors = Arc::new(Mutex::new(FileCursors::new()));
+        let writer_cursors = file_cursors.clone();
         std::thread::spawn(move || {
             // Retention also runs after restart, before processing queued writes.
             {
@@ -1155,8 +1289,42 @@ impl Service {
                         continue;
                     }
                 }
-                if let Job::Clear(tx) = job {
-                    let result = storage::atomic_write_stream(&path, |_| Ok(()));
+                if let Job::Clear(home, claude_home, tx) = job {
+                    // Scans keep this lock until their discovered rows are added.
+                    // Clear therefore cannot race with an in-flight import.
+                    let mut cursors = writer_cursors.lock();
+                    let mut sources: Vec<_> = cursors.keys().cloned().collect();
+                    let cutoff = now().saturating_sub(RETENTION);
+                    if let Some(home) = home {
+                        let (transcripts, logs) = antigravity_files(&home, cutoff);
+                        sources.extend(
+                            transcripts
+                                .into_iter()
+                                .chain(logs.into_iter().flatten())
+                                .map(|(_, _, path)| path),
+                        );
+                    }
+                    if let Some(home) = claude_home {
+                        let mut sessions = Vec::new();
+                        session_files(&home.join("projects"), 0, cutoff, &mut sessions);
+                        sources.extend(sessions.into_iter().map(|(_, _, path)| path));
+                    }
+                    let cleared = ClearMark {
+                        at: now(),
+                        files: sources
+                            .into_iter()
+                            .filter_map(|path| {
+                                let meta = std::fs::metadata(&path).ok()?;
+                                meta.is_file()
+                                    .then(|| (source_identity(&path, &meta), meta.len()))
+                            })
+                            .collect(),
+                    };
+                    let snapshot = JournalSnapshot {
+                        cleared: Some(Arc::new(cleared)),
+                        records: Vec::new(),
+                    };
+                    let result = write_records_stream(&path, &snapshot);
                     let raw_pruned = if result.is_ok() {
                         prune_raw_ids(&raw_path, &HashSet::new())
                     } else {
@@ -1165,6 +1333,8 @@ impl Service {
                     let error = {
                         let mut current = j.lock();
                         if result.is_ok() {
+                            current.cleared = snapshot.cleared;
+                            cursors.clear();
                             current.records.clear();
                             current.aliases.clear();
                             current.dirty = false;
@@ -1297,7 +1467,7 @@ impl Service {
                                 changed = Some(r.clone());
                             }
                         }
-                        Job::Clear(_) | Job::Prune => (),
+                        Job::Clear(..) | Job::Prune => (),
                     }
                     changes.push((changed, notify));
                 }
@@ -1363,7 +1533,7 @@ impl Service {
             journal,
             events,
             raw_directory,
-            file_cursors: Default::default(),
+            file_cursors,
         }
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Change> {
@@ -1441,137 +1611,95 @@ impl Service {
         let cutoff = now().saturating_sub(RETENTION);
         let mut cursors = self.file_cursors.lock();
         let mut discovered = Vec::new();
-        let brain = home.join(".gemini/antigravity/brain");
-        if let Ok(entries) = std::fs::read_dir(&brain) {
-            let mut transcripts = Vec::new();
-            for entry in entries.flatten() {
-                let candidate = entry.path().join(".system_generated/logs/transcript.jsonl");
-                if let Ok(meta) = std::fs::metadata(&candidate) {
-                    if let Ok(modified) = meta.modified() {
-                        let secs = modified
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        if secs >= cutoff && meta.is_file() {
-                            transcripts.push((secs, meta.len(), entry.file_name(), candidate));
+        let cleared = self.journal.lock().cleared.clone();
+        let cutoff = cutoff.max(cleared.as_ref().map_or(0, |c| c.at));
+        let (transcripts, logs) = antigravity_files(home, cutoff);
+        for (file_secs, file_len, path) in transcripts.into_iter().take(48) {
+            let conv = path
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .unwrap_or_default()
+                .to_string_lossy();
+            scan_new_lines(
+                &path,
+                file_len,
+                file_secs,
+                (ANTIGRAVITY_BACKLOG, 512 * 1024),
+                &mut cursors,
+                cleared.as_deref(),
+                |line_offset, line| {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
+                        let step_type = v["type"].as_str().unwrap_or("");
+                        let raw_err = v["errorMessage"]
+                            .as_str()
+                            .or_else(|| v["error"]["message"].as_str())
+                            .or_else(|| v["error"].as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+                        let is_err =
+                            !matches!(step_type, "GENERIC" | "TOOL_RESPONSE" | "USER_INPUT")
+                                && (step_type.eq_ignore_ascii_case("ERROR_MESSAGE")
+                                    || raw_err.is_some());
+                        if is_err {
+                            let step_key = v["step_index"]
+                                .as_u64()
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| {
+                                    format!("off:{line_offset}:{}", &storage::digest(line)[..12])
+                                });
+                            let ts = v["created_at"]
+                                .as_str()
+                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                .and_then(|dt| u64::try_from(dt.timestamp()).ok())
+                                .unwrap_or(file_secs);
+                            if ts >= cutoff {
+                                let raw = raw_err.unwrap_or("Antigravity step error");
+                                let model =
+                                    v["model"].as_str().or_else(|| v["response_model"].as_str());
+                                let r = Record::antigravity_error(
+                                    &format!("transcript:{conv}:{step_key}"),
+                                    ts,
+                                    model,
+                                    raw,
+                                );
+                                discovered.push(r);
+                            }
                         }
                     }
-                }
-            }
-            transcripts.sort_by_key(|(secs, _, _, _)| std::cmp::Reverse(*secs));
-            for (file_secs, file_len, conv_name, path) in transcripts.into_iter().take(48) {
-                let conv = conv_name.to_string_lossy();
-                scan_new_lines(
-                    &path,
-                    file_len,
-                    file_secs,
-                    ANTIGRAVITY_BACKLOG,
-                    &mut cursors,
-                    |line_offset, line| {
-                        if line.len() <= 512 * 1024 {
-                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
-                                let step_type = v["type"].as_str().unwrap_or("");
-                                let raw_err = v["errorMessage"]
-                                    .as_str()
-                                    .or_else(|| v["error"]["message"].as_str())
-                                    .or_else(|| v["error"].as_str())
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty());
-                                let is_err = !matches!(
-                                    step_type,
-                                    "GENERIC" | "TOOL_RESPONSE" | "USER_INPUT"
-                                ) && (step_type.eq_ignore_ascii_case("ERROR_MESSAGE")
-                                    || raw_err.is_some());
-                                if is_err {
-                                    let step_key = v["step_index"]
-                                        .as_u64()
-                                        .map(|n| n.to_string())
-                                        .unwrap_or_else(|| {
-                                            format!(
-                                                "off:{line_offset}:{}",
-                                                &storage::digest(line)[..12]
-                                            )
-                                        });
-                                    let ts = v["created_at"]
-                                        .as_str()
-                                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                                        .and_then(|dt| u64::try_from(dt.timestamp()).ok())
-                                        .unwrap_or(file_secs);
-                                    if ts >= cutoff {
-                                        let raw = raw_err.unwrap_or("Antigravity step error");
-                                        let model = v["model"]
-                                            .as_str()
-                                            .or_else(|| v["response_model"].as_str());
-                                        let r = Record::antigravity_error(
-                                            &format!("transcript:{conv}:{step_key}"),
-                                            ts,
-                                            model,
-                                            raw,
-                                        );
-                                        discovered.push(r);
-                                    }
-                                }
-                            }
-                        }
-                    },
-                );
-            }
+                },
+            );
         }
-        for log_dir in [
-            home.join("Library/Logs/Antigravity"),
-            home.join(".gemini/antigravity/logs"),
-        ] {
-            let Ok(entries) = std::fs::read_dir(&log_dir) else {
-                continue;
-            };
-            for entry in entries.flatten().take(24) {
-                let path = entry.path();
-                let Ok(meta) = std::fs::metadata(&path) else {
-                    continue;
-                };
-                if !meta.is_file() {
-                    continue;
-                }
-                let file_secs = meta
-                    .modified()
-                    .ok()
-                    .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                if file_secs < cutoff {
-                    continue;
-                }
-                let file_len = meta.len();
-                let fname = entry.file_name();
-                let fname = fname.to_string_lossy();
-                scan_new_lines(
-                    &path,
-                    file_len,
-                    file_secs,
-                    ANTIGRAVITY_BACKLOG,
-                    &mut cursors,
-                    |line_offset, line| {
-                        if line.len() <= 64 * 1024 {
-                            let line_str = String::from_utf8_lossy(line);
-                            if let Some((line_ts, body)) =
-                                parse_antigravity_log_line(&line_str, file_secs)
-                            {
-                                if line_ts >= cutoff {
-                                    let key = format!(
-                                        "logfile:{fname}:{line_offset}:{}",
-                                        &storage::digest(body.as_bytes())[..16]
-                                    );
-                                    let r = Record::antigravity_error(&key, line_ts, None, body);
-                                    discovered.push(r);
-                                }
-                            }
+        for (file_secs, file_len, path) in
+            logs.into_iter().flat_map(|logs| logs.into_iter().take(24))
+        {
+            let fname = path.file_name().unwrap_or_default().to_string_lossy();
+            scan_new_lines(
+                &path,
+                file_len,
+                file_secs,
+                (ANTIGRAVITY_BACKLOG, 64 * 1024),
+                &mut cursors,
+                cleared.as_deref(),
+                |line_offset, line| {
+                    let line_str = String::from_utf8_lossy(line);
+                    if let Some((line_ts, body)) = parse_antigravity_log_line(&line_str, file_secs)
+                    {
+                        if line_ts >= cutoff {
+                            let key = format!(
+                                "logfile:{fname}:{line_offset}:{}",
+                                &storage::digest(body.as_bytes())[..16]
+                            );
+                            let r = Record::antigravity_error(&key, line_ts, None, body);
+                            discovered.push(r);
                         }
-                    },
-                );
-            }
+                    }
+                },
+            );
         }
-        drop(cursors);
         self.add_external(discovered);
+        drop(cursors);
     }
     /// Reads the API errors Claude Code wrote to its session files in the
     /// last week. Only lines marked as an API error are parsed.
@@ -1581,6 +1709,8 @@ impl Service {
         let mut sessions = Vec::new();
         session_files(&claude_home.join("projects"), 0, cutoff, &mut sessions);
         let mut cursors = self.file_cursors.lock();
+        let cleared = self.journal.lock().cleared.clone();
+        let cutoff = cutoff.max(cleared.as_ref().map_or(0, |c| c.at));
         let mut discovered = Vec::new();
         for (file_secs, file_len, path) in sessions {
             // The whole week is wanted and a session file can be large, so
@@ -1589,10 +1719,11 @@ impl Service {
                 &path,
                 file_len,
                 file_secs,
-                u64::MAX,
+                (u64::MAX, 64 * 1024),
                 &mut cursors,
+                cleared.as_deref(),
                 |_, line| {
-                    if line.len() > 64 * 1024 || !line.windows(MARK.len()).any(|w| w == MARK) {
+                    if !line.windows(MARK.len()).any(|w| w == MARK) {
                         return;
                     }
                     let record = serde_json::from_slice(line)
@@ -1602,8 +1733,8 @@ impl Service {
                 },
             );
         }
-        drop(cursors);
         self.add_external(discovered);
+        drop(cursors);
     }
     fn add_external(&self, discovered: Vec<Record>) {
         if discovered.is_empty() {
@@ -1651,10 +1782,14 @@ impl Service {
             .map(|reference| crate::event_raw::read(&self.raw_directory, &reference.id))
             .transpose()
     }
-    pub async fn clear(&self) -> Result<()> {
+    pub async fn clear(
+        &self,
+        home: Option<std::path::PathBuf>,
+        claude_home: Option<std::path::PathBuf>,
+    ) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .try_send(Job::Clear(tx))
+            .try_send(Job::Clear(home, claude_home, tx))
             .map_err(|_| AppError::new(code::LOG_BUSY, "日志繁忙，请重试"))?;
         rx.await
             .map_err(|_| AppError::new(code::LOG_WRITE, "日志清空失败"))?
@@ -2104,13 +2239,13 @@ mod routing_visibility_tests {
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("blocker"), b"x").unwrap();
 
-        assert!(service.clear().await.is_err());
+        assert!(service.clear(None, None).await.is_err());
         assert_eq!(service.query(Filter::default()).total, 1);
         assert_eq!(service.detail(&alias_id).unwrap().record.id, canonical_id);
 
         // Restore path and confirm normal clear empties records and aliases.
         std::fs::remove_dir_all(&path).unwrap();
-        service.clear().await.unwrap();
+        service.clear(None, None).await.unwrap();
         assert_eq!(service.query(Filter::default()).total, 0);
         assert!(service.detail(&alias_id).is_none());
     }
@@ -2209,5 +2344,83 @@ mod routing_visibility_tests {
         assert_eq!(loaded.records[0].id, log_record.id);
         assert_eq!(loaded.records[1].id, timeout_record.id);
         assert!(loaded.records[0].details.upstream_type.is_none());
+    }
+}
+
+#[cfg(test)]
+mod external_scan_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn oversized_partial_lines_are_skipped_until_newline_then_normal_lines_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let limit = 64 * 1024;
+        std::fs::write(&path, vec![b'x'; limit + 1]).unwrap();
+        let mut cursors = FileCursors::new();
+        let mut lines = Vec::new();
+        let mut scan = |cursors: &mut FileCursors| {
+            let len = std::fs::metadata(&path).unwrap().len();
+            scan_new_lines(
+                &path,
+                len,
+                now(),
+                (u64::MAX, limit),
+                cursors,
+                None,
+                |offset, line| lines.push((offset, line.to_vec())),
+            );
+        };
+        scan(&mut cursors);
+        assert!(cursors[&path].discarding);
+        assert_eq!(cursors[&path].offset, (limit + 1) as u64);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"still oversized").unwrap();
+        scan(&mut cursors);
+        assert_eq!(
+            cursors[&path].offset,
+            std::fs::metadata(&path).unwrap().len()
+        );
+        file.write_all(b"\nnormal\npartial").unwrap();
+        scan(&mut cursors);
+        assert!(!cursors[&path].discarding);
+        file.write_all(b" completed\n").unwrap();
+        scan(&mut cursors);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|(_, line)| line.as_slice())
+                .collect::<Vec<_>>(),
+            [b"normal\n".as_slice(), b"partial completed\n"]
+        );
+        // Truncation and file rotation restart the cursor.
+        std::fs::write(&path, b"short\n").unwrap();
+        scan_new_lines(
+            &path,
+            6,
+            now(),
+            (u64::MAX, limit),
+            &mut cursors,
+            None,
+            |_, line| assert_eq!(line, b"short\n"),
+        );
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, b"other\n").unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        let mut rotated = Vec::new();
+        scan_new_lines(
+            &path,
+            6,
+            now(),
+            (u64::MAX, limit),
+            &mut cursors,
+            None,
+            |_, line| rotated.extend_from_slice(line),
+        );
+        assert_eq!(rotated, b"other\n");
     }
 }

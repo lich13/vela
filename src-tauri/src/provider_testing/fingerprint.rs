@@ -75,7 +75,6 @@ impl Service {
                     report["disposition"] == "unknown"
                         && compat::string(&report["prediction_name"]).contains('/')
                 );
-                report["planned_outputs"] = context.sample_count.into();
                 report["initial"] =
                     json!(context.engine == Engine::LmDetector && context.sample_count == 1);
             }
@@ -262,8 +261,6 @@ impl Service {
         };
         let mark = Degradation {
             provider_id: job.provider_id.clone(),
-            job_id: id.into(),
-            detected_at: self.now(),
             requested_model: job.forwarded_model.clone(),
             predicted_model: compat::string(&report["prediction"]).into(),
             probability: report["probability"].as_f64(),

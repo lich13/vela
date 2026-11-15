@@ -28,7 +28,6 @@ pub struct Current {
     pub provider_name: Option<String>,
     pub address: Option<String>,
     pub address_source: Option<String>,
-    pub credential_source: Option<String>,
     pub protocol: Option<super::provider_protocol::Protocol>,
 }
 impl Current {
@@ -41,7 +40,6 @@ impl Current {
             provider_name: None,
             address: None,
             address_source: None,
-            credential_source: None,
             protocol: None,
         }
     }
@@ -149,26 +147,6 @@ pub(super) fn grok_effective(
                 current.address_source = profile.address_source.map(str::to_owned);
                 current.address =
                     super::grok_import::safe_address(profile.pair.base_url.as_deref());
-                current.credential_source = Some(
-                    if profile
-                        .table
-                        .get("api_key")
-                        .and_then(toml_edit::Item::as_str)
-                        .is_some_and(|v| !v.is_empty())
-                    {
-                        "模型 api_key".into()
-                    } else if profile
-                        .credential_names
-                        .iter()
-                        .any(|name| effective.variables.contains_key(name))
-                    {
-                        "endpoint.env".into()
-                    } else if profile.pair.token.is_some() {
-                        "进程环境".into()
-                    } else {
-                        "未读取到".into()
-                    },
-                );
                 current
             }
         }

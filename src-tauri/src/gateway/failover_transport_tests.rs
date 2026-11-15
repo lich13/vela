@@ -112,7 +112,7 @@ async fn incident_rate_limited_p1_waits_then_recovers_while_p2_is_open() {
     let view = g.view();
     let recovered = &view.providers[0];
     assert_eq!(recovered.health.failures, 0);
-    assert_eq!(recovered.health.requests, 2);
+
     assert_eq!(recovered.health.cooldown_reason, None);
     assert!(recovered.health.available);
     assert!(!recovered.health.probe_in_flight);
@@ -201,7 +201,7 @@ async fn cooldown_timeout_returns_503_without_another_upstream_attempt() {
         .clone();
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     assert_eq!(health.failures, 1);
-    assert_eq!(health.requests, 1);
+
     assert_eq!(health.state, super::super::circuit::CircuitState::Closed);
     assert_eq!(health.cooldown_reason.as_deref(), Some("retry_after"));
     assert!(!health.available);
@@ -277,7 +277,7 @@ async fn failover_preserves_requests_returns_final_response_and_releases_both_sl
         &[(0, Bytes::from(req.clone())), (1, Bytes::from(req))]
     );
     let view = g.view();
-    assert_eq!(view.providers[0].health.requests, 0);
+
     assert_eq!(view.providers[0].health.failures, 0);
     assert_eq!(
         view.providers[0].health.state,
@@ -292,9 +292,9 @@ async fn failover_preserves_requests_returns_final_response_and_releases_both_sl
         p1_model.health.state,
         super::super::circuit::CircuitState::Open
     );
-    assert_eq!(p1_model.health.requests, 1);
+
     assert_eq!(p1_model.health.failures, 1);
-    assert_eq!(view.providers[1].health.requests, 1);
+
     assert_eq!(view.providers[1].health.failures, 0);
     assert_eq!(
         view.last_successful.as_deref(),
@@ -319,15 +319,9 @@ async fn sse_completed_then_client_disconnect_is_success_and_preoutput_service_e
     settings.transient_failure_threshold = 1;
     update(&g, &t, Edit::Settings { settings });
     start(&g, &t).await;
-    for (path, terminal, status, failures, requests) in [
-        ("/v1/responses", "response.completed", 200, 0, 1),
-        (
-            "/v1/responses?case=failed",
-            code::UPSTREAM_REJECTED,
-            502,
-            0,
-            1,
-        ),
+    for (path, terminal, status, failures) in [
+        ("/v1/responses", "response.completed", 200, 0),
+        ("/v1/responses?case=failed", code::UPSTREAM_REJECTED, 502, 0),
     ] {
         let (mut r, sender, task) =
             super::tests::request_with_reset(&g, path, vec![], vec![]).await;
@@ -342,7 +336,7 @@ async fn sse_completed_then_client_disconnect_is_success_and_preoutput_service_e
         settle_within(&g, Duration::from_millis(2000)).await;
         let view = g.view();
         assert_eq!(view.providers[0].active_requests, 0);
-        assert_eq!(view.providers[0].health.requests, requests);
+
         assert_eq!(view.providers[0].health.failures, failures);
         assert!(!view.providers[0].health.probe_in_flight);
     }

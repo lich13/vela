@@ -487,7 +487,7 @@ async fn protection_uses_actual_queue_and_updates_existing_circuit() {
         },
     );
     assert_eq!(circuit.health().state, circuit::CircuitState::Closed);
-    assert!(circuit.health().protected_single_provider);
+
     assert!(!circuit.health().available);
     update(
         &g,
@@ -497,7 +497,6 @@ async fn protection_uses_actual_queue_and_updates_existing_circuit() {
             queued: true,
         },
     );
-    assert!(!circuit.health().protected_single_provider);
 }
 
 #[tokio::test]
@@ -558,7 +557,7 @@ async fn service_and_network_errors_do_not_open_sole_automatic_provider() {
         g.view().providers[0].health.state,
         circuit::CircuitState::Closed
     );
-    assert!(g.view().providers[0].health.protected_single_provider);
+
     assert_eq!(g.view().providers[0].health.failures, 1);
     g.stop().await.unwrap();
 }
@@ -660,7 +659,7 @@ async fn manual_and_known_or_unknown_context_retry_original_provider_until_recov
         assert_eq!(response_body, "recovered", "{mode}");
         assert_eq!(hits.load(Ordering::SeqCst), 4, "{mode}");
         assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
-        assert!(!g.view().providers[0].health.protected_single_provider);
+
         g.stop().await.unwrap();
     }
 }
@@ -716,7 +715,7 @@ async fn claude_capacity_uses_shared_cooldown_and_wait_budget() {
     );
     assert!(model.health.retry_in >= 58);
     assert_eq!(provider.health.cooldown_reason, None);
-    assert!(!provider.health.protected_single_provider);
+
     assert!(g.view().capacity_retries.is_empty());
     g.stop().await.unwrap();
 }

@@ -32,7 +32,6 @@ pub struct Page {
     pub total: u64,
     pub page: u32,
     pub detail_since: i64,
-    pub data_version: u64,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,7 +47,6 @@ pub struct Dashboard {
     pub models: Vec<Group>,
     pub detail_since: i64,
     pub sources: BTreeMap<String, u64>,
-    pub data_version: u64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -301,7 +299,6 @@ impl Store {
             total,
             page,
             detail_since: self.detail_since()?,
-            data_version: query::version(&self.connection)?,
         })
     }
     pub(crate) fn recent_gateway_requests(

@@ -1481,7 +1481,10 @@ pub fn run() {
             let start_silently = startup::login_source(&args);
             app.manage(quick::Panel::new(&data)?);
             let power = power::Service::new();
-            let _ = antigravity::auth::poll_state(&data);
+            let auth_data = data.clone();
+            let _ = tauri::async_runtime::block_on(tauri::async_runtime::spawn_blocking(move || {
+                antigravity::auth::poll_state(&auth_data, &mut None)
+            }));
             let usage = usage::Service::new(&data);
             gateway.set_usage(usage.clone());
             claude.set_usage(usage.clone());
@@ -1792,6 +1795,7 @@ pub fn run() {
                 let mut agy_config_cache = auth_cache::Cache::default();
                 let mut agy_auth_stamp: Option<String> = None;
                 let mut agy_auth_revision: Option<String> = None;
+                let mut agy_auth_error: Option<String> = None;
                 #[cfg(windows)]
                 let mut last_tray_dark: Option<bool> = None;
                 loop {
@@ -1858,32 +1862,34 @@ pub fn run() {
                     }
                     // Like the Codex account, a new Antigravity login is picked
                     // up whether or not a window is open.
-                    if let Some(stamp) = antigravity::auth::disk_stamp() {
-                        if agy_auth_stamp.as_ref() != Some(&stamp) {
-                            match antigravity::auth::poll_state(&runtime.data) {
-                                Ok((auth_state, clean)) => {
-                                    if agy_auth_revision.as_ref() != Some(&auth_state.revision) {
-                                        agy_auth_revision = Some(auth_state.revision.clone());
-                                        let _ = handle.emit("antigravity-auth-state", auth_state);
-                                    }
-                                    if clean {
-                                        agy_auth_stamp = Some(stamp);
-                                    }
+                    let data = runtime.data.clone();
+                    let mut stamp = agy_auth_stamp.take();
+                    let polled = tauri::async_runtime::spawn_blocking(move || {
+                        let result = antigravity::auth::poll_state(&data, &mut stamp);
+                        (stamp, result)
+                    }).await;
+                    let result = match polled {
+                        Ok((stamp, result)) => { agy_auth_stamp = stamp; result }
+                        Err(_) => Err(storage::AppError::new(errors::code::PROCESS, "读取 Antigravity 账号任务异常中断")),
+                    };
+                    match result {
+                        Ok(state) => {
+                            agy_auth_error = None;
+                            if let Some(auth_state) = state {
+                                if agy_auth_revision.as_ref() != Some(&auth_state.revision) {
+                                    agy_auth_revision = Some(auth_state.revision.clone());
+                                    let _ = handle.emit("antigravity-auth-state", auth_state);
                                 }
-                                Err(_) => {
-                                    // Reported once; the next change on disk
-                                    // tries again.
-                                    agy_auth_stamp = Some(stamp);
-                                    runtime.diagnostics.emit(events::Record::new(
-                                        None,
-                                        None,
-                                        None,
-                                        events::Reason::AccountSync,
-                                        events::Action::Stopped,
-                                        None,
-                                        None,
-                                    ));
-                                }
+                            }
+                        }
+                        Err(error) => {
+                            let error = format!("{}:{}", error.code, error.message);
+                            if agy_auth_error.as_ref() != Some(&error) {
+                                agy_auth_error = Some(error);
+                                runtime.diagnostics.emit(events::Record::new(
+                                    None, None, None, events::Reason::AccountSync,
+                                    events::Action::Stopped, None, None,
+                                ));
                             }
                         }
                     }

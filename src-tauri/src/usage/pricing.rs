@@ -99,7 +99,6 @@ pub struct PriceComparison {
     pub model: String,
     pub context: u64,
     pub reference_at: Option<i64>,
-    pub source_model: Option<String>,
     pub fields: Vec<PriceDifference>,
     pub reason: Option<String>,
 }
@@ -111,7 +110,6 @@ pub struct PriceDifference {
     pub models_dev: String,
     pub deviation_percent: Option<String>,
     pub level: String,
-    pub context_threshold: Option<u64>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,12 +120,7 @@ pub struct Reference {
     pub cache_read_per_m: Option<String>,
     pub deviation: bool,
 }
-fn difference(
-    field: &str,
-    wei: Decimal,
-    reference: Decimal,
-    threshold: Option<u64>,
-) -> PriceDifference {
+fn difference(field: &str, wei: Decimal, reference: Decimal) -> PriceDifference {
     let ratio = (wei != Decimal::ZERO)
         .then(|| (reference - wei).abs().checked_div(wei))
         .flatten();
@@ -151,7 +144,6 @@ fn difference(
             .flatten()
             .map(|n| n.normalize().to_string()),
         level: level.into(),
-        context_threshold: threshold,
     }
 }
 
@@ -641,7 +633,6 @@ impl Pricing {
             model: model.into(),
             context,
             reference_at: self.models_dev.view().updated_at,
-            source_model: None,
             fields: vec![],
             reason: Some("当前参考：来源、模型或价格阶梯缺少可比依据".into()),
         };
@@ -667,9 +658,6 @@ impl Pricing {
         {
             return result;
         }
-        result.source_model = data["models_dev_match"]["model"]
-            .as_str()
-            .map(str::to_owned);
         let Some((rates, threshold)) = crate::models_dev::rates(&data, context, false) else {
             return result;
         };
@@ -688,9 +676,7 @@ impl Pricing {
             if threshold != wei_threshold {
                 continue;
             }
-            result
-                .fields
-                .push(difference(field, price, reference, threshold));
+            result.fields.push(difference(field, price, reference));
         }
         if !result.fields.is_empty() {
             result.reason = None;
@@ -1153,7 +1139,7 @@ mod tests {
             (0, 1, "zero_conflict", None),
             (1, 0, "zero_conflict", None),
         ] {
-            let difference = difference("input", Decimal::from(a), Decimal::from(b), None);
+            let difference = difference("input", Decimal::from(a), Decimal::from(b));
             assert_eq!(difference.level, level);
             assert_eq!(difference.deviation_percent.as_deref(), percent);
         }

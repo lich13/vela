@@ -31,6 +31,7 @@ use std::{
 use tokio::sync::{broadcast, oneshot};
 
 const PROVIDER: &str = "fixture-provider";
+
 const NATIVE_CREATE: &str = r#"{"type":"response.create","model":"fixture-model","input":"fixture","future":{"keep":true}}"#;
 const NATIVE_CREATED: &str =
     r#"{"type":"response.created","response":{"id":"fixture-rpm-ws","model":"fixture-model"}}"#;
@@ -76,6 +77,48 @@ async fn fill_failed_rpm_requests(scheduler: &Scheduler, route: &Route, limit: u
         admission.commit_rpm();
         drop(admission);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_wait_sleeps_after_its_rpm_window_expires() {
+    use std::future::Future;
+    let dir = tempfile::tempdir().unwrap();
+    let scheduler = scheduler(dir.path());
+    let mut p = provider("v1", true, 1);
+    p.max_concurrency = 1;
+    scheduler.configure(std::slice::from_ref(&p), true);
+    let r = route(p);
+    let mut budget = Budget::new(30);
+    let mut held = scheduler
+        .acquire(std::slice::from_ref(&r), false, 8, &mut budget)
+        .await
+        .unwrap();
+    held.commit_rpm();
+    tokio::time::advance(Duration::from_secs(62)).await;
+    let polls = Arc::new(AtomicUsize::new(0));
+    let count = polls.clone();
+    let queued = tokio::spawn(async move {
+        let mut budget = Budget::new(30);
+        let routes = [r];
+        let mut waiting = std::pin::pin!(scheduler.acquire(&routes, false, 8, &mut budget));
+        std::future::poll_fn(|cx| {
+            count.fetch_add(1, Ordering::Relaxed);
+            waiting.as_mut().poll(cx)
+        })
+        .await
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(polls.load(Ordering::Relaxed), 1);
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        polls.load(Ordering::Relaxed),
+        1,
+        "expired RPM entries must not wake a capacity waiter"
+    );
+    drop(held);
+    assert!(queued.await.unwrap().is_ok());
 }
 
 async fn wait_for_waiter_count(scheduler: &Scheduler, expected: usize) {

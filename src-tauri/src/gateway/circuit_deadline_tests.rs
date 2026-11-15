@@ -147,7 +147,7 @@ fn single_provider_protection_still_suppresses_circuit_open_events() {
     assert!(fail(&circuit, &cfg, None, None).is_none());
     let health = circuit.health();
     assert_eq!(health.state, CircuitState::Closed);
-    assert!(health.protected_single_provider);
+
     assert!(health.retry_in >= 29);
     assert!(circuit.take_open_event().is_none());
 }

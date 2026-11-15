@@ -1239,6 +1239,7 @@ async fn reset_after_an_opened_reasoning_block_is_not_replayed() {
 enum Lingering {
     /// One frame, no declared length.
     Whole,
+    PartialHeartbeat,
     /// `message_stop` arrives in a later frame than the stream start.
     Split,
     /// So much precedes the message that the gateway inspects `message_stop`
@@ -1287,7 +1288,16 @@ async fn lingering(
             Vec::new()
         };
         (
-            [padding.as_slice(), message].concat(),
+            [
+                padding.as_slice(),
+                message,
+                if shape == Lingering::PartialHeartbeat {
+                    b"event: ping\ndata: {\"type\":\"pi"
+                } else {
+                    b""
+                },
+            ]
+            .concat(),
             b": fixture tail\n\n".to_vec(),
         )
     };
@@ -1302,7 +1312,7 @@ async fn lingering(
             let length = head.len() + tail.len();
             let stream = async_stream::stream! {
                 let _guard = guard;
-                if shape != Lingering::Whole && shape != Lingering::Sized {
+                if !matches!(shape, Lingering::Whole | Lingering::PartialHeartbeat | Lingering::Sized) {
                     let start = match shape {
                         Lingering::Gzip => head.len() - 1,
                         Lingering::Padded => head.len() - MESSAGES_BLOCK.backup.len(),
@@ -1347,7 +1357,12 @@ async fn lingering(
 
 #[tokio::test]
 async fn message_stop_ends_the_response_while_the_upstream_lingers() {
-    for shape in [Lingering::Whole, Lingering::Split, Lingering::Padded] {
+    for shape in [
+        Lingering::Whole,
+        Lingering::Split,
+        Lingering::Padded,
+        Lingering::PartialHeartbeat,
+    ] {
         let (fixture, _release, closed, (head, _), _upstream) = lingering(shape, true).await;
         let response = request(
             &fixture.gateway,

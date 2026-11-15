@@ -272,7 +272,7 @@ async fn codex_single_provider_capacity_waits_and_never_opens() {
     );
     let provider = &g.view().providers[0];
     assert_eq!(provider.health.state, super::circuit::CircuitState::Closed);
-    assert!(!provider.health.protected_single_provider);
+
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     g.stop().await.unwrap();
 }
@@ -558,7 +558,6 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
     );
     assert_eq!(hits.load(Ordering::Relaxed), 1);
 
-    let before = g.view().providers[0].health.requests;
     let response = request(
         &g,
         "/v1/responses",
@@ -567,7 +566,7 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
     )
     .await;
     response.into_body().collect().await.unwrap();
-    assert_eq!(g.view().providers[0].health.requests, before);
+
     assert_eq!(hits.load(Ordering::Relaxed), 2);
     let never=server(|_|async{Response::builder().header("content-type","text/event-stream").body(StreamBody::new(async_stream::try_stream!{
         yield Frame::data(Bytes::from_static(b"data: first\n\n"));tokio::time::sleep(Duration::from_secs(20)).await;yield Frame::data(Bytes::new());
@@ -673,7 +672,7 @@ async fn port_conflict_startup_recovery_and_single_candidate_breaker() {
         health.cooldown_reason.as_deref(),
         Some("single_provider_protected")
     );
-    assert!(health.protected_single_provider);
+
     g.stop().await.unwrap();
     let (_, pair) = takeover::tests::read(t.path()).unwrap();
     takeover::tests::attach(
@@ -871,7 +870,7 @@ async fn real_codex_cli_with_isolated_home() {
         "CLI completion missing"
     );
     let view = g.view();
-    assert!(view.providers[0].health.requests > 0);
+
     assert_eq!(
         view.last_successful.as_deref(),
         Some(view.providers[0].id.as_str())
@@ -1091,7 +1090,7 @@ async fn quota_sub2_priority_singleflight_cache_and_health_isolation() {
     assert_eq!(g.view().providers[0].health.failures, 0);
     assert_eq!(g.view().providers[0].active_requests, 0);
     assert_eq!(g.view().last_successful, None);
-    assert_eq!(g.view().providers[0].health.requests, 0);
+
     assert_eq!(std::fs::read(t.path().join("config.toml")).unwrap(), config);
 }
 #[tokio::test]
@@ -1295,7 +1294,7 @@ async fn quota_timeout_does_not_probe_another_protocol() {
     assert!(start.elapsed() < Duration::from_secs(12));
     assert_eq!(hits.load(Ordering::Relaxed), 1);
     let view = g.view();
-    assert_eq!(view.providers[0].health.requests, 0);
+
     assert_eq!(view.providers[0].health.failures, 0);
     assert_eq!(view.providers[0].active_requests, 0);
     assert_eq!(view.waiting_requests, 0);

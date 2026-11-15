@@ -265,7 +265,6 @@ it("imports unknown sources into the chosen platform and keeps compatible protoc
       provider: {
         clientId: null,
         protocol: "messages",
-        sourceApp: "future",
         name: first.name,
         baseUrl: first.baseUrl,
       },

@@ -534,7 +534,7 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
         .to_bytes();
     assert_eq!(complete.as_ref(), [START, STOP].concat());
     wait_until(|| f.claude.view().providers[0].active_requests == 0).await;
-    assert_eq!(f.claude.view().providers[0].health.requests, 1);
+
     assert_eq!(f.claude.view().providers[0].health.failures, 0);
     let model_health = |gateway: &Gateway| {
         gateway
@@ -546,7 +546,7 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
             .unwrap()
             .health()
     };
-    assert_eq!(model_health(&f.claude).requests, 1);
+
     assert_eq!(model_health(&f.claude).failures, 0);
     let eof_response = request(
         &f.claude,
@@ -567,9 +567,9 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
         START
     );
     wait_until(|| f.claude.view().providers[0].active_requests == 0).await;
-    assert_eq!(f.claude.view().providers[0].health.requests, 1);
+
     assert_eq!(f.claude.view().providers[0].health.failures, 0);
-    assert_eq!(model_health(&f.claude).requests, 2);
+
     assert_eq!(model_health(&f.claude).failures, 1);
     let mut interrupted = request(
         &f.claude,
@@ -585,9 +585,9 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
     release.add_permits(1);
     assert!(interrupted.into_body().collect().await.is_err());
     wait_until(|| f.claude.view().providers[0].active_requests == 0).await;
-    assert_eq!(f.claude.view().providers[0].health.requests, 1);
+
     assert_eq!(f.claude.view().providers[0].health.failures, 0);
-    assert_eq!(model_health(&f.claude).requests, 3);
+
     assert_eq!(model_health(&f.claude).failures, 2);
     f.claude.stop().await.unwrap();
 }

@@ -71,7 +71,7 @@ async fn complete_errors_survive_restart_and_size_growth_and_do_not_merge_differ
         restored.raw(&id).unwrap().unwrap().headers[0].value,
         "keep all"
     );
-    restored.clear().await.unwrap();
+    restored.clear(None, None).await.unwrap();
     assert!(restored.raw(&id).unwrap().is_none());
     assert_eq!(
         fs::read_dir(temp.path().join("diagnostic-errors"))
@@ -91,6 +91,83 @@ async fn next(rx: &mut tokio::sync::broadcast::Receiver<Change>) -> Change {
 async fn emit(service: &Service, rx: &mut tokio::sync::broadcast::Receiver<Change>, value: Record) {
     service.emit(value);
     let _ = next(rx).await;
+}
+
+#[tokio::test]
+async fn clearing_external_logs_survives_restart_append_and_unscanned_files() {
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let logs = home.join(".gemini/antigravity/logs");
+    let claude = home.join("claude");
+    fs::create_dir_all(&logs).unwrap();
+    fs::create_dir_all(claude.join("projects/fixture")).unwrap();
+    let old_log = logs.join("language_server.log");
+    let partial = logs.join("unscanned.log");
+    fs::write(&old_log, "[ERROR] 503 old fixture\n").unwrap();
+    let session = claude.join("projects/fixture/session.jsonl");
+    let row = |id: &str, at: chrono::DateTime<chrono::Utc>| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"assistant","isApiErrorMessage":true,"uuid":id,"sessionId":"fixture-session","timestamp":at.to_rfc3339(),"message":{"content":[{"type":"text","text":"API Error: fixture"}]}})
+        )
+    };
+    fs::write(&session, row("old", chrono::Utc::now())).unwrap();
+    let data = temp.path().join("data");
+    let service = Service::new(&data);
+    service.sync_antigravity_logs(&home);
+    service.sync_claude_logs(&claude);
+    assert_eq!(service.query(Filter::default()).total, 2);
+    // This file was never scanned and ends in a partial line at clear time.
+    fs::write(&partial, "[ERROR] 401 old partial").unwrap();
+    service
+        .clear(Some(home.clone()), Some(claude.clone()))
+        .await
+        .unwrap();
+    drop(service);
+    let marker = fs::read_to_string(data.join("diagnostics.jsonl")).unwrap();
+    assert!(!marker.contains("language_server"));
+    assert!(!marker.contains("old partial"));
+    let mut f = fs::OpenOptions::new().append(true).open(&old_log).unwrap();
+    writeln!(f, "[ERROR] 429 new fixture").unwrap();
+    let mut f = fs::OpenOptions::new().append(true).open(&partial).unwrap();
+    writeln!(f, " completed").unwrap();
+    writeln!(f, "[ERROR] 503 another new fixture").unwrap();
+    let mut f = fs::OpenOptions::new().append(true).open(&session).unwrap();
+    f.write_all(row("new", chrono::Utc::now()).as_bytes())
+        .unwrap();
+    f.write_all(
+        row(
+            "backfilled",
+            chrono::Utc::now() - chrono::Duration::hours(1),
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    // The persisted mark, rather than in-memory cursors, determines the boundary.
+    let restored = Service::new(&data);
+    restored.sync_antigravity_logs(&home);
+    restored.sync_claude_logs(&claude);
+    let page = restored.query(Filter::default());
+    assert_eq!(page.total, 3);
+    assert!(page
+        .items
+        .iter()
+        .all(|r| !r.details.message.as_deref().unwrap_or("").contains("old")));
+    let mut rx = restored.subscribe();
+    restored.emit(record("after-clear", Reason::ProtocolError));
+    while next(&mut rx)
+        .await
+        .record
+        .is_none_or(|r| r.model.as_deref() != Some("after-clear"))
+    {}
+    let again = Service::new(&data);
+    again.sync_antigravity_logs(&home);
+    again.sync_claude_logs(&claude);
+    assert_eq!(again.query(Filter::default()).total, 4);
+    assert!(fs::read_to_string(data.join("diagnostics.jsonl"))
+        .unwrap()
+        .starts_with("{\"cleared\":"));
 }
 
 #[tokio::test]
@@ -114,12 +191,12 @@ async fn records_merge_within_300_seconds_and_expose_subscribe_detail_and_clear(
     emit(&service, &mut rx, separate).await;
     assert_eq!(service.query(Filter::default()).total, 2);
 
-    service.clear().await.unwrap();
+    service.clear(None, None).await.unwrap();
     assert_eq!(service.query(Filter::default()).total, 0);
     assert!(service.detail(&id).is_none());
-    assert!(fs::read(temp.path().join("diagnostics.jsonl"))
-        .unwrap()
-        .is_empty());
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(temp.path().join("diagnostics.jsonl")).unwrap()).unwrap();
+    assert!(saved.get("cleared").is_some());
 }
 
 #[tokio::test]

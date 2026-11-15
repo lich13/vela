@@ -131,7 +131,12 @@ pub async fn get_app_event_raw(r: R<'_>, id: String) -> Result<Option<crate::eve
 }
 #[tauri::command]
 pub async fn clear_app_events(r: R<'_>) -> Result<()> {
-    r.diagnostics.clear().await
+    r.diagnostics
+        .clear(
+            dirs::home_dir(),
+            r.home(crate::gateway::ClientId::Claude).ok(),
+        )
+        .await
 }
 
 #[tauri::command]

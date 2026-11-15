@@ -42,7 +42,6 @@ pub struct ModelView {
     pub address: Option<String>,
     pub address_source: Option<String>,
     pub credential_available: bool,
-    pub credential_source: Option<String>,
     pub error: Option<String>,
 }
 #[derive(Serialize)]
@@ -184,17 +183,6 @@ fn model_view(key: String, result: &Result<Profile>) -> ModelView {
             address: safe_address(p.pair.base_url.as_deref()),
             address_source: p.address_source.map(str::to_owned),
             credential_available: p.pair.token.is_some(),
-            credential_source: Some(
-                if p.table
-                    .get("api_key")
-                    .and_then(Item::as_str)
-                    .is_some_and(|v| !v.is_empty())
-                {
-                    "模型 api_key".into()
-                } else {
-                    format!("环境变量：{}", p.credential_names.join(" / "))
-                },
-            ),
             error: None,
         },
         Err(e) => ModelView {
@@ -204,7 +192,6 @@ fn model_view(key: String, result: &Result<Profile>) -> ModelView {
             address: None,
             address_source: None,
             credential_available: false,
-            credential_source: None,
             error: Some(e.message.clone()),
         },
     }

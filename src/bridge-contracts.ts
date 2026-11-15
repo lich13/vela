@@ -171,7 +171,6 @@ export type FingerprintReport = {
     minimum_numbers: number;
     accepted: boolean;
   }[];
-  planned_outputs?: number;
   bank_version: Record<string, unknown>;
 };
 export type ProviderTestGroup = {
@@ -261,8 +260,6 @@ export type ProviderDetection = {
 };
 export type ProviderDegradation = {
   providerId: string;
-  jobId: string;
-  detectedAt: number;
   requestedModel: string;
   predictedModel: string;
   probability: number | null;
@@ -318,7 +315,6 @@ export type PendingImport = {
   provider: {
     clientId: ClientId | null;
     protocol?: GrokProtocol | null;
-    sourceApp?: string | null;
     model?: string | null;
     name: string;
     baseUrl: string;

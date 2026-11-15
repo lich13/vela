@@ -242,8 +242,6 @@ pub enum DegradationBasis {
 #[serde(rename_all = "camelCase")]
 pub struct Degradation {
     pub provider_id: String,
-    pub job_id: String,
-    pub detected_at: i64,
     pub requested_model: String,
     pub predicted_model: String,
     pub probability: Option<f64>,

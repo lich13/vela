@@ -2114,7 +2114,6 @@ async fn session_title_changes_only_cursor_metadata_and_survives_app_closure() {
         .unwrap();
     assert!(fixture.calls.lock().is_empty());
     let after = store.logs(&Filter::default()).unwrap();
-    assert_eq!(before.data_version, after.data_version);
     assert_eq!(
         serde_json::to_value(before.rows).unwrap(),
         serde_json::to_value(after.rows).unwrap()

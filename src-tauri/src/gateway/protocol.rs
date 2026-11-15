@@ -1435,7 +1435,7 @@ impl Protocol {
         };
         self.status = self.status.or(status);
         if let Some(o) = &mut self.observer {
-            self.observation = o.snapshot(true);
+            self.observation = o.snapshot(reason != ENDED_AT_TERMINAL);
         }
         if matches!(
             reason,

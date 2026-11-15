@@ -5270,7 +5270,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vela"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "async-stream",
  "auto-launch",
@@ -5288,11 +5288,14 @@ dependencies = [
  "hyper-util",
  "libc",
  "lmfpd",
+ "memchr",
  "mime",
  "multer",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-foundation",
  "objc2-foundation",
+ "objc2-security",
  "open",
  "parking_lot",
  "plist",

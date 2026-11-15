@@ -1092,11 +1092,7 @@ fn dashboard_cache_refreshes_after_writes_and_keeps_filters_isolated() {
 
     let refreshed = store.dashboard(&codex_model_a).unwrap();
     assert_eq!(refreshed.totals.requests, 2);
-    assert!(refreshed.data_version > cached_before_write.data_version);
-    assert_eq!(
-        refreshed.data_version,
-        store.logs(&codex_model_a).unwrap().data_version
-    );
+    assert_eq!(store.logs(&codex_model_a).unwrap().total, 2);
 
     let claude_model_a = Filter {
         client: Some("claude".into()),

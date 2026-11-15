@@ -2,7 +2,6 @@ use super::{
     admission::{Admission, Budget, CapacitySource, Rejected},
     attempt::{DeliveryGuard, DownstreamEnd},
     circuit,
-    client::ClientId,
     connector::{self, BoxError},
     health_settlement::observe_protocol,
     model::Settings,
@@ -296,8 +295,7 @@ struct Relay {
 /// Whether a response may be ended at `message_stop`: only an uncompressed
 /// event stream whose length was never promised can be cut short unnoticed.
 fn ends_at_message_stop(route: &Route, status: StatusCode, headers: &HeaderMap) -> bool {
-    route.client_id == ClientId::Claude
-        && route.provider.end_on_message_stop
+    route.provider.end_on_message_stop
         && status.as_u16() < 400
         && !headers.contains_key(header::CONTENT_LENGTH)
         && headers

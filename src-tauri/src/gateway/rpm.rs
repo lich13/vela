@@ -37,7 +37,8 @@ impl Ledger {
         self.starts.retain(|id, _| ids(id));
     }
     /// When the oldest counted send leaves the window.
-    pub(super) fn next_change(&self, id: &str) -> Option<Instant> {
+    pub(super) fn next_change(&mut self, id: &str) -> Option<Instant> {
+        self.prune(id);
         self.starts
             .get(id)
             .and_then(|starts| starts.front())

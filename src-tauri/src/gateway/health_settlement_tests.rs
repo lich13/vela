@@ -207,11 +207,17 @@ fn successful_and_limited_terminals_settle_each_permit_once() {
         assert_eq!(protocol.terminal(), Some(expected), "{label} fixture");
 
         settlement::settle_protocol(&protocol, &mut permits, &settings(), Some(200));
+        let settled = (provider.health().revision, model.health().revision);
         settlement::settle_protocol(&protocol, &mut permits, &settings(), Some(200));
+        assert_eq!(
+            (provider.health().revision, model.health().revision),
+            settled,
+            "{label} settles once"
+        );
 
         for (scope, circuit) in [("provider", provider), ("model", model)] {
             let health = circuit.health();
-            assert_eq!(health.requests, 1, "{label} must count {scope} once");
+
             assert_eq!(health.failures, 0, "{label} must not fail {scope}");
         }
     }
@@ -251,16 +257,6 @@ fn transport_failures_only_count_the_selected_health_scope() {
             "{label} provider"
         );
         assert_eq!(model.health().failures, model_failures, "{label} model");
-        assert_eq!(
-            provider.health().requests,
-            provider_failures,
-            "{label} provider requests"
-        );
-        assert_eq!(
-            model.health().requests,
-            model_failures,
-            "{label} model requests"
-        );
     }
 }
 
@@ -294,9 +290,8 @@ fn explicit_service_failure_on_http_200_counts_only_model_health() {
         1,
     );
 
-    assert_eq!(provider.health().requests, 0);
     assert_eq!(provider.health().failures, 0);
-    assert_eq!(model.health().requests, 1);
+
     assert_eq!(model.health().failures, 1);
 }
 
@@ -308,6 +303,7 @@ fn unterminated_protocol_keeps_permits_until_a_terminal_arrives() {
     let mut permits = permits(&route);
     let mut protocol = Protocol::new(true);
     assert_eq!(protocol.terminal(), None);
+    let before = (provider.health().revision, model.health().revision);
 
     settlement::observe_protocol(
         &protocol,
@@ -319,9 +315,11 @@ fn unterminated_protocol_keeps_permits_until_a_terminal_arrives() {
         Some(200),
         1,
     );
-    assert_eq!(provider.health().requests, 0);
-    assert_eq!(model.health().requests, 0);
 
+    assert_eq!(
+        (provider.health().revision, model.health().revision),
+        before
+    );
     protocol.value(&json!({
         "type": "response.completed",
         "response": {
@@ -341,8 +339,8 @@ fn unterminated_protocol_keeps_permits_until_a_terminal_arrives() {
         1,
     );
 
-    assert_eq!(provider.health().requests, 1);
-    assert_eq!(model.health().requests, 1);
+    assert!(provider.health().revision > before.0);
+    assert!(model.health().revision > before.1);
 }
 
 #[test]

@@ -26,7 +26,6 @@ pub const APP_ID: &str = "com.lich13.vela";
 pub struct Preview {
     pub client_id: Option<gateway::ClientId>,
     pub protocol: Option<gateway::provider_protocol::Protocol>,
-    pub source_app: Option<String>,
     pub model: Option<String>,
     pub id: String,
     pub name: String,
@@ -148,7 +147,6 @@ fn parse(raw: &str) -> Result<Parsed> {
         preview: Preview {
             client_id,
             protocol,
-            source_app,
             model,
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_owned(),

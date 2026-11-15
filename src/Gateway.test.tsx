@@ -793,7 +793,6 @@ it.each(["codex", "claude", "grok", "dsh"] as const)(
       address: "http://127.0.0.1:43721/v1",
       protocol: "chat_completions",
       addressSource: "fixture-source",
-      credentialSource: "fixture-credential-source",
     };
     mock.command.mockImplementation(async (name) =>
       name === "get_gateway" ? structuredClone(state) : null,

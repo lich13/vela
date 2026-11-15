@@ -447,11 +447,7 @@ async fn queue_is_fifo_bounded_cancelable_and_does_not_consume_retry_budget() {
         drop(held);
     }
     until(|| g.view().waiting_requests == 0).await;
-    assert!(g
-        .view()
-        .providers
-        .iter()
-        .all(|p| p.health.requests == 0 && p.health.failures == 0));
+    assert!(g.view().providers.iter().all(|p| p.health.failures == 0));
     g.stop().await.unwrap();
 }
 #[tokio::test]
@@ -658,7 +654,6 @@ async fn capacity_timeout_and_stop_release_waiters_and_never_poison_health() {
     assert!(matches!(waiting.await.unwrap(), Err(Rejected::Stopped)));
     drop(held);
     assert_eq!(g.view().waiting_requests, 0);
-    assert_eq!(g.view().providers[0].health.requests, 0);
 }
 #[tokio::test]
 async fn http_capacity_429_and_client_disconnect_release_the_slot() {
@@ -858,7 +853,7 @@ async fn responses_websocket_releases_each_turn_preserves_compressed_payload_and
     assert_eq!(completed["type"], "response.completed");
     assert_eq!(completed["response"]["id"], "resp-fixture");
     until(|| g.view().providers[0].active_requests == 0).await;
-    assert_eq!(g.view().providers[0].health.requests, 1);
+
     // An idle connection must not reserve provider capacity; the next turn reacquires it.
     first
         .send(yawc::Frame::text(payload.clone()))
@@ -891,8 +886,7 @@ async fn responses_websocket_releases_each_turn_preserves_compressed_payload_and
     assert_eq!(pong.payload().as_ref(), b"control-ping");
     let view = g.view();
     assert_eq!(view.waiting_requests, 0);
-    assert_eq!(view.providers[0].health.requests, 2);
-    assert_eq!(view.providers[1].health.requests, 1);
+
     assert!(view
         .providers
         .iter()
@@ -905,8 +899,7 @@ async fn responses_websocket_releases_each_turn_preserves_compressed_payload_and
     drop(second);
     until(|| g.view().active_connections == 0).await;
     let view = g.view();
-    assert_eq!(view.providers[0].health.requests, 2);
-    assert_eq!(view.providers[1].health.requests, 1);
+
     assert!(view
         .providers
         .iter()

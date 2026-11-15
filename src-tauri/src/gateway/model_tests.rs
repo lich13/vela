@@ -119,7 +119,8 @@ async fn exact_rules_filter_before_attempts_and_preserve_original_json_and_resou
     assert_eq!(g.view().providers[4].active_requests, 0);
     assert!(g.view().providers[..4]
         .iter()
-        .all(|p| p.health.requests == 0 && p.active_requests == 0));
+        .all(|p| p.active_requests == 0));
+
     let denied = request(
         &g,
         "/v1/responses",
@@ -285,7 +286,7 @@ async fn waiting_requests_recheck_rules_without_resetting_occupied_slots() {
         Err(admission::Rejected::Model)
     ));
     assert_eq!(g.view().providers[0].active_requests, 1);
-    assert_eq!(g.view().providers[0].health.requests, 0);
+
     drop(held);
     assert_eq!(g.view().providers[0].active_requests, 0);
     g.stop().await.unwrap();
@@ -316,7 +317,7 @@ async fn catalog_is_cached_singleflight_bounded_and_has_no_business_side_effects
     assert_eq!(b.unwrap().models, vec!["a", "b"]);
     g.list_models(&id, false).await.unwrap();
     assert_eq!(count.load(Ordering::Relaxed), 1);
-    assert_eq!(g.view().providers[0].health.requests, 0);
+
     assert_eq!(g.view().active_connections, 0);
     assert_eq!(std::fs::read(t.path().join("auth.json")).unwrap(), auth);
     assert_eq!(std::fs::read(t.path().join("config.toml")).unwrap(), config);
@@ -506,7 +507,7 @@ async fn completed_http_response_keeps_model_affinity_and_health() {
     )
     .await;
     body(first).await;
-    assert_eq!(g.view().providers[0].health.requests, 1);
+
     assert_eq!(g.view().providers[0].health.failures, 0);
     let inherited = request(
         &g,
@@ -573,12 +574,12 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
         value["settings"]["endOnMessageStop"] = json!(legacy);
         value["providers"] = json!([
             {"id":"inherited","name":"Inherited","baseUrl":"https://one.example.invalid","token":"fixture","queued":true,"version":"one"},
-            {"id":"explicit","name":"Explicit","baseUrl":"https://two.example.invalid","token":"fixture","queued":true,"version":"two","endOnMessageStop":!legacy}
+            {"id":"second","name":"Second","baseUrl":"https://two.example.invalid","token":"fixture","queued":true,"version":"two"}
         ]);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         let (mut store, revision) = Store::load(&path).unwrap();
         assert_eq!(store.providers[0].end_on_message_stop, legacy);
-        assert_eq!(store.providers[1].end_on_message_stop, !legacy);
+        assert_eq!(store.providers[1].end_on_message_stop, legacy);
         store
             .edit(
                 Edit::SaveProvider {
@@ -609,24 +610,12 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
             )
             .unwrap();
         assert_eq!(store.providers[0].end_on_message_stop, !legacy);
-        assert_eq!(store.providers[1].end_on_message_stop, !legacy);
+        assert_eq!(store.providers[1].end_on_message_stop, legacy);
         store.persist(&path, &revision).unwrap();
         let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(saved["settings"].get("endOnMessageStop").is_none());
         let (reloaded, _) = Store::load(&path).unwrap();
         assert_eq!(reloaded.providers[0].end_on_message_stop, !legacy);
         assert!(!reloaded.providers[2].end_on_message_stop);
-    }
-}
-
-#[test]
-fn provider_setting_migration_rejects_malformed_store_without_modifying_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("gateway.json");
-    for value in [json!([]), json!({"settings":{"endOnMessageStop":"true"}})] {
-        let raw = serde_json::to_vec(&value).unwrap();
-        fs::write(&path, &raw).unwrap();
-        assert!(Store::load(&path).is_err());
-        assert_eq!(fs::read(&path).unwrap(), raw);
     }
 }

@@ -83,7 +83,7 @@ async fn clear_write_failure_restores_rows_aliases_and_stable_page_order() {
     let path = dir.path().join("diagnostics.jsonl");
     std::fs::remove_file(&path).unwrap();
     std::fs::create_dir(&path).unwrap();
-    assert!(service.clear().await.is_err());
+    assert!(service.clear(None, None).await.is_err());
     let restored = service.query(Filter::default());
     assert_eq!(restored.total, 55);
     assert_eq!(
@@ -102,7 +102,7 @@ async fn clear_write_failure_restores_rows_aliases_and_stable_page_order() {
         );
     }
     std::fs::remove_dir(&path).unwrap();
-    service.clear().await.unwrap();
+    service.clear(None, None).await.unwrap();
     assert_eq!(service.query(Filter::default()).total, 0);
     assert_eq!(
         std::fs::read_dir(dir.path().join("diagnostic-errors"))
@@ -264,7 +264,10 @@ async fn burst_preserves_each_change_merge_notification_and_clear_barrier() {
             .sender
             .send(super::Job::NotificationAccepted(records[69].id.clone()))
             .unwrap();
-        service.sender.send(super::Job::Clear(tx)).unwrap();
+        service
+            .sender
+            .send(super::Job::Clear(None, None, tx))
+            .unwrap();
         let last = Record::new(
             None,
             None,
@@ -298,7 +301,7 @@ async fn burst_preserves_each_change_merge_notification_and_clear_barrier() {
     assert!(service.journal.lock().aliases.is_empty());
     let restored = Service::new(dir.path());
     assert_eq!(restored.query(Filter::default()).items[0].id, last.id);
-    restored.clear().await.unwrap();
+    restored.clear(None, None).await.unwrap();
 }
 
 #[tokio::test]

@@ -147,17 +147,16 @@ fn structured_codes(error: &Value) -> impl Iterator<Item = &str> {
 }
 
 fn explicit_type(error: &Value) -> Option<ErrorBasis> {
-    let kind = error.get("type").and_then(Value::as_str)?;
+    let kind = error
+        .get("type")
+        .and_then(Value::as_str)?
+        .to_ascii_lowercase();
     // Generic wrappers do not override concrete reasons inside the envelope.
     (!matches!(
-        kind,
-        "invalid_request_error"
-            | "invalid_request"
-            | "rate_limit_error"
-            | "api_error"
-            | "server_error"
+        kind.as_str(),
+        "invalid_request_error" | "invalid_request" | "rate_limit_error"
     ))
-    .then(|| code_kind(kind))
+    .then(|| specific_code_kind(&kind))
     .flatten()
 }
 

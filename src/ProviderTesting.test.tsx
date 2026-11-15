@@ -482,8 +482,6 @@ it("shows mixed-family evidence separately from a normal aggregate prediction", 
   state.jobs = [job];
   state.degraded[provider.id] = {
     providerId: provider.id,
-    jobId: job.id,
-    detectedAt: 1,
     requestedModel: "gpt-6-sol",
     predictedModel: "gpt-6-sol",
     probability: null,

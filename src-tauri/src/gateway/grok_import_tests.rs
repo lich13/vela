@@ -49,7 +49,6 @@ fn global_connection_import_keeps_only_current_api_configuration() {
         current.state,
         super::current::Kind::Unmatched { .. }
     ));
-    assert_eq!(current.credential_source.as_deref(), Some("endpoint.env"));
     let preview = fixture.valid_preview(None, true);
     assert_eq!(preview.selected, "native-model");
     fixture.commit(&preview).unwrap();

@@ -120,6 +120,9 @@ pub fn classify(requested: &str, predicted: &str) -> Option<bool> {
     let requested = normalize(requested);
     let predicted = normalize(predicted);
     let (a, b) = (family(&requested)?, family(&predicted)?);
+    if requested == predicted {
+        return Some(false);
+    }
     if a != b {
         return Some(b < a);
     }
@@ -424,7 +427,7 @@ mod tests {
             ("gpt-6.1-sol", "gpt-6-astra", false),
             ("gpt-6-luna", "gpt-5.6-luna", true),
             ("gpt-6-astra", "gpt-5.6-luna", true),
-            ("gpt-5.6-luna", "gpt-5.6-luna", true),
+            ("gpt-5.6-luna", "gpt-5.6-luna", false),
             ("gpt-6-astra", "gpt-6-sol", true),
             ("gpt-6-sol", "gpt-6-luna", true),
             ("gpt-6-sol", "gpt-6-astra", false),
@@ -520,6 +523,7 @@ mod tests {
             ("gpt-6-sol", "deepseek-custom-alias", None),
             ("gpt-5.4", "grok-4.7", Some(true)),
             ("router-alias", "gpt-5.6-luna", None),
+            ("router-alias", "router-alias", None),
             ("gpt-6-sol", "qwen-3", None),
         ] {
             assert_eq!(

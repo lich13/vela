@@ -436,7 +436,7 @@ impl Store {
                     {
                         for provider in providers {
                             if let Some(provider) = provider.as_object_mut() {
-                                provider.entry("endOnMessageStop").or_insert(enabled.into());
+                                provider.insert("endOnMessageStop".into(), enabled.into());
                             }
                         }
                     }

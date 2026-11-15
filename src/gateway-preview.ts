@@ -15,10 +15,8 @@ import { densePreview } from "./preview-fixtures";
 const healthy: Health = {
   state: "closed",
   failures: 0,
-  requests: 0,
   retryIn: 0,
   cooldownReason: null,
-  protectedSingleProvider: false,
   probeInFlight: false,
   available: true,
 };

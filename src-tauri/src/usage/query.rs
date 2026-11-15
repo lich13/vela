@@ -427,7 +427,6 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
         models,
         detail_since,
         sources,
-        data_version: version(c)?,
     })
 }
 

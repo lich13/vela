@@ -54,7 +54,7 @@ async fn native_models_paginate_and_config_conflicts_recover_independently() {
             "/deployment/v1/models?after_id=Claude-A"
         ]
     );
-    assert_eq!(claude.view().providers[0].health.requests, 0);
+
     claude.start(&claude.view().revision, &home).await.unwrap();
     let current = std::fs::read_to_string(home.join("settings.json")).unwrap();
     let foreign = current.replace("\"permissions\"", "\"externalPermissions\"");

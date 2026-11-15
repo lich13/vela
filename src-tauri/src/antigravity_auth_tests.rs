@@ -153,15 +153,15 @@ fn oauth_validation_requires_access_or_refresh_token_and_disk_read_tolerates_cor
     // Half-written OAuth file marks clean = false so polling retries on next tick.
     write_private_file(&paths.oauth_file(), b"{\"access_token\":\"half").unwrap();
     write_private_file(&paths.adc_file(), br#"{"type":"external_account"}"#).unwrap();
-    let (state, clean) = state_with_health(&paths).unwrap();
+    let (state, clean) = state_with_oauth(&paths, read_oauth(&paths, false).unwrap()).unwrap();
     assert!(!clean);
     assert!(!state.oauth_present);
     assert!(state.accounts.is_empty());
 
     // Complete JSON with permanently unsupported schema (external_account ADC) marks clean = true
-    // so disk_stamp advances and background polling does not spin on every tick.
+    // so the auth stamp advances and background polling does not spin on every tick.
     fs::remove_file(paths.oauth_file()).unwrap();
-    let (state2, clean2) = state_with_health(&paths).unwrap();
+    let (state2, clean2) = state_with_oauth(&paths, read_oauth(&paths, false).unwrap()).unwrap();
     assert!(clean2);
     assert!(state2.accounts.is_empty());
 }
@@ -827,6 +827,11 @@ fn current_account_and_timeline_do_not_fall_back_across_credential_kinds() {
 #[test]
 fn keyring_values_decode_from_both_encodings_and_round_trip() {
     let raw = r#"{"auth_method":"google-oauth","id_token_email":"user@example.invalid","token":{"access_token":"fixture","refresh_token":"fixture"}}"#;
+    let large = raw.replace("fixture", &"fixture".repeat(1024));
+    assert_eq!(
+        decode_keyring(&encode_keyring(&large)).as_deref(),
+        Some(large.as_str())
+    );
     let stored = encode_keyring(raw);
     assert!(stored.starts_with("go-keyring-base64:"));
     assert_eq!(decode_keyring(&format!("{stored}\n")).as_deref(), Some(raw));
@@ -854,7 +859,7 @@ fn keyring_values_decode_from_both_encodings_and_round_trip() {
 fn fixture_homes_never_reach_the_keychain() {
     let (_tmp, paths) = setup_paths();
     assert!(!paths.keychain());
-    assert!(read_oauth(&paths).unwrap().is_none());
+    assert!(read_oauth(&paths, false).unwrap().is_none());
     write_oauth(&paths, r#"{"access_token":"fixture"}"#).unwrap();
     assert_eq!(
         fs::read_to_string(paths.oauth_file()).unwrap(),
@@ -882,30 +887,31 @@ fn a_new_login_is_saved_even_when_a_later_file_is_unreadable() {
 }
 
 #[test]
-fn oauth_keychain_precedes_file_and_only_missing_items_allow_fallback() {
+fn captured_keychain_login_never_falls_back_to_the_legacy_file() {
     let (_tmp, paths) = setup_paths();
-    let file = paths.oauth_file();
-    fs::write(&file, "fixture-file").unwrap();
-    let read = |status, bytes: &[u8]| oauth_or_file(decode_keychain_oauth(status, bytes), &file);
-    assert_eq!(
-        read(Some(0), encode_keyring("fixture-keychain").as_bytes())
-            .unwrap()
-            .as_deref(),
-        Some("fixture-keychain")
-    );
-    assert_eq!(
-        read(Some(44), b"").unwrap().as_deref(),
-        Some("fixture-file")
-    );
-    for (status, bytes) in [
-        (Some(36), b"".as_slice()),
-        (None, b"".as_slice()),
-        (Some(0), b"go-keyring-base64:***".as_slice()),
-    ] {
-        assert_eq!(read(status, bytes).unwrap_err().code, code::AUTH);
+    let legacy = r#"{"auth_method":"google-oauth","id_token_email":"old@example.invalid","token":{"access_token":"fixture-old","refresh_token":"fixture-old"}}"#;
+    fs::write(paths.oauth_file(), legacy).unwrap();
+    for value in ["", "go-keyring-base64:", "go-keyring-base64:***"] {
+        let (state, clean) = state_with_oauth(&paths, decode_keyring(value)).unwrap();
+        assert!(clean);
+        assert!(!state.oauth_present);
+        assert!(state.accounts.is_empty());
+        assert_eq!(fs::read_to_string(paths.oauth_file()).unwrap(), legacy);
     }
-    fs::remove_file(&file).unwrap();
-    assert_eq!(read(Some(44), b"").unwrap(), None);
+    let current = legacy
+        .replace("old@example.invalid", "new@example.invalid")
+        .replace("fixture-old", "fixture-new");
+    let (state, _) = state_with_oauth(&paths, decode_keyring(&encode_keyring(&current))).unwrap();
+    assert_eq!(state.oauth_email.as_deref(), Some("new@example.invalid"));
+    let before = load_vault(&paths).unwrap().0.activations;
+    let refreshed = current.replace("fixture-new", "fixture-refreshed");
+    state_with_oauth(&paths, Some(refreshed)).unwrap();
+    assert_eq!(load_vault(&paths).unwrap().0.activations, before);
+    let (logged_out, _) = state_with_oauth(&paths, None).unwrap();
+    assert!(!logged_out.oauth_present);
+    assert!(logged_out.accounts.iter().all(|a| !a.current));
+    assert_eq!(logged_out.accounts.len(), 1);
+    assert_eq!(fs::read_to_string(paths.oauth_file()).unwrap(), legacy);
 }
 
 #[test]
@@ -917,7 +923,7 @@ fn credential_read_failure_keeps_the_saved_account_and_can_be_retried() {
     let vault = fs::read(paths.vault_file()).unwrap();
     fs::remove_file(paths.oauth_file()).unwrap();
     fs::create_dir(paths.oauth_file()).unwrap();
-    assert!(state_with_health(&paths).is_err());
+    assert!(state_at(&paths).is_err());
     assert_eq!(fs::read(paths.vault_file()).unwrap(), vault);
     fs::remove_dir(paths.oauth_file()).unwrap();
     fs::write(paths.oauth_file(), raw).unwrap();

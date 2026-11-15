@@ -32,10 +32,8 @@ pub enum CircuitState {
 pub struct Health {
     pub state: CircuitState,
     pub failures: u32,
-    pub requests: u32,
     pub retry_in: u64,
     pub cooldown_reason: Option<String>,
-    pub protected_single_provider: bool,
     pub probe_in_flight: bool,
     pub available: bool,
     pub revision: u64,
@@ -91,7 +89,6 @@ struct State {
     retry_probe: bool,
     retry_generation: u64,
     rate_streak: u32,
-    protected_single_provider: bool,
     protection: Option<Duration>,
     revision: u64,
     open_event: Option<crate::events::Record>,
@@ -114,7 +111,6 @@ impl Default for State {
             retry_probe: false,
             retry_generation: 0,
             rate_streak: 0,
-            protected_single_provider: false,
             protection: None,
             revision: 0,
             open_event: None,
@@ -224,14 +220,12 @@ impl Circuit {
         Health {
             state: s.phase,
             failures: s.failures,
-            requests: s.total,
             retry_in: retry.as_millis().div_ceil(1000) as u64,
             cooldown_reason: if s.phase == CircuitState::Open && s.until.is_some_and(|t| t > now) {
                 Some("circuit_open".into())
             } else {
                 s.retry_reason.map(str::to_owned)
             },
-            protected_single_provider: s.protected_single_provider,
             probe_in_flight: s.probe || s.retry_probe,
             available: s.available(),
             revision: s.revision,
@@ -287,10 +281,7 @@ impl Circuit {
                 s.probe = false;
                 s.generation += 1;
                 s.cooldown(remaining.max(cooldown), "single_provider_protected");
-                s.protected_single_provider = true;
             }
-        } else {
-            s.protected_single_provider = false;
         }
         s.revision += 1;
     }
@@ -372,7 +363,6 @@ impl Permit {
                     )
                 });
                 s.cooldown(delay, "rate_limit");
-                s.protected_single_provider |= protected_single_provider;
             }
             Outcome::HardRejected(retry) => {
                 s.cooldown(
@@ -401,7 +391,6 @@ impl Permit {
                     .unwrap_or_default()
                     .max(Duration::from_secs(cfg.capacity_retry_seconds));
                 s.cooldown(delay, "capacity_retry");
-                s.protected_single_provider |= protected_single_provider;
             }
             Outcome::Success => {
                 if self.retry_probe && self.retry_generation == s.retry_generation {
@@ -418,7 +407,6 @@ impl Permit {
                 s.record(SampleKind::Success);
                 s.cause = None;
                 s.failures = 0;
-                s.protected_single_provider = false;
                 if s.phase == CircuitState::HalfOpen {
                     s.successes += 1;
                     if s.successes >= cfg.success_threshold {
@@ -477,7 +465,6 @@ impl Permit {
                 if protected_single_provider && (!transient || consecutive) {
                     let delay = retry.unwrap_or_default().max(s.protection.unwrap());
                     s.cooldown(delay, "single_provider_protected");
-                    s.protected_single_provider = true;
                 } else if let Some(retry) = retry {
                     s.cooldown(retry, "retry_after");
                 }
@@ -697,11 +684,11 @@ mod cooldown_tests {
             .finish(Outcome::RateLimited(Some(Duration::from_secs(2))), &cfg);
         assert!((5..=6).contains(&c.health().retry_in));
         assert_eq!(c.health().failures, 0);
-        assert_eq!(c.health().requests, 0);
+        assert_eq!(c.0.lock().total, 0);
         assert_eq!(c.health().state, CircuitState::Closed);
         stale.finish(Outcome::Success, &cfg);
         assert!(!c.health().available);
-        assert_eq!(c.health().requests, 1);
+        assert_eq!(c.0.lock().total, 1);
         assert!(c.acquire().is_none());
         c.0.lock().retry_until = Some(Instant::now());
         let probe = c.acquire().unwrap();
@@ -755,7 +742,6 @@ mod cooldown_tests {
             assert_eq!(c.health().state, CircuitState::Closed);
             c.0.lock().retry_until = Some(Instant::now());
         }
-        assert!(c.health().protected_single_provider);
         assert_eq!(
             c.health().cooldown_reason.as_deref(),
             Some("single_provider_protected")
@@ -770,7 +756,6 @@ mod cooldown_tests {
         let stale = c.acquire().unwrap();
         c.acquire().unwrap().finish(Outcome::Failure(None), &cfg);
         stale.finish(Outcome::Success, &cfg);
-        assert!(c.health().protected_single_provider);
         assert_eq!(c.health().failures, 1);
         c.0.lock().retry_until = Some(Instant::now());
         let probe = c.acquire().unwrap();
@@ -778,7 +763,6 @@ mod cooldown_tests {
         drop(probe);
         c.acquire().unwrap().finish(Outcome::Success, &cfg);
         assert!(c.health().available);
-        assert!(!c.health().protected_single_provider);
         assert!(c.health().cooldown_reason.is_none());
         assert_eq!(c.health().state, CircuitState::Closed);
     }
@@ -908,7 +892,7 @@ mod tolerance_tests {
         let health = circuit.health();
         assert_eq!(health.state, CircuitState::Open);
         assert_eq!(health.failures, 6);
-        assert_eq!(health.requests, 6);
+        assert_eq!(circuit.0.lock().total, 6);
         let opened = circuit.take_open_event().expect("transient open event");
         assert_eq!(opened.reason, Reason::CircuitOpen);
         let evidence = opened.details.circuit.expect("circuit evidence");
@@ -945,7 +929,6 @@ mod tolerance_tests {
         finish_transient(&circuit, &cfg, 503);
         let health = circuit.health();
         assert_eq!(health.state, CircuitState::Closed);
-        assert!(health.protected_single_provider);
         assert_eq!(
             health.cooldown_reason.as_deref(),
             Some("single_provider_protected")
@@ -971,7 +954,7 @@ mod tolerance_tests {
         });
         expire_retry(&retry);
         let health = retry.health();
-        assert_eq!(health.requests, 0);
+        assert_eq!(retry.0.lock().total, 0);
         assert_eq!(health.failures, 0);
         assert!(health.available);
     }
@@ -1004,12 +987,12 @@ mod tolerance_tests {
         );
         let health = capacity.health();
         assert_eq!(health.state, CircuitState::Closed);
-        assert_eq!(health.requests, 0);
+        assert_eq!(capacity.0.lock().total, 0);
         assert_eq!(health.failures, 0);
         assert_eq!(health.cooldown_reason.as_deref(), Some("capacity_retry"));
         expire_retry(&capacity);
         capacity.acquire().unwrap().finish(Outcome::Neutral, &cfg);
-        assert_eq!(capacity.health().requests, 0);
+        assert_eq!(capacity.0.lock().total, 0);
     }
 
     #[test]

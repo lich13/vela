@@ -35,7 +35,7 @@ async fn import_link_only_adds_and_keeps_the_existing_or_empty_selection() {
         let imported = view.providers.last().unwrap();
         assert_eq!(imported.name, "链接供应商");
         assert_eq!(imported.base_url, "https://imported.example.invalid/v1");
-        assert_eq!(imported.health.requests, 0);
+
         assert!(!serde_json::to_string(&view)
             .unwrap()
             .contains("import-fixture-token"));
@@ -91,7 +91,7 @@ async fn running_gateway_import_keeps_config_auth_and_the_selected_upstream() {
     assert_eq!(imported_hits.load(Ordering::SeqCst), 0);
     let view = g.view();
     assert_eq!(view.last_successful, before.selected);
-    assert_eq!(view.providers[1].health.requests, 0);
+
     assert!(view.providers.iter().all(|p| p.active_requests == 0));
     assert_eq!(std::fs::read(t.path().join("config.toml")).unwrap(), config);
     assert_eq!(std::fs::read(t.path().join("auth.json")).unwrap(), auth);

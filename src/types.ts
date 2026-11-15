@@ -102,10 +102,8 @@ export type GatewaySettings = {
 export type Health = {
   state: "closed" | "open" | "half_open";
   failures: number;
-  requests: number;
   retryIn: number;
   cooldownReason: string | null;
-  protectedSingleProvider: boolean;
   probeInFlight: boolean;
   available: boolean;
   cause?: {
@@ -172,7 +170,6 @@ export type GrokModel = {
   address: string | null;
   addressSource: string | null;
   credentialAvailable: boolean;
-  credentialSource?: string | null;
   error: string | null;
 };
 export type CurrentConnection = {
@@ -187,7 +184,6 @@ export type CurrentConnection = {
   providerName?: string | null;
   address?: string | null;
   addressSource?: string | null;
-  credentialSource?: string | null;
   protocol?: GrokProtocol | null;
 };
 export type DshProfileCurrent = { profile: string; current: CurrentConnection };
