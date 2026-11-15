@@ -12,16 +12,69 @@ import { densePreview } from "./preview-fixtures";
 const previewParams = new URLSearchParams(location.search);
 const previewTheme = previewParams.get("theme");
 const freezePreview = previewParams.get("freeze");
-let freezeState = {
-  frozen: freezePreview === "draining" || freezePreview === "frozen",
-  draining: freezePreview === "draining" ? 2 : 0,
-  receiving: 0,
-  waiting: 0,
-  headers: freezePreview === "draining" ? 1 : 0,
-  streaming: freezePreview === "draining" ? 1 : 0,
-  finishing: 0,
-  queued: freezePreview === "draining" || freezePreview === "frozen" ? 3 : 0,
-};
+const freezeScopes = ["codex", "claude", "grok", "dsh", "antigravity"].map(
+  (clientId, i) => ({
+    clientId,
+    frozen:
+      freezePreview === "frozen" ||
+      freezePreview === "draining" ||
+      (freezePreview === "partial" && i === 0),
+    draining: freezePreview === "draining" && i === 0 ? 2 : 0,
+    receiving: 0,
+    waiting: 0,
+    headers: freezePreview === "draining" && i === 0 ? 1 : 0,
+    streaming: freezePreview === "draining" && i === 0 ? 1 : 0,
+    finishing: 0,
+    queued: freezePreview && i === 0 ? 3 : 0,
+    resumeAt: null as number | null,
+  }),
+);
+function freezeView() {
+  const frozen = freezeScopes.every((s) => s.frozen);
+  const sum = (
+    key:
+      | "draining"
+      | "receiving"
+      | "waiting"
+      | "headers"
+      | "streaming"
+      | "finishing"
+      | "queued",
+  ) => freezeScopes.reduce((sum, s) => sum + s[key], 0);
+  return {
+    frozen,
+    partial: !frozen && freezeScopes.some((s) => s.frozen),
+    draining: sum("draining"),
+    receiving: sum("receiving"),
+    waiting: sum("waiting"),
+    headers: sum("headers"),
+    streaming: sum("streaming"),
+    finishing: sum("finishing"),
+    queued: sum("queued"),
+    clients: freezeScopes.slice(0, 4).map((s) => ({ ...s })),
+  };
+}
+let freezeTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleFreeze() {
+  clearTimeout(freezeTimer);
+  const times = freezeScopes.flatMap((s) =>
+    s.resumeAt === null ? [] : [s.resumeAt],
+  );
+  if (!times.length) return;
+  freezeTimer = setTimeout(
+    () => {
+      for (const s of freezeScopes)
+        if (s.resumeAt !== null && s.resumeAt <= Date.now()) {
+          s.frozen = false;
+          s.queued = 0;
+          s.resumeAt = null;
+        }
+      emit("gateway-freeze", freezeView());
+      scheduleFreeze();
+    },
+    Math.min(2_147_483_647, Math.max(0, Math.min(...times) - Date.now())),
+  );
+}
 const callbacks = new Map<string, Set<(p: never) => void>>();
 export function subscribe<T>(event: string, fn: (p: T) => void) {
   if (!callbacks.has(event)) callbacks.set(event, new Set());
@@ -200,20 +253,36 @@ export async function run(
   name: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  if (name === "get_gateway_freeze") return { ...freezeState };
+  if (name === "get_gateway_freeze") return freezeView();
   if (name === "set_gateway_frozen") {
-    if (freezeState.draining && args.frozen === false)
+    const selected = freezeScopes.filter(
+      (s) => !args.clientId || args.clientId === s.clientId,
+    );
+    if (!args.frozen && selected.some((s) => s.frozen && s.draining))
       throw { code: "BUSY", message: "等待收尾完成后才能解冻" };
-    freezeState = {
-      ...freezeState,
-      frozen: !!args.frozen,
-      queued: args.frozen ? freezeState.queued : 0,
-    };
-    emit("gateway-freeze", { ...freezeState });
-    if (freezeState.frozen && freezeState.draining === 0) {
-      disableClamshellOnFreeze(emit);
+    for (const s of selected) {
+      s.frozen = !!args.frozen;
+      if (!s.frozen) {
+        s.queued = 0;
+        s.resumeAt = null;
+      }
     }
-    return { ...freezeState };
+    scheduleFreeze();
+    const state = freezeView();
+    emit("gateway-freeze", state);
+    if (state.frozen && state.draining === 0) disableClamshellOnFreeze(emit);
+    return state;
+  }
+  if (name === "set_gateway_freeze_resume") {
+    const state = freezeScopes.find((s) => s.clientId === args.clientId)!;
+    const at = args.resumeAt as number | null;
+    if (at !== null && (!state.frozen || state.draining || at <= Date.now()))
+      throw { code: "TIME", message: "请在冻结完成后选择未来的恢复时间" };
+    state.resumeAt = at;
+    scheduleFreeze();
+    const view = freezeView();
+    emit("gateway-freeze", view);
+    return view;
   }
   if (name.startsWith("provider_test_")) {
     const result = providerTestingPreview(name, args);
@@ -489,30 +558,29 @@ export async function run(
       return;
     case "get_app_events": {
       const filter = (args.filter ?? {}) as Record<string, unknown>;
-      const rows = demoEvents.filter(
-        (r) =>
-          Object.entries(filter).every(
-            ([key, v]) =>
-              !v ||
-              key === "page" ||
-              (key === "statusGroup"
-                ? v === "no_status"
-                  ? r.status == null
-                  : r.status != null &&
-                    Math.floor(r.status / 100) ===
-                      (
-                        {
-                          success: 2,
-                          client_error: 4,
-                          server_error: 5,
-                        } as Record<string, number>
-                      )[String(v)]
-                : key === "from"
-                  ? r.lastAt >= Number(v)
-                  : key === "to"
-                    ? r.firstAt <= Number(v)
-                    : r[key as keyof typeof r] === v),
-          ),
+      const rows = demoEvents.filter((r) =>
+        Object.entries(filter).every(
+          ([key, v]) =>
+            !v ||
+            key === "page" ||
+            (key === "statusGroup"
+              ? v === "no_status"
+                ? r.status == null
+                : r.status != null &&
+                  Math.floor(r.status / 100) ===
+                    (
+                      {
+                        success: 2,
+                        client_error: 4,
+                        server_error: 5,
+                      } as Record<string, number>
+                    )[String(v)]
+              : key === "from"
+                ? r.lastAt >= Number(v)
+                : key === "to"
+                  ? r.firstAt <= Number(v)
+                  : r[key as keyof typeof r] === v),
+        ),
       );
       const page = Math.max(
         1,

@@ -28,8 +28,11 @@ pub(super) fn hard_rejection(d: &Details) -> bool {
 }
 
 pub(super) fn temporary(d: &Details) -> bool {
+    temporary_basis(d.error_basis)
+}
+fn temporary_basis(basis: Option<ErrorBasis>) -> bool {
     matches!(
-        d.error_basis,
+        basis,
         Some(
             ErrorBasis::Rpm
                 | ErrorBasis::Rps
@@ -495,7 +498,8 @@ pub(super) fn http_value_with_rules(
             .or_else(|| explicit_type(e))
             .or_else(|| quota_details(e).map(|q| q.0))
     });
-    if !retryable_status(status) && status >= 400 && temporary(&d) && structured.is_none() {
+    let allow_temporary_text = retryable_status(status) || status < 400 || structured.is_some();
+    if !allow_temporary_text && temporary(&d) {
         d.error_basis = Some(ErrorBasis::InvalidRequest);
         d.health_scope = Some(HealthScope::Request);
     }
@@ -507,7 +511,7 @@ pub(super) fn http_value_with_rules(
     }
     refine_headers(&mut d, headers, structured.is_some());
     if let Some(error) = envelope(value, status >= 400, 0) {
-        apply_custom(&mut d, error, headers, rules);
+        apply_custom(&mut d, error, headers, rules, allow_temporary_text);
     }
     let retry = envelope(value, true, 0)
         .and_then(retry_after_fields)
@@ -559,7 +563,7 @@ pub(super) fn details_with_headers(
         .is_some()
         || quota_details(error).is_some();
     refine_headers(&mut details, headers, structured);
-    apply_custom(&mut details, error, headers, rules);
+    apply_custom(&mut details, error, headers, rules, true);
     details.error_basis.get_or_insert(ErrorBasis::ServiceError);
     let wait = retry_after_fields(error).max(retry_headers(headers, &details));
     (details, wait)
@@ -1087,6 +1091,7 @@ fn apply_custom(
     error: &Value,
     headers: &hyper::HeaderMap,
     rules: &[super::failure_rules::Rule],
+    allow_temporary_text: bool,
 ) {
     use super::failure_rules::MatchKind;
     if rules.is_empty() {
@@ -1096,7 +1101,11 @@ fn apply_custom(
         .filter_map(specific_code_kind)
         .chain(explicit_type(error))
         .chain(quota_details(error).map(|q| q.0))
-        .chain(strings(error).filter_map(message_kind))
+        .chain(
+            strings(error)
+                .filter_map(message_kind)
+                .filter(|b| allow_temporary_text || !temporary_basis(Some(*b))),
+        )
         .any(|b| !vague(b))
         || is_model(error)
         || error
@@ -1174,7 +1183,7 @@ fn apply_custom(
 pub(super) fn details_with_rules(value: &Value, rules: &[super::failure_rules::Rule]) -> Details {
     let mut details = details_value(value, false);
     if let Some(error) = envelope(value, false, 0) {
-        apply_custom(&mut details, error, &hyper::HeaderMap::new(), rules);
+        apply_custom(&mut details, error, &hyper::HeaderMap::new(), rules, true);
         details.error_basis.get_or_insert(ErrorBasis::ServiceError);
     }
     details

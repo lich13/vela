@@ -584,3 +584,31 @@ fn every_builtin_code_uses_the_same_classifier() {
         );
     }
 }
+
+#[test]
+fn custom_rule_can_replace_temporary_text_rejected_by_http_status() {
+    use super::failure_rules::MatchKind::Keyword;
+    let rules = [custom(Keyword, "upstream-custom-tag", B::ServiceError)];
+    for status in [400, 422] {
+        let body = serde_json::to_vec(&json!({"error":{"type":"invalid_request_error","message":"model is at capacity: upstream-custom-tag"}})).unwrap();
+        assert_eq!(
+            policy::http_with_rules(status, &HeaderMap::new(), &body, &[])
+                .0
+                .error_basis,
+            Some(B::InvalidRequest)
+        );
+        let d = policy::http_with_rules(status, &HeaderMap::new(), &body, &rules).0;
+        assert_eq!(d.error_basis, Some(B::ServiceError));
+        assert_eq!(d.custom_rule_id.as_deref(), Some(rules[0].id.as_str()));
+        let body = serde_json::to_vec(
+            &json!({"error":{"code":"insufficient_quota","message":"upstream-custom-tag"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            policy::http_with_rules(status, &HeaderMap::new(), &body, &rules)
+                .0
+                .error_basis,
+            Some(B::Billing)
+        );
+    }
+}

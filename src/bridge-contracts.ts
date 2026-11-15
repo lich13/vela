@@ -371,7 +371,6 @@ export type GrokImportPreview = {
   revision: string;
   models: GrokModel[];
   selected: string;
-  clearEnvironment: string[];
   error: string | null;
 };
 export type GatewayModels = {
@@ -418,11 +417,7 @@ export type ModelSearch = {
   error: string | null;
 };
 export type DshFileKey =
-  | "profilePatch"
-  | "homePatch"
-  | "settings"
-  | "environment"
-  | "credentials";
+  "profilePatch" | "homePatch" | "settings" | "environment" | "credentials";
 export type DshFileView = {
   profiles: string[];
   profile: string | null;
@@ -560,10 +555,7 @@ export type CommandMap = {
   read_config: Call<Client, ConfigDocument>;
   read_previous_config: Call<Client, string>;
   validate_config: Call<Client & { text: string }, void>;
-  save_config: Call<
-    Client & { text: string } & Revision,
-    ConfigDocument
-  >;
+  save_config: Call<Client & { text: string } & Revision, ConfigDocument>;
   set_preferences: Call<{ preferences: Preferences }, ViewState>;
   set_quota_refresh: Call<
     { seconds: number; expectedSeconds: number },
@@ -609,7 +601,14 @@ export type CommandMap = {
   cancel_gateway_wait: Call<Client & { requestId: string }, boolean>;
   get_gateway: Call<Client, GatewayState>;
   get_gateway_freeze: Call<None, GatewayFreeze>;
-  set_gateway_frozen: Call<{ frozen: boolean }, GatewayFreeze>;
+  set_gateway_frozen: Call<
+    { frozen: boolean; clientId?: ClientId },
+    GatewayFreeze
+  >;
+  set_gateway_freeze_resume: Call<
+    { clientId: ClientId; resumeAt: number | null },
+    GatewayFreeze
+  >;
   get_gateway_models: Call<Client, GatewayModels>;
   refresh_gateway_models: Call<
     Client & { providerIds?: string[] | null },
@@ -684,11 +683,7 @@ export type CommandMap = {
         category?: EventRecord["category"] | null;
         reason?: EventRecord["reason"] | null;
         statusGroup?:
-          | "success"
-          | "client_error"
-          | "server_error"
-          | "no_status"
-          | null;
+          "success" | "client_error" | "server_error" | "no_status" | null;
         page?: number;
       };
     },
@@ -817,7 +812,7 @@ export type CommandArgs<K extends CommandName> = CommandMap[K]["args"];
 export type CommandResult<K extends CommandName> = CommandMap[K]["result"];
 export type CommandParams<K extends CommandName> =
   {} extends CommandArgs<K> ? [args?: CommandArgs<K>] : [args: CommandArgs<K>];
-export type GatewayFreeze = {
+export type FreezeStatus = {
   frozen: boolean;
   draining: number;
   receiving: number;
@@ -826,6 +821,14 @@ export type GatewayFreeze = {
   streaming: number;
   finishing: number;
   queued: number;
+};
+export type ClientFreeze = FreezeStatus & {
+  clientId: ClientId;
+  resumeAt: number | null;
+};
+export type GatewayFreeze = FreezeStatus & {
+  partial: boolean;
+  clients: ClientFreeze[];
 };
 export type EventMap = {
   "switch-state": ViewState;

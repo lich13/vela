@@ -14,6 +14,7 @@ import {
   ArrowLeftRight,
   ChartNoAxesCombined,
   Network,
+  Snowflake,
   Shield,
   Users,
   FileCode2,
@@ -54,6 +55,7 @@ const AccountExchange = lazy(() => import("./AccountExchange"));
 const Usage = lazy(() => import("./Usage"));
 const EventLog = lazy(() => import("./EventLog"));
 const Gateway = lazy(() => import("./Gateway"));
+const FreezePanel = lazy(() => import("./FreezePanel"));
 const ConfigEditor = lazy(() => import("./ConfigEditor"));
 type Dialog =
   | "add"
@@ -77,7 +79,7 @@ export default function App() {
   );
   const [state, setState] = useState<ViewState | null>(null),
     [page, setPage] = useState<
-      "accounts" | "config" | "gateway" | "logs" | "usage"
+      "accounts" | "config" | "gateway" | "freeze" | "logs" | "usage"
     >("accounts"),
     [search, setSearch] = useState(""),
     [dialog, setDialog] = useState<Dialog>(null),
@@ -118,7 +120,9 @@ export default function App() {
   pageRef.current = page;
   const notify = useCallback((s: string) => setMessage(s), []);
   const navigate = useCallback(
-    async (next: "accounts" | "config" | "gateway" | "logs" | "usage") => {
+    async (
+      next: "accounts" | "config" | "gateway" | "freeze" | "logs" | "usage",
+    ) => {
       if (next === pageRef.current) return;
       if (!(await flushTestPrompt())) return;
       if (
@@ -213,7 +217,11 @@ export default function App() {
             setDialog("settings");
           })()
         : navigate(
-            p === "config" || p === "gateway" || p === "logs" || p === "usage"
+            p === "config" ||
+            p === "gateway" ||
+            p === "freeze" ||
+            p === "logs" ||
+            p === "usage"
               ? p
               : "accounts",
           ),
@@ -357,6 +365,14 @@ export default function App() {
             网关
           </button>
           <button
+            data-nav="freeze"
+            className={page === "freeze" ? "nav-item active" : "nav-item"}
+            onClick={() => navigate("freeze")}
+          >
+            <Snowflake size={17} />
+            冻结
+          </button>
+          <button
             data-nav="usage"
             className={page === "usage" ? "nav-item active" : "nav-item"}
             onClick={() => navigate("usage")}
@@ -403,7 +419,11 @@ export default function App() {
             </button>
           </div>
         )}
-        {page === "usage" ? (
+        {page === "freeze" ? (
+          <Suspense fallback={null}>
+            <FreezePanel />
+          </Suspense>
+        ) : page === "usage" ? (
           <Suspense fallback={null}>
             <Usage onDirtyChange={usageDraftChanged} />
           </Suspense>

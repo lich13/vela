@@ -487,7 +487,7 @@ async fn freeze_holds_websocket_next_turn_and_honors_cancel_and_disconnect() {
         next_text_frame(&mut socket).await.payload().as_ref(),
         WS_DELTA.as_bytes()
     );
-    gate.set(true).unwrap();
+    gate.set_selected(Some(ClientId::Codex), true).unwrap();
     socket.send(yawc::Frame::text(create)).await.unwrap();
     settled(|| gate.view().queued == 1).await;
     tokio::time::sleep(Duration::from_millis(1200)).await;
@@ -500,7 +500,7 @@ async fn freeze_holds_websocket_next_turn_and_honors_cancel_and_disconnect() {
     );
     settled(|| gate.view().draining == 0).await;
     assert_eq!(gate.view().queued, 1);
-    gate.set(false).unwrap();
+    gate.set_selected(Some(ClientId::Codex), false).unwrap();
     assert_eq!(
         next_text_frame(&mut socket).await.payload().as_ref(),
         WS_DELTA.as_bytes()
@@ -510,7 +510,7 @@ async fn freeze_holds_websocket_next_turn_and_honors_cancel_and_disconnect() {
         completed(2).as_bytes()
     );
     settled(|| gate.view().draining == 0).await;
-    gate.set(true).unwrap();
+    gate.set_selected(Some(ClientId::Codex), true).unwrap();
     socket.send(yawc::Frame::text(create)).await.unwrap();
     settled(|| gate.view().queued == 1).await;
     socket
@@ -530,7 +530,7 @@ async fn freeze_holds_websocket_next_turn_and_honors_cancel_and_disconnect() {
         .unwrap();
     drop(socket);
     settled(|| gate.view().queued == 0).await;
-    gate.set(false).unwrap();
+    gate.set_selected(Some(ClientId::Codex), false).unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     fixture.stop().await;
 }

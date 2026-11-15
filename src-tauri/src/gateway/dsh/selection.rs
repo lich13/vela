@@ -243,7 +243,6 @@ pub(super) fn read_provider(
     result.model_source = Some(source);
     result.warning = (!warning.is_empty()).then_some(warning);
     result.provider_name = crate::events::safe_message(&provider_name);
-    result.address_source = Some("llm-pi-ai.providers".into());
     result.address = super::super::grok_import::safe_address(selected_pair.base_url.as_deref());
     result.protocol = protocol;
     Ok(Selection {

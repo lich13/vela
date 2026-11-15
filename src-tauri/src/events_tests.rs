@@ -553,3 +553,31 @@ fn claude_log_scan_covers_all_recent_sessions_and_keeps_incremental_cursors() {
     service.sync_claude_logs(&home);
     assert_eq!(service.query(filter()).total, 65);
 }
+
+#[test]
+fn antigravity_reads_all_recent_files_above_former_caps_without_duplicates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let logs = home.join(".gemini/antigravity/logs");
+    fs::create_dir_all(&logs).unwrap();
+    let at = chrono::Utc::now().to_rfc3339();
+    for i in 0..55 {
+        let dir = home.join(format!(
+            ".gemini/antigravity/brain/fixture-{i}/.system_generated/logs"
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("transcript.jsonl"), format!("{}\n",serde_json::json!({"type":"ERROR_MESSAGE","errorMessage":"fixture 503","step_index":0,"created_at":at}))).unwrap();
+    }
+    for i in 0..30 {
+        fs::write(
+            logs.join(format!("fixture-{i}.log")),
+            "[ERROR] 503 fixture\n",
+        )
+        .unwrap();
+    }
+    let service = Service::new(&tmp.path().join("data"));
+    service.sync_antigravity_logs(&home);
+    assert_eq!(service.query(Filter::default()).total, 85);
+    service.sync_antigravity_logs(&home);
+    assert_eq!(service.query(Filter::default()).total, 85);
+}

@@ -39,6 +39,7 @@ vi.mock("@uiw/react-codemirror", () => ({
 import App from "./App";
 import { gatewayDemo, claudeGatewayDemo } from "./gateway-preview";
 import { providerTestingPreview } from "./provider-testing-preview";
+import { clients } from "./ClientSelection";
 let state: ViewState;
 let doc: ConfigDocument;
 let pendingImports: import("./bridge-contracts").PendingImport[];
@@ -102,6 +103,19 @@ beforeEach(() => {
       switch (name) {
         case "get_gateway_freeze":
           return {
+            partial: false,
+            clients: clients.map((clientId) => ({
+              clientId,
+              resumeAt: null,
+              frozen: false,
+              draining: 0,
+              receiving: 0,
+              waiting: 0,
+              headers: 0,
+              streaming: 0,
+              finishing: 0,
+              queued: 0,
+            })),
             frozen: false,
             draining: 0,
             receiving: 0,
@@ -225,6 +239,27 @@ describe("settings presentation", () => {
   });
 });
 describe("user workflows", () => {
+  it("opens the four-platform freeze page below gateway and receives cross-page login notices", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const nav = within(screen.getByRole("navigation", { name: "主导航" }));
+    const freeze = nav.getByRole("button", { name: "冻结" });
+    expect(nav.getByRole("button", { name: "网关" }).nextElementSibling).toBe(
+      freeze,
+    );
+    await user.click(freeze);
+    expect(
+      await screen.findByRole("heading", { name: "冻结", level: 1 }),
+    ).toBeInTheDocument();
+    for (const name of ["Codex", "Claude Code", "Grok Build", "DSH"])
+      expect(await screen.findByRole("region", { name })).toBeInTheDocument();
+    act(() =>
+      mocks.listeners.get("switch-notice")?.("新账号已自动加入切换列表"),
+    );
+    expect(
+      await screen.findByText("新账号已自动加入切换列表"),
+    ).toBeInTheDocument();
+  });
   it("shows subscription labels only for ChatGPT accounts and marks stale plans by title", async () => {
     state.accounts = [
       {
@@ -769,4 +804,3 @@ it("shows association errors recorded before frontend event subscriptions", asyn
     await screen.findByText("系统需要确认 CC Switch 链接关联"),
   ).toBeInTheDocument();
 });
-

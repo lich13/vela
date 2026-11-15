@@ -498,7 +498,7 @@ impl Gateway {
         self.try_view()
     }
     pub fn next_endpoint_probe_wait(&self) -> Option<Duration> {
-        if self.0.registry.freeze.is_frozen() {
+        if self.0.registry.freeze.is_frozen(self.client_id()) {
             return None;
         }
         let s = self.request_state();
@@ -518,7 +518,7 @@ impl Gateway {
             .min()
     }
     pub async fn probe_due_endpoints(&self) {
-        if self.0.registry.freeze.is_frozen() {
+        if self.0.registry.freeze.is_frozen(self.client_id()) {
             return;
         }
         let ids = {

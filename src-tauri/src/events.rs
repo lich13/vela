@@ -800,7 +800,6 @@ fn antigravity_files(home: &Path, cutoff: u64) -> (Vec<SourceFile>, [Vec<SourceF
             }
         }
     }
-    transcripts.sort_by_key(|(secs, _, _)| std::cmp::Reverse(*secs));
     let mut logs = [Vec::new(), Vec::new()];
     for (logs, root) in logs.iter_mut().zip([
         home.join("Library/Logs/Antigravity"),
@@ -1614,7 +1613,7 @@ impl Service {
         let cleared = self.journal.lock().cleared.clone();
         let cutoff = cutoff.max(cleared.as_ref().map_or(0, |c| c.at));
         let (transcripts, logs) = antigravity_files(home, cutoff);
-        for (file_secs, file_len, path) in transcripts.into_iter().take(48) {
+        for (file_secs, file_len, path) in transcripts {
             let conv = path
                 .parent()
                 .and_then(Path::parent)
@@ -1671,9 +1670,7 @@ impl Service {
                 },
             );
         }
-        for (file_secs, file_len, path) in
-            logs.into_iter().flat_map(|logs| logs.into_iter().take(24))
-        {
+        for (file_secs, file_len, path) in logs.into_iter().flatten() {
             let fname = path.file_name().unwrap_or_default().to_string_lossy();
             scan_new_lines(
                 &path,
@@ -1706,11 +1703,11 @@ impl Service {
     pub fn sync_claude_logs(&self, claude_home: &Path) {
         const MARK: &[u8] = br#""isApiErrorMessage":true"#;
         let cutoff = now().saturating_sub(RETENTION);
-        let mut sessions = Vec::new();
-        session_files(&claude_home.join("projects"), 0, cutoff, &mut sessions);
         let mut cursors = self.file_cursors.lock();
         let cleared = self.journal.lock().cleared.clone();
         let cutoff = cutoff.max(cleared.as_ref().map_or(0, |c| c.at));
+        let mut sessions = Vec::new();
+        session_files(&claude_home.join("projects"), 0, cutoff, &mut sessions);
         let mut discovered = Vec::new();
         for (file_secs, file_len, path) in sessions {
             // The whole week is wanted and a session file can be large, so
@@ -1723,7 +1720,7 @@ impl Service {
                 &mut cursors,
                 cleared.as_deref(),
                 |_, line| {
-                    if !line.windows(MARK.len()).any(|w| w == MARK) {
+                    if memchr::memmem::find(line, MARK).is_none() {
                         return;
                     }
                     let record = serde_json::from_slice(line)
@@ -1741,14 +1738,15 @@ impl Service {
             return;
         }
         let mut guard = self.journal.lock();
-        let mut added = false;
-        for r in discovered {
-            if !guard.records.iter().any(|existing| existing.id == r.id) {
-                guard.records.push_back(Arc::new(r));
-                added = true;
-            }
-        }
-        if added {
+        let mut known: HashSet<String> = guard.records.iter().map(|r| r.id.clone()).collect();
+        let before = guard.records.len();
+        guard.records.extend(
+            discovered
+                .into_iter()
+                .filter(|r| known.insert(r.id.clone()))
+                .map(Arc::new),
+        );
+        if guard.records.len() != before {
             guard.dirty = true;
             let _ = self.sender.try_send(Job::Prune);
         }
@@ -2205,6 +2203,47 @@ mod routing_visibility_tests {
         assert!(reloaded.error.is_none());
         assert_eq!(reloaded.records.len(), 2);
         assert_eq!(reloaded.records[1].count, 2);
+    }
+
+    #[tokio::test]
+    async fn cleared_claude_files_are_skipped_until_they_change() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("claude");
+        let sessions = home.join("projects/fixture");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let old = sessions.join("old.jsonl");
+        let active = sessions.join("active.jsonl");
+        for path in [&old, &active] {
+            std::fs::write(path, b"{}\n").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(now() - 60))
+                .unwrap();
+        }
+        let service = Service::new(&dir.path().join("data"));
+        service.clear(None, Some(home.clone())).await.unwrap();
+        service.sync_claude_logs(&home);
+        assert!(service.file_cursors.lock().is_empty());
+
+        let entry = serde_json::json!({
+            "uuid":"fixture-after-clear", "sessionId":"fixture-session",
+            "timestamp":chrono::Utc::now().to_rfc3339(), "isApiErrorMessage":true,
+            "message":{"content":[{"type":"text","text":"API Error: 503 unavailable"}]}
+        });
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&active)
+                .unwrap(),
+            "{entry}"
+        )
+        .unwrap();
+        service.sync_claude_logs(&home);
+        assert_eq!(service.file_cursors.lock().len(), 1);
+        assert_eq!(service.query(Filter::default()).total, 1);
     }
 
     #[tokio::test]

@@ -21,12 +21,10 @@ const missingCredentialPreview: GrokImportPreview = {
       model: "fixture-model",
       protocol: "responses",
       address: "https://api.example.invalid/v1",
-      addressSource: "modelApi",
       credentialAvailable: false,
       error: null,
     },
   ],
-  clearEnvironment: ["GROK_MODELS_BASE_URL", "XAI_API_KEY"],
   error: "未读取到 API 凭据；可确认读取 endpoint.env",
 };
 const credentialPreview: GrokImportPreview = {

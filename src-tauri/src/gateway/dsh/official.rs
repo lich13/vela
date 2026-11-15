@@ -147,7 +147,6 @@ fn parse_catalog(body: &Value, version: Option<&semver::Version>) -> Result<Vec<
             continue;
         }
         let mut model = json!({"id":id, "name":row["name"].as_str().filter(|n| !n.is_empty() && n.len() <= 256 && !n.chars().any(char::is_control)).unwrap_or(id), "input":inputs});
-        let mut valid = true;
         for (from, to) in [
             ("context_window", "contextWindow"),
             ("max_output_tokens", "maxTokens"),
@@ -158,15 +157,11 @@ fn parse_catalog(body: &Value, version: Option<&semver::Version>) -> Result<Vec<
                     .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
                 {
                     model[to] = value.clone();
-                } else {
-                    valid = false;
                 }
             }
         }
-        if valid {
-            models::normalize(&mut model);
-            models.push(model);
-        }
+        models::normalize(&mut model);
+        models.push(model);
     }
     if models.is_empty() {
         return Err(error(
@@ -289,6 +284,17 @@ mod tests {
     use super::*;
     fn entry(id: &str) -> Value {
         json!({"id":id,"name":id,"context_window":1048576,"max_output_tokens":131072,"input_modalities":["text","image"],"api_capabilities":{"anthropic_messages":{}}})
+    }
+    #[test]
+    fn invalid_optional_capacity_keeps_model_and_valid_capacity() {
+        for invalid in [json!(0), json!(-1), json!("unknown"), json!(null)] {
+            let mut row = entry(models::FLASH);
+            row["context_window"] = invalid;
+            let parsed = parse_catalog(&json!({"data":[row]}), None).unwrap();
+            assert_eq!(parsed[0]["id"], models::FLASH);
+            assert!(parsed[0].get("contextWindow").is_none());
+            assert_eq!(parsed[0]["maxTokens"], 131072);
+        }
     }
     #[test]
     fn catalog_accepts_future_ids_only_with_compatible_requirements() {

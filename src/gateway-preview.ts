@@ -481,12 +481,10 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           model: "fixture-model",
           protocol: "responses",
           address: "https://example.invalid/v1",
-          addressSource: "global",
           credentialAvailable: true,
           error: null,
         },
       ],
-      clearEnvironment: ["GROK_MODELS_BASE_URL", "XAI_API_KEY"],
       error: null,
     };
   if (name === "commit_grok_import") return structuredClone(grokGatewayDemo);

@@ -422,11 +422,6 @@ fn commit_migrates_config_environment_and_store_once_without_duplicates() {
     let config_path = fixture.home.join("config.toml");
     let environment_path = fixture.home.join("endpoint.env");
     let preview = fixture.valid_preview(None, true);
-    assert!(preview.clear_environment.contains(&"XAI_API_KEY".into()));
-    assert!(preview
-        .clear_environment
-        .contains(&"GROK_MODELS_BASE_URL".into()));
-
     let view = fixture.commit(&preview).unwrap();
     let config = fs::read_to_string(&config_path).unwrap();
     let document = config.parse::<toml_edit::DocumentMut>().unwrap();

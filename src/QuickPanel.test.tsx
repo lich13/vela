@@ -36,19 +36,14 @@ beforeEach(() => {
         return structuredClone(
           args?.clientId === "claude" ? claudeGatewayDemo : gatewayDemo,
         );
-      if (name === "get_quick")
-        return { pinned: false, visible: true };
-      if (name === "set_quick")
-        return { pinned: false, ...args };
+      if (name === "get_quick") return { pinned: false, visible: true };
+      if (name === "set_quick") return { pinned: false, ...args };
     },
   );
 });
 afterEach(() => localStorage.clear());
 it("keeps a newer hide event when the initial visibility read resolves late", async () => {
-  let finish!: (value: {
-    pinned: boolean;
-    visible: boolean;
-  }) => void;
+  let finish!: (value: { pinned: boolean; visible: boolean }) => void;
   const initial = new Promise<{
     pinned: boolean;
     visible: boolean;
@@ -149,10 +144,8 @@ it("omits the provider/account tab row, hides wallet placeholder badges, and com
         return structuredClone(demo);
       if (name === "get_gateway" || name === "update_gateway")
         return structuredClone(gateway);
-      if (name === "get_quick")
-        return { pinned: false, visible: true };
-      if (name === "set_quick")
-        return { pinned: false, ...args };
+      if (name === "get_quick") return { pinned: false, visible: true };
+      if (name === "set_quick") return { pinned: false, ...args };
     },
   );
   render(<QuickPanel />);
@@ -178,21 +171,37 @@ it("refreshes the waiting budget once on freeze and thaw", async () => {
     mock.command.mock.calls.filter(([name]) => name === "get_gateway").length;
   const before = reads();
   await act(async () =>
-    mock.listeners.get("gateway-freeze")?.({ frozen: false }),
+    mock.listeners.get("gateway-freeze")?.({
+      frozen: false,
+      clients: [
+        { clientId: "codex", frozen: false },
+        { clientId: "claude", frozen: true },
+      ],
+    }),
   );
   expect(reads()).toBe(before);
   await act(async () => mock.listeners.get("panel-visibility")?.(false));
   expect(reads()).toBe(before);
   await act(async () =>
-    mock.listeners.get("gateway-freeze")?.({ frozen: true }),
+    mock.listeners.get("gateway-freeze")?.({
+      frozen: false,
+      clients: [{ clientId: "codex", frozen: true }],
+    }),
   );
   expect(reads()).toBe(before + 1);
   await act(async () =>
-    mock.listeners.get("gateway-freeze")?.({ frozen: true, queued: 2 }),
+    mock.listeners.get("gateway-freeze")?.({
+      frozen: true,
+      queued: 2,
+      clients: [{ clientId: "codex", frozen: true }],
+    }),
   );
   expect(reads()).toBe(before + 1);
   await act(async () =>
-    mock.listeners.get("gateway-freeze")?.({ frozen: false }),
+    mock.listeners.get("gateway-freeze")?.({
+      frozen: false,
+      clients: [{ clientId: "codex", frozen: false }],
+    }),
   );
   expect(reads()).toBe(before + 2);
 });
@@ -316,10 +325,8 @@ it("keeps the provider quota beside the name in the quick panel", async () => {
         return structuredClone(demo);
       if (name === "get_gateway" || name === "update_gateway")
         return structuredClone(gateway);
-      if (name === "get_quick")
-        return { pinned: false, visible: true };
-      if (name === "set_quick")
-        return { pinned: false, ...args };
+      if (name === "get_quick") return { pinned: false, visible: true };
+      if (name === "set_quick") return { pinned: false, ...args };
     },
   );
   render(<QuickPanel />);

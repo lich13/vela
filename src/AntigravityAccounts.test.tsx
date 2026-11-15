@@ -204,7 +204,7 @@ describe("AntigravityAccounts", () => {
     expect(
       (await screen.findAllByText("user3@example.invalid")).length,
     ).toBeGreaterThan(0);
-    expect(notify).toHaveBeenCalledWith("新账号已自动加入切换列表");
+    expect(notify).not.toHaveBeenCalled();
     notify.mockClear();
     // The same accounts arriving again are not new.
     act(() => {

@@ -149,6 +149,10 @@ async fn mapping_save_updates_every_active_catalog_and_retains_model_choices() {
 #[test]
 fn canonical_mapping_preserves_explicit_empty_and_canonical_values() {
     let mut value = serde_json::to_value(Store::default()).unwrap();
+    value["providers"] = serde_json::json!([{
+        "id":"fixture", "name":"fixture", "baseUrl":"https://example.invalid",
+        "token":"fixture", "queued":true, "version":"fixture"
+    }]);
     value["dshModels"] = serde_json::json!({"fixture": {models::FLASH:"custom-flash", models::PRO:null, "deepseek-future":"custom-future"}});
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("gateway.json");

@@ -833,3 +833,49 @@ async fn grok_initial_discovery_is_read_only_and_manual_connection_survives_reop
     assert!(reopened_connection.headers.is_empty());
     assert!(reopened_connection.query.is_empty());
 }
+
+#[tokio::test]
+async fn clearing_endpoints_of_running_messages_provider_keeps_imported_auth_and_query() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let upstream = capturing_server(seen.clone(), MESSAGES_RESPONSE_BODY).await;
+    let config = native_config(&upstream.url("/v1"))
+        .replace("api_backend = \"responses\"", "api_backend = \"messages\"");
+    let fixture = Fixture::new_with_config(config).await;
+    let id = fixture.gateway.view().providers[0].id.clone();
+    let before = serde_json::to_value(grok_connection(&fixture.gateway, &id)).unwrap();
+    fixture.start().await;
+    fixture.edit(Edit::EndpointsProvider {
+        id: id.clone(),
+        base_urls: vec!["https://backup.example.invalid/v1".into()],
+    });
+    fixture.edit(Edit::EndpointsProvider {
+        id: id.clone(),
+        base_urls: vec![],
+    });
+    assert_eq!(
+        serde_json::to_value(grok_connection(&fixture.gateway, &id)).unwrap(),
+        before
+    );
+    let response = gateway_request(&fixture.gateway, "/v1/messages", MESSAGES_REQUEST).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_bytes(response).await, MESSAGES_RESPONSE_BODY);
+    let observed = requests(&seen);
+    assert_eq!(
+        observed[0].api_key.as_deref(),
+        Some("fixture-stale-api-key")
+    );
+    assert_eq!(
+        query_pairs(&observed[0].path_and_query)["profile"],
+        "fixture-profile-query"
+    );
+    fixture.stop().await;
+    fixture.edit(Edit::DeleteProvider { id });
+    assert!(fixture
+        .gateway
+        .0
+        .inner
+        .lock()
+        .store
+        .grok_connections
+        .is_empty());
+}

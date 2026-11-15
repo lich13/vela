@@ -48,7 +48,7 @@ async fn freeze_keeps_fifo_limits_and_budget_without_reserving_rpm_or_capacity()
     let mut tasks = Vec::new();
     let mut tickets = Vec::new();
     for count in 1..=2 {
-        let traffic = gate.request();
+        let traffic = gate.request(crate::gateway::freeze::Scope::Client(ClientId::Codex));
         traffic.waiting();
         tickets.push(traffic.clone());
         let scheduler = g.0.admission.clone();
@@ -63,7 +63,7 @@ async fn freeze_keeps_fifo_limits_and_budget_without_reserving_rpm_or_capacity()
         }));
         until(|| g.view().waiting_requests == count).await;
     }
-    let excess = gate.request();
+    let excess = gate.request(crate::gateway::freeze::Scope::Client(ClientId::Codex));
     excess.waiting();
     let mut budget = Budget::new(1);
     budget.traffic = Some(excess);

@@ -168,7 +168,6 @@ export type GrokModel = {
   model: string;
   protocol: GrokProtocol | null;
   address: string | null;
-  addressSource: string | null;
   credentialAvailable: boolean;
   error: string | null;
 };
@@ -183,7 +182,6 @@ export type CurrentConnection = {
   warning: string | null;
   providerName?: string | null;
   address?: string | null;
-  addressSource?: string | null;
   protocol?: GrokProtocol | null;
 };
 export type DshProfileCurrent = { profile: string; current: CurrentConnection };

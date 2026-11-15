@@ -91,6 +91,13 @@ fn oauth_auto_recognizes_disk_login_and_deduplicates_on_token_refresh() {
     .unwrap();
 
     let s1 = state_at(&paths).unwrap();
+    assert!(s1.oauth_added);
+    assert!(!serde_json::to_value(&s1)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("oauthAdded"));
+    assert!(!state_at(&paths).unwrap().oauth_added);
     assert_eq!(s1.accounts.len(), 1);
     assert!(s1.accounts[0].current);
     assert_eq!(
@@ -111,6 +118,7 @@ fn oauth_auto_recognizes_disk_login_and_deduplicates_on_token_refresh() {
     .unwrap();
 
     let s2 = state_at(&paths).unwrap();
+    assert!(!s2.oauth_added);
     assert_eq!(s2.accounts.len(), 1);
     assert!(s2.accounts[0].current);
     assert_ne!(s2.accounts[0].credential_revision, rev1);
@@ -931,4 +939,22 @@ fn credential_read_failure_keeps_the_saved_account_and_can_be_retried() {
     assert_eq!(after.accounts.len(), before.accounts.len());
     assert_eq!(after.accounts[0].id, before.accounts[0].id);
     assert!(after.accounts[0].current);
+}
+
+#[test]
+fn new_oauth_notice_survives_hidden_updates_and_is_drained_once() {
+    let (_tmp, paths) = setup_paths();
+    let state = state_with_oauth(&paths, Some(serde_json::json!({"auth_method":"google-oauth","user":{"email":"fixture@example.invalid"},"token":{"access_token":"fixture","refresh_token":"fixture"}}).to_string())).unwrap().0;
+    assert!(state.oauth_added);
+    let pending = crate::PendingMainEvents::default();
+    pending.record_antigravity_auth(&state);
+    let mut next = state.clone();
+    next.oauth_added = false;
+    next.revision = "newer".into();
+    pending.record_antigravity_auth(&next);
+    assert!(pending.drain_for_window("quick").is_none());
+    let drained = pending.drain_for_window("main").unwrap();
+    assert!(drained.antigravity_auth.as_ref().unwrap().oauth_added);
+    assert_eq!(drained.antigravity_auth.unwrap().revision, "newer");
+    assert!(pending.drain().antigravity_auth.is_none());
 }

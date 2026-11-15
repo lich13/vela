@@ -40,7 +40,6 @@ pub struct ModelView {
     pub model: String,
     pub protocol: Option<Protocol>,
     pub address: Option<String>,
-    pub address_source: Option<String>,
     pub credential_available: bool,
     pub error: Option<String>,
 }
@@ -54,7 +53,6 @@ pub struct Preview {
     pub revision: String,
     pub models: Vec<ModelView>,
     pub selected: String,
-    pub clear_environment: Vec<String>,
     pub error: Option<String>,
 }
 fn error(message: &str) -> AppError {
@@ -181,7 +179,6 @@ fn model_view(key: String, result: &Result<Profile>) -> ModelView {
             model: p.model.clone(),
             protocol: p.protocol_known.then_some(p.connection.protocol),
             address: safe_address(p.pair.base_url.as_deref()),
-            address_source: p.address_source.map(str::to_owned),
             credential_available: p.pair.token.is_some(),
             error: None,
         },
@@ -190,7 +187,6 @@ fn model_view(key: String, result: &Result<Profile>) -> ModelView {
             key,
             protocol: None,
             address: None,
-            address_source: None,
             credential_available: false,
             error: Some(e.message.clone()),
         },
@@ -453,7 +449,6 @@ impl Gateway {
                 .and_then(Item::as_str)
                 .unwrap_or_default()
                 .into(),
-            clear_environment: Vec::new(),
             error: None,
         };
         let prepared = (|| -> Result<Pending> {
@@ -494,7 +489,6 @@ impl Gateway {
             if resolve("GROK_AUTH_PREFERRED_METHOD").as_deref() == Some("api_key") {
                 clear.insert("GROK_AUTH_PREFERRED_METHOD".into());
             }
-            preview.clear_environment = clear.iter().cloned().collect();
             Ok(Pending {
                 layers: effective.files.clone(),
                 overlays: super::grok_layers::environment_snapshot(inherited),

@@ -619,3 +619,59 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
         assert!(!reloaded.providers[2].end_on_message_stop);
     }
 }
+
+#[test]
+fn auxiliary_endpoint_clear_preserves_connection_and_deleted_providers_leave_no_metadata() {
+    let mut store = Store::default();
+    store
+        .edit(
+            Edit::SaveGrokProvider {
+                id: None,
+                name: Some("fixture".into()),
+                base_url: "https://primary.example.invalid".into(),
+                token: "fixture".into(),
+                quota_access_token: None,
+                protocol: grok_config::Protocol::Messages,
+            },
+            false,
+        )
+        .unwrap();
+    let id = store.providers[0].id.clone();
+    let connection = store.grok_connections.get_mut(&id).unwrap();
+    connection
+        .headers
+        .insert("x-api-key".into(), "fixture-auth".into());
+    connection
+        .query
+        .insert("region".into(), "fixture-region".into());
+    let connection = serde_json::to_value(connection).unwrap();
+    for base_urls in [
+        vec!["https://backup.example.invalid".into()],
+        vec![],
+        vec![store.providers[0].base_url.clone()],
+    ] {
+        store
+            .edit(
+                Edit::EndpointsProvider {
+                    id: id.clone(),
+                    base_urls,
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&store.grok_connections[&id]).unwrap(),
+            connection
+        );
+    }
+    store.dsh_models.insert(id.clone(), Default::default());
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("gateway.json");
+    let mut orphaned = store.clone();
+    orphaned.providers.clear();
+    fs::write(&path, serde_json::to_vec(&orphaned).unwrap()).unwrap();
+    let (loaded, _) = Store::load(&path).unwrap();
+    assert!(loaded.grok_connections.is_empty() && loaded.dsh_models.is_empty());
+    store.edit(Edit::DeleteProvider { id }, false).unwrap();
+    assert!(store.grok_connections.is_empty() && store.dsh_models.is_empty());
+}

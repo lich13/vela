@@ -247,7 +247,7 @@ pub(super) async fn forward(
         parts,
         body.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync(),
     );
-    let ticket = freeze.request();
+    let ticket = freeze.request(freeze::Scope::Antigravity);
     ticket.waiting();
     let mut changes = ticket.subscribe();
     let mut stop = session.stop.subscribe();

@@ -86,6 +86,8 @@ pub struct AntigravityAccountItem {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AntigravityAuthState {
+    #[serde(skip)]
+    pub oauth_added: bool,
     pub accounts: Vec<AntigravityAccountItem>,
     pub mode: AuthMode,
     pub enable_adc: bool,
@@ -760,6 +762,7 @@ fn state_with_oauth(
 ) -> Result<(AntigravityAuthState, bool)> {
     let (mut vault, mut vault_rev) = load_vault(paths)?;
     let (mut dirty, mut clean) = (false, true);
+    let mut oauth_added = false;
     let (mut oauth_auth_method, mut oauth_email, mut oauth_digest) = (None, None, None);
     if let Some(raw) = oauth_raw {
         match parse_oauth_metadata(&raw) {
@@ -784,6 +787,7 @@ fn state_with_oauth(
                     let meta = (email.clone(), None);
                     let id = vault.push_new(name, AccountKind::Oauth, &auth_method, meta, raw);
                     vault.active_oauth_id = Some(id);
+                    oauth_added = true;
                     dirty = true;
                 }
                 oauth_auth_method = Some(auth_method);
@@ -892,6 +896,7 @@ fn state_with_oauth(
         })
         .collect::<Result<_>>()?;
     let mut state = AntigravityAuthState {
+        oauth_added,
         accounts,
         mode,
         enable_adc,
@@ -1721,11 +1726,18 @@ async fn run_blocking(
     result
 }
 #[tauri::command]
-pub async fn get_antigravity_auth_state(r: R<'_>) -> Result<AntigravityAuthState> {
+pub async fn get_antigravity_auth_state(
+    app: tauri::AppHandle,
+    r: R<'_>,
+) -> Result<AntigravityAuthState> {
     let data = r.data.clone();
-    tauri::async_runtime::spawn_blocking(move || with_lock(|| state_at(&Paths::resolve(&data)?)))
-        .await
-        .map_err(|_| err(code::PROCESS, "读取 Antigravity 账号任务异常中断"))?
+    let state = tauri::async_runtime::spawn_blocking(move || {
+        with_lock(|| state_at(&Paths::resolve(&data)?))
+    })
+    .await
+    .map_err(|_| err(code::PROCESS, "读取 Antigravity 账号任务异常中断"))??;
+    crate::emit_antigravity_auth_state(&app, &state);
+    Ok(state)
 }
 #[tauri::command]
 pub async fn add_antigravity_adc(

@@ -696,3 +696,32 @@ async fn initial_claude_import_is_read_only_and_deleted_providers_stay_deleted_a
     assert_eq!(file_hash(codex_home.join("auth.json")), before[1]);
     assert_eq!(file_hash(claude_home.join("settings.json")), before[2]);
 }
+
+#[tokio::test]
+async fn freezing_codex_keeps_claude_requests_running_and_resume_dispatches_codex() {
+    let port = server(|_| async { Response::new(full("fixture")) }).await;
+    let url = format!("http://127.0.0.1:{port}");
+    let f = dual_fixture(vec![url.clone()], vec![url]).await;
+    f.codex
+        .start(&f.codex.view().revision, &f.codex_home)
+        .await
+        .unwrap();
+    f.claude
+        .start(&f.claude.view().revision, &f.claude_home)
+        .await
+        .unwrap();
+    let gate = f.codex.freeze_gate();
+    gate.set_selected(Some(ClientId::Codex), true).unwrap();
+    let task = {
+        let g = f.codex.clone();
+        tokio::spawn(async move { response_bytes(&g, "/v1/responses").await })
+    };
+    wait_until(|| f.codex.view().waiting_requests == 1).await;
+    assert_eq!(response_bytes(&f.claude, "/v1/messages").await, "fixture");
+    assert!(!task.is_finished());
+    gate.schedule(ClientId::Codex, Some(2000), 1000).unwrap();
+    gate.resume_due(2000);
+    assert_eq!(task.await.unwrap(), "fixture");
+    f.codex.stop().await.unwrap();
+    f.claude.stop().await.unwrap();
+}

@@ -1791,7 +1791,10 @@ impl<'a> Session<'a> {
         request_budget: &'a super::wait_budget::WaitBudget,
         first: Frame,
     ) -> Result<Option<Session<'a>>, Failure> {
-        let traffic = g.0.registry.freeze.request();
+        let traffic =
+            g.0.registry
+                .freeze
+                .request(super::freeze::Scope::Client(g.client_id()));
         traffic.waiting();
         request_budget.attach_traffic(&traffic);
         let turn_rules = g
@@ -3582,7 +3585,12 @@ impl<'a> Session<'a> {
             self.pending_received_at = crate::usage::model::now();
             self.pending_started = tokio::time::Instant::now();
             self.pending = Some(frame);
-            let ticket = self.g.0.registry.freeze.request();
+            let ticket = self
+                .g
+                .0
+                .registry
+                .freeze
+                .request(super::freeze::Scope::Client(self.g.client_id()));
             ticket.waiting();
             self.pending_traffic = Some(ticket);
         } else if let Err(e) = send_to_upstream(&mut self.upstream, frame).await {

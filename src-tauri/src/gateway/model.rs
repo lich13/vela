@@ -455,6 +455,12 @@ impl Store {
         store
             .provider_endpoints
             .retain(|id, _| store.providers.iter().any(|p| &p.id == id));
+        store
+            .grok_connections
+            .retain(|id, _| store.providers.iter().any(|p| &p.id == id));
+        store
+            .dsh_models
+            .retain(|id, _| store.providers.iter().any(|p| &p.id == id));
         for p in &store.providers {
             if let Some(values) = store.provider_endpoints.get_mut(&p.id) {
                 *values = endpoint_urls(&p.base_url, values, store.settings.port)?;
@@ -690,7 +696,6 @@ impl Store {
                 let values = endpoint_urls(&primary, &base_urls, self.settings.port)?;
                 if values.is_empty() {
                     self.provider_endpoints.remove(&id);
-                    self.grok_connections.remove(&id);
                 } else {
                     self.provider_endpoints.insert(id, values);
                 }
@@ -720,6 +725,7 @@ impl Store {
             }
             Edit::DeleteProvider { id } => {
                 self.quota_access_tokens.remove(&id);
+                self.grok_connections.remove(&id);
                 self.providers.retain(|p| p.id != id);
                 self.dsh_models.remove(&id);
                 self.provider_endpoints.remove(&id);

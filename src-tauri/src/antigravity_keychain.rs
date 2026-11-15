@@ -3,6 +3,8 @@ use super::{decode_keyring, encode_keyring, err};
 use crate::{errors::code, storage::Result};
 use objc2_core_foundation::{CFBoolean, CFData, CFDictionary, CFRetained, CFString, CFType};
 use objc2_security::{
+    errSecAuthFailed as ERR_SEC_AUTH_FAILED,
+    errSecInteractionNotAllowed as ERR_SEC_INTERACTION_NOT_ALLOWED,
     errSecItemNotFound as ERR_SEC_ITEM_NOT_FOUND, errSecSuccess as ERR_SEC_SUCCESS,
     kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecMatchLimit,
     kSecMatchLimitOne, kSecReturnData, kSecValueData, SecItemAdd, SecItemCopyMatching,
@@ -82,7 +84,14 @@ pub(super) fn read(interactive: bool) -> Result<Option<String>> {
                         .ok()
                         .and_then(decode_keyring))
                 }
-                _ => Err(fail()),
+                ERR_SEC_INTERACTION_NOT_ALLOWED | ERR_SEC_AUTH_FAILED => Err(err(
+                    code::AUTH,
+                    "macOS 钥匙串尚未授权或已锁定，请在 Antigravity 账号页刷新授权",
+                )),
+                status => Err(err(
+                    code::AUTH,
+                    &format!("无法读取 macOS 钥匙串中的 Antigravity 登录凭据（系统错误 {status}）"),
+                )),
             }
         }
     })

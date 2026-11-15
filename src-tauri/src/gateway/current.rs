@@ -27,7 +27,6 @@ pub struct Current {
     pub warning: Option<String>,
     pub provider_name: Option<String>,
     pub address: Option<String>,
-    pub address_source: Option<String>,
     pub protocol: Option<super::provider_protocol::Protocol>,
 }
 impl Current {
@@ -39,7 +38,6 @@ impl Current {
             warning: None,
             provider_name: None,
             address: None,
-            address_source: None,
             protocol: None,
         }
     }
@@ -144,7 +142,6 @@ pub(super) fn grok_effective(
                     .get("name")
                     .and_then(toml_edit::Item::as_str)
                     .and_then(crate::events::safe_message);
-                current.address_source = profile.address_source.map(str::to_owned);
                 current.address =
                     super::grok_import::safe_address(profile.pair.base_url.as_deref());
                 current

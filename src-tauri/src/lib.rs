@@ -101,6 +101,7 @@ pub(crate) struct DrainedMainEvents {
     pricing_state: bool,
     usage_state: bool,
     config_states: Vec<serde_json::Value>,
+    antigravity_auth: Option<antigravity::auth::AntigravityAuthState>,
 }
 
 #[derive(Default)]
@@ -108,11 +109,18 @@ pub(crate) struct PendingMainEvents {
     app_event: Mutex<Option<events::Change>>,
     notification_state: Mutex<Option<notifications::State>>,
     config_states: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
+    antigravity_auth: Mutex<Option<antigravity::auth::AntigravityAuthState>>,
     provider_tests: AtomicBool,
     pricing_state: AtomicBool,
     usage_state: AtomicBool,
 }
 impl PendingMainEvents {
+    fn record_antigravity_auth(&self, state: &antigravity::auth::AntigravityAuthState) {
+        let mut slot = self.antigravity_auth.lock();
+        let mut next = state.clone();
+        next.oauth_added |= slot.as_ref().is_some_and(|s| s.oauth_added);
+        *slot = Some(next);
+    }
     fn record_signal(&self, signal: MainSignal) {
         match signal {
             MainSignal::ProviderTests => self.provider_tests.store(true, Ordering::Relaxed),
@@ -153,6 +161,7 @@ impl PendingMainEvents {
             .into_values()
             .collect();
         DrainedMainEvents {
+            antigravity_auth: self.antigravity_auth.lock().take(),
             app_event,
             notification_state,
             provider_tests,
@@ -301,6 +310,19 @@ pub(crate) fn emit_main_config_state(
         r.pending_main.record_config_state(client_key, payload);
     }
 }
+pub(crate) fn emit_antigravity_auth_state(
+    app: &tauri::AppHandle,
+    state: &antigravity::auth::AntigravityAuthState,
+) {
+    if let Some(window) = main_visible_window(app) {
+        let _ = window.emit("antigravity-auth-state", state);
+        if state.oauth_added {
+            let _ = window.emit("switch-notice", "新账号已自动加入切换列表");
+        }
+    } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
+        r.pending_main.record_antigravity_auth(state);
+    }
+}
 pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     let Some(window) = app.get_webview_window(label) else {
         return;
@@ -310,6 +332,12 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     };
     let was_visible = r.mark_window_visible(label, true);
     if let Some(drained) = r.pending_main.drain_for_window(label) {
+        if let Some(state) = drained.antigravity_auth {
+            let _ = window.emit("antigravity-auth-state", &state);
+            if state.oauth_added {
+                let _ = window.emit("switch-notice", "新账号已自动加入切换列表");
+            }
+        }
         if let Some(change) = drained.app_event {
             let _ = window.emit("app-event", &change);
         }
@@ -408,7 +436,10 @@ enum ProviderAction {
     Testing,
 }
 fn valid_main_page(page: &str) -> bool {
-    ["accounts", "config", "gateway", "logs", "usage", "settings"].contains(&page)
+    [
+        "accounts", "config", "gateway", "freeze", "logs", "usage", "settings",
+    ]
+    .contains(&page)
 }
 #[tauri::command]
 fn open_main(
@@ -468,7 +499,7 @@ fn emit_account_sync_diagnostic(diagnostics: &events::Service, state: &ViewState
             .as_ref()
             .is_some_and(|s| matches!(s.state.as_str(), "invalid" | "missing" | "error"));
     if should_emit {
-        diagnostics.emit(events::Record::new(
+        let mut record = events::Record::new(
             Some(gateway::ClientId::Codex),
             None,
             None,
@@ -476,7 +507,13 @@ fn emit_account_sync_diagnostic(diagnostics: &events::Service, state: &ViewState
             events::Action::Stopped,
             None,
             None,
-        ));
+        );
+        record.details.local_code = Some(code::AUTH.into());
+        record.details.message = state
+            .error
+            .clone()
+            .or_else(|| state.auth_sync.as_ref().map(|s| s.message.clone()));
+        diagnostics.emit(record);
     }
     should_emit
 }
@@ -1096,9 +1133,24 @@ fn get_gateway_freeze(r: tauri::State<'_, Arc<Runtime>>) -> gateway::freeze::Vie
 #[tauri::command]
 fn set_gateway_frozen(
     frozen: bool,
+    client_id: Option<gateway::ClientId>,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::freeze::View> {
-    r.gateway.freeze_gate().set(frozen)
+    let gate = r.gateway.freeze_gate();
+    match client_id {
+        Some(client) => gate.set_selected(Some(client), frozen),
+        None => gate.set(frozen),
+    }
+}
+#[tauri::command]
+fn set_gateway_freeze_resume(
+    client_id: gateway::ClientId,
+    resume_at: Option<i64>,
+    r: tauri::State<'_, Arc<Runtime>>,
+) -> Result<gateway::freeze::View> {
+    r.gateway
+        .freeze_gate()
+        .schedule(client_id, resume_at, usage::model::now())
 }
 #[tauri::command]
 fn get_gateway(
@@ -1582,7 +1634,18 @@ pub fn run() {
             let freeze_runtime = runtime.clone();
             tauri::async_runtime::spawn(async move {
                 let mut power_attempted = false;
-                while freeze_events.changed().await.is_ok() {
+                loop {
+                    let next = freeze.next_resume();
+                    tokio::select! {
+                        changed = freeze_events.changed() => if changed.is_err() { break; },
+                        _ = async {
+                            if let Some(at) = next {
+                                let delay = at.saturating_sub(usage::model::now()).max(0) as u64;
+                                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                            } else { std::future::pending::<()>().await; }
+                        } => {},
+                    }
+                    freeze.resume_due(usage::model::now());
                     let view = freeze.view();
                     for window in visible_windows(&freeze_app) {
                         let _ = window.emit("gateway-freeze", &view);
@@ -1804,6 +1867,7 @@ pub fn run() {
                     if runtime.quitting.load(Ordering::Relaxed) {
                         break;
                     }
+                    runtime.gateway.freeze_gate().resume_due(usage::model::now());
                     match poll_account_state_step(
                         &runtime.core,
                         &runtime.gateway,
@@ -1878,18 +1942,22 @@ pub fn run() {
                             if let Some(auth_state) = state {
                                 if agy_auth_revision.as_ref() != Some(&auth_state.revision) {
                                     agy_auth_revision = Some(auth_state.revision.clone());
-                                    let _ = handle.emit("antigravity-auth-state", auth_state);
+                                    emit_antigravity_auth_state(&handle, &auth_state);
                                 }
                             }
                         }
                         Err(error) => {
-                            let error = format!("{}:{}", error.code, error.message);
-                            if agy_auth_error.as_ref() != Some(&error) {
-                                agy_auth_error = Some(error);
-                                runtime.diagnostics.emit(events::Record::new(
+                            let signature = format!("{}:{}", error.code, error.message);
+                            if agy_auth_error.as_ref() != Some(&signature) {
+                                agy_auth_error = Some(signature);
+                                let mut record = events::Record::new(
                                     None, None, None, events::Reason::AccountSync,
                                     events::Action::Stopped, None, None,
-                                ));
+                                );
+                                record.client_id = Some(events::JournalClient::External(events::ExternalClient::Antigravity));
+                                record.details.local_code = Some(error.code);
+                                record.details.message = Some(error.message);
+                                runtime.diagnostics.emit(record);
                             }
                         }
                     }
@@ -2033,6 +2101,7 @@ pub fn run() {
             get_gateway,
             get_gateway_freeze,
             set_gateway_frozen,
+            set_gateway_freeze_resume,
             cancel_gateway_wait,
             preview_grok_import,
             get_gateway_models,
@@ -2130,7 +2199,9 @@ mod page_whitelist_tests {
 
     #[test]
     fn allows_usage_and_all_primary_pages_while_rejecting_unknown_pages() {
-        for page in ["accounts", "config", "gateway", "logs", "usage", "settings"] {
+        for page in [
+            "accounts", "config", "gateway", "freeze", "logs", "usage", "settings",
+        ] {
             assert!(valid_main_page(page), "{page} should be allowed");
         }
         assert!(!valid_main_page("invalid"));
@@ -2358,6 +2429,21 @@ mod page_whitelist_tests {
                 .iter()
                 .any(|item| item.record.reason == events::Reason::AccountSync)
             {
+                let record = &page
+                    .items
+                    .iter()
+                    .find(|item| item.record.reason == events::Reason::AccountSync)
+                    .unwrap()
+                    .record;
+                assert_eq!(
+                    record.details.local_code.as_deref(),
+                    Some(crate::errors::code::AUTH)
+                );
+                assert!(record
+                    .details
+                    .message
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty()));
                 break;
             }
             assert!(

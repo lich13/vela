@@ -17,6 +17,8 @@ vi.mock("./bridge", () => ({
 }));
 import QuickFreeze from "./QuickFreeze";
 const idle: GatewayFreeze = {
+  partial: false,
+  clients: [],
   frozen: false,
   draining: 0,
   receiving: 0,
@@ -105,6 +107,16 @@ it("keeps newer events when initial or command responses arrive late", async () 
   expect(screen.getByText("未冻结")).toBeInTheDocument();
   view.unmount();
   expect(mock.listeners.size).toBe(0);
+});
+
+it("shows partial freeze without the safe-sleep state or ice layer", async () => {
+  const view = render(<QuickFreeze surface="main" />);
+  await screen.findByText("未冻结");
+  act(() => mock.listeners.get("gateway-freeze")?.({ ...idle, partial: true }));
+  expect(screen.getByText("部分冻结")).toBeInTheDocument();
+  expect(screen.queryByText("可休眠")).not.toBeInTheDocument();
+  expect(view.container.querySelector(".freeze-effect")).toBeNull();
+  expect(screen.getByRole("button", { name: "全局冻结" })).toBeEnabled();
 });
 
 it("retries failed reads and refreshes status when the panel reopens", async () => {

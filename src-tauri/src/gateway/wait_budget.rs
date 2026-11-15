@@ -376,7 +376,9 @@ mod tests {
         let registry = Registry::new(broadcast::channel(16).0);
         let budget = WaitBudget::tracked(10, &registry);
         let gate = crate::gateway::freeze::Gate::default();
-        let traffic = gate.request();
+        let traffic = gate.request(crate::gateway::freeze::Scope::Client(
+            crate::gateway::ClientId::Codex,
+        ));
         traffic.waiting();
         budget.begin();
         budget.attach_traffic(&traffic);

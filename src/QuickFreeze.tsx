@@ -3,13 +3,13 @@ import { Pause, Play } from "lucide-react";
 import { command } from "./bridge";
 import type { GatewayFreeze } from "./bridge-contracts";
 import { subscriptions } from "./subscriptions";
-import { errorOf } from "./types";
+import { errorOf, type ClientId } from "./types";
 
 const FREEZE_DURATION_MS = 1500;
 const THAW_DURATION_MS = 860;
 const CORNERS = ["nw", "ne", "se", "sw"] as const;
 
-function useGatewayFreeze(surface: "quick" | "main") {
+export function useGatewayFreeze(surface: "quick" | "main") {
   const [state, setState] = useState<GatewayFreeze | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -92,45 +92,77 @@ function useGatewayFreeze(surface: "quick" | "main") {
     ? "red"
     : !state
       ? "neutral"
-      : !state.frozen
-        ? "green"
-        : draining
-          ? "yellow"
-          : "ice";
+      : state.partial
+        ? "yellow"
+        : !state.frozen
+          ? "green"
+          : draining
+            ? "yellow"
+            : "ice";
   const label = error
     ? "状态异常"
     : !state
       ? "读取状态"
-      : !state.frozen
-        ? "未冻结"
-        : draining
-          ? "等待收尾"
-          : "可休眠";
-  const toggle = async () => {
-    if (locked.current || draining) return;
-    if (!state || error) {
-      setState(null);
-      setError("");
-      setRefresh((value) => value + 1);
-      return;
-    }
+      : state.partial
+        ? "部分冻结"
+        : !state.frozen
+          ? "未冻结"
+          : draining
+            ? "等待收尾"
+            : "可休眠";
+  const edit = async (action: () => Promise<GatewayFreeze>) => {
+    if (locked.current) return;
     locked.current = true;
     setBusy(true);
-    setError("");
     const current = version.current;
     try {
-      const next = await command("set_gateway_frozen", {
-        frozen: !state.frozen,
-      });
+      const next = await action();
       if (current === version.current) accept(next, true);
-    } catch (e) {
-      setError(errorOf(e).message);
+      setError("");
     } finally {
       locked.current = false;
       setBusy(false);
     }
   };
-  return { state, busy, error, draining, tone, label, toggle, motion };
+  const setFrozen = (frozen: boolean, clientId?: ClientId) =>
+    edit(() =>
+      command(
+        "set_gateway_frozen",
+        clientId ? { frozen, clientId } : { frozen },
+      ),
+    );
+  const setResume = (clientId: ClientId, resumeAt: number | null) =>
+    edit(() => command("set_gateway_freeze_resume", { clientId, resumeAt }));
+  const retry = () => {
+    setState(null);
+    setError("");
+    setRefresh((value) => value + 1);
+  };
+  const toggle = async () => {
+    if (locked.current || draining) return;
+    if (!state || error) {
+      retry();
+      return;
+    }
+    try {
+      await setFrozen(!state.frozen);
+    } catch (e) {
+      setError(errorOf(e).message);
+    }
+  };
+  return {
+    state,
+    busy,
+    error,
+    draining,
+    tone,
+    label,
+    toggle,
+    motion,
+    setFrozen,
+    setResume,
+    retry,
+  };
 }
 
 function IceLayer({

@@ -101,8 +101,11 @@ function QuickContent({
     });
     let frozen = false;
     watch("gateway-freeze", (state) => {
-      if (frozen === state.frozen) return;
-      frozen = state.frozen;
+      const selectedFrozen = state.clients.find(
+        (c) => c.clientId === clientId,
+      )!.frozen;
+      if (frozen === selectedFrozen) return;
+      frozen = selectedFrozen;
       const request = ++gatewaySequence;
       void command("get_gateway", { clientId })
         .then((next) => {
