@@ -1241,18 +1241,29 @@ pub fn delete_account_at(paths: &Paths, id: &str, rev: &str) -> Result<Antigravi
                 paths.agswitch_adc_file(),
             ],
         };
+        let holds_target = |raw: &str| {
+            let d = payload_digest(raw);
+            let em = (target.kind == AccountKind::Oauth)
+                .then(|| parse_oauth_metadata(raw).ok()?.1)
+                .flatten();
+            let adc_value_matches = target.kind == AccountKind::Adc
+                && serde_json::from_str::<Value>(raw)
+                    .ok()
+                    .zip(serde_json::from_str::<Value>(&target.payload).ok())
+                    .is_some_and(|(a, b)| a == b);
+            entry_matches(&target, Some(&d), em.as_deref()) || adc_value_matches
+        };
+        // The login left behind by an account that is not in use lives where
+        // the app reads it: the keychain on macOS, the token file elsewhere.
+        if target.kind == AccountKind::Oauth
+            && paths.keychain()
+            && keychain_oauth()?.is_some_and(|raw| holds_target(&raw))
+        {
+            set_keychain_oauth(None)?;
+        }
         for f in candidates {
             if let Some(raw) = read_text_optional(&f)? {
-                let d = payload_digest(&raw);
-                let em = (target.kind == AccountKind::Oauth)
-                    .then(|| parse_oauth_metadata(&raw).ok()?.1)
-                    .flatten();
-                let adc_value_matches = target.kind == AccountKind::Adc
-                    && serde_json::from_str::<Value>(&raw)
-                        .ok()
-                        .zip(serde_json::from_str::<Value>(&target.payload).ok())
-                        .is_some_and(|(a, b)| a == b);
-                if entry_matches(&target, Some(&d), em.as_deref()) || adc_value_matches {
+                if holds_target(&raw) {
                     let meta = fs::symlink_metadata(&f).map_err(storage::io_error)?;
                     if meta.file_type().is_symlink() || !meta.is_file() {
                         return Err(err(code::SYMLINK, "拒绝删除非普通文件或符号链接的凭据文件"));
