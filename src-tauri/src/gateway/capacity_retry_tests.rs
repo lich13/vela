@@ -1209,6 +1209,9 @@ async fn shared_wait_budget_stops_capacity_backoff_and_releases_admission() {
     .await
     .unwrap();
     assert_eq!(response.status(), 504);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("RETRY_BUDGET_EXHAUSTED"));
+    assert!(!String::from_utf8_lossy(&body).contains("FIRST_BYTE_TIMEOUT"));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     until(|| g.view().waiting_requests == 0).await;
     assert_eq!(g.0.admission.counts().0.values().sum::<usize>(), 0);

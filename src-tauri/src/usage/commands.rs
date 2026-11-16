@@ -7,6 +7,21 @@ pub fn get_usage_state(r: R<'_>) -> State {
     r.usage.state()
 }
 #[tauri::command]
+pub fn calculate_usage_cost(
+    input: super::calculator::Input,
+) -> Result<super::calculator::Calculation> {
+    super::calculator::calculate(input)
+}
+#[tauri::command]
+pub async fn get_usage_calculator_totals(r: R<'_>, filter: Filter) -> Result<Totals> {
+    let service = r.usage.clone();
+    tokio::task::spawn_blocking(move || {
+        service.read(|db| super::query::calculator_totals(&db.connection, &filter))
+    })
+    .await
+    .map_err(|_| failure("用量查询中断"))?
+}
+#[tauri::command]
 pub async fn get_usage_dashboard(r: R<'_>, filter: Filter) -> Result<store::Dashboard> {
     let s = r.usage.clone();
     tokio::task::spawn_blocking(move || s.read(|db| db.dashboard(&filter)))

@@ -1564,6 +1564,10 @@ mod tests {
                     take_new_threads: false,
                     search_only: false,
                     end_on_message_stop: false,
+                    filter_count_tokens: false,
+                    buffer_complete_response: false,
+                    endless_mode: false,
+                    upstream_retry_seconds: 5,
                 })
                 .collect();
             self.prepare_inner(

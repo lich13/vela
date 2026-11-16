@@ -1,4 +1,6 @@
+mod claude_stream;
 pub mod gemini;
+mod response_decoder;
 use crate::errors::code;
 #[cfg(test)]
 mod api_login_tests;
@@ -162,6 +164,10 @@ pub struct ProviderView {
     pub take_new_threads: bool,
     pub search_only: bool,
     pub end_on_message_stop: bool,
+    pub filter_count_tokens: bool,
+    pub buffer_complete_response: bool,
+    pub endless_mode: bool,
+    pub upstream_retry_seconds: u64,
 }
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -402,13 +408,22 @@ impl Route {
         circuit.set_single_provider_protection(self.provider_circuit.protection());
         Some(circuit)
     }
+    fn endless(&self) -> bool {
+        self.client_id == ClientId::Claude && self.provider.endless_mode
+    }
     fn health_for(&self, requirement: &routing::Requirement) -> Health {
-        let provider = self.provider_circuit.health();
+        let available = |mut health: Health| {
+            if self.endless() && health.cooldown_reason.as_deref() != Some("hard_rejection") {
+                health.available = true;
+            }
+            health
+        };
+        let provider = available(self.provider_circuit.health());
         if !provider.available {
             return provider;
         }
         self.model_circuit(requirement)
-            .map(|c| c.health())
+            .map(|c| available(c.health()))
             .unwrap_or(provider)
     }
 }
@@ -746,6 +761,10 @@ impl Gateway {
                 Edit::SaveProvider {
                     search_only: None,
                     end_on_message_stop: None,
+                    filter_count_tokens: None,
+                    buffer_complete_response: None,
+                    endless_mode: None,
+                    upstream_retry_seconds: None,
                     quota_access_token: None,
                     id: None,
                     base_url,
@@ -939,6 +958,10 @@ impl Gateway {
                         take_new_threads: p.take_new_threads,
                         search_only: p.search_only,
                         end_on_message_stop: p.end_on_message_stop,
+                        filter_count_tokens: p.filter_count_tokens,
+                        buffer_complete_response: p.buffer_complete_response,
+                        endless_mode: p.endless_mode,
+                        upstream_retry_seconds: p.upstream_retry_seconds,
                         active_requests: occupied.get(&p.id).copied().unwrap_or(0),
                         quota_checking,
                         quota_check,
@@ -1187,6 +1210,8 @@ impl Gateway {
                 takeover::grok_unchanged(&self.0.data, text)?
             } else {
                 current == takeover::pair_for(self.0.client, text)?
+                    && (self.0.client != ClientId::Claude
+                        || takeover::claude_hint_unchanged(&self.0.data, home, text)?)
             };
             if !unchanged {
                 return Err(AppError::new(
@@ -1410,6 +1435,10 @@ impl Gateway {
                     Edit::SaveProvider {
                         search_only: None,
                         end_on_message_stop: None,
+                        filter_count_tokens: None,
+                        buffer_complete_response: None,
+                        endless_mode: None,
+                        upstream_retry_seconds: None,
                         quota_access_token: None,
                         id: None,
                         base_url,

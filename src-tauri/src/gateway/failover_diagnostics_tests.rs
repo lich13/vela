@@ -827,6 +827,10 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
         Edit::SaveProvider {
             search_only: None,
             end_on_message_stop: None,
+            filter_count_tokens: None,
+            buffer_complete_response: None,
+            endless_mode: None,
+            upstream_retry_seconds: None,
             quota_access_token: None,
             id: Some(backup_id.clone()),
             base_url: providers[1].base_url.clone(),

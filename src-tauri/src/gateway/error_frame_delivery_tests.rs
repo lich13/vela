@@ -70,6 +70,10 @@ async fn run_case(streaming: bool, ending: ConsumerEnd) -> (u8, bool, Vec<String
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: base,

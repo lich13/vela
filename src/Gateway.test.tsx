@@ -731,9 +731,11 @@ describe("client isolation", () => {
     });
     await user.click(screen.getByRole("button", { name: "添加" }));
     const dialog = screen.getByRole("dialog", { name: "添加供应商" });
-    expect(within(dialog).getByRole("checkbox", {
-      name: "收到 message_stop 后立即结束响应",
-    })).not.toBeChecked();
+    expect(
+      within(dialog).getByRole("checkbox", {
+        name: "收到 message_stop 后立即结束响应",
+      }),
+    ).not.toBeChecked();
     const base = within(dialog).getByLabelText("ANTHROPIC_BASE_URL");
     const token = within(dialog).getByLabelText("ANTHROPIC_AUTH_TOKEN");
     expect(token).toHaveAttribute("type", "password");
@@ -763,6 +765,10 @@ describe("client isolation", () => {
         baseUrl: "https://claude.fixture.invalid/deployment",
         token: "claude-form-fixture",
         endOnMessageStop: false,
+        filterCountTokens: false,
+        bufferCompleteResponse: false,
+        endlessMode: false,
+        upstreamRetrySeconds: 5,
       },
       expectedRevision: claudeState.revision,
     });

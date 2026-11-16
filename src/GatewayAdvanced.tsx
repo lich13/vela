@@ -71,7 +71,7 @@ export default function Advanced({
       tone: "service",
       fields: [
         ["maxRetries", "最大重试次数"],
-        ["retryBudgetSeconds", "等待与重试预算 / 秒"],
+        ["retryBudgetSeconds", "排队与重试等待 / 秒"],
         ["failureThreshold", "连续失败阈值"],
         ["transientFailureThreshold", "5xx 连续失败阈值"],
         ["successThreshold", "恢复成功次数"],

@@ -383,6 +383,20 @@ export type PricingView = {
   syncing: boolean;
   revision: string;
 };
+export type CostCalculatorInput = {
+  basePrice: string;
+  modelRatio: string;
+  outputRatio: string;
+  cacheReadRatio: string;
+  cacheWriteRatio: string;
+  groupRatio: string;
+  tokens: [number, number, number, number];
+};
+export type CostCalculation = {
+  rates: [string, string, string, string];
+  costs: [string, string, string, string];
+  total: string;
+};
 export type PricingSearchRow = {
   model: string;
   name: string | null;

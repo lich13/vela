@@ -120,13 +120,20 @@ impl Default for State {
 }
 impl State {
     fn refresh_samples(&mut self, now: Instant) {
+        let mut changed = false;
         while self
             .samples
             .front()
             .is_some_and(|(at, _)| now.saturating_duration_since(*at) >= FAILURE_WINDOW)
         {
             self.samples.pop_front();
+            changed = true;
         }
+        if changed {
+            self.recount_samples();
+        }
+    }
+    fn recount_samples(&mut self) {
         self.total = self.samples.len() as u32;
         self.failed = self
             .samples
@@ -152,8 +159,9 @@ impl State {
     }
     fn record(&mut self, kind: SampleKind) {
         let now = Instant::now();
-        self.samples.push_back((now, kind));
         self.refresh_samples(now);
+        self.samples.push_back((now, kind));
+        self.recount_samples();
     }
     fn available(&self) -> bool {
         let now = Instant::now();
@@ -232,9 +240,15 @@ impl Circuit {
             cause: s.cause.clone(),
         }
     }
+    #[cfg(test)]
     pub fn acquire(&self) -> Option<Permit> {
+        self.acquire_for(false)
+    }
+    pub(super) fn acquire_for(&self, endless: bool) -> Option<Permit> {
         let mut s = self.0.lock();
-        if !s.available() {
+        let hard = s.retry_reason == Some("hard_rejection")
+            && (s.retry_probe || s.retry_until.is_some_and(|at| at > Instant::now()));
+        if !s.available() && (!endless || hard) {
             return None;
         }
         if s.phase == CircuitState::Open {

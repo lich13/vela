@@ -20,6 +20,10 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
             edit(Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url.into(),
@@ -63,6 +67,10 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://c.invalid/sub".into(),
@@ -181,6 +189,10 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
         name: None,
         search_only: role,
         end_on_message_stop: None,
+        filter_count_tokens: None,
+        buffer_complete_response: None,
+        endless_mode: None,
+        upstream_retry_seconds: None,
     };
     assert!(gateway
         .edit(edit("invalid", Some(true)), &initial.revision, dir.path())
@@ -232,6 +244,10 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
                 name: None,
                 search_only: Some(true),
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
             },
             &claude.view().revision,
             dir.path()

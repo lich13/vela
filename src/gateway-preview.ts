@@ -32,6 +32,10 @@ const idle = {
   dshModels: null,
   searchOnly: false,
   endOnMessageStop: false,
+  filterCountTokens: false,
+  bufferCompleteResponse: false,
+  endlessMode: false,
+  upstreamRetrySeconds: 5,
 } satisfies Partial<Provider>;
 export const gatewayDemo: GatewayState = {
   clientId: "codex",
@@ -702,6 +706,13 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       if (p) {
         p.baseUrl = String(e.baseUrl);
         if (e.searchOnly !== undefined) p.searchOnly = Boolean(e.searchOnly);
+        if (e.filterCountTokens !== undefined)
+          p.filterCountTokens = Boolean(e.filterCountTokens);
+        if (e.bufferCompleteResponse !== undefined)
+          p.bufferCompleteResponse = Boolean(e.bufferCompleteResponse);
+        if (e.endlessMode !== undefined) p.endlessMode = Boolean(e.endlessMode);
+        if (e.upstreamRetrySeconds !== undefined)
+          p.upstreamRetrySeconds = Number(e.upstreamRetrySeconds);
         if (e.endOnMessageStop !== undefined)
           p.endOnMessageStop = Boolean(e.endOnMessageStop);
       } else
@@ -709,6 +720,10 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           ...structuredClone(idle),
           id: crypto.randomUUID(),
           endOnMessageStop: Boolean(e.endOnMessageStop),
+          filterCountTokens: Boolean(e.filterCountTokens),
+          bufferCompleteResponse: Boolean(e.bufferCompleteResponse),
+          endlessMode: Boolean(e.endlessMode),
+          upstreamRetrySeconds: Number(e.upstreamRetrySeconds ?? 5),
           name: new URL(String(e.baseUrl)).hostname,
           baseUrl: String(e.baseUrl),
           preferredBaseUrl: String(e.baseUrl),

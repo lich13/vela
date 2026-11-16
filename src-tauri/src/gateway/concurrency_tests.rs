@@ -95,11 +95,11 @@ async fn freeze_keeps_fifo_limits_and_budget_without_reserving_rpm_or_capacity()
 }
 
 #[tokio::test]
-async fn queue_and_provider_switches_share_the_original_wait_budget() {
+async fn queue_and_provider_switches_exclude_upstream_time_from_wait_budget() {
     let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut urls = Vec::new();
-    // Keep the combined waits above the shared budget with enough room for
-    // loopback I/O on loaded runners; a budget reset still reaches provider 3.
+    // Upstream work exceeds the local wait budget; only the one-second queue
+    // consumes it, so the third provider must still be reached.
     for delay in [1000, 3000, 0] {
         let hits = hits.clone();
         let port = server(move |_| {
@@ -147,9 +147,11 @@ async fn queue_and_provider_switches_share_the_original_wait_budget() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(response.status(), 504);
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(response.status(), 200);
+    response.into_body().collect().await.unwrap();
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
     until(|| g.view().waiting_requests == 0).await;
+    until(|| g.0.admission.counts().0.values().sum::<usize>() == 0).await;
     assert_eq!(g.0.admission.counts().0.values().sum::<usize>(), 0);
     g.stop().await.unwrap();
 }
@@ -212,6 +214,10 @@ async fn capacity_spills_over_and_returns_to_priority_without_circuit_failures()
         Edit::SaveProvider {
             search_only: None,
             end_on_message_stop: None,
+            filter_count_tokens: None,
+            buffer_complete_response: None,
+            endless_mode: None,
+            upstream_retry_seconds: None,
             quota_access_token: None,
             id: None,
             base_url: "https://new.invalid/v1".into(),
@@ -355,6 +361,10 @@ async fn rpm_windows_are_isolated_between_codex_and_claude() {
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://shared.example.test".into(),
@@ -465,6 +475,10 @@ async fn dynamic_limits_keep_slots_across_route_edits_and_do_not_oversubscribe()
         Edit::SaveProvider {
             search_only: None,
             end_on_message_stop: None,
+            filter_count_tokens: None,
+            buffer_complete_response: None,
+            endless_mode: None,
+            upstream_retry_seconds: None,
             quota_access_token: None,
             id: Some(r[0].provider.id.clone()),
             base_url: "https://changed.invalid".into(),
@@ -555,6 +569,10 @@ async fn panel_edits_preserve_live_slots_files_and_persist_queue_priority() {
         Edit::SaveProvider {
             search_only: None,
             end_on_message_stop: None,
+            filter_count_tokens: None,
+            buffer_complete_response: None,
+            endless_mode: None,
+            upstream_retry_seconds: None,
             quota_access_token: None,
             id: Some(ids[0].clone()),
             base_url: g.view().providers[1].base_url.clone(),

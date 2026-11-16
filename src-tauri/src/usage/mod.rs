@@ -3,6 +3,7 @@ mod billing;
 mod bodies;
 mod body_wire;
 mod builtin_pricing;
+mod calculator;
 pub(crate) mod claude_quota;
 #[cfg(test)]
 mod claude_stats_tests;
@@ -732,6 +733,7 @@ impl Drop for TraceInner {
     }
 }
 pub struct AttemptTrace {
+    omit_unbilled_rejection: bool,
     trace: Trace,
     attempt: Attempt,
     started: Instant,
@@ -812,6 +814,7 @@ impl Trace {
             )
         });
         AttemptTrace {
+            omit_unbilled_rejection: false,
             trace: self.clone(),
             attempt: Attempt {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -836,6 +839,9 @@ impl Trace {
     }
 }
 impl AttemptTrace {
+    pub(crate) fn omit_unbilled_rejections(&mut self) {
+        self.omit_unbilled_rejection = true;
+    }
     pub fn upstream_model(&mut self, model: Option<String>) {
         self.attempt.upstream_model = model_id(model.as_deref());
     }
@@ -1021,6 +1027,21 @@ impl Drop for AttemptTrace {
             {
                 self.attempt.usage_status = "ended_early".into();
             }
+        }
+        if self.omit_unbilled_rejection
+            && !matches!(self.attempt.outcome.as_str(), "success" | "limited")
+            && self.attempt.end.as_ref().is_some_and(|end| {
+                matches!(
+                    end.cause,
+                    EndCause::UpstreamRejected
+                        | EndCause::ApplicationError
+                        | EndCause::FirstByteTimeout
+                        | EndCause::StreamTimeout
+                )
+            })
+            && !self.attempt.tokens.has_consumption()
+        {
+            return;
         }
         self.attempt.duration_ms = self.started.elapsed().as_millis() as u64;
         self.price();

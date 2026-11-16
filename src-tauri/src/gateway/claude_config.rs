@@ -9,6 +9,7 @@ use std::ops::Range;
 const KEYS: [&str; 2] = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"];
 struct Member {
     key: String,
+    start: usize,
     span: Range<usize>,
 }
 fn invalid() -> AppError {
@@ -43,6 +44,7 @@ fn object(text: &str, start: usize) -> Result<Vec<Member>> {
         if text.as_bytes().get(at) == Some(&b'}') {
             return Ok(members);
         }
+        let start = at;
         let key: String = one(text, &mut at)?;
         skip(text, &mut at);
         if text.as_bytes().get(at) != Some(&b':') {
@@ -54,6 +56,7 @@ fn object(text: &str, start: usize) -> Result<Vec<Member>> {
         let _: serde::de::IgnoredAny = one(text, &mut at)?;
         members.push(Member {
             key,
+            start,
             span: begin..at,
         });
         skip(text, &mut at);
@@ -190,6 +193,71 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
         out.replace_range(range, &value);
     }
     Ok(out)
+}
+
+pub const HINT_HEADERS: &str = "CLAUDE_CODE_GATEWAY_HINT_HEADERS";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct HintSnapshot {
+    before: Value,
+    existed: bool,
+}
+pub(super) fn hint(text: &str) -> Result<Option<Value>> {
+    let (_, _, fields) = locations(text)?;
+    unique(&fields, HINT_HEADERS)?
+        .map(|m| serde_json::from_str(&text[m.span.clone()]).map_err(|_| invalid()))
+        .transpose()
+}
+impl HintSnapshot {
+    pub fn new(text: &str) -> Result<Self> {
+        let before = hint(text)?;
+        Ok(Self {
+            existed: before.is_some(),
+            before: before.unwrap_or(Value::Null),
+        })
+    }
+    pub fn patch(&self, text: &str, apply: bool) -> Result<String> {
+        let current = hint(text)?;
+        let enabled = Some(Value::String("1".into()));
+        let before = self.existed.then_some(self.before.clone());
+        if current != before && current != enabled {
+            return Err(AppError::new(
+                code::CONFLICT,
+                "Claude 网关提示头设置已被外部修改，已保留现场与事务记录",
+            ));
+        }
+        let target = if apply { &enabled } else { &before };
+        if &current == target {
+            return Ok(text.to_owned());
+        }
+        let (_, env, fields) = locations(text)?;
+        let mut out = text.to_owned();
+        if let Some(member) = unique(&fields, HINT_HEADERS)? {
+            if let Some(value) = target {
+                out.replace_range(member.span.clone(), &value.to_string());
+            } else {
+                let index = fields.iter().position(|m| m.start == member.start).unwrap();
+                let span = if let Some(next) = fields.get(index + 1) {
+                    member.start..next.start
+                } else if index > 0 {
+                    fields[index - 1].span.end..member.span.end
+                } else {
+                    member.start..member.span.end
+                };
+                out.replace_range(span, "");
+            }
+        } else if let Some(value) = target {
+            // The managed address/token patch creates env before this patch.
+            let (span, inserted) = insertion(
+                text,
+                env.ok_or_else(invalid)?.start,
+                &fields,
+                vec![(HINT_HEADERS.into(), value.to_string())],
+            );
+            out.replace_range(span, &inserted);
+        }
+        Ok(out)
+    }
 }
 
 // Report only identifiable overrides, never their values.

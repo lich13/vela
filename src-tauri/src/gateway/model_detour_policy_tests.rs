@@ -17,6 +17,10 @@ fn provider(id: &str, model: Option<&str>, special: bool) -> Provider {
         take_new_threads: special,
         search_only: false,
         end_on_message_stop: false,
+        filter_count_tokens: false,
+        buffer_complete_response: false,
+        endless_mode: false,
+        upstream_retry_seconds: 5,
     }
 }
 fn hints(model: &str, compacted: bool) -> RequestHints {

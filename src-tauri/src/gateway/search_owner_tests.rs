@@ -1288,7 +1288,7 @@ async fn v02523_search_heartbeats_do_not_extend_timeout_and_delivered_content_is
     }
 }
 #[tokio::test]
-async fn v02523_search_total_budget_and_cancel_stop_before_backup() {
+async fn search_upstream_timeout_is_independent_of_wait_budget_and_cancellation() {
     for cancel in [false, true] {
         let sent = Arc::new(tokio::sync::Notify::new());
         let signal = sent.clone();
@@ -1338,16 +1338,17 @@ async fn v02523_search_total_budget_and_cancel_stop_before_backup() {
             gateway.stop().await.unwrap();
         } else {
             tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(5)).await;
+            tokio::time::advance(Duration::from_secs(30)).await;
             tokio::time::resume();
             let response = tokio::time::timeout(Duration::from_secs(5), request)
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(!response.status().is_success());
+            assert!(response.status().is_success());
+            response_bytes(response).await;
             gateway.stop().await.unwrap();
         }
-        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert_eq!(hits.load(Ordering::SeqCst), usize::from(!cancel));
     }
 }
 
@@ -1366,5 +1367,9 @@ fn search_only_edit(gateway: &Gateway, id: &str) -> Edit {
         name: None,
         search_only: Some(true),
         end_on_message_stop: None,
+        filter_count_tokens: None,
+        buffer_complete_response: None,
+        endless_mode: None,
+        upstream_retry_seconds: None,
     }
 }

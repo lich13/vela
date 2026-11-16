@@ -426,7 +426,7 @@ async fn relay(relay: Relay) {
             }
             _ = request_budget.wait() => {
                 protocol.timeout("retry_budget", cfg.retry_budget_seconds);
-                protocol.finish(Some(status.as_u16()), code::FIRST_BYTE_TIMEOUT);
+                protocol.finish(Some(status.as_u16()), code::RETRY_BUDGET_EXHAUSTED);
                 disconnected = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await;
                 break;
             }
@@ -511,6 +511,17 @@ async fn relay(relay: Relay) {
                 break;
             }
         }
+    }
+    if route.endless() && !disconnected && !delivery.is_settled() && !protocol.terminal_observed() {
+        disconnected = send_error_frame(
+            &sender,
+            &mut protocol,
+            &activity,
+            &mut shutdown,
+            status.as_u16(),
+            cfg.idle_seconds,
+        )
+        .await;
     }
     // Close the body channel before waiting: Hyper must see its end in
     // order to flush the final chunk/trailers. Socket completion is local
@@ -756,7 +767,23 @@ async fn plan(
             .get(header::ACCEPT)
             .is_some_and(|h| h.as_bytes().windows(17).any(|w| w == b"text/event-stream"));
     let mut model = hints.as_ref().ok().and_then(|h| h.model.clone());
-    let compaction_trigger = hints.as_ref().is_ok_and(|h| h.compaction_trigger);
+    let compaction_trigger = (gateway.client_id() != super::ClientId::Claude
+        && hints.as_ref().is_ok_and(|h| h.compaction_trigger))
+        || (gateway.client_id() == super::ClientId::Claude
+            && parts.method == hyper::Method::POST
+            && matches!(
+                parts.uri.path().trim_end_matches('/'),
+                "/messages" | "/v1/messages"
+            )
+            && ["x-claude-code-compaction", "x-cc-compaction-request"]
+                .iter()
+                .any(|key| {
+                    parts
+                        .headers
+                        .get(*key)
+                        .and_then(|h| h.to_str().ok())
+                        .is_some_and(|v| !v.is_empty() && v != "0" && v != "false")
+                }));
     let mut pinned = (mode == "manual").then(|| ids.first().cloned()).flatten();
     let mut unknown_affinity = false;
     let continuation = match &hints {
@@ -1079,8 +1106,117 @@ struct Exchange<'a> {
     transient_retries: u8,
     retry_owner: Option<String>,
     search_fallback: bool,
+    claude_owner: Option<String>,
 }
 impl Exchange<'_> {
+    async fn claude_retry(
+        &mut self,
+        mut attempt: Attempt,
+        status: Option<u16>,
+        kind: &'static str,
+        mut details: crate::events::Details,
+        retry_after: Option<Duration>,
+    ) -> End {
+        let route = attempt.route.clone();
+        let infinite = route.endless();
+        let can_retry = infinite || self.ordinary_attempts <= self.settings.max_retries;
+        let delay = Duration::from_secs(if infinite {
+            route.provider.upstream_retry_seconds
+        } else {
+            self.settings.rate_limit_seconds
+        })
+        .max(retry_after.unwrap_or_default());
+        details.local_code.get_or_insert(kind.into());
+        details.wait_seconds = can_retry.then_some(delay.as_secs());
+        details.phase.get_or_insert(if kind == code::NETWORK {
+            crate::events::Phase::Connect
+        } else if kind == code::FIRST_BYTE_TIMEOUT {
+            crate::events::Phase::Headers
+        } else {
+            crate::events::Phase::Response
+        });
+        details.counted_failure.get_or_insert(true);
+        let policy = super::failure_policy::decision(status, &details);
+        self.failover.failure(if status == Some(429) {
+            super::failover::Failure::RateLimit
+        } else {
+            super::failover::Failure::Transport
+        });
+        let mut event = attempt.admission.permits.prepare_report(
+            self.gateway,
+            &route,
+            self.plan.model.as_deref(),
+            if status.is_some_and(|s| s >= 400) {
+                policy.reason
+            } else {
+                Reason::Network
+            },
+            if can_retry {
+                Action::RetryingSame
+            } else {
+                Action::Returned
+            },
+            status,
+            self.attempted,
+            details.clone(),
+        );
+        event.details.wait_seconds = can_retry.then_some(delay.as_secs());
+        if matches!(
+            kind,
+            code::NETWORK
+                | code::FIRST_BYTE_TIMEOUT
+                | code::STREAM_TIMEOUT
+                | code::STREAM_INTERRUPTED
+        ) {
+            attempt
+                .admission
+                .permits
+                .failure(self.settings, retry_after);
+        } else {
+            attempt
+                .admission
+                .permits
+                .policy(self.settings, status, &details, retry_after);
+        }
+        self.last_error = Some(self.failover.report_failure(Some(&attempt.protocol), || {
+            super::health_settlement::publish(self.gateway, event)
+        }));
+        self.last_category = kind;
+        let reset_generation = attempt.reset_generation;
+        drop(attempt);
+        if !can_retry {
+            return End::Stop;
+        }
+        self.failover
+            .wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
+        self.request_budget.describe(
+            Some(&route.provider.id),
+            self.plan.model.as_deref(),
+            "retry",
+        );
+        let result = self
+            .gateway
+            .0
+            .admission
+            .wait_transient(
+                CapacitySource {
+                    provider_id: route.provider.id.clone(),
+                    reset_generation,
+                },
+                delay,
+                self.settings.max_waiting,
+            )
+            .await;
+        match result {
+            Ok(()) => {
+                self.ids = vec![route.provider.id.clone()];
+                self.retry_owner = Some(route.provider.id.clone());
+                End::Again
+            }
+            Err(Rejected::Stopped) => End::reply(stopped()),
+            Err(_) => End::Stop,
+        }
+    }
     /// The queue is empty: waits out a pending capacity cooldown and rebuilds
     /// the queue, or stops.
     async fn await_capacity(&mut self) -> End {
@@ -1371,6 +1507,10 @@ impl Exchange<'_> {
     }
     /// Takes a slot at one of the candidates.
     async fn admit(&mut self, candidates: &[Route]) -> Result<Admission, End> {
+        if candidates.len() == 1 && candidates[0].endless() {
+            self.request_budget.set_endless();
+            self.wait_budget.protect_capacity();
+        }
         let admission = match self
             .gateway
             .0
@@ -1581,6 +1721,11 @@ impl Exchange<'_> {
         let started = Instant::now();
         let mut protocol = super::protocol::Protocol::new(self.plan.stream_hint);
         protocol.attach_wait_budget(self.request_budget);
+        protocol.buffer_output(
+            route.client_id == super::ClientId::Claude
+                && route.provider.buffer_complete_response
+                && matches!(self.parts.uri.path(), "/messages" | "/v1/messages"),
+        );
         protocol.attach_failure_rules(&self.settings.custom_failure_rules);
         self.request_budget.describe(
             Some(&route.provider.id),
@@ -1613,6 +1758,9 @@ impl Exchange<'_> {
                 self.plan.stream_hint,
                 if self.websocket { "websocket" } else { "http" },
             );
+            if route.client_id == super::ClientId::Claude && route.provider.endless_mode {
+                attempt.omit_unbilled_rejections();
+            }
             attempt.upstream_model(upstream_model.clone());
             protocol.attach_usage(attempt);
         }
@@ -1671,6 +1819,21 @@ impl Exchange<'_> {
         attempt: Attempt,
         e: &(dyn std::error::Error + Send + Sync + 'static),
     ) -> End {
+        let mut attempt = attempt;
+        if attempt.route.endless()
+            && matches!(
+                connector::classify(e),
+                None | Some(
+                    connector::ConnectError::TargetConnect | connector::ConnectError::TargetTimeout
+                )
+            )
+        {
+            attempt.protocol.finish(None, code::NETWORK);
+            let details = attempt.protocol.observation.error.clone();
+            return self
+                .claude_retry(attempt, None, code::NETWORK, details, None)
+                .await;
+        }
         let Attempt {
             mut admission,
             route,
@@ -1784,7 +1947,17 @@ impl Exchange<'_> {
         End::Again
     }
     /// No response head arrived in time.
-    fn headers_timeout(&mut self, attempt: Attempt) -> End {
+    async fn headers_timeout(&mut self, mut attempt: Attempt) -> End {
+        if attempt.route.endless() {
+            attempt
+                .protocol
+                .timeout("response_headers", self.settings.first_byte_seconds);
+            attempt.protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
+            let details = attempt.protocol.observation.error.clone();
+            return self
+                .claude_retry(attempt, None, code::FIRST_BYTE_TIMEOUT, details, None)
+                .await;
+        }
         let Attempt {
             mut admission,
             route,
@@ -2005,6 +2178,54 @@ impl Exchange<'_> {
             details.health_scope = Some(crate::events::HealthScope::Provider);
         }
         let policy = super::failure_policy::decision(Some(status.as_u16()), &details);
+        if route.endless() {
+            let reply = match captured {
+                Ok(body) => Response::from_parts(response_parts, body.body()),
+                Err(_) => error(status, code::UPSTREAM_BODY, "上游错误响应未完整接收"),
+            };
+            if !model_error
+                && !policy.hard
+                && policy.retryable
+                && (status == StatusCode::TOO_MANY_REQUESTS
+                    || circuit::is_server_error(status.as_u16()))
+            {
+                self.last = Some(reply);
+                return self
+                    .claude_retry(
+                        Attempt {
+                            admission,
+                            route,
+                            protocol,
+                            reset_generation,
+                            rerouted: false,
+                            started: Instant::now(),
+                            search_deadline: tokio::time::Instant::now(),
+                        },
+                        Some(status.as_u16()),
+                        code::HTTP,
+                        details,
+                        cooldown,
+                    )
+                    .await;
+            }
+            let event = admission.permits.prepare_report(
+                self.gateway,
+                &route,
+                self.plan.model.as_deref(),
+                policy.reason,
+                Action::Returned,
+                Some(status.as_u16()),
+                self.attempted,
+                details.clone(),
+            );
+            admission
+                .permits
+                .policy(self.settings, Some(status.as_u16()), &details, cooldown);
+            self.failover.report_failure(Some(&protocol), || {
+                super::health_settlement::publish(self.gateway, event)
+            });
+            return End::reply(reply);
+        }
         let hard_rejection = policy.hard;
         if hard_rejection {
             self.hard_denied
@@ -2205,6 +2426,15 @@ impl Exchange<'_> {
         response: Response<Incoming>,
         stream: bool,
     ) -> Opening {
+        if attempt.route.client_id == super::ClientId::Claude
+            && attempt.route.provider.buffer_complete_response
+            && matches!(
+                self.parts.uri.path().trim_end_matches('/'),
+                "/messages" | "/v1/messages"
+            )
+        {
+            return self.buffered_opening(attempt, response).await;
+        }
         let status = response.status();
         let protocol = &mut attempt.protocol;
         let (started, search_deadline) = (attempt.started, attempt.search_deadline);
@@ -2376,6 +2606,89 @@ impl Exchange<'_> {
             inspected_bytes,
         }
     }
+    async fn buffered_opening(
+        &mut self,
+        attempt: &mut Attempt,
+        response: Response<Incoming>,
+    ) -> Opening {
+        let status = response.status();
+        let end_at_stop = ends_at_message_stop(&attempt.route, status, response.headers());
+        let (mut parts, mut upstream) = response.into_parts();
+        clean_headers(&mut parts.headers, false);
+        let mut deadline = tokio::time::Instant::now()
+            + Duration::from_secs(self.settings.first_byte_seconds)
+                .saturating_sub(attempt.started.elapsed());
+        let mut failure_kind = code::STREAM_INTERRUPTED;
+        let mut received = false;
+        let protocol = &mut attempt.protocol;
+        let captured = {
+            let failure_kind = &mut failure_kind;
+            let received = &mut received;
+            let request_budget = self.request_budget;
+            let compaction = self.plan.operation == crate::usage::model::Operation::Compaction;
+            let idle_seconds = self.settings.idle_seconds;
+            let frames = async_stream::try_stream! {
+                loop {
+                    match request_budget.response(deadline, compaction, upstream.frame()).await {
+                        Ok(Some(Ok(frame))) => {
+                            if frame.data_ref().is_some_and(|data| !data.is_empty()) {
+                                *received = true;
+                                deadline = tokio::time::Instant::now() + Duration::from_secs(idle_seconds);
+                            }
+                            yield frame;
+                        }
+                        Ok(None) => break,
+                        Ok(Some(Err(error))) => Err(std::io::Error::other(error))?,
+                        Err(_) => {
+                            *failure_kind = if *received { code::STREAM_TIMEOUT } else { code::FIRST_BYTE_TIMEOUT };
+                            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "上游响应超时"))?;
+                        }
+                    }
+                }
+            };
+            let mut body = StreamBody::new(Box::pin(frames)).map_err(|error: std::io::Error| error);
+            Replay::capture_until(&mut body, self.gateway.0.spool.path(), None, |data| {
+                protocol.feed(data);
+                end_at_stop && protocol.message_stopped()
+            })
+            .await
+        };
+        if captured.is_err() && failure_kind.ends_with("TIMEOUT") {
+            protocol.timeout(
+                if received {
+                    "buffer_idle"
+                } else {
+                    "first_byte"
+                },
+                if received {
+                    self.settings.idle_seconds
+                } else {
+                    self.settings.first_byte_seconds
+                },
+            );
+        }
+        let complete = protocol.finish_buffer(
+            status.as_u16(),
+            captured.as_ref().err().map(|_| failure_kind),
+            end_at_stop,
+        );
+        let (body, inspected_bytes) = captured.map_or_else(
+            |_| (replay::empty(), 0),
+            |replay| (replay.body(), replay.length),
+        );
+        Opening {
+            status,
+            parts,
+            body,
+            prefix: Vec::new(),
+            prefix_bytes: 0,
+            ended: true,
+            failed: !complete,
+            failure_kind,
+            preinspected: true,
+            inspected_bytes,
+        }
+    }
     /// The response broke off before any output, where a replay is still safe.
     async fn interrupted(
         &mut self,
@@ -2383,6 +2696,14 @@ impl Exchange<'_> {
         status: StatusCode,
         failure_kind: &'static str,
     ) -> End {
+        if attempt.route.client_id == super::ClientId::Claude
+            && (attempt.route.provider.buffer_complete_response || attempt.route.endless())
+        {
+            let details = attempt.protocol.observation.error.clone();
+            return self
+                .claude_retry(attempt, Some(status.as_u16()), failure_kind, details, None)
+                .await;
+        }
         let Attempt {
             mut admission,
             route,
@@ -2497,6 +2818,45 @@ impl Exchange<'_> {
         attempt: Attempt,
         opening: &mut Opening,
     ) -> Result<Attempt, End> {
+        if attempt.route.client_id == super::ClientId::Claude
+            && (attempt.route.endless() || attempt.route.provider.buffer_complete_response)
+            && attempt.protocol.explicit_failure()
+        {
+            let mut attempt = attempt;
+            let details = attempt.protocol.observation.error.clone();
+            let policy = super::failure_policy::decision(Some(opening.status.as_u16()), &details);
+            if !policy.hard
+                && attempt.protocol.terminal() != Some(super::protocol::Terminal::ModelUnavailable)
+                && (policy.temporary
+                    || details.error_basis == Some(crate::events::ErrorBasis::ServiceError))
+            {
+                let retry = attempt.protocol.observation.retry_after;
+                return Err(self
+                    .claude_retry(
+                        attempt,
+                        Some(opening.status.as_u16()),
+                        code::UPSTREAM_REJECTED,
+                        details,
+                        retry,
+                    )
+                    .await);
+            }
+            observe_protocol(
+                &attempt.protocol,
+                &mut attempt.admission.permits,
+                self.settings,
+                self.gateway,
+                &attempt.route,
+                self.plan.model.as_deref(),
+                Some(opening.status.as_u16()),
+                self.attempted,
+            );
+            return Err(End::reply(error(
+                StatusCode::BAD_GATEWAY,
+                code::UPSTREAM_REJECTED,
+                "上游拒绝了请求",
+            )));
+        }
         let Attempt {
             mut admission,
             route,
@@ -2760,7 +3120,14 @@ impl Exchange<'_> {
         })
     }
     /// Starts the relay task for an accepted response and returns its head.
-    fn hand_over(mut self, attempt: Attempt, opening: Opening) -> Response<WireBody> {
+    fn hand_over(mut self, mut attempt: Attempt, opening: Opening) -> Response<WireBody> {
+        if attempt.route.client_id == super::ClientId::Claude
+            && attempt.route.provider.buffer_complete_response
+            && matches!(self.parts.uri.path(), "/messages" | "/v1/messages")
+        {
+            attempt.protocol.buffer_output(false);
+            attempt.protocol.effective_output();
+        }
         let Attempt {
             admission,
             route,
@@ -2908,7 +3275,27 @@ impl Exchange<'_> {
         })
     }
 }
-async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<WireBody> {
+async fn forward(gateway: Gateway, request: Request<Incoming>) -> Response<WireBody> {
+    let managed = gateway.client_id() == super::ClientId::Claude
+        && gateway
+            .request_state()
+            .store
+            .providers
+            .iter()
+            .any(|p| p.buffer_complete_response || p.endless_mode);
+    if managed {
+        let (started, received) = tokio::sync::oneshot::channel();
+        super::claude_stream::waiting(forward_inner(gateway, request, Some(started)), received)
+            .await
+    } else {
+        forward_inner(gateway, request, None).await
+    }
+}
+async fn forward_inner(
+    gateway: Gateway,
+    mut request: Request<Incoming>,
+    mut stream_started: Option<tokio::sync::oneshot::Sender<()>>,
+) -> Response<WireBody> {
     let (settings, mode, mut ids, token, running) = {
         let s = gateway.request_state();
         let ids = if s.store.mode == "auto" {
@@ -3077,14 +3464,19 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             transient_retries: 0,
             retry_owner: None,
             search_fallback: false,
+            claude_owner: None,
         };
-        while cx.plan.dedicated_search || cx.ordinary_attempts <= cx.settings.max_retries {
+        while cx.claude_owner.is_some()
+            || cx.plan.dedicated_search
+            || cx.ordinary_attempts <= cx.settings.max_retries
+        {
             cx.traffic.waiting();
             cx.search_fallback |= cx.attempted > 0;
             // An unknown previous_response_id has no safe owner to replay against;
             // preserve the existing one-attempt rule instead of silently
             // repeating the request on an arbitrary provider.
-            if !cx.plan.dedicated_search
+            if cx.claude_owner.is_none()
+                && !cx.plan.dedicated_search
                 && ((cx.plan.unknown_affinity && !cx.capacity_protected)
                     || (cx.gateway.client_id() == super::ClientId::Claude && cx.plan.continuation))
                 && cx.attempted > 0
@@ -3095,8 +3487,52 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 end!(cx.await_capacity().await)
             }
             let (candidates, new_thread_model_denied) = step!(cx.candidates().await);
+            if candidates.len() == 1
+                && candidates[0].client_id == super::ClientId::Claude
+                && cx.plan.stream_hint
+                && (candidates[0].provider.buffer_complete_response || candidates[0].endless())
+                && matches!(
+                    cx.parts.uri.path().trim_end_matches('/'),
+                    "/messages" | "/v1/messages"
+                )
+            {
+                if let Some(started) = stream_started.take() {
+                    let _ = started.send(());
+                }
+            }
             let mut admission = step!(cx.admit(&candidates).await);
             let route = step!(cx.endpoint(&mut admission).await);
+            if route.client_id == super::ClientId::Claude
+                && route.provider.filter_count_tokens
+                && cx.parts.method == hyper::Method::POST
+                && matches!(
+                    cx.parts.uri.path().trim_end_matches('/'),
+                    "/messages/count_tokens" | "/v1/messages/count_tokens"
+                )
+            {
+                return Response::builder().status(StatusCode::NOT_FOUND)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(replay::full(Bytes::from_static(br#"{"type":"error","error":{"type":"not_found_error","message":"Token counting is not supported by this provider"}}"#))).unwrap();
+            }
+            if route.client_id == super::ClientId::Claude
+                && cx.plan.stream_hint
+                && (route.provider.buffer_complete_response || route.endless())
+                && matches!(
+                    cx.parts.uri.path().trim_end_matches('/'),
+                    "/messages" | "/v1/messages"
+                )
+            {
+                if let Some(started) = stream_started.take() {
+                    let _ = started.send(());
+                }
+            }
+            if route.endless() {
+                cx.claude_owner = Some(route.provider.id.clone());
+                cx.request_budget.set_endless();
+                cx.wait_budget.protect_capacity();
+                cx.wait_budget.pin_provider();
+                cx.ids.clear();
+            }
             let (upstream, upstream_model) = match upstream_request(
                 &route,
                 cx.parts,
@@ -3129,7 +3565,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             let response = match response {
                 Ok(Ok(response)) => response,
                 Ok(Err(e)) => end!(cx.unreached(attempt, &e).await),
-                Err(_) => end!(cx.headers_timeout(attempt)),
+                Err(_) => end!(cx.headers_timeout(attempt).await),
             };
             let status = response.status();
             let stream = response
@@ -3155,9 +3591,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 end!(cx.rejected(attempt, response).await)
             }
             let mut opening = cx.opening(&mut attempt, response, stream).await;
+            if attempt.route.endless()
+                && !attempt.route.provider.buffer_complete_response
+                && opening.ended
+                && !opening.failed
+                && matches!(cx.parts.uri.path(), "/messages" | "/v1/messages")
+            {
+                opening.failed = !attempt.protocol.finish_buffer(status.as_u16(), None, false);
+                opening.failure_kind = code::STREAM_INTERRUPTED;
+            }
             if opening.failed
                 && (cx.plan.dedicated_search
                     || attempt.route.client_id == super::ClientId::Dsh
+                    || (attempt.route.client_id == super::ClientId::Claude
+                        && (attempt.route.provider.buffer_complete_response
+                            || attempt.route.endless())
+                        && !attempt.protocol.explicit_failure())
                     || super::attempt::transport_retry(
                         opening.prefix_bytes != 0,
                         attempt.protocol.transport_failure(),
@@ -3174,10 +3623,16 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         }
         cx.exhausted()
     };
+    let mut shutdown = gateway
+        .request_state()
+        .shutdown
+        .as_ref()
+        .map(watch::Sender::subscribe);
     tokio::select! {
         biased;
+        _ = stopping(&mut shutdown) => stopped(),
         _ = request_budget.cancelled() => error(StatusCode::from_u16(499).unwrap(), code::CANCELLED, "已手动中止等待"),
-        _ = request_budget.wait() => error(StatusCode::GATEWAY_TIMEOUT, code::FIRST_BYTE_TIMEOUT, "等待与重试预算已耗尽"),
+        _ = request_budget.wait() => error(StatusCode::GATEWAY_TIMEOUT, code::RETRY_BUDGET_EXHAUSTED, "排队与重试等待预算已耗尽"),
         response = forwarding => if request_budget.cancel_requested() {
             error(StatusCode::from_u16(499).unwrap(), code::CANCELLED, "已手动中止等待")
         } else { response },

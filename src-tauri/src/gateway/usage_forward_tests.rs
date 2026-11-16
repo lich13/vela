@@ -172,6 +172,10 @@ impl Fixture {
             fixture.edit(Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url.clone(),
@@ -1350,6 +1354,10 @@ async fn lingering(
         quota_access_token: None,
         search_only: None,
         end_on_message_stop: Some(end_on_message_stop),
+        filter_count_tokens: None,
+        buffer_complete_response: None,
+        endless_mode: None,
+        upstream_retry_seconds: None,
     });
     fixture.start().await;
     (fixture, release, closed, sent, upstream)
@@ -1453,6 +1461,10 @@ async fn message_stop_uses_the_failover_target_provider_setting() {
             quota_access_token: None,
             search_only: None,
             end_on_message_stop: Some(!enabled),
+            filter_count_tokens: None,
+            buffer_complete_response: None,
+            endless_mode: None,
+            upstream_retry_seconds: None,
         });
         let providers = fixture.gateway.view().providers;
         let target_id = providers[0].id.clone();
@@ -1508,3 +1520,6 @@ async fn message_stop_uses_the_failover_target_provider_setting() {
         fixture.stop().await;
     }
 }
+
+#[path = "claude_resilience_tests.rs"]
+mod claude_resilience_tests;

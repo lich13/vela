@@ -297,6 +297,7 @@ pub fn sync(
     paths.sort();
     let mut parents = BTreeMap::new();
     let mut metadata = BTreeMap::new();
+    let mut scans = std::collections::VecDeque::new();
     let mut report = Report {
         total_files: paths.len() as u64,
         phase: "scanning".into(),
@@ -306,9 +307,10 @@ pub fn sync(
     if client == "codex" {
         for p in &paths {
             let key = safe_id(&format!("{client}:{}", p.to_string_lossy()));
-            let saved = store
-                .cursor(&key)?
-                .and_then(|s| serde_json::from_str::<Cursor>(&s).ok())
+            let saved_raw = store.cursor(&key)?;
+            let saved = saved_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Cursor>(s).ok())
                 .filter(|c| c.generation == generation);
             let st = std::fs::metadata(p).map_err(storage::io_error)?;
             let id = identity_meta(&st);
@@ -324,8 +326,8 @@ pub fn sync(
                         && file_settled(&st)
                 });
             let value = if settled_match {
-                let c = saved.unwrap();
-                (c.session, c.parent, c.fork_at)
+                let c = saved.as_ref().unwrap();
+                (c.session.clone(), c.parent.clone(), c.fork_at)
             } else {
                 let mut file = File::open(p).map_err(storage::io_error)?;
                 let id = identity(&file)?;
@@ -336,8 +338,8 @@ pub fn sync(
                     .map(|c| tail(&mut file, c.offset).map(|v| v == c.tail))
                     .transpose()?
                     .unwrap_or(false);
-                if let Some(c) = saved.filter(|_| stable) {
-                    (c.session, c.parent, c.fork_at)
+                if let Some(c) = saved.as_ref().filter(|_| stable) {
+                    (c.session.clone(), c.parent.clone(), c.fork_at)
                 } else {
                     meta(p)?
                 }
@@ -345,7 +347,12 @@ pub fn sync(
             if let Some(id) = &value.0 {
                 parents.insert(id.clone(), p.clone());
             }
-            metadata.insert(key, value);
+            metadata.insert(key.clone(), value);
+            scans.push_back(if settled_match {
+                None
+            } else {
+                Some((key, saved_raw, saved, st))
+            });
         }
     }
     let mut prefixes = BTreeMap::new();
@@ -353,14 +360,32 @@ pub fn sync(
         store.begin_rebuild(client)?;
     }
     for path in paths {
-        let key = safe_id(&format!("{client}:{}", path.to_string_lossy()));
-        let saved_raw = if rebuild { None } else { store.cursor(&key)? };
-        let saved = saved_raw
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<Cursor>(s).ok())
-            .filter(|c| c.generation == generation);
+        let (key, saved_raw, saved, scanned_meta) = match scans.pop_front() {
+            Some(None) => {
+                report.files += 1;
+                if report.files % 16 == 0 {
+                    store.progress(&report);
+                }
+                continue;
+            }
+            Some(Some((key, raw, cursor, meta))) => (
+                key,
+                if rebuild { None } else { raw },
+                if rebuild { None } else { cursor },
+                Some(meta),
+            ),
+            None => {
+                let key = safe_id(&format!("{client}:{}", path.to_string_lossy()));
+                let raw = if rebuild { None } else { store.cursor(&key)? };
+                let cursor = raw
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Cursor>(s).ok())
+                    .filter(|c| c.generation == generation);
+                (key, raw, cursor, std::fs::metadata(&path).ok())
+            }
+        };
         if !rebuild {
-            if let (Ok(st), Some(c)) = (std::fs::metadata(&path), saved.as_ref()) {
+            if let (Some(st), Some(c)) = (scanned_meta, saved.as_ref()) {
                 let modified = file_modified(&st);
                 if c.complete
                     && !modified.is_empty()

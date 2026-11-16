@@ -939,6 +939,81 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 14px;
 }
+.usage-calculator fieldset {
+  padding: 0;
+  border: 0;
+  margin: 0;
+  min-width: 0;
+}
+.usage-calculator .usage-field {
+  font-size: 13px;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.usage-calculator input,
+.usage-calculator select {
+  height: 36px;
+  font: inherit;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  box-sizing: border-box;
+}
+.usage-calculator-source {
+  display: flex;
+  align-items: end;
+  gap: 14px;
+}
+.usage-calculator-source label {
+  flex: 1;
+}
+.usage-calculator-source button {
+  height: 36px;
+  margin-bottom: 14px;
+  flex-shrink: 0;
+}
+.usage-calculator-ratios {
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.usage-calculator .usage-form-actions {
+  margin-top: 4px;
+}
+.usage-calculator-result {
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.usage-calculator-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 20px 0 14px;
+}
+.usage-calculator-total output {
+  font-size: 20px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.usage-calculator table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.usage-calculator th,
+.usage-calculator td {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.usage-calculator th:first-child {
+  text-align: left;
+}
 .usage-json {
   width: 100%;
   height: 250px;

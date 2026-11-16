@@ -718,7 +718,7 @@ export default function Usage({
           />
         </>
       ) : tab === "pricing" ? (
-        <Pricing onDirtyChange={priceDirty} />
+        <Pricing onDirtyChange={priceDirty} filter={query()} />
       ) : (
         <Ranking
           groups={

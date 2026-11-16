@@ -1,4 +1,9 @@
-import type { BillRequest, BillExport } from "./usage-types";
+import type {
+  BillRequest,
+  BillExport,
+  CostCalculatorInput,
+  CostCalculation,
+} from "./usage-types";
 // IPC contracts mirror the registered Rust commands. Credentials only cross
 // the explicit reveal/login commands and are never added to shared state.
 import type {
@@ -32,6 +37,7 @@ import type {
   PricingView,
   PricingSearchPage,
   UsageFilter,
+  Totals,
   UsagePage,
   UsageRecord,
   UsageSettings,
@@ -441,6 +447,10 @@ export type GatewayEdit =
       op: "saveProvider";
       searchOnly?: boolean;
       endOnMessageStop?: boolean;
+      filterCountTokens?: boolean;
+      bufferCompleteResponse?: boolean;
+      endlessMode?: boolean;
+      upstreamRetrySeconds?: number;
       id?: string | null;
       baseUrl: string;
       token: string;
@@ -785,6 +795,8 @@ export type CommandMap = {
   set_usage_settings: Call<{ settings: UsageSettings }, UsageState>;
   sync_usage: Call<{ rebuild?: string }, UsageState>;
   get_pricing: Call<None, PricingView>;
+  calculate_usage_cost: Call<{ input: CostCalculatorInput }, CostCalculation>;
+  get_usage_calculator_totals: Call<{ filter: UsageFilter }, Totals>;
   search_pricing: Call<
     { query: string; offset: number; limit: number },
     PricingSearchPage

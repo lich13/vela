@@ -24,6 +24,10 @@ fn v0212_provider(base_url: &str) -> Provider {
         take_new_threads: false,
         search_only: false,
         end_on_message_stop: false,
+        filter_count_tokens: false,
+        buffer_complete_response: false,
+        endless_mode: false,
+        upstream_retry_seconds: 5,
     }
 }
 
@@ -36,6 +40,10 @@ fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_pr
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: primary_raw.into(),
@@ -140,6 +148,10 @@ fn v0212_gateway_rejects_stale_edit_revision_and_persists_endpoints_across_resta
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://primary.example.invalid/v1".into(),
@@ -312,6 +324,10 @@ async fn v0212_loopback_probe_sends_no_authorization_or_business_rpm_and_keeps_e
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: format!("http://127.0.0.1:{upstream_port}/v1"),

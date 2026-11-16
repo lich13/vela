@@ -2052,6 +2052,8 @@ pub fn run() {
             usage::commands::set_usage_settings,
             usage::commands::sync_usage,
             usage::commands::get_pricing,
+            usage::commands::calculate_usage_cost,
+            usage::commands::get_usage_calculator_totals,
             usage::commands::search_pricing,
             usage::commands::get_models_dev,
             usage::commands::get_antigravity_vertex_models,

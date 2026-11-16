@@ -92,6 +92,10 @@ async fn dual_fixture(codex_urls: Vec<String>, claude_urls: Vec<String>) -> Dual
                 Edit::SaveProvider {
                     search_only: None,
                     end_on_message_stop: None,
+                    filter_count_tokens: None,
+                    buffer_complete_response: None,
+                    endless_mode: None,
+                    upstream_retry_seconds: None,
                     quota_access_token: None,
                     id: None,
                     base_url,
@@ -194,7 +198,13 @@ async fn dual_hot_switch_preserves_live_config_hashes_and_stops_to_each_selected
     );
     assert_eq!(
         std::fs::read_to_string(f.claude_home.join("settings.json")).unwrap(),
-        claude_config::patch(&original_claude, &live_claude_pair).unwrap()
+        claude_config::HintSnapshot::new(&original_claude)
+            .unwrap()
+            .patch(
+                &claude_config::patch(&original_claude, &live_claude_pair).unwrap(),
+                true
+            )
+            .unwrap()
     );
     let live_hashes = config_hashes(&f);
     assert_ne!(live_hashes[0], initial_hashes[0]);
@@ -618,6 +628,10 @@ async fn peer_gateway_urls_are_rejected_when_saved() {
                     Edit::SaveProvider {
                         search_only: None,
                         end_on_message_stop: None,
+                        filter_count_tokens: None,
+                        buffer_complete_response: None,
+                        endless_mode: None,
+                        upstream_retry_seconds: None,
                         quota_access_token: None,
                         id: None,
                         base_url: format!("http://{host}:{}/loop", peer.view().settings.port),

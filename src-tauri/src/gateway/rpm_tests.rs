@@ -52,6 +52,10 @@ fn provider(version: &str, queued: bool, max_rpm: u32) -> Provider {
         take_new_threads: false,
         search_only: false,
         end_on_message_stop: false,
+        filter_count_tokens: false,
+        buffer_complete_response: false,
+        endless_mode: false,
+        upstream_retry_seconds: 5,
     }
 }
 
@@ -354,6 +358,10 @@ async fn started_http_gateway(
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url,
@@ -420,6 +428,10 @@ async fn started_native_gateway(upstream_port: u16, max_rpm: u32) -> (tempfile::
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url,

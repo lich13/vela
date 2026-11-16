@@ -36,6 +36,10 @@ fn fixture_provider(base_url: &str) -> Provider {
         take_new_threads: false,
         search_only: false,
         end_on_message_stop: false,
+        filter_count_tokens: false,
+        buffer_complete_response: false,
+        endless_mode: false,
+        upstream_retry_seconds: 5,
     }
 }
 
@@ -203,6 +207,10 @@ async fn first_affinity_persist_failure_returns_before_sending_to_upstream() {
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: base_url.clone(),
@@ -298,6 +306,10 @@ async fn frozen_queued_probes_preserve_complete_samples_and_manual_probes_still_
                 quota_access_token: None,
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
             },
             &gateway.view().revision,
             dir.path(),

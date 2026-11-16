@@ -156,6 +156,10 @@ export type Provider = {
   takeNewThreads: boolean;
   searchOnly: boolean;
   endOnMessageStop: boolean;
+  filterCountTokens: boolean;
+  bufferCompleteResponse: boolean;
+  endlessMode: boolean;
+  upstreamRetrySeconds: number;
 };
 export type GatewayListener = {
   port: number;

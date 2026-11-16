@@ -2,6 +2,7 @@ import type {
   AntigravityUsageStats,
   Attempt,
   Dashboard,
+  CostCalculatorInput,
   PricingView,
   Tokens,
   Totals,
@@ -366,6 +367,8 @@ export const usageCommands = [
   "set_usage_settings",
   "sync_usage",
   "get_pricing",
+  "calculate_usage_cost",
+  "get_usage_calculator_totals",
   "search_pricing",
   "configure_pricing",
   "update_pricing",
@@ -421,6 +424,48 @@ export function usagePreview(
   }
   if (name === "get_usage_state" || name === "sync_usage") return state();
   if (name === "get_usage_detail") return rows.find((r) => r.id === args.id);
+  if (name === "get_usage_calculator_totals") {
+    const filter = args.filter as UsageFilter;
+    const matches = rows
+      .filter(
+        (row) =>
+          (!filter.client || row.client === filter.client) &&
+          (!filter.start || row.startedAt >= filter.start) &&
+          (!filter.end || row.startedAt <= filter.end),
+      )
+      .map((row) => ({
+        ...row,
+        attempts: row.attempts.filter(
+          (a) =>
+            (!filter.provider || a.provider === filter.provider) &&
+            (!filter.model || a.pricingModel === filter.model),
+        ),
+      }))
+      .filter((row) => row.attempts.length);
+    return {
+      ...total(matches),
+      attempts: matches.reduce((n, row) => n + row.attempts.length, 0),
+    };
+  }
+  if (name === "calculate_usage_cost") {
+    const input = args.input as CostCalculatorInput;
+    const base = Number(input.basePrice) * Number(input.modelRatio);
+    const rates = [
+      1,
+      input.outputRatio,
+      input.cacheReadRatio,
+      input.cacheWriteRatio,
+    ].map((n) => base * Number(n));
+    const costs = rates.map(
+      (rate, i) => ((rate * input.tokens[i]) / 1e6) * Number(input.groupRatio),
+    );
+    const format = (n: number) => String(Number(n.toFixed(12)));
+    return {
+      rates: rates.map(format),
+      costs: costs.map(format),
+      total: format(costs.reduce((a, b) => a + b, 0)),
+    };
+  }
   if (name === "configure_pricing") {
     price = {
       ...price,

@@ -102,6 +102,10 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://a.example.invalid/v1".into(),
@@ -118,6 +122,10 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://b.example.invalid/v1".into(),
@@ -181,6 +189,10 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://a.example.invalid".into(),

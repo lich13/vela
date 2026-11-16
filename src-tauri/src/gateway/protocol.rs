@@ -650,15 +650,8 @@ impl Write for Sink {
         Ok(())
     }
 }
-enum Decoder {
-    Plain(Sink),
-    Brotli(Box<brotli::DecompressorWriter<Sink>>),
-    Gzip(flate2::write::GzDecoder<Sink>),
-    Deflate(flate2::write::ZlibDecoder<Sink>),
-    Zstd(zstd::stream::write::Decoder<'static, Sink>),
-}
 pub struct Observer {
-    decoder: Decoder,
+    decoder: super::response_decoder::Decoder<Sink>,
     failed: bool,
     encoded: Option<crate::event_raw::Capture>,
 }
@@ -806,6 +799,7 @@ impl Delivery {
 pub struct Protocol {
     business: Option<(super::Gateway, super::testing::BusinessIdentity)>,
     wait_budget: Option<(super::wait_budget::WaitBudget, Option<tokio::time::Instant>)>,
+    execution: Option<super::wait_budget::Execution>,
     traffic: Option<super::freeze::Ticket>,
     observer: Option<Observer>,
     transfer: crate::usage::model::TransferMetadata,
@@ -824,6 +818,7 @@ pub struct Protocol {
     first_usage_ms: Option<u64>,
     ownership: Option<(std::sync::Arc<super::compaction::Lease>, String)>,
     compaction_operation: bool,
+    buffering: bool,
     routing_log: Option<std::sync::Arc<super::routing_log::RoutingLog>>,
     routing_decision: Option<crate::usage::model::RoutingDecision>,
     identity: Option<crate::usage::model::ThreadIdentity>,
@@ -846,6 +841,7 @@ impl Protocol {
         Self {
             business: None,
             wait_budget: None,
+            execution: None,
             traffic: None,
             observer: None,
             transfer: crate::usage::model::TransferMetadata {
@@ -866,6 +862,7 @@ impl Protocol {
             first_usage_ms: None,
             ownership: None,
             compaction_operation: false,
+            buffering: false,
             routing_log: None,
             routing_decision: None,
             identity: None,
@@ -888,14 +885,44 @@ impl Protocol {
     pub(super) fn attach_wait_budget(&mut self, budget: &super::wait_budget::WaitBudget) {
         self.wait_budget = Some((budget.clone(), budget.deadline()));
         self.traffic = budget.traffic();
+        self.execution = Some(budget.execution());
     }
     pub(super) fn effective_output(&self) {
-        if self.compaction_operation && !self.succeeded() {
+        if self.buffering || (self.compaction_operation && !self.succeeded()) {
             return;
         }
         if let Some((budget, deadline)) = &self.wait_budget {
             budget.complete(*deadline);
         }
+    }
+    pub(super) fn buffer_output(&mut self, enabled: bool) {
+        self.buffering = enabled;
+    }
+    pub(super) fn finish_buffer(
+        &mut self,
+        status: u16,
+        failure: Option<&str>,
+        end_at_stop: bool,
+    ) -> bool {
+        if end_at_stop && self.message_stopped() && failure.is_none() {
+            self.finish_at_terminal(Some(status));
+        } else {
+            self.finish(Some(status), failure.unwrap_or(code::OK));
+        }
+        let complete = failure.is_none()
+            && !self.observation.incomplete
+            && self.terminal_received
+            && self.succeeded()
+            && (!self.stream || self.message_stopped());
+        if !complete && !self.explicit_failure() {
+            self.observation.terminal = Some(Terminal::Failure);
+            self.transport_failure = true;
+            self.observation.error.local_code =
+                Some(failure.unwrap_or(code::STREAM_INTERRUPTED).into());
+            self.record_usage();
+            self.record_end(failure.unwrap_or(code::STREAM_INTERRUPTED));
+        }
+        complete
     }
     pub(super) fn begin_compaction_execution(&self) {
         if self.compaction_operation {
@@ -1383,6 +1410,7 @@ impl Protocol {
         self.transport_failure
     }
     pub fn finish(&mut self, status: Option<u16>, reason: &str) {
+        self.execution.take();
         self.end_compaction_execution();
         let reason = if self
             .wait_budget
@@ -1550,6 +1578,7 @@ impl Protocol {
             code::CANCELLED => EndCause::ClientCancelled,
             _ if self.status.is_some_and(|s| s >= 400) => EndCause::UpstreamRejected,
             code::FIRST_BYTE_TIMEOUT => EndCause::FirstByteTimeout,
+            code::RETRY_BUDGET_EXHAUSTED => EndCause::WaitBudgetExhausted,
             code::STREAM_TIMEOUT => EndCause::StreamTimeout,
             code::STREAM_INTERRUPTED => EndCause::UpstreamDisconnected,
             code::NETWORK | code::TLS => EndCause::ConnectFailed,
@@ -1742,7 +1771,7 @@ impl Drop for Protocol {
                 self.finish(None, code::CANCELLED);
             } else if budget.expired(*deadline) && !self.finished {
                 self.timeout("retry_budget", budget.seconds);
-                self.finish(None, code::FIRST_BYTE_TIMEOUT);
+                self.finish(None, code::RETRY_BUDGET_EXHAUSTED);
             }
         }
         // Only the transport's live cancellation branch performs a bounded
@@ -1806,18 +1835,7 @@ impl Drop for Protocol {
 impl Observer {
     pub fn new(stream: bool, encoding: &str) -> Self {
         let sink = Sink::new(stream);
-        let mut failed = false;
-        let decoder = match encoding.trim().to_ascii_lowercase().as_str() {
-            "" | "identity" => Decoder::Plain(sink),
-            "br" => Decoder::Brotli(Box::new(brotli::DecompressorWriter::new(sink, 4096))),
-            "gzip" => Decoder::Gzip(flate2::write::GzDecoder::new(sink)),
-            "deflate" => Decoder::Deflate(flate2::write::ZlibDecoder::new(sink)),
-            "zstd" => Decoder::Zstd(zstd::stream::write::Decoder::new(sink).expect("zstd decoder")),
-            _ => {
-                failed = true;
-                Decoder::Plain(sink)
-            }
-        };
+        let (decoder, failed) = super::response_decoder::Decoder::new(sink, encoding);
         Self {
             decoder,
             failed,
@@ -1829,14 +1847,9 @@ impl Observer {
         }
     }
     fn sink(&mut self) -> &mut Sink {
-        match &mut self.decoder {
-            Decoder::Plain(s) => s,
-            Decoder::Brotli(d) => d.get_mut(),
-            Decoder::Gzip(d) => d.get_mut(),
-            Decoder::Deflate(d) => d.get_mut(),
-            Decoder::Zstd(d) => d.get_mut(),
-        }
+        self.decoder.sink()
     }
+
     pub fn feed(&mut self, bytes: &[u8]) {
         if let Some(encoded) = &mut self.encoded {
             encoded.feed(bytes);
@@ -1844,27 +1857,14 @@ impl Observer {
         if self.failed {
             return;
         }
-        let result = match &mut self.decoder {
-            Decoder::Plain(s) => s.write_all(bytes),
-            Decoder::Brotli(d) => d.write_all(bytes),
-            Decoder::Gzip(d) => d.write_all(bytes),
-            Decoder::Deflate(d) => d.write_all(bytes),
-            // Flush decoded output promptly even when the compressed stream is quiet.
-            Decoder::Zstd(d) => d.write_all(bytes).and_then(|()| d.flush()),
-        };
+        let result = self.decoder.feed(bytes);
         if result.is_err() {
             self.failed = true;
         }
     }
     pub fn snapshot(&mut self, finish: bool) -> Observation {
         if finish {
-            let result = match &mut self.decoder {
-                Decoder::Plain(_) => Ok(()),
-                Decoder::Brotli(d) => d.close(),
-                Decoder::Gzip(d) => d.try_finish(),
-                Decoder::Deflate(d) => d.try_finish(),
-                Decoder::Zstd(d) => d.flush(),
-            };
+            let result = self.decoder.finish();
             if result.is_err() {
                 self.failed = true;
             }

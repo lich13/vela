@@ -8,6 +8,10 @@ fn save_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) ->
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: base_url.into(),
@@ -168,6 +172,10 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: Some(id.clone()),
                 base_url: base_url.into(),
@@ -195,6 +203,10 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: Some(id.clone()),
                 base_url: base_url.into(),
@@ -223,6 +235,10 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: Some(id.clone()),
                 base_url: updated_base_url.into(),

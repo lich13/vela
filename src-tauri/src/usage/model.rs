@@ -50,6 +50,26 @@ pub struct Tokens {
     pub audio_output: Option<u64>,
 }
 impl Tokens {
+    pub(crate) fn has_consumption(&self) -> bool {
+        [
+            self.inclusive_input,
+            self.input,
+            self.output,
+            self.reasoning,
+            self.cache_read,
+            self.cache_write,
+            self.cache_write_5m,
+            self.cache_write_1h,
+            self.image_input,
+            self.image_cache_read,
+            self.image_output,
+            self.audio_input,
+            self.audio_output,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value > 0)
+    }
     pub fn total(&self) -> Option<u64> {
         [self.input, self.output, self.cache_read, self.cache_write]
             .into_iter()
@@ -682,6 +702,7 @@ pub enum EndCause {
     UpstreamDisconnected,
     ConnectFailed,
     FirstByteTimeout,
+    WaitBudgetExhausted,
     StreamTimeout,
     ParseIncomplete,
     Unsettled,

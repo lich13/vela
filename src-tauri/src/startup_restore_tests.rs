@@ -34,6 +34,10 @@ async fn resumable_codex() -> Resumable {
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://resume.example.invalid/v1".into(),
@@ -233,6 +237,10 @@ async fn resumable_claude() -> (tempfile::TempDir, PathBuf, PathBuf, Gateway, Ga
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: CLAUDE_BASE.into(),

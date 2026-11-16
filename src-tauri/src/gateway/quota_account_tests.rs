@@ -16,6 +16,10 @@ fn save_account(g: &Gateway, t: &tempfile::TempDir, token: Option<&str>, base: O
         Edit::SaveProvider {
             search_only: None,
             end_on_message_stop: None,
+            filter_count_tokens: None,
+            buffer_complete_response: None,
+            endless_mode: None,
+            upstream_retry_seconds: None,
             id: Some(p.id.clone()),
             base_url: base.unwrap_or(&p.base_url).into(),
             token: String::new(),

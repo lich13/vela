@@ -142,6 +142,10 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
             Edit::SaveProvider {
                 search_only: None,
                 end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 name: None,

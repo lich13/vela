@@ -35,6 +35,10 @@ fn provider(id: &str, allowed_models: Option<&str>, handoff: bool) -> Provider {
         take_new_threads: handoff,
         search_only: false,
         end_on_message_stop: false,
+        filter_count_tokens: false,
+        buffer_complete_response: false,
+        endless_mode: false,
+        upstream_retry_seconds: 5,
     }
 }
 

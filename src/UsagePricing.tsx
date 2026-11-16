@@ -14,6 +14,7 @@ import { command } from "./bridge";
 import { errorOf } from "./types";
 import { confirmAction } from "./confirmation";
 import ProviderPriceMappings from "./ProviderPriceMappings";
+import UsageCostCalculator from "./UsageCostCalculator";
 import { Drawer } from "./UsageDrawer";
 import type {
   ModelsDevState,
@@ -21,6 +22,7 @@ import type {
   PricingConfig,
   PricingView,
   PricingSearchPage,
+  UsageFilter,
 } from "./usage-types";
 const fields = [
   ["input_cost_per_token", "输入"],
@@ -35,8 +37,10 @@ function millions(v: unknown) {
 }
 export default function Pricing({
   onDirtyChange,
+  filter = {},
 }: {
   onDirtyChange?: (dirty: boolean) => void;
+  filter?: UsageFilter;
 }) {
   const [view, setView] = useState<PricingView | null>(null),
     [catalog, setCatalog] = useState<ModelsDevState | null>(null),
@@ -46,6 +50,7 @@ export default function Pricing({
     [sync, setSync] = useState(false),
     [mapping, setMapping] = useState(false),
     [billing, setBilling] = useState(false),
+    [calculator, setCalculator] = useState(false),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [page, setPage] = useState<PricingSearchPage>({ rows: [], total: 0 }),
@@ -111,9 +116,11 @@ export default function Pricing({
     }
   };
   useEffect(() => {
-    onDirtyChange?.(editor !== null || sync || mapping || billing);
+    onDirtyChange?.(
+      editor !== null || sync || mapping || billing || calculator,
+    );
     return () => onDirtyChange?.(false);
-  }, [editor, sync, mapping, billing, onDirtyChange]);
+  }, [editor, sync, mapping, billing, calculator, onDirtyChange]);
   const save = async (config: PricingConfig, revision?: string) => {
     if (!view) return;
     setBusy(true);
@@ -211,6 +218,7 @@ export default function Pricing({
           <Download size={14} />
           立即更新
         </button>
+        <button onClick={() => setCalculator(true)}>倍率换算</button>
         <details className="usage-more">
           <summary aria-label="定价高级操作">•••</summary>
           <div>
@@ -393,6 +401,12 @@ export default function Pricing({
           busy={busy}
           save={save}
           onClose={() => setEditor(null)}
+        />
+      )}
+      {calculator && (
+        <UsageCostCalculator
+          filter={filter}
+          close={() => setCalculator(false)}
         />
       )}
       {comparison && (

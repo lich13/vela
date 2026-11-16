@@ -847,7 +847,7 @@ async fn session(
     };
     tokio::select! {
         biased;
-        _ = request_budget.wait() => Err((1013, code::FIRST_BYTE_TIMEOUT)),
+        _ = request_budget.wait() => Err((1013, code::RETRY_BUDGET_EXHAUSTED)),
         result = forwarding => result,
     }
 }
@@ -3795,7 +3795,7 @@ async fn session_once(
             ), if session.pending.is_some()
                 && !session.pending_traffic.as_ref().is_some_and(|t| t.paused()) =>
             {
-                return Err((1013, code::FIRST_BYTE_TIMEOUT));
+                return Err((1013, code::RETRY_BUDGET_EXHAUSTED));
             },
             _ = client.closed.changed() => {
                 session.abandon(&client.activity, false).await;

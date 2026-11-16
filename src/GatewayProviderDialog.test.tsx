@@ -63,3 +63,51 @@ describe("Claude provider message_stop setting", () => {
     },
   );
 });
+
+describe("Claude reliability controls", () => {
+  it("tracks drafts, persists independent controls and retains values after a failed save", async () => {
+    const user = userEvent.setup();
+    const dirty = vi.fn();
+    const save = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("fixture save failed"))
+      .mockResolvedValueOnce(undefined);
+    const item = { ...claudeGatewayDemo.providers[0], upstreamRetrySeconds: 5 };
+    render(
+      <GatewayProviderDialog
+        clientId="claude"
+        connectionMode="bearer"
+        dialog={{ kind: "provider", item }}
+        revision="fixture-revision"
+        close={() => {}}
+        save={save}
+        onDirtyChange={dirty}
+      />,
+    );
+    expect(
+      screen.queryByRole("spinbutton", { name: "重试间隔 秒" }),
+    ).toBeNull();
+    for (const name of ["过滤 Token 计数请求", "完整响应后发送", "无尽模式"])
+      await user.click(screen.getByRole("checkbox", { name }));
+    const interval = screen.getByRole("spinbutton", { name: "重试间隔 秒" });
+    expect(interval).toHaveValue(5);
+    await user.clear(interval);
+    await user.type(interval, "7");
+    expect(dirty).toHaveBeenLastCalledWith(true);
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "fixture save failed",
+    );
+    expect(interval).toHaveValue(7);
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    expect(save).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        filterCountTokens: true,
+        bufferCompleteResponse: true,
+        endlessMode: true,
+        upstreamRetrySeconds: 7,
+      }),
+      null,
+    );
+  });
+});

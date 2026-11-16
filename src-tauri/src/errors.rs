@@ -73,6 +73,7 @@ local_codes! {
     FileSize => FILE_SIZE = "FILE_SIZE",
     FileType => FILE_TYPE = "FILE_TYPE",
     FirstByteTimeout => FIRST_BYTE_TIMEOUT = "FIRST_BYTE_TIMEOUT",
+    RetryBudgetExhausted => RETRY_BUDGET_EXHAUSTED = "RETRY_BUDGET_EXHAUSTED",
     Forbidden => FORBIDDEN = "FORBIDDEN",
     Gateway => GATEWAY = "GATEWAY",
     GatewayActive => GATEWAY_ACTIVE = "GATEWAY_ACTIVE",

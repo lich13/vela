@@ -64,6 +64,8 @@ struct Journal {
     version: u32,
     connection: Connection,
     grok: Option<super::grok_config::Snapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claude_hint: Option<super::claude_config::HintSnapshot>,
     path: PathBuf,
     before: Pair,
     applied: Pair,
@@ -176,7 +178,17 @@ fn write_record(
             .ok_or_else(|| AppError::new(code::RECOVERY, "API 恢复路径无效"))?;
         codex_api::write(home, provider, target, expected, allowed)
     } else {
-        write_pair(record.client, &record.path, target, expected, allowed)
+        write_pair(
+            record.client,
+            &record.path,
+            target,
+            expected,
+            allowed,
+            record
+                .claude_hint
+                .as_ref()
+                .map(|hint| (hint, target == &record.applied)),
+        )
     }
 }
 /// Account synchronization must never adopt the gateway's local API credential.
@@ -300,6 +312,7 @@ fn write_pair(
     target: &Pair,
     expected: Option<&str>,
     allowed: Option<&[&Pair]>,
+    hint: Option<(&super::claude_config::HintSnapshot, bool)>,
 ) -> Result<()> {
     let raw = storage::read_user_optional(path)?;
     if raw.is_none() && client == ClientId::Codex {
@@ -329,6 +342,11 @@ fn write_pair(
         ClientId::Grok => super::grok_config::Snapshot::new(text, target)?
             .applied()
             .to_owned(),
+    };
+    let output = if let Some((hint, apply)) = hint {
+        hint.patch(&output, apply)?
+    } else {
+        output
     };
     if raw.is_none() || output != text {
         storage::atomic_write_user(path, output.as_bytes(), Some(&revision))?;
@@ -413,6 +431,14 @@ pub fn attach_store_for(
         return Err(AppError::new(code::CONFLICT, "配置已变化，请刷新后重试"));
     }
     let mut record = Journal {
+        claude_hint: if client == ClientId::Claude {
+            let raw = storage::read_user_optional(&client.config(home))?;
+            let text = std::str::from_utf8(raw.as_deref().unwrap_or(b"{}"))
+                .map_err(|_| AppError::new(code::CLAUDE_CONFIG, "配置不是 UTF-8"))?;
+            Some(super::claude_config::HintSnapshot::new(text)?)
+        } else {
+            None
+        },
         version: 2,
         grok: grok_snapshot(
             client,
@@ -558,6 +584,7 @@ pub fn commit_store_for(
             return Err(AppError::new(code::CONFLICT, "配置已变化，请刷新后重试"));
         }
         Journal {
+            claude_hint: None,
             version: 2,
             grok: grok_snapshot(client, home, &target, Some(&after_store), None)?,
             connection,
@@ -595,6 +622,15 @@ pub fn commit_store_for(
         fs::remove_file(data.join(FILE)).map_err(storage::io_error)?;
     }
     Ok(())
+}
+pub(super) fn claude_hint_unchanged(data: &Path, home: &Path, text: &str) -> Result<bool> {
+    if load(data)?.is_none_or(|record| record.claude_hint.is_none()) {
+        return Ok(true);
+    }
+    let raw = storage::read_user_optional(&ClientId::Claude.config(home))?;
+    let current = std::str::from_utf8(raw.as_deref().unwrap_or(b"{}"))
+        .map_err(|_| AppError::new(code::CLAUDE_CONFIG, "配置不是 UTF-8"))?;
+    Ok(super::claude_config::hint(current)? == super::claude_config::hint(text)?)
 }
 fn detach_record(data: &Path, mut record: Journal) -> Result<()> {
     let current = if record.grok.is_none() {
@@ -785,6 +821,7 @@ pub(super) mod tests {
         let old = Pair::new("https://original.test/v1", "old");
         let new = Pair::new("https://next.test", "new");
         let mut record = Journal {
+            claude_hint: None,
             client: ClientId::Codex,
             connection: Connection::Bearer,
             grok: None,
@@ -799,7 +836,7 @@ pub(super) mod tests {
             store_after: Some("{\"selected\":\"new\"}".into()),
         };
         save(t.path(), &record).unwrap();
-        write_pair(ClientId::Codex, &path, &new, None, None).unwrap();
+        write_pair(ClientId::Codex, &path, &new, None, None, None).unwrap();
         record.config_applied = true;
         save(t.path(), &record).unwrap();
         recover(t.path()).unwrap();

@@ -430,6 +430,36 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     })
 }
 
+pub fn calculator_totals(c: &Connection, filter: &Filter) -> Result<Totals> {
+    // Attribute billed attempts to their actual supplier, even when a later
+    // supplier completed the request. The normal dashboard selects final owners.
+    let scope = Filter {
+        provider: None,
+        model: None,
+        source: Some("proxy".into()),
+        ..filter.clone()
+    };
+    let (cte, mut args) = selection(&scope);
+    let mut conditions = Vec::new();
+    for (field, value) in [("provider", &filter.provider), ("model", &filter.model)] {
+        if let Some(value) = value.as_ref().filter(|v| !v.is_empty()) {
+            conditions.push(format!("{field}=?"));
+            args.push(Value::Text(value.clone()));
+        }
+    }
+    let restriction = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    let sql = native_sql(format!("{cte} SELECT {SUM} FROM m{restriction}"));
+    db(
+        c.query_row(&sql, rusqlite::params_from_iter(args.iter()), |row| {
+            totals(row, 0)
+        }),
+    )
+}
+
 pub fn overview_key(c: &Connection, f: &Filter) -> Result<String> {
     let mut f = f.clone();
     f.status = None;

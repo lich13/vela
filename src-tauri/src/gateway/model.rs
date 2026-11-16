@@ -29,6 +29,14 @@ pub struct Provider {
     pub search_only: bool,
     #[serde(default)]
     pub end_on_message_stop: bool,
+    #[serde(default)]
+    pub filter_count_tokens: bool,
+    #[serde(default)]
+    pub buffer_complete_response: bool,
+    #[serde(default)]
+    pub endless_mode: bool,
+    #[serde(default = "default_rate_limit_seconds")]
+    pub upstream_retry_seconds: u64,
 }
 // Existing defaults: three retries allow four total upstream attempts.
 const DEFAULT_MAX_RETRIES: usize = 3;
@@ -240,6 +248,14 @@ pub enum Edit {
         search_only: Option<bool>,
         #[serde(default)]
         end_on_message_stop: Option<bool>,
+        #[serde(default)]
+        filter_count_tokens: Option<bool>,
+        #[serde(default)]
+        buffer_complete_response: Option<bool>,
+        #[serde(default)]
+        endless_mode: Option<bool>,
+        #[serde(default)]
+        upstream_retry_seconds: Option<u64>,
         id: Option<String>,
         base_url: String,
         token: String,
@@ -526,6 +542,10 @@ impl Store {
                     Edit::SaveProvider {
                         search_only: None,
                         end_on_message_stop: None,
+                        filter_count_tokens: None,
+                        buffer_complete_response: None,
+                        endless_mode: None,
+                        upstream_retry_seconds: None,
                         id,
                         base_url,
                         token,
@@ -577,6 +597,10 @@ impl Store {
                     Edit::SaveProvider {
                         search_only: None,
                         end_on_message_stop: None,
+                        filter_count_tokens: None,
+                        buffer_complete_response: None,
+                        endless_mode: None,
+                        upstream_retry_seconds: None,
                         id: None,
                         base_url: raw.clone(),
                         token,
@@ -600,6 +624,10 @@ impl Store {
             Edit::SaveProvider {
                 search_only,
                 end_on_message_stop,
+                filter_count_tokens,
+                buffer_complete_response,
+                endless_mode,
+                upstream_retry_seconds,
                 id,
                 base_url: raw,
                 token,
@@ -607,6 +635,9 @@ impl Store {
                 name: display_name,
             } => {
                 let u = base_url(&raw, self.settings.port)?;
+                if upstream_retry_seconds == Some(0) {
+                    return Err(AppError::new(code::SETTINGS, "上游重试间隔必须大于 0 秒"));
+                }
                 if quota_access_token.as_ref().is_some_and(|value| {
                     value.len() > 16384
                         || value.chars().any(char::is_control)
@@ -644,6 +675,18 @@ impl Store {
                     if let Some(value) = end_on_message_stop {
                         p.end_on_message_stop = value;
                     }
+                    if let Some(value) = filter_count_tokens {
+                        p.filter_count_tokens = value;
+                    }
+                    if let Some(value) = buffer_complete_response {
+                        p.buffer_complete_response = value;
+                    }
+                    if let Some(value) = endless_mode {
+                        p.endless_mode = value;
+                    }
+                    if let Some(value) = upstream_retry_seconds {
+                        p.upstream_retry_seconds = value;
+                    }
                     p.base_url = base_url.to_owned();
                     if !token.is_empty() {
                         p.token = token;
@@ -673,6 +716,10 @@ impl Store {
                         take_new_threads: false,
                         search_only: search_only.unwrap_or(false),
                         end_on_message_stop: end_on_message_stop.unwrap_or(false),
+                        filter_count_tokens: filter_count_tokens.unwrap_or(false),
+                        buffer_complete_response: buffer_complete_response.unwrap_or(false),
+                        endless_mode: endless_mode.unwrap_or(false),
+                        upstream_retry_seconds: upstream_retry_seconds.unwrap_or(5),
                     });
                     if self.selected.is_none() {
                         self.selected = Some(id);

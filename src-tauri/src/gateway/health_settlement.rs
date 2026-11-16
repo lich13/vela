@@ -302,9 +302,9 @@ impl Permits {
         route: &Route,
         requirement: &super::routing::Requirement,
     ) -> Option<Self> {
-        let provider = route.provider_circuit.acquire()?;
+        let provider = route.provider_circuit.acquire_for(route.endless())?;
         let model = match route.model_circuit(requirement) {
-            Some(circuit) => Some(circuit.acquire()?),
+            Some(circuit) => Some(circuit.acquire_for(route.endless())?),
             None => None,
         };
         let scope = if model.is_some() {

@@ -45,6 +45,19 @@ export default function GatewayDialog({
   const [endOnMessageStop, setEndOnMessageStop] = useState(
     Boolean(dialog.item?.endOnMessageStop),
   );
+  const [filterCountTokens, setFilterCountTokens] = useState(
+    Boolean(dialog.item?.filterCountTokens),
+  );
+  const [bufferCompleteResponse, setBufferCompleteResponse] = useState(
+    Boolean(dialog.item?.bufferCompleteResponse),
+  );
+  const [endlessMode, setEndlessMode] = useState(
+    Boolean(dialog.item?.endlessMode),
+  );
+  const [upstreamRetrySeconds, setUpstreamRetrySeconds] = useState(
+    String(dialog.item?.upstreamRetrySeconds ?? 5),
+  );
+
   const [revealed, setRevealed] = useState<{
     value: string;
     revision: string;
@@ -118,6 +131,10 @@ export default function GatewayDialog({
       quotaAccessToken,
       searchOnly,
       endOnMessageStop,
+      filterCountTokens,
+      bufferCompleteResponse,
+      endlessMode,
+      upstreamRetrySeconds,
     ]),
   );
   useEffect(() => {
@@ -130,6 +147,10 @@ export default function GatewayDialog({
         quotaAccessToken,
         searchOnly,
         endOnMessageStop,
+        filterCountTokens,
+        bufferCompleteResponse,
+        endlessMode,
+        upstreamRetrySeconds,
       ]) !== initialDraft.current,
     );
   }, [
@@ -140,6 +161,10 @@ export default function GatewayDialog({
     quotaAccessToken,
     searchOnly,
     endOnMessageStop,
+    filterCountTokens,
+    bufferCompleteResponse,
+    endlessMode,
+    upstreamRetrySeconds,
     onDirtyChange,
   ]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
@@ -147,7 +172,7 @@ export default function GatewayDialog({
   return (
     <Modal title={title} close={close} busy={busy}>
       <form
-        className="gateway-form"
+        className="gateway-form provider-form"
         onSubmit={(e) => {
           e.preventDefault();
           setError("");
@@ -170,7 +195,17 @@ export default function GatewayDialog({
               : {
                   op: "saveProvider",
                   ...draft,
-                  ...(clientId === "claude" ? { endOnMessageStop } : {}),
+                  ...(clientId === "claude"
+                    ? {
+                        endOnMessageStop,
+                        filterCountTokens,
+                        bufferCompleteResponse,
+                        endlessMode,
+                        upstreamRetrySeconds: endlessMode
+                          ? Number(upstreamRetrySeconds)
+                          : (dialog.item?.upstreamRetrySeconds ?? 5),
+                      }
+                    : {}),
                   ...(clientId === "codex" && dialog.item
                     ? { searchOnly }
                     : {}),
@@ -328,15 +363,61 @@ export default function GatewayDialog({
           </label>
         )}
         {clientId === "claude" && (
-          <label className="provider-search-setting">
-            <input
-              type="checkbox"
-              checked={endOnMessageStop}
-              disabled={busy}
-              onChange={(e) => setEndOnMessageStop(e.target.checked)}
-            />
-            <span>收到 message_stop 后立即结束响应</span>
-          </label>
+          <div className="provider-claude-settings">
+            <label className="provider-search-setting">
+              <input
+                type="checkbox"
+                checked={endOnMessageStop}
+                disabled={busy}
+                onChange={(e) => setEndOnMessageStop(e.target.checked)}
+              />
+              <span>收到 message_stop 后立即结束响应</span>
+            </label>
+            <label className="provider-search-setting">
+              <input
+                type="checkbox"
+                checked={filterCountTokens}
+                disabled={busy}
+                onChange={(e) => setFilterCountTokens(e.target.checked)}
+              />
+              <span>过滤 Token 计数请求</span>
+            </label>
+            <label className="provider-search-setting">
+              <input
+                type="checkbox"
+                checked={bufferCompleteResponse}
+                disabled={busy}
+                onChange={(e) => setBufferCompleteResponse(e.target.checked)}
+              />
+              <span>完整响应后发送</span>
+            </label>
+            <div className="provider-endless-setting">
+              <label className="provider-search-setting">
+                <input
+                  type="checkbox"
+                  checked={endlessMode}
+                  disabled={busy}
+                  onChange={(e) => setEndlessMode(e.target.checked)}
+                />
+                <span>无尽模式</span>
+              </label>
+              {endlessMode && (
+                <label className="provider-retry-setting">
+                  <span>重试间隔</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    required
+                    value={upstreamRetrySeconds}
+                    disabled={busy}
+                    onChange={(e) => setUpstreamRetrySeconds(e.target.value)}
+                  />
+                  <span>秒</span>
+                </label>
+              )}
+            </div>
+          </div>
         )}
         {error && (
           <div className="banner error" role="alert">

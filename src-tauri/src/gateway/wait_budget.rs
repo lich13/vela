@@ -1,4 +1,4 @@
-//! One deadline and cancellation boundary cover a request up to effective output.
+//! Queue/backoff time shares one budget; upstream attempts have phase timeouts.
 use parking_lot::Mutex;
 use std::{
     collections::HashMap,
@@ -26,6 +26,9 @@ struct Pending {
     started: Instant,
     deadline: Instant,
     compaction_execution: bool,
+    endless: bool,
+    executing: bool,
+    execution_elapsed: Duration,
     traffic: Option<super::freeze::Ticket>,
     paused_before: Duration,
 }
@@ -39,7 +42,7 @@ impl Pending {
         self.traffic.as_ref().is_some_and(|t| t.paused())
     }
     fn expires_at(&self) -> Instant {
-        self.deadline + self.paused_for()
+        self.deadline + self.paused_for() + self.execution_elapsed
     }
 }
 #[derive(Default)]
@@ -91,14 +94,17 @@ impl Registry {
                 if active.paused() {
                     view.phase = "frozen".into();
                 }
-                view.remaining_seconds =
-                    (!active.compaction_execution && !active.paused()).then(|| {
-                        active
-                            .expires_at()
-                            .saturating_duration_since(Instant::now())
-                            .as_millis()
-                            .div_ceil(1000) as u64
-                    });
+                view.remaining_seconds = (!active.compaction_execution
+                    && !active.endless
+                    && !active.executing
+                    && !active.paused())
+                .then(|| {
+                    active
+                        .expires_at()
+                        .saturating_duration_since(Instant::now())
+                        .as_millis()
+                        .div_ceil(1000) as u64
+                });
                 Some(view)
             })
             .collect();
@@ -117,7 +123,11 @@ impl Registry {
         let mut state = shared.state.lock();
         if !state.active.as_ref().is_some_and(|p| {
             p.view.request_id == id
-                && (p.compaction_execution || p.paused() || p.expires_at() > Instant::now())
+                && (p.compaction_execution
+                    || p.endless
+                    || p.executing
+                    || p.paused()
+                    || p.expires_at() > Instant::now())
         }) {
             return false;
         }
@@ -140,7 +150,41 @@ pub(super) struct WaitBudget {
     shared: Arc<Shared>,
     pub seconds: u64,
 }
+pub(super) struct Execution {
+    budget: WaitBudget,
+    deadline: Option<Instant>,
+    started: Instant,
+}
+impl Drop for Execution {
+    fn drop(&mut self) {
+        let mut state = self.budget.shared.state.lock();
+        if let Some(active) = state
+            .active
+            .as_mut()
+            .filter(|p| Some(p.deadline) == self.deadline)
+        {
+            active.executing = false;
+            active.execution_elapsed += self.started.elapsed();
+        }
+        drop(state);
+        self.budget.shared.changes.send_replace(());
+    }
+}
 impl WaitBudget {
+    pub fn execution(&self) -> Execution {
+        let mut state = self.shared.state.lock();
+        let deadline = state.active.as_mut().map(|active| {
+            active.executing = true;
+            active.deadline
+        });
+        drop(state);
+        self.shared.changes.send_replace(());
+        Execution {
+            budget: self.clone(),
+            deadline,
+            started: Instant::now(),
+        }
+    }
     pub fn tracked(seconds: u64, registry: &Registry) -> Self {
         Self::with_registry(seconds, Some(registry.clone()))
     }
@@ -181,6 +225,9 @@ impl WaitBudget {
             started,
             deadline: started + Duration::from_secs(self.seconds),
             compaction_execution: false,
+            endless: false,
+            executing: false,
+            execution_elapsed: Duration::ZERO,
             traffic: None,
             paused_before: Duration::ZERO,
         });
@@ -193,6 +240,12 @@ impl WaitBudget {
             let _ = registry.0.events.send(());
         }
         drop(state);
+        self.shared.changes.send_replace(());
+    }
+    pub fn set_endless(&self) {
+        if let Some(active) = &mut self.shared.state.lock().active {
+            active.endless = true;
+        }
         self.shared.changes.send_replace(());
     }
     pub fn attach_traffic(&self, traffic: &super::freeze::Ticket) {
@@ -313,6 +366,8 @@ impl WaitBudget {
     pub fn expired(&self, deadline: Option<Instant>) -> bool {
         self.shared.state.lock().active.as_ref().is_some_and(|p| {
             !p.compaction_execution
+                && !p.endless
+                && !p.executing
                 && Some(p.deadline) == deadline
                 && !p.paused()
                 && Instant::now() >= p.expires_at()
@@ -341,7 +396,7 @@ impl WaitBudget {
                 .lock()
                 .active
                 .as_ref()
-                .filter(|p| !p.compaction_execution && !p.paused())
+                .filter(|p| !p.compaction_execution && !p.endless && !p.executing && !p.paused())
                 .map(|p| (p.deadline, p.expires_at()));
             if let Some((identity, deadline)) = deadline {
                 tokio::select! {
@@ -369,6 +424,36 @@ mod tests {
         pub fn new(seconds: u64) -> Self {
             Self::with_registry(seconds, None)
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upstream_execution_preserves_remaining_wait_budget_and_cancellation() {
+        let registry = Registry::new(broadcast::channel(16).0);
+        let budget = WaitBudget::tracked(10, &registry);
+        budget.begin();
+        let identity = budget.deadline();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let mut protocol = Protocol::new(true);
+        protocol.attach_wait_budget(&budget);
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert!(!budget.expired(identity));
+        assert_eq!(registry.view()[0].remaining_seconds, None);
+        protocol.finish(Some(503), crate::errors::code::HTTP);
+        assert_eq!(registry.view()[0].remaining_seconds, Some(7));
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(!budget.expired(identity));
+        budget.wait().await;
+        assert!(budget.expired(identity));
+        budget.complete(identity);
+
+        budget.begin();
+        let mut protocol = Protocol::new(true);
+        protocol.attach_wait_budget(&budget);
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert!(registry.cancel(&registry.view()[0].request_id));
+        budget.cancelled().await;
+        protocol.finish(None, crate::errors::code::CANCELLED);
+        assert!(registry.view().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -501,6 +586,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(150)).await;
         first.feed(b": heartbeat\n\n");
         assert_eq!(budget.deadline(), deadline);
+        first.finish(Some(503), crate::errors::code::HTTP);
         let mut retry = Protocol::new(true);
         retry.attach_wait_budget(&budget);
         tokio::time::advance(Duration::from_secs(149)).await;

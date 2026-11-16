@@ -131,6 +131,10 @@ pub(crate) fn policy_provider(id: &str, handoff: bool, take: bool) -> Provider {
         take_new_threads: take,
         search_only: false,
         end_on_message_stop: false,
+        filter_count_tokens: false,
+        buffer_complete_response: false,
+        endless_mode: false,
+        upstream_retry_seconds: 5,
     }
 }
 
@@ -307,6 +311,10 @@ pub(crate) mod loopback {
                 Edit::SaveProvider {
                     search_only: None,
                     end_on_message_stop: None,
+                    filter_count_tokens: None,
+                    buffer_complete_response: None,
+                    endless_mode: None,
+                    upstream_retry_seconds: None,
                     quota_access_token: None,
                     id: None,
                     base_url: url,
