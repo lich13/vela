@@ -3285,8 +3285,12 @@ async fn forward(gateway: Gateway, request: Request<Incoming>) -> Response<WireB
             .any(|p| p.buffer_complete_response || p.endless_mode);
     if managed {
         let (started, received) = tokio::sync::oneshot::channel();
-        super::claude_stream::waiting(forward_inner(gateway, request, Some(started)), received)
-            .await
+        // Keep the unboxed forwarding state out of the waiting future.
+        super::claude_stream::waiting(
+            Box::pin(forward_inner(gateway, request, Some(started))),
+            received,
+        )
+        .await
     } else {
         forward_inner(gateway, request, None).await
     }

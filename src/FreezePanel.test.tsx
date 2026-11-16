@@ -62,8 +62,17 @@ it("freezes only the selected platform and schedules, changes and cancels its re
   });
   expect(await codex.findByText("已冻结")).toBeInTheDocument();
   expect(claude.getByText("未冻结")).toBeInTheDocument();
+  const clock = vi
+    .spyOn(Date, "now")
+    .mockReturnValue(new Date(2025, 1, 3, 4, 5, 6).getTime());
   await user.click(codex.getByRole("button", { name: "定时恢复" }));
-  const time = "2099-06-15T18:30";
+  clock.mockRestore();
+  expect(
+    new Date(
+      (codex.getByLabelText("恢复时间") as HTMLInputElement).value,
+    ).getTime(),
+  ).toBe(new Date(2025, 1, 3, 4, 5, 6).getTime());
+  const time = "2099-06-15T18:30:45";
   const at = new Date(time).getTime();
   const scheduled: GatewayFreeze = {
     ...frozen,
@@ -80,9 +89,13 @@ it("freezes only the selected platform and schedules, changes and cancels its re
     clientId: "codex",
     resumeAt: at,
   });
-  expect(await codex.findByText("2099-06-15 18:30")).toBeInTheDocument();
+  expect(await codex.findByText("2099-06-15 18:30:45")).toBeInTheDocument();
   await user.click(codex.getByRole("button", { name: "修改时间" }));
-  expect(codex.getByLabelText("恢复时间")).toHaveValue(time);
+  expect(
+    new Date(
+      (codex.getByLabelText("恢复时间") as HTMLInputElement).value,
+    ).getTime(),
+  ).toBe(at);
   await user.click(codex.getByRole("button", { name: /^取消$/ }));
   mock.command.mockResolvedValue(frozen);
   await user.click(codex.getByRole("button", { name: "取消 Codex 定时恢复" }));

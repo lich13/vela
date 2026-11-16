@@ -11,10 +11,9 @@ fn failure(status: u16) -> Frame<Bytes> {
     )))
 }
 pub(super) async fn waiting(
-    pending: impl Future<Output = Response<WireBody>> + Send + 'static,
+    mut pending: std::pin::Pin<Box<impl Future<Output = Response<WireBody>> + Send + 'static>>,
     started: tokio::sync::oneshot::Receiver<()>,
 ) -> Response<WireBody> {
-    let mut pending = Box::pin(pending);
     tokio::select! {
         response = &mut pending => return response,
         result = started => if result.is_err() { return pending.await; },

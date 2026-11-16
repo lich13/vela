@@ -17,7 +17,7 @@ const stages = [
 function localTime(at: number) {
   const date = new Date(at);
   const part = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())}T${part(date.getHours())}:${part(date.getMinutes())}`;
+  return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())}T${part(date.getHours())}:${part(date.getMinutes())}:${part(date.getSeconds())}`;
 }
 type Controller = ReturnType<typeof useGatewayFreeze>;
 function Platform({
@@ -42,7 +42,7 @@ function Platform({
     }
   };
   const openTime = () => {
-    setTime(state.resumeAt ? localTime(state.resumeAt) : "");
+    setTime(localTime(state.resumeAt ?? Date.now()));
     setEditing(true);
     setError("");
   };
@@ -130,7 +130,7 @@ function Platform({
           <input
             id={`resume-${state.clientId}`}
             type="datetime-local"
-            step="60"
+            step="1"
             value={time}
             onChange={(e) => setTime(e.target.value)}
             required
