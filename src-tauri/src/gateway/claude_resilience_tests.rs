@@ -42,7 +42,6 @@ fn json(bytes: impl Into<Bytes>) -> Response<WireBody> {
 }
 async fn settled(f: &Fixture) {
     super::super::test_support::settled(&f.gateway).await;
-    f.usage.query(|_| Ok(())).unwrap();
 }
 
 #[tokio::test]
@@ -72,7 +71,7 @@ async fn count_filter_is_provider_scoped_and_leaves_no_usage_or_health_failure()
     }
     settled(&f).await;
     assert_eq!(hits.load(Ordering::SeqCst), 0);
-    assert!(records(&f.usage).is_empty());
+    no_new_records(&f.usage, 0).await;
     assert_eq!(f.gateway.view().providers[0].health.failures, 0);
     options(&f, false, false, false);
     assert_eq!(
@@ -272,7 +271,7 @@ async fn endless_retries_429_and_5xx_past_global_budget_on_the_original_provider
     assert_eq!(hits.load(Ordering::SeqCst), 3);
     assert_eq!(other_hits.load(Ordering::SeqCst), 0);
     settled(&f).await;
-    let rows = records(&f.usage);
+    let rows = recorded(&f.usage, 1).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].attempts.len(), 1);
     assert_eq!(rows[0].attempts[0].outcome, "success");
@@ -380,7 +379,7 @@ async fn endless_header_timeout_is_omitted() {
     let bytes = response_bytes(request(&f.gateway, "/v1/messages", STREAM_REQUEST).await).await;
     assert!(String::from_utf8_lossy(&bytes).contains("complete"));
     settled(&f).await;
-    let rows = records(&f.usage);
+    let rows = recorded(&f.usage, 1).await;
     assert_eq!(rows[0].attempts.len(), 1);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     f.stop().await;
@@ -409,12 +408,12 @@ async fn endless_permanent_rejections_stop_and_consumed_usage_is_kept() {
         settled(&f).await;
         if billed {
             assert_eq!(hits.load(Ordering::SeqCst), 2);
-            let rows = records(&f.usage);
+            let rows = recorded(&f.usage, 1).await;
             assert_eq!(rows[0].attempts.len(), 2);
             assert!(String::from_utf8_lossy(&bytes).contains("complete"));
         } else {
             assert_eq!(hits.load(Ordering::SeqCst), 1);
-            assert!(records(&f.usage).is_empty());
+            no_new_records(&f.usage, 0).await;
             assert!(String::from_utf8_lossy(&bytes).contains("event: error"));
         }
         f.stop().await;
@@ -477,7 +476,7 @@ async fn endless_wait_releases_slots_and_stops_on_cancel_disconnect_or_shutdown(
         .unwrap_or_else(|_| panic!("{end} left a pending request"));
         settled(&f).await;
         assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert!(records(&f.usage).is_empty());
+        no_new_records(&f.usage, 0).await;
         if end != "shutdown" {
             f.stop().await;
         }
@@ -621,7 +620,16 @@ async fn explicit_compaction_headers_classify_usage_and_suspend_execution_timeou
 
 #[tokio::test]
 async fn context_compacted_header_and_prompt_words_are_ordinary_messages() {
-    let upstream = server(move |_, _| async move { json(MESSAGE) }).await;
+    let next_id = Arc::new(AtomicUsize::new(0));
+    let upstream = server(move |_, _| {
+        let id = next_id.fetch_add(1, Ordering::SeqCst);
+        async move {
+            let mut message: serde_json::Value = serde_json::from_slice(MESSAGE).unwrap();
+            message["id"] = json!(format!("msg_fixture_{id}"));
+            json(message.to_string())
+        }
+    })
+    .await;
     let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
     f.start().await;
     for header in ["x-claude-code-context-compacted", "x-cc-context-compacted"] {
@@ -629,10 +637,13 @@ async fn context_compacted_header_and_prompt_words_are_ordinary_messages() {
             Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));
         let token = f.gateway.0.inner.lock().store.local_token.clone();
         let request=Request::builder().method("POST").uri(format!("http://127.0.0.1:{}/v1/messages",f.gateway.view().settings.port)).header("authorization",format!("Bearer {token}")).header("content-type","application/json").header(header,"true").body(full(br#"{"model":"claude-fixture","messages":[{"role":"user","content":"compact summarize compression request"}]}"#.as_slice())).unwrap();
-        response_bytes(client.request(request).await.unwrap()).await;
+        let response = client.request(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        response_bytes(response).await;
     }
     settled(&f).await;
-    assert!(records(&f.usage)
+    assert!(recorded(&f.usage, 2)
+        .await
         .iter()
         .all(|row| row.attempts[0].operation == Operation::Model));
     f.stop().await;
