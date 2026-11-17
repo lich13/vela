@@ -3,3 +3,7 @@ pmOnFail: ignore
 allowBuilds:
   esbuild: true
   sharp: true
+auditConfig:
+  ignoreGhsas:
+    # picomatch ReDoS has no patched release; reachable only from dev-only vitest/vite globbing, never shipped.
+    - GHSA-fc5q-39xc-vjpf
