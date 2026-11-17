@@ -309,3 +309,71 @@ async fn account_credentials_persist_clear_and_invalidate_cache_without_leaking_
     let (store, _) = Store::load(&g.0.data.join("gateway.json")).unwrap();
     assert!(store.quota_access_tokens.is_empty());
 }
+
+#[tokio::test]
+async fn codex_catalog_is_generated_from_the_union_and_cached_per_provider() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = hits.clone();
+    let port = server(move |request| {
+        let counted = counted.clone();
+        async move {
+            assert_eq!(request.uri().path(), "/v1/models");
+            assert_eq!(
+                request.headers().get("authorization").unwrap(),
+                "Bearer upstream-fixture-token"
+            );
+            match request.uri().query() {
+                None => Response::new(full(
+                    r#"{"data":[{"id":"fixture-model"},{"id":"fixture-extra"}]}"#,
+                )),
+                Some("client_version=1") => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Response::new(full(
+                        r#"{"models":[{"slug":"fixture-model","display_name":"Fixture","base_instructions":"fixture instructions","supported_reasoning_levels":[{"effort":"medium","description":"fixture"}]},{"slug":"fixture-upstream-only","display_name":"Other","supported_reasoning_levels":[]}]}"#,
+                    ))
+                }
+                Some("client_version=2") => Response::new(full(
+                    r#"{"object":"list","data":[{"id":"fixture-model"}]}"#,
+                )),
+                _ => Response::builder().status(502).body(full("{}")).unwrap(),
+            }
+        }
+    })
+    .await;
+    let (_t, g) = fixture(vec![format!("http://127.0.0.1:{port}/v1")]).await;
+    let id = g.view().providers[0].id.clone();
+    g.list_models(&id, true).await.unwrap();
+    assert_eq!(
+        g.model_union(None).unwrap(),
+        ["fixture-extra", "fixture-model"]
+    );
+    let ask = |query: &'static str| {
+        let g = g.clone();
+        let id = id.clone();
+        async move {
+            catalog::codex_catalog(
+                &g,
+                &[id],
+                &format!("/v1/models{query}").parse().unwrap(),
+                &hyper::HeaderMap::new(),
+            )
+            .await
+        }
+    };
+    for _ in 0..2 {
+        let response = ask("?client_version=1").await.unwrap();
+        assert_eq!(response.headers()["x-models-etag"].len(), 64);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let models = body["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["slug"], "fixture-extra");
+        assert_eq!(models[0]["base_instructions"], "fixture instructions");
+        assert_eq!(models[1]["display_name"], "Fixture");
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    // Another list format, an upstream failure and a plain list are forwarded.
+    for query in ["?client_version=2", "?client_version=3", ""] {
+        assert!(ask(query).await.is_none(), "{query}");
+    }
+}

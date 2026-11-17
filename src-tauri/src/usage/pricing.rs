@@ -512,7 +512,14 @@ impl Pricing {
                 if matched_by == "exact" {
                     matched_by = "normalized";
                 }
-            } else if let Some(known) = builtin_pricing::canonical(requested) {
+            } else if let Some(known) = builtin_pricing::canonical_with(requested, |base| {
+                s.config
+                    .fixed
+                    .keys()
+                    .chain(s.cache.catalog.keys())
+                    .find(|key| key.eq_ignore_ascii_case(base))
+                    .cloned()
+            }) {
                 canonical = if known == "gpt-5.3-codex"
                     && requested.to_ascii_lowercase().contains("-spark")
                     && (s.cache.catalog.contains_key("gpt-5.1-codex")

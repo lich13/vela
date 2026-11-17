@@ -139,7 +139,6 @@ struct ControlsCardModel: Codable, Equatable {
 }
 
 struct QuickPanelViewModel: Codable, Equatable {
-    let theme: String
     let appearanceMode: String
     let pinned: Bool
     let busy: Bool
@@ -156,7 +155,6 @@ struct QuickPanelViewModel: Codable, Equatable {
     let renameCloseSeq: UInt64
 
     static let placeholder = QuickPanelViewModel(
-        theme: "dark",
         appearanceMode: "system",
         pinned: false,
         busy: false,
@@ -267,7 +265,20 @@ struct DragSession: Equatable {
     var offsetY: CGFloat
 }
 
+/// Row heights as laid out, keyed by provider id, for drag targets.
+struct ProviderRowHeightKey: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
+    }
+}
+
 final class QuickPanelStore: ObservableObject {
+    /// Not published: a height change must not redraw the list by itself.
+    var rowHeights: [String: CGFloat] = [:]
+    /// A rename was sent and its outcome has not arrived yet.
+    var renamePending: Bool = false
+    @Published var decodeFailed: Bool = false
     @Published var model: QuickPanelViewModel = .placeholder
     @Published var editingProviderId: String? = nil
     @Published var editingNameDraft: String = ""
@@ -301,8 +312,12 @@ final class QuickPanelStore: ObservableObject {
         }
         if next.renameCloseSeq != prevRenameClose {
             editingProviderId = nil
-        } else if editingProviderId != nil && next.errorBanner != nil && next.errorBanner != prevBanner {
+            renamePending = false
+        } else if renamePending && editingProviderId != nil
+            && next.errorBanner != nil && next.errorBanner != prevBanner {
+            // Only a failed submit drops the baseline, so a retry uses the new revision.
             editingRevision = nil
+            renamePending = false
         }
         if let drag = activeDrag, let gw = next.gateway, drag.expectedRevision != gw.revision {
             activeDrag = nil
@@ -753,6 +768,7 @@ struct QuickProviderRowView: View {
     let onMoveByStep: (Int) -> Void
 
     @State private var nameHovered: Bool = false
+    @FocusState private var nameFocused: Bool
 
     private var isEditingName: Bool {
         store.editingProviderId == provider.id
@@ -804,6 +820,8 @@ struct QuickProviderRowView: View {
                             onCommit: { submitRename() }
                         )
                         .textFieldStyle(.plain)
+                        .focused($nameFocused)
+                        .onAppear { DispatchQueue.main.async { nameFocused = true } }
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundColor(palette.ink)
                         .padding(.horizontal, 6)
@@ -855,6 +873,7 @@ struct QuickProviderRowView: View {
                     .onTapGesture(count: 2) {
                         if !rowDisabled {
                             store.editingProviderId = provider.id
+                            store.renamePending = false
                             store.editingNameDraft = provider.name
                             store.editingRevision = gatewayRevision
                         }
@@ -1081,6 +1100,7 @@ struct QuickProviderRowView: View {
         if let rev = store.editingRevision {
             payload["expectedRevision"] = rev
         }
+        store.renamePending = true
         store.dispatch(payload)
     }
 
@@ -1614,6 +1634,17 @@ struct QuickPanelRootView: View {
 
                 ScrollView(.vertical, showsIndicators: true) {
                     VStack(alignment: .leading, spacing: 8) {
+                        if store.decodeFailed {
+                            Text("面板数据格式不符，显示的是上一次的内容")
+                                .font(.system(size: 12))
+                                .foregroundColor(palette.error)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(palette.errorSoft))
+                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(palette.error.opacity(0.32), lineWidth: 1))
+                        }
+
                         if let err = store.model.errorBanner, !err.isEmpty {
                             Text(err)
                                 .font(.system(size: 12))
@@ -1772,9 +1803,11 @@ struct QuickPanelRootView: View {
             let map = Dictionary(uniqueKeysWithValues: gateway.providers.map { ($0.id, $0) })
             return drag.currentIds.compactMap { map[$0] }
         }()
-        let rowStride: CGFloat = 78.0
+        let rowSpacing: CGFloat = 7.0
+        // Rows differ in height, so the target comes from each measured row.
+        let stride: (String) -> CGFloat = { id in (store.rowHeights[id] ?? 71.0) + rowSpacing }
 
-        return VStack(spacing: 7) {
+        return VStack(spacing: rowSpacing) {
             ForEach(orderedProviders) { provider in
                 QuickProviderRowView(
                     store: store,
@@ -1796,8 +1829,17 @@ struct QuickPanelRootView: View {
                                 offsetY: translationY
                             )
                         }
-                        let delta = Int((translationY / rowStride).rounded())
-                        let targetIdx = max(0, min(ids.count - 1, startIdx + delta))
+                        var targetIdx = startIdx
+                        var passed: CGFloat = 0
+                        let neighbours = translationY >= 0
+                            ? Array(ids[(startIdx + 1)...])
+                            : Array(ids[..<startIdx].reversed())
+                        for id in neighbours {
+                            let step = stride(id)
+                            guard abs(translationY) > passed + step / 2 else { break }
+                            passed += step
+                            targetIdx += translationY >= 0 ? 1 : -1
+                        }
                         var reordered = ids
                         let item = reordered.remove(at: startIdx)
                         reordered.insert(item, at: targetIdx)
@@ -1829,9 +1871,18 @@ struct QuickPanelRootView: View {
                         ])
                     }
                 )
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: ProviderRowHeightKey.self,
+                            value: [provider.id: geo.size.height]
+                        )
+                    }
+                )
             }
         }
         .coordinateSpace(name: "providerList")
+        .onPreferenceChange(ProviderRowHeightKey.self) { store.rowHeights = $0 }
     }
 }
 
@@ -1878,8 +1929,12 @@ final class QuickPanelController: NSObject {
         guard let jsonPtr = jsonPtr else { return }
         let data = Data(bytes: jsonPtr, count: strlen(jsonPtr))
         if let decoded = try? JSONDecoder().decode(QuickPanelViewModel.self, from: data) {
+            store.decodeFailed = false
             store.apply(decoded)
             applyPanelAppearance(decoded.appearanceMode)
+        } else {
+            // Keep the last good view and say why it stopped updating.
+            store.decodeFailed = true
         }
     }
 
@@ -2092,12 +2147,6 @@ public func vela_quick_attach_status_item(_ raw: UnsafeRawPointer?) {
 @_cdecl("vela_quick_toggle")
 public func vela_quick_toggle(_ jsonPtr: UnsafePointer<CChar>?) -> Bool {
     QuickPanelController.shared.toggle(jsonPtr: jsonPtr)
-}
-
-@_cdecl("vela_quick_show")
-public func vela_quick_show(_ jsonPtr: UnsafePointer<CChar>?) {
-    QuickPanelController.shared.updateJson(jsonPtr)
-    QuickPanelController.shared.show()
 }
 
 @_cdecl("vela_quick_render")

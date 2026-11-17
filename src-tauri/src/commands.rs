@@ -51,7 +51,17 @@ pub async fn set_clamshell_awake(
     enabled: bool,
     expected_revision: String,
 ) -> Result<power::State> {
-    let r = r.inner().clone();
+    set_clamshell(&app, r.inner(), enabled, expected_revision).await
+}
+/// Changes the lid setting and publishes the outcome to every window; the
+/// main window command and the native panel both come through here.
+pub(crate) async fn set_clamshell(
+    app: &tauri::AppHandle,
+    r: &Arc<crate::Runtime>,
+    enabled: bool,
+    expected_revision: String,
+) -> Result<power::State> {
+    let (app, r) = (app.clone(), r.clone());
     tauri::async_runtime::spawn_blocking(move || {
         let result = r.power.set(enabled, &expected_revision);
         publish_power_result(&app, &r.power, result)
@@ -84,14 +94,20 @@ pub async fn force_quit_agent_clients(
     target: process_control::Target,
     r: R<'_>,
 ) -> Result<process_control::Outcome> {
+    force_quit(r.inner(), target).await
+}
+/// Ends the chosen client's processes, one request at a time.
+pub(crate) async fn force_quit(
+    r: &Arc<crate::Runtime>,
+    target: process_control::Target,
+) -> Result<process_control::Outcome> {
     if r.force_quitting.swap(true, Ordering::AcqRel) {
         return Err(AppError::new(code::BUSY, "正在退出客户端"));
     }
-    let runtime = r.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || process_control::force_quit(target))
         .await
         .map_err(|_| AppError::new(code::PROCESS, "退出客户端失败"));
-    runtime.force_quitting.store(false, Ordering::Release);
+    r.force_quitting.store(false, Ordering::Release);
     result?
 }
 #[cfg(test)]

@@ -71,6 +71,8 @@ export type UpdateInfo = {
   hasUpdate: boolean;
   latestVersion: string | null;
 };
+/** Seconds between upstream retries when a provider has no saved value. */
+export const DEFAULT_UPSTREAM_RETRY_SECONDS = 5;
 export const errorOf = (e: unknown): AppError =>
   typeof e === "object" && e !== null && "message" in e
     ? (e as AppError)

@@ -311,6 +311,14 @@ pub(super) const CODES: &[Code] = &[
         category: InvalidRequest,
     },
     Code {
+        value: "timeout_error",
+        category: ServiceError,
+    },
+    Code {
+        value: "not_found_error",
+        category: InvalidRequest,
+    },
+    Code {
         value: "api_error",
         category: ServiceError,
     },
@@ -357,6 +365,9 @@ pub(super) const MSG_0: &[&str] = &[
     "context_length_exceeded",
     "request exceeds the token limit",
     "maximum context length",
+    "prompt is too long",
+    "context window",
+    "exceed context limit",
     "请求体过大",
     "上下文长度超限",
 ];
@@ -598,6 +609,8 @@ pub(super) const RPM_WORDS: &[&str] = &[
     "requests-per-minute limit exceeded",
     "requests per minute limit exceeded",
     "requests per minute limit reached",
+    "requests per minute",
+    "request rate limit",
     "rpm limit exceeded",
     "rpm_limit_exceeded",
     "每分钟请求数超限",

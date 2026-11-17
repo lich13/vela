@@ -265,7 +265,9 @@ export default function App() {
         setLogin(next);
       }),
       events.watch("main-close-requested", async (payload) => {
-        if (disposed || closingMain.current) return;
+        if (disposed) return;
+        void command("ack_main_close").catch(() => {});
+        if (closingMain.current) return;
         closingMain.current = true;
         try {
           let wasHidden = Boolean(payload?.hidden) || document.hidden;

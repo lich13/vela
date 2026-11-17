@@ -385,24 +385,18 @@ impl Record {
             .as_u64()
             .and_then(|s| u16::try_from(s).ok())
             .filter(|s| (100..600).contains(s));
-        let kind = line["error"].as_str().unwrap_or_default();
-        let reason = if kind == "rate_limit" || status == Some(429) {
-            Reason::RateLimit
-        } else if matches!(kind, "authentication_failed" | "billing_error")
-            || matches!(status, Some(401 | 403))
-        {
-            Reason::Authentication
-        } else if !line["streamCutCause"].is_null() {
-            Reason::RequestInterrupted
-        } else if line["apiError"] == "connection_failed" {
-            Reason::Network
-        } else {
-            Reason::UpstreamService
-        };
         let message = line["message"]["content"]
             .as_array()
             .and_then(|blocks| blocks.iter().find_map(|block| block["text"].as_str()))
             .and_then(raw_log_message);
+        let mut details = Details {
+            upstream_code: text(&line["error"]),
+            upstream_type: text(&line["apiError"]),
+            upstream_reason: text(&line["streamCutCause"]),
+            message,
+            ..Default::default()
+        };
+        let reason = claude_session_reason(status, &mut details);
         Some(Self::external(
             ExternalClient::ClaudeCode,
             &key,
@@ -410,14 +404,38 @@ impl Record {
             None,
             reason,
             status,
-            Details {
-                upstream_code: text(&line["error"]),
-                upstream_type: text(&line["apiError"]),
-                upstream_reason: text(&line["streamCutCause"]),
-                message,
-                ..Default::default()
-            },
+            details,
         ))
+    }
+    /// Session errors stored before they were classified get the same
+    /// classification when the journal is read, as do stored 429s that only
+    /// said the service was unavailable.
+    fn classify_stored(&mut self) {
+        let vague = matches!(
+            self.details.error_basis,
+            None | Some(ErrorBasis::UnknownRateLimit)
+        );
+        if !vague {
+            return;
+        }
+        if matches!(
+            self.client_id,
+            Some(JournalClient::External(ExternalClient::ClaudeCode))
+        ) {
+            self.reason = claude_session_reason(self.status, &mut self.details);
+            self.level = external_level(self.reason);
+        } else if self.details.error_basis.is_some() {
+            crate::gateway::unavailable_429(self.status, &mut self.details);
+            if self.details.error_basis != Some(ErrorBasis::Capacity)
+                || self.reason != Reason::RateLimit
+            {
+                return;
+            }
+            self.reason = Reason::Capacity;
+        } else {
+            return;
+        }
+        self.error_code = self.reason.code();
     }
     /// A record read from another application's own files. The id derives
     /// from `key`, so reading the same line again does not add a second one.
@@ -450,14 +468,7 @@ impl Record {
             model: model.and_then(safe_model),
             reason,
             action: Action::Returned,
-            level: if matches!(
-                reason,
-                Reason::ModelUnavailable | Reason::RateLimit | Reason::Capacity
-            ) {
-                Level::Warning
-            } else {
-                Level::Error
-            },
+            level: external_level(reason),
             status,
             attempt: Some(1),
             error_code: reason.code(),
@@ -629,6 +640,36 @@ impl Record {
 }
 fn safe_id(s: &str) -> Option<String> {
     uuid::Uuid::parse_str(s).ok().map(|v| v.to_string())
+}
+fn external_level(reason: Reason) -> Level {
+    if matches!(
+        reason,
+        Reason::ModelUnavailable | Reason::RateLimit | Reason::Capacity
+    ) {
+        Level::Warning
+    } else {
+        Level::Error
+    }
+}
+/// Classifies a Claude Code session error with the gateway's rules and fills
+/// in the basis; errors without one fall back to how the request ended.
+fn claude_session_reason(status: Option<u16>, details: &mut Details) -> Reason {
+    let (basis, scope, reason) = crate::gateway::external_details(
+        status,
+        details.upstream_code.as_deref().unwrap_or_default(),
+        details.message.as_deref().unwrap_or_default(),
+    );
+    details.error_basis = basis;
+    details.health_scope = scope;
+    if let Some(reason) = reason {
+        reason
+    } else if details.upstream_reason.is_some() {
+        Reason::RequestInterrupted
+    } else if details.upstream_type.as_deref() == Some("connection_failed") {
+        Reason::Network
+    } else {
+        Reason::UpstreamService
+    }
 }
 fn raw_log_message(value: &str) -> Option<String> {
     let text = value.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1155,7 +1196,8 @@ fn load(path: &Path) -> Journal {
                     }
                 }
                 match serde_json::from_slice::<Record>(&line) {
-                    Ok(r) => {
+                    Ok(mut r) => {
+                        r.classify_stored();
                         if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
                             j.records.push_back(Arc::new(r))
                         } else {
@@ -1895,8 +1937,18 @@ mod diagnostic_record_tests {
             ),
             (
                 serde_json::json!({"error": "server_error", "apiErrorStatus": 529}),
-                Reason::UpstreamService,
+                Reason::Capacity,
                 Some(529),
+            ),
+            (
+                serde_json::json!({"error": "billing_error", "apiErrorStatus": 403}),
+                Reason::UpstreamService,
+                Some(403),
+            ),
+            (
+                serde_json::json!({"error": "server_error", "apiErrorStatus": 500}),
+                Reason::UpstreamService,
+                Some(500),
             ),
         ] {
             let record = Record::claude_session_error(&line(extra.clone())).unwrap();
@@ -1918,6 +1970,62 @@ mod diagnostic_record_tests {
             // The same line always yields the same record.
             let again = Record::claude_session_error(&line(extra)).unwrap();
             assert_eq!(again.id, record.id);
+        }
+        let basis = |extra: serde_json::Value, text: &str| {
+            let mut line = line(extra);
+            line["message"]["content"][0]["text"] = text.into();
+            let record = Record::claude_session_error(&line).unwrap();
+            (record.reason, record.details.error_basis)
+        };
+        let limited = serde_json::json!({"error": "rate_limit", "apiErrorStatus": 429});
+        assert_eq!(
+            basis(
+                limited.clone(),
+                "API Error: Request rejected (429) · Service Unavailable"
+            ),
+            (Reason::Capacity, Some(ErrorBasis::Capacity))
+        );
+        assert_eq!(
+            basis(
+                limited.clone(),
+                r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your organization's rate limit of 50 requests per minute"}}"#
+            ),
+            (Reason::RateLimit, Some(ErrorBasis::Rpm))
+        );
+        assert_eq!(
+            basis(limited, "API Error: fixture"),
+            (Reason::RateLimit, Some(ErrorBasis::UnknownRateLimit))
+        );
+        assert_eq!(
+            basis(
+                serde_json::json!({"error": "billing_error", "apiErrorStatus": 403}),
+                "API Error: fixture"
+            ),
+            (Reason::UpstreamService, Some(ErrorBasis::Billing))
+        );
+        assert_eq!(
+            basis(
+                serde_json::json!({"error": "invalid_request", "apiErrorStatus": 400}),
+                r#"API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 200000 maximum"}}"#
+            ),
+            (Reason::ProtocolError, Some(ErrorBasis::RequestTooLarge))
+        );
+        // A record stored before classification gains it when read back.
+        let mut stored = Record::claude_session_error(&{
+            let mut line = line(serde_json::json!({"error": "rate_limit", "apiErrorStatus": 429}));
+            line["message"]["content"][0]["text"] =
+                "API Error: Request rejected (429) · Service Unavailable".into();
+            line
+        })
+        .unwrap();
+        for old in [None, Some(ErrorBasis::UnknownRateLimit)] {
+            stored.details.error_basis = old;
+            stored.reason = Reason::RateLimit;
+            stored.classify_stored();
+            assert_eq!(
+                (stored.reason, stored.details.error_basis),
+                (Reason::Capacity, Some(ErrorBasis::Capacity))
+            );
         }
         let mut ordinary = line(serde_json::json!({}));
         ordinary["isApiErrorMessage"] = false.into();

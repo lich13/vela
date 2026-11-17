@@ -26,6 +26,8 @@ export function limitLabel(e?: LimitEvidence | null): string {
     ].includes(reason)
   )
     return "月额度已用尽";
+  if (reason === "five_hour") return "5 小时额度已用尽";
+  if (reason === "seven_day") return "7 天额度已用尽";
   return (
     (
       {

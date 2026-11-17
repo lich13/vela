@@ -81,6 +81,9 @@ struct Runtime {
     main_window: Mutex<MainWindowState>,
     main_create_lock: tokio::sync::Mutex<()>,
     main_destroyed: tokio::sync::Notify,
+    /// Close requests sent to the frontend and the latest one it acknowledged.
+    main_close_seq: std::sync::atomic::AtomicU64,
+    main_close_ack: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -113,6 +116,8 @@ pub(crate) struct MainWindowState {
     pub(crate) generation: u64,
     pub(crate) want_show: bool,
     pub(crate) pending_target: Option<MainTarget>,
+    /// The window was shown before its frontend reported ready.
+    pub(crate) shown_early: bool,
 }
 
 impl MainWindowState {
@@ -129,6 +134,7 @@ impl MainWindowState {
             return None;
         }
         self.phase = MainWindowPhase::Creating;
+        self.shown_early = false;
         self.generation += 1;
         Some(self.generation)
     }
@@ -157,9 +163,14 @@ impl MainWindowState {
         true
     }
 
-    pub(crate) fn on_destroyed(&mut self) -> bool {
+    /// Settles a destroy. A `Destroyed` event that arrives after the state
+    /// already moved on belongs to the previous window and changes nothing.
+    pub(crate) fn on_destroyed(&mut self) -> Option<bool> {
+        if self.phase != MainWindowPhase::Destroying {
+            return None;
+        }
         self.phase = MainWindowPhase::Absent;
-        self.want_show
+        Some(self.want_show)
     }
 }
 
@@ -637,6 +648,7 @@ fn present_main_window(
 }
 async fn ensure_main_window(app: &tauri::AppHandle, r: &Arc<Runtime>) -> Result<()> {
     let _guard = r.main_create_lock.lock().await;
+    let mut absent_polls = 0u32;
     let gen = loop {
         let notified = r.main_destroyed.notified();
         tokio::pin!(notified);
@@ -648,12 +660,30 @@ async fn ensure_main_window(app: &tauri::AppHandle, r: &Arc<Runtime>) -> Result<
             }
             match st.phase {
                 MainWindowPhase::Destroying => {
+                    // The Destroyed event normally settles this; only a window
+                    // that stays gone for a second without one is settled here.
                     if app.get_webview_window("main").is_none() {
-                        st.on_destroyed();
-                        continue;
+                        absent_polls += 1;
+                        if absent_polls >= 20 {
+                            st.on_destroyed();
+                            continue;
+                        }
+                    } else {
+                        absent_polls = 0;
                     }
                 }
-                MainWindowPhase::Creating => return Ok(()),
+                MainWindowPhase::Creating => {
+                    let shown_early = st.shown_early;
+                    drop(st);
+                    if shown_early {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.unminimize();
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    return Ok(());
+                }
                 MainWindowPhase::Ready => {
                     if let Some(w) = app.get_webview_window("main") {
                         let target = st.pending_target.take();
@@ -699,8 +729,12 @@ async fn ensure_main_window(app: &tauri::AppHandle, r: &Arc<Runtime>) -> Result<
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 let still_creating = {
-                    let st = fallback_r.main_window.lock();
-                    st.phase == MainWindowPhase::Creating && st.generation == gen && st.want_show
+                    let mut st = fallback_r.main_window.lock();
+                    let creating = st.phase == MainWindowPhase::Creating
+                        && st.generation == gen
+                        && st.want_show;
+                    st.shown_early |= creating;
+                    creating
                 };
                 if still_creating {
                     if let Some(w) = fallback_app.get_webview_window("main") {
@@ -724,16 +758,22 @@ fn destroy_main_window(app: &tauri::AppHandle) -> Result<()> {
     let Some(r) = app.try_state::<Arc<Runtime>>() else {
         return Ok(());
     };
-    if !r.main_window.lock().begin_destroying() {
-        return Ok(());
-    }
-    r.mark_window_visible("main", false);
-    r.grok.cancel_grok_import(None);
-    r.core.lock().exchange_clear();
+    let previous = {
+        let mut st = r.main_window.lock();
+        let previous = st.phase;
+        if !st.begin_destroying() {
+            return Ok(());
+        }
+        previous
+    };
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.emit("app-visibility", false);
-        w.destroy()
-            .map_err(|_| AppError::new(code::WINDOW, "无法关闭主窗口"))?;
+        if w.destroy().is_err() {
+            r.main_window.lock().phase = previous;
+            return Err(AppError::new(code::WINDOW, "无法关闭主窗口"));
+        }
+        r.mark_window_visible("main", false);
+        r.grok.cancel_grok_import(None);
+        r.core.lock().exchange_clear();
     } else {
         on_main_window_destroyed(app);
     }
@@ -745,10 +785,13 @@ fn on_main_window_destroyed(app: &tauri::AppHandle) {
     let Some(r) = app.try_state::<Arc<Runtime>>().map(|s| s.inner().clone()) else {
         return;
     };
+    let Some(want_show) = r.main_window.lock().on_destroyed() else {
+        return;
+    };
     r.mark_window_visible("main", false);
     r.grok.cancel_grok_import(None);
     r.core.lock().exchange_clear();
-    let reopen = r.main_window.lock().on_destroyed() && !r.quitting.load(Ordering::Relaxed);
+    let reopen = want_show && !r.quitting.load(Ordering::Relaxed);
     r.main_destroyed.notify_waiters();
     if reopen {
         let handle = app.clone();
@@ -778,14 +821,12 @@ pub(crate) fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
         }
         r.main_window.lock().phase = MainWindowPhase::Absent;
     }
-    if phase != MainWindowPhase::Creating {
-        let handle = app.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = ensure_main_window(&handle, &r).await {
-                emit_switch_error(&handle, e);
-            }
-        });
-    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = ensure_main_window(&handle, &r).await {
+            emit_switch_error(&handle, e);
+        }
+    });
     Ok(())
 }
 fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
@@ -881,6 +922,15 @@ fn close_main(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<()>
     }
     destroy_main_window(&app)
 }
+/// The frontend received a close request and now owns the decision.
+#[tauri::command]
+fn ack_main_close(window: tauri::WebviewWindow, r: tauri::State<'_, Arc<Runtime>>) {
+    if window.label() == "main" {
+        r.main_close_ack
+            .store(r.main_close_seq.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
+const MAIN_CLOSE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const VISIBLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const HIDDEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -1818,6 +1868,26 @@ async fn start_gateway(
     expected_revision: String,
     expected_config_revision: Option<String>,
 ) -> Result<gateway::View> {
+    let result = start_gateway_for(
+        &app,
+        &r,
+        client_id,
+        &expected_revision,
+        expected_config_revision.as_deref(),
+    )
+    .await?;
+    emit_switch_notice(&app, format!("网关已启用，请重新打开 {}", client_id.name()));
+    Ok(result)
+}
+/// Starts one client's gateway and refreshes every window. The main window
+/// command and the native panel share it; each words its own notice.
+pub(crate) async fn start_gateway_for(
+    app: &tauri::AppHandle,
+    r: &Arc<Runtime>,
+    client_id: gateway::ClientId,
+    expected_revision: &str,
+    expected_config_revision: Option<&str>,
+) -> Result<gateway::View> {
     let _official_guard = r.official_tx.lock().await;
     if client_id == gateway::ClientId::Codex && official::blocks_gateway(&r.data) {
         return Err(AppError::new(
@@ -1828,16 +1898,27 @@ async fn start_gateway(
     let home = r.home(client_id)?;
     let result = r
         .gateway(client_id)
-        .start_checked(
-            &expected_revision,
-            &home,
-            expected_config_revision.as_deref(),
-        )
+        .start_checked(expected_revision, &home, expected_config_revision)
         .await
         .map_err(|e| r.config_failure(client_id, e))?;
     r.window_wake.notify_one();
-    let _ = refresh(&app, &r);
-    emit_switch_notice(&app, format!("网关已启用，请重新打开 {}", client_id.name()));
+    let _ = refresh(app, r);
+    Ok(result)
+}
+pub(crate) async fn stop_gateway_for(
+    app: &tauri::AppHandle,
+    r: &Arc<Runtime>,
+    client_id: gateway::ClientId,
+    expected_config_revision: Option<&str>,
+) -> Result<gateway::View> {
+    let _official_guard = r.official_tx.lock().await;
+    let result = r
+        .gateway(client_id)
+        .stop_checked(expected_config_revision)
+        .await
+        .map_err(|e| r.config_failure(client_id, e))?;
+    r.window_wake.notify_one();
+    let _ = refresh(app, r);
     Ok(result)
 }
 #[tauri::command]
@@ -1847,14 +1928,7 @@ async fn stop_gateway(
     r: tauri::State<'_, Arc<Runtime>>,
     expected_config_revision: Option<String>,
 ) -> Result<gateway::View> {
-    let _official_guard = r.official_tx.lock().await;
-    let result = r
-        .gateway(client_id)
-        .stop_checked(expected_config_revision.as_deref())
-        .await
-        .map_err(|e| r.config_failure(client_id, e))?;
-    r.window_wake.notify_one();
-    let _ = refresh(&app, &r);
+    let result = stop_gateway_for(&app, &r, client_id, expected_config_revision.as_deref()).await?;
     emit_switch_notice(
         &app,
         format!("已写入当前供应商，请重新打开 {}", client_id.name()),
@@ -1990,6 +2064,8 @@ pub fn run() {
                 main_window: Mutex::new(MainWindowState::default()),
                 main_create_lock: tokio::sync::Mutex::new(()),
                 main_destroyed: tokio::sync::Notify::new(),
+                main_close_seq: Default::default(),
+                main_close_ack: Default::default(),
             });
             runtime
                 .gateway
@@ -2497,10 +2573,22 @@ pub fn run() {
                         let phase = r.main_window.lock().phase;
                         match phase {
                             MainWindowPhase::Ready => {
+                                let seq = r.main_close_seq.fetch_add(1, Ordering::Relaxed) + 1;
                                 let _ = w.emit(
                                     "main-close-requested",
                                     serde_json::json!({ "hidden": !visible }),
                                 );
+                                // A crashed or hung page cannot answer; close anyway.
+                                let app = w.app_handle().clone();
+                                let r = r.inner().clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(MAIN_CLOSE_ACK_TIMEOUT).await;
+                                    if r.main_close_seq.load(Ordering::Relaxed) == seq
+                                        && r.main_close_ack.load(Ordering::Relaxed) < seq
+                                    {
+                                        let _ = destroy_main_window(&app);
+                                    }
+                                });
                             }
                             MainWindowPhase::Creating => {
                                 let _ = destroy_main_window(w.app_handle());
@@ -2582,6 +2670,7 @@ pub fn run() {
             notifications::open_notification_settings,
             open_main,
             close_main,
+            ack_main_close,
             quick::get_quick,
             quick::set_quick,
             quick::quick_ready,
@@ -2996,8 +3085,9 @@ mod page_whitelist_tests {
             st.begin_creating().is_none(),
             "must not build second main WebView before Destroyed"
         );
-        assert!(
+        assert_eq!(
             st.on_destroyed(),
+            Some(true),
             "Destroyed must report queued reopen request"
         );
         assert_eq!(st.phase, MainWindowPhase::Absent);
@@ -3005,6 +3095,9 @@ mod page_whitelist_tests {
             .begin_creating()
             .expect("should recreate after Destroyed");
         assert_eq!(gen2, 2);
+        // A late Destroyed event from the previous window must not reset the new one.
+        assert_eq!(st.on_destroyed(), None);
+        assert_eq!(st.phase, MainWindowPhase::Creating);
         assert_eq!(st.finish_ready(), Some((true, Some(log_target))));
 
         // Buffered switch_error drains once for main and never leaks to quick.

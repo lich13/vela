@@ -157,7 +157,7 @@ fn explicit_type(error: &Value) -> Option<ErrorBasis> {
     // Generic wrappers do not override concrete reasons inside the envelope.
     (!matches!(
         kind.as_str(),
-        "invalid_request_error" | "invalid_request" | "rate_limit_error"
+        "invalid_request_error" | "invalid_request" | "rate_limit_error" | "not_found_error"
     ))
     .then(|| specific_code_kind(&kind))
     .flatten()
@@ -203,6 +203,36 @@ pub(super) fn bare_capacity(text: &str) -> bool {
         "selected model is at capacity"
             | "selected model is at capacity. please try a different model"
     )
+}
+
+/// A 429 whose whole message only says the service is unavailable carries no
+/// limit dimension; it is the upstream shedding load.
+fn bare_unavailable(text: &str) -> bool {
+    let normalized = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    matches!(
+        normalized.trim_end_matches(['.', '。']),
+        "service unavailable"
+            | "service temporarily unavailable"
+            | "server overloaded"
+            | "服务不可用"
+            | "服务暂时不可用"
+            | "服務不可用"
+            | "服務暫時不可用"
+    )
+}
+
+pub(crate) fn unavailable_429(status: Option<u16>, d: &mut Details) {
+    if status == Some(429)
+        && matches!(d.error_basis, None | Some(ErrorBasis::UnknownRateLimit))
+        && d.message.as_deref().is_some_and(bare_unavailable)
+    {
+        d.error_basis = Some(ErrorBasis::Capacity);
+        d.health_scope = None;
+    }
 }
 
 fn message_kind(text: &str) -> Option<ErrorBasis> {
@@ -386,6 +416,7 @@ fn classification(error: &Value) -> (Option<ErrorBasis>, Option<HealthScope>) {
             number
                 .and_then(|n| u16::try_from(n).ok())
                 .and_then(|code| match code {
+                    529 => Some(ErrorBasis::Capacity),
                     500 | 502..=599 => Some(ErrorBasis::ServiceError),
                     other => status_error_basis(other),
                 })
@@ -480,7 +511,9 @@ fn status_error_basis(status: u16) -> Option<ErrorBasis> {
         403 => Some(ErrorBasis::Permission),
         429 => Some(ErrorBasis::UnknownRateLimit),
         413 | 414 => Some(ErrorBasis::RequestTooLarge),
-        400 | 405 | 406 | 409 | 415 | 422 | 426 | 501 => Some(ErrorBasis::InvalidRequest),
+        408 | 504 => Some(ErrorBasis::ServiceError),
+        529 => Some(ErrorBasis::Capacity),
+        400 | 404 | 405 | 406 | 409 | 415 | 422 | 426 | 501 => Some(ErrorBasis::InvalidRequest),
         _ => None,
     }
 }
@@ -503,6 +536,7 @@ pub(super) fn http_value_with_rules(
         d.error_basis = Some(ErrorBasis::InvalidRequest);
         d.health_scope = Some(HealthScope::Request);
     }
+    unavailable_429(Some(status), &mut d);
     if d.error_basis.is_none() {
         d.error_basis = status_error_basis(status);
         if hard_rejection(&d) {
@@ -510,6 +544,14 @@ pub(super) fn http_value_with_rules(
         }
     }
     refine_headers(&mut d, headers, structured.is_some());
+    if status == 429 && d.error_basis.is_none_or(vague) {
+        if let Some(window) = unified_window(headers) {
+            d.error_basis = Some(ErrorBasis::UsageLimit);
+            if let Some(window) = window {
+                d.upstream_reason = Some(window.into());
+            }
+        }
+    }
     if let Some(error) = envelope(value, status >= 400, 0) {
         apply_custom(&mut d, error, headers, rules, allow_temporary_text);
     }
@@ -546,6 +588,43 @@ fn refine_headers(d: &mut Details, headers: &hyper::HeaderMap, structured: bool)
             d.health_scope = None;
         }
     }
+}
+
+/// Subscription windows report a rejection in the unified headers. The outer
+/// `Some` means a window rejected the request; the inner value names it.
+fn unified_window(headers: &hyper::HeaderMap) -> Option<Option<&'static str>> {
+    const PREFIX: &str = "anthropic-ratelimit-unified-";
+    let get = |name: &str| {
+        headers
+            .get(format!("{PREFIX}{name}"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_ascii_lowercase())
+    };
+    let rejected = |name: &str| get(name).as_deref() == Some("rejected");
+    let (five, seven) = (rejected("5h-status"), rejected("7d-status"));
+    if !(rejected("status") || five || seven) {
+        return None;
+    }
+    let claim = get("representative-claim").unwrap_or_default();
+    Some(if claim.starts_with("five_hour") {
+        Some("five_hour")
+    } else if claim.starts_with("seven_day") {
+        Some("seven_day")
+    } else if five {
+        Some("five_hour")
+    } else if seven {
+        Some("seven_day")
+    } else {
+        None
+    })
+}
+
+/// Unified reset headers carry a Unix timestamp in seconds, not a duration.
+fn epoch_wait(value: &str) -> Option<Duration> {
+    let at = value.trim().parse::<u64>().ok()?;
+    (at > 1_000_000_000).then(|| {
+        Duration::from_secs(at.saturating_sub(chrono::Utc::now().timestamp().max(0) as u64))
+    })
 }
 
 pub(super) fn details_with_headers(
@@ -677,7 +756,87 @@ pub(super) fn retry_headers(headers: &hyper::HeaderMap, d: &Details) -> Option<D
             );
         }
     }
+    if d.error_basis == Some(ErrorBasis::UsageLimit) {
+        if let Some(window) = unified_window(headers) {
+            let names: &[&str] = match window {
+                Some("five_hour") => &["5h-reset", "reset"],
+                Some("seven_day") => &["7d-reset", "reset"],
+                _ => &["reset"],
+            };
+            retry = retry.max(names.iter().find_map(|name| {
+                headers
+                    .get(format!("anthropic-ratelimit-unified-{name}"))
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(epoch_wait)
+            }));
+        }
+    }
     retry
+}
+
+/// Classifies an error another client wrote to its own log from the status,
+/// that client's error kind and the message text, with the gateway's rules.
+pub fn external_details(
+    status: Option<u16>,
+    kind: &str,
+    text: &str,
+) -> (Option<ErrorBasis>, Option<HealthScope>, Option<Reason>) {
+    let mut body = text.trim();
+    body = body
+        .strip_prefix("API Error:")
+        .map_or(body, str::trim_start);
+    if let Some(rest) = body.strip_prefix("Request rejected") {
+        body = rest
+            .trim_start()
+            .trim_start_matches(|c: char| matches!(c, '(' | ')') || c.is_ascii_digit())
+            .trim_start()
+            .trim_start_matches('·')
+            .trim_start();
+    }
+    if let Some(at) = body.find('{') {
+        if body[..at].trim().bytes().all(|b| b.is_ascii_digit()) {
+            body = &body[at..];
+        }
+    }
+    let value = serde_json::from_str::<Value>(body)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| Value::String(body.into()));
+    let mut d = details_value(&value, true);
+    let from_kind = match kind {
+        "rate_limit" => Some(ErrorBasis::UnknownRateLimit),
+        "authentication_failed" => Some(ErrorBasis::Authentication),
+        "overloaded" => Some(ErrorBasis::Capacity),
+        other => specific_code_kind(other),
+    };
+    if d.error_basis.is_none_or(vague) {
+        if let Some(basis) = from_kind.filter(|b| !vague(*b)) {
+            d.error_basis = Some(basis);
+            d.health_scope = None;
+        }
+    }
+    unavailable_429(status, &mut d);
+    if d.error_basis.is_none() {
+        d.error_basis = from_kind.or_else(|| status.and_then(status_error_basis));
+    }
+    if d.health_scope.is_none() {
+        d.health_scope = if hard_rejection(&d) {
+            Some(HealthScope::Provider)
+        } else if matches!(
+            d.error_basis,
+            Some(
+                ErrorBasis::InvalidRequest
+                    | ErrorBasis::RequestTooLarge
+                    | ErrorBasis::SafetyRejection
+            )
+        ) {
+            Some(HealthScope::Request)
+        } else {
+            None
+        };
+    }
+    let reason = d.error_basis.map(|_| decision(status, &d).reason);
+    (d.error_basis, d.health_scope, reason)
 }
 pub fn capacity_message(message: &str) -> bool {
     if rpm_message(message) {

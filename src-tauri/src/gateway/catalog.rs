@@ -327,6 +327,204 @@ fn anthropic_list(
         "first_id":page.first(), "last_id":page.last(), "has_more":if before.is_some(){start>0}else{end<models.len()}
     }))
 }
+const CODEX_EFFORTS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+type CodexCache = Mutex<HashMap<String, (Instant, Arc<Vec<serde_json::Value>>)>>;
+static CODEX_UPSTREAM: std::sync::LazyLock<CodexCache> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Codex reads its model menu from `model_catalog_url`. The menu lists every
+/// model the queued providers offer: the current provider's own entry when it
+/// has one, otherwise a copy of one of its entries under the missing id.
+/// `None` leaves the request to be forwarded unchanged.
+pub(super) async fn codex_catalog(
+    gateway: &super::Gateway,
+    providers: &[String],
+    uri: &hyper::Uri,
+    headers: &hyper::HeaderMap,
+) -> Option<hyper::Response<replay::WireBody>> {
+    if gateway.client_id() != super::ClientId::Codex
+        || !matches!(uri.path(), "/models" | "/v1/models")
+        || !url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
+            .any(|(key, _)| key == "client_version")
+    {
+        return None;
+    }
+    let models = gateway.model_union(None).ok().filter(|m| !m.is_empty())?;
+    let (input, _) = gateway.query_snapshot(providers.first()?, false).ok()?;
+    let key = format!(
+        "{}:{}:{}",
+        input.id,
+        input.version,
+        uri.query().unwrap_or("")
+    );
+    let cached = CODEX_UPSTREAM
+        .lock()
+        .get(&key)
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(300))
+        .map(|(_, entries)| entries.clone());
+    let upstream = match cached {
+        Some(entries) => entries,
+        None => {
+            let fetched =
+                tokio::time::timeout(Duration::from_secs(5), codex_upstream(&input, uri, headers))
+                    .await
+                    .ok()
+                    .flatten()?;
+            let entries = Arc::new(fetched);
+            let mut cache = CODEX_UPSTREAM.lock();
+            cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(300));
+            cache.insert(key, (Instant::now(), entries.clone()));
+            entries
+        }
+    };
+    let usage = gateway.0.usage.lock().clone();
+    let prices = usage.as_ref().and_then(|u| u.prices().ok());
+    let (choices, _) = gateway.0.model_list.snapshot();
+    let value = codex_merge(&models, &upstream, |id| {
+        prices
+            .as_ref()?
+            .models_dev
+            .metadata_from(id, choices.source(id))
+    })?;
+    let body = serde_json::to_vec(&value).expect("model catalog JSON");
+    Some(
+        hyper::Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-models-etag", storage::digest(&body))
+            .body(replay::full(body))
+            .expect("model catalog response"),
+    )
+}
+
+async fn codex_upstream(
+    input: &Query,
+    uri: &hyper::Uri,
+    headers: &hyper::HeaderMap,
+) -> Option<Vec<serde_json::Value>> {
+    let path = format!("/v1/models?{}", uri.query().unwrap_or(""));
+    let target = super::forward::target(&input.base, &path.parse().ok()?).ok()?;
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(target)
+        .header(header::AUTHORIZATION, format!("Bearer {}", input.token))
+        .header(header::ACCEPT, "application/json")
+        .header(header::ACCEPT_ENCODING, "identity");
+    for name in ["user-agent", "originator", "version"] {
+        if let Some(value) = headers.get(name) {
+            builder = builder.header(name, value);
+        }
+    }
+    let mut response = input
+        .client
+        .request(builder.body(replay::empty()).ok()?)
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    while let Some(frame) = response.body_mut().frame().await {
+        if let Some(data) = frame.ok()?.data_ref() {
+            if bytes.len() + data.len() > 16_000_000 {
+                return None;
+            }
+            bytes.extend_from_slice(data);
+        }
+    }
+    codex_models(&bytes)
+}
+
+/// The entries of a Codex-format catalog; `None` for any other model list.
+fn codex_models(bytes: &[u8]) -> Option<Vec<serde_json::Value>> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let entries: Vec<_> = std::mem::take(value.get_mut("models")?.as_array_mut()?)
+        .into_iter()
+        .filter(|m| m["slug"].as_str().is_some_and(|slug| !slug.is_empty()))
+        .collect();
+    (!entries.is_empty()).then_some(entries)
+}
+
+fn codex_merge(
+    models: &[String],
+    upstream: &[serde_json::Value],
+    metadata: impl Fn(&str) -> Option<crate::models_dev::Metadata>,
+) -> Option<serde_json::Value> {
+    let template = upstream.first()?;
+    let levels = |meta: Option<&crate::models_dev::Metadata>| -> Vec<&'static str> {
+        let known: Vec<_> = CODEX_EFFORTS
+            .into_iter()
+            .filter(|effort| {
+                *effort != "none"
+                    && meta
+                        .and_then(|m| m.reasoning_efforts.as_ref())
+                        .is_some_and(|efforts| efforts.contains_key(*effort))
+            })
+            .collect();
+        if known.is_empty() {
+            vec!["low", "medium", "high"]
+        } else {
+            known
+        }
+    };
+    let set_levels = |entry: &mut serde_json::Value, efforts: Vec<&'static str>| {
+        let described = |effort: &str| {
+            template["supported_reasoning_levels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|level| level["effort"] == effort)
+                .and_then(|level| level["description"].as_str())
+                .map_or_else(|| format!("{effort} reasoning effort"), str::to_owned)
+        };
+        entry["default_reasoning_level"] = if efforts.contains(&"medium") {
+            "medium"
+        } else {
+            efforts[0]
+        }
+        .into();
+        entry["supported_reasoning_levels"] = efforts
+            .iter()
+            .map(|effort| serde_json::json!({"effort": effort, "description": described(effort)}))
+            .collect();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    for id in models.iter().filter(|id| seen.insert(id.as_str())) {
+        let meta = metadata(id);
+        let name = meta.as_ref().and_then(|m| m.name.clone());
+        let entry = if let Some(own) = upstream.iter().find(|m| m["slug"] == id.as_str()) {
+            let mut entry = own.clone();
+            let usable = entry["supported_reasoning_levels"]
+                .as_array()
+                .is_some_and(|levels| levels.iter().any(|level| level["effort"] != "none"));
+            if !usable {
+                set_levels(&mut entry, levels(meta.as_ref()));
+            }
+            if entry["display_name"] == id.as_str() {
+                if let Some(name) = name {
+                    entry["display_name"] = name.into();
+                }
+            }
+            entry
+        } else {
+            let mut entry = template.clone();
+            entry["slug"] = id.as_str().into();
+            entry["display_name"] = name.unwrap_or_else(|| id.clone()).into();
+            entry["description"] = "Vela 网关提供的模型".into();
+            entry["visibility"] = "list".into();
+            if let Some(context) = meta.as_ref().and_then(|m| m.context) {
+                entry["context_window"] = context.into();
+                entry["max_context_window"] = context.into();
+            }
+            if meta.as_ref().is_some_and(|m| m.reasoning_efforts.is_some()) {
+                set_levels(&mut entry, levels(meta.as_ref()));
+            }
+            entry
+        };
+        entries.push(entry);
+    }
+    Some(serde_json::json!({ "models": entries }))
+}
 async fn fetch(
     input: &Query,
     connection: Option<&super::grok_config::Connection>,
@@ -524,6 +722,99 @@ mod tests {
                 .is_empty());
         }
     }
+    #[test]
+    fn codex_catalog_lists_the_union_with_upstream_entries_and_filled_gaps() {
+        let upstream = serde_json::json!({"models":[
+            {"slug":"fixture-a","display_name":"Fixture A","description":"fixture","priority":5,
+             "default_reasoning_level":"medium","context_window":1000,"max_context_window":1000,
+             "base_instructions":"fixture instructions","visibility":"hide",
+             "supported_reasoning_levels":[{"effort":"low","description":"fixture low"},{"effort":"medium","description":"fixture medium"}]},
+            {"slug":"fixture-b","display_name":"fixture-b","supported_reasoning_levels":[{"effort":"none","description":"off"}]},
+            {"slug":"fixture-unlisted","display_name":"Unlisted","supported_reasoning_levels":[]},
+            {"slug":""},
+        ]});
+        let entries = codex_models(&serde_json::to_vec(&upstream).unwrap()).unwrap();
+        assert_eq!(entries.len(), 3);
+        let meta = |id: &str| {
+            (id != "fixture-a").then(|| crate::models_dev::Metadata {
+                sources: vec![],
+                model: id.into(),
+                matched_by: "exact".into(),
+                name: Some(format!("Named {id}")),
+                reasoning: Some(true),
+                context: (id == "fixture-new").then_some(2000),
+                output: None,
+                reasoning_efforts: (id == "fixture-new").then(|| {
+                    ["high", "max", "xhigh"]
+                        .into_iter()
+                        .map(|k| (k.to_owned(), serde_json::Value::Null))
+                        .collect()
+                }),
+            })
+        };
+        let models: Vec<String> = [
+            "fixture-new",
+            "fixture-a",
+            "fixture-b",
+            "fixture-plain",
+            "fixture-a",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let value = codex_merge(&models, &entries, meta).unwrap();
+        let list = value["models"].as_array().unwrap();
+        let slugs: Vec<_> = list.iter().map(|m| m["slug"].as_str().unwrap()).collect();
+        // The union decides membership and order; upstream extras are left out.
+        assert_eq!(
+            slugs,
+            ["fixture-new", "fixture-a", "fixture-b", "fixture-plain"]
+        );
+        let efforts = |m: &serde_json::Value| -> Vec<String> {
+            m["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| l["effort"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        // An upstream entry is kept as it is.
+        assert_eq!(list[1], entries[0]);
+        // A missing id copies an upstream entry and takes its own facts.
+        let new = &list[0];
+        assert_eq!(new["display_name"], "Named fixture-new");
+        assert_eq!(new["base_instructions"], "fixture instructions");
+        assert_eq!(
+            (&new["context_window"], &new["max_context_window"]),
+            (&2000.into(), &2000.into())
+        );
+        assert_eq!(new["visibility"], "list");
+        // Efforts Codex cannot parse are never listed.
+        assert_eq!(efforts(new), ["high", "xhigh"]);
+        assert_eq!(new["default_reasoning_level"], "high");
+        // Unusable upstream levels and a raw display name are repaired.
+        assert_eq!(efforts(&list[2]), ["low", "medium", "high"]);
+        assert_eq!(list[2]["default_reasoning_level"], "medium");
+        assert_eq!(
+            list[2]["supported_reasoning_levels"][0]["description"],
+            "fixture low"
+        );
+        assert_eq!(list[2]["display_name"], "Named fixture-b");
+        // Without known efforts the copied entry keeps the template's levels.
+        assert_eq!(efforts(&list[3]), ["low", "medium"]);
+        assert_eq!(list[3]["context_window"], 1000);
+        // Other list formats and empty catalogs are not rewritten.
+        for other in [
+            serde_json::json!({"object":"list","data":[{"id":"fixture-a"}]}),
+            serde_json::json!({"models":[]}),
+            serde_json::json!({"models":[{"id":"fixture-a"}]}),
+            serde_json::json!({"error":{"message":"fixture"}}),
+        ] {
+            assert!(codex_models(&serde_json::to_vec(&other).unwrap()).is_none());
+        }
+        assert!(codex_models(b"<html>").is_none());
+        assert!(codex_merge(&models, &[], meta).is_none());
+    }
     #[tokio::test]
     async fn union_is_ordered_exact_and_client_isolated_with_paginated_anthropic_lists() {
         let dir = tempfile::tempdir().unwrap();
@@ -582,6 +873,25 @@ mod tests {
         }
         let codex = Gateway::new(dir.path().join("codex")).unwrap();
         assert!(codex.model_union(None).unwrap().is_empty());
+        // Without queued models the catalog request is forwarded unchanged.
+        for uri in ["/v1/models?client_version=1", "/v1/models"] {
+            assert!(codex_catalog(
+                &codex,
+                &["fixture".into()],
+                &uri.parse().unwrap(),
+                &hyper::HeaderMap::new()
+            )
+            .await
+            .is_none());
+        }
+        assert!(codex_catalog(
+            &gateway,
+            &["fixture".into()],
+            &"/v1/models?client_version=1".parse().unwrap(),
+            &hyper::HeaderMap::new()
+        )
+        .await
+        .is_none());
         assert!(local_list(
             &codex,
             &"/v1/models".parse().unwrap(),

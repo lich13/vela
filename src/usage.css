@@ -939,6 +939,14 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 14px;
 }
+.usage-price-fields.usage-calculator-triple {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+@media (max-width: 760px) {
+  .usage-price-fields.usage-calculator-triple {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 .usage-calculator fieldset {
   padding: 0;
   border: 0;

@@ -12,7 +12,7 @@ use crate::{
         quota::{Plan, QuotaView, Subscription, Usage},
         ClientId, ProviderView,
     },
-    official, power, process_control, quick, Runtime,
+    power, process_control, quick, Runtime,
 };
 use chrono::{Local, TimeZone};
 use parking_lot::Mutex;
@@ -26,7 +26,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tokio::sync::watch;
 
 extern "C" {
@@ -219,7 +219,6 @@ pub struct ControlsCardModel {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuickPanelViewModel {
-    pub theme: String,
     pub appearance_mode: String,
     pub pinned: bool,
     pub busy: bool,
@@ -323,6 +322,8 @@ pub fn limit_label(cause: Option<&Cause>) -> &'static str {
         "MONTHLY_LIMIT_EXCEEDED" | "USER_PLATFORM_MONTHLY_QUOTA_EXHAUSTED" => {
             return "月额度已用尽"
         }
+        "five_hour" => return "5 小时额度已用尽",
+        "seven_day" => return "7 天额度已用尽",
         _ => {}
     }
     match c.error_basis {
@@ -1096,11 +1097,11 @@ pub fn validate_limit_input(raw: &str) -> std::result::Result<u32, &'static str>
     Ok(val)
 }
 
-#[cfg(test)]
-pub fn active_notice_at(notice: Option<&(String, Instant)>, now: Instant) -> Option<String> {
+/// The notice text while it is still within its time to live.
+pub fn active_notice_at(notice: Option<(&str, Instant)>, now: Instant) -> Option<String> {
     notice
         .filter(|(_, expires_at)| *expires_at > now)
-        .map(|(text, _)| text.clone())
+        .map(|(text, _)| text.to_owned())
 }
 
 pub fn reconcile_startup_error(
@@ -1427,8 +1428,12 @@ struct Host {
     state: Mutex<EphemeralState>,
     render_mu: Mutex<()>,
     pending_render: Mutex<Option<CString>>,
+    /// What the panel last drew, so an unchanged model is not sent again.
+    last_render: Mutex<Option<CString>>,
     wake_tx: watch::Sender<u64>,
     wake_seq: std::sync::atomic::AtomicU64,
+    /// Wakes only the power poller: the panel was shown or the switch used.
+    power_wake_tx: watch::Sender<u64>,
 }
 
 extern "C" fn on_swift_action(raw: *const c_char) {
@@ -1451,6 +1456,30 @@ impl Host {
     fn bump_wake(&self) {
         let next = self.wake_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self.wake_tx.send(next);
+    }
+
+    fn bump_power_wake(&self) {
+        self.power_wake_tx.send_modify(|seq| *seq += 1);
+    }
+
+    /// Settles what a render only reads: a hidden selected client falls back
+    /// to a visible one and the gateway learns the client's home directory.
+    fn prepare(&self) {
+        let (Some(r), Some(panel)) = (
+            self.app.try_state::<Arc<Runtime>>(),
+            self.app.try_state::<quick::Panel>(),
+        ) else {
+            return;
+        };
+        let selected = self.current_selected_client();
+        if let Some(cid) = selected {
+            if selected != panel.snapshot().selected_client {
+                let _ = panel.sync_selected_client(cid);
+            }
+            if let Ok(home) = r.home(cid) {
+                r.gateway(cid).observe_home(&home);
+            }
+        }
     }
 
     fn set_notice(&self, text: String) {
@@ -1494,7 +1523,7 @@ impl Host {
     fn build_view_model_json(&self) -> Option<CString> {
         let r = self.app.try_state::<Arc<Runtime>>()?;
         let panel = self.app.try_state::<quick::Panel>()?;
-        let mut prefs = panel.snapshot();
+        let prefs = panel.snapshot();
         let visible_clients: Vec<ClientId> = ALL_CLIENTS
             .into_iter()
             .filter(|id| !prefs.hidden_clients.contains(id))
@@ -1503,13 +1532,6 @@ impl Host {
             .selected_client
             .filter(|id| visible_clients.contains(id))
             .or_else(|| visible_clients.first().copied());
-        if selected_client != prefs.selected_client {
-            if let Some(cid) = selected_client {
-                if let Ok(updated) = panel.sync_selected_client(cid) {
-                    prefs = updated;
-                }
-            }
-        }
         let client_visible = selected_client.is_some();
 
         let accounts: Option<ViewState> = crate::state_for(&r).ok();
@@ -1517,24 +1539,13 @@ impl Host {
             .as_ref()
             .map(|a| a.preferences.theme.as_str())
             .unwrap_or("system");
-        let is_dark = match pref_theme {
-            "dark" => true,
-            "light" => false,
-            _ => effective_dark(),
-        };
-        let theme = if is_dark { "dark" } else { "light" }.to_owned();
         let appearance_mode = match pref_theme {
             "dark" | "light" => pref_theme.to_owned(),
             _ => "system".to_owned(),
         };
 
         let freeze_view = r.gateway.freeze_gate().view();
-        let gateway_result = selected_client.map(|cid| {
-            if let Ok(home) = r.home(cid) {
-                r.gateway(cid).observe_home(&home);
-            }
-            r.gateway(cid).try_view()
-        });
+        let gateway_result = selected_client.map(|cid| r.gateway(cid).try_view());
 
         let now_inst = Instant::now();
         let now_secs = gateway::quota::now();
@@ -1550,10 +1561,10 @@ impl Host {
                 startup_now.as_ref().map(|e| e.message.as_str()),
             );
         }
-        let notice_banner = st
-            .notice
-            .as_ref()
-            .and_then(|(txt, exp, _)| (*exp > now_inst).then(|| txt.clone()));
+        let notice_banner = active_notice_at(
+            st.notice.as_ref().map(|(text, at, _)| (text.as_str(), *at)),
+            now_inst,
+        );
         if notice_banner.is_none() {
             st.notice = None;
         }
@@ -1627,7 +1638,6 @@ impl Host {
             quit_busy: st.quit_busy.clone(),
         };
         let vm = QuickPanelViewModel {
-            theme,
             appearance_mode,
             pinned: prefs.pinned,
             busy: st.busy,
@@ -1657,6 +1667,10 @@ impl Host {
             let Some(cstr) = self.build_view_model_json() else {
                 return;
             };
+            if self.last_render.lock().as_ref() == Some(&cstr) {
+                self.pending_render.lock().take();
+                return;
+            }
             *self.pending_render.lock() = Some(cstr);
         }
         let Some(host) = PANEL_HOST.get().cloned() else {
@@ -1668,6 +1682,7 @@ impl Host {
                     unsafe {
                         vela_quick_render(cstr.as_ptr());
                     }
+                    *host.last_render.lock() = Some(cstr);
                 }
             } else {
                 host.pending_render.lock().take();
@@ -1717,6 +1732,7 @@ impl Host {
                         self.set_error(e.message);
                         self.bump_wake();
                     }
+                    self.prepare();
                 }
             }
             QuickAction::OpenMain {
@@ -1825,38 +1841,15 @@ impl Host {
                         st.local_error_from_startup = false;
                     }
                     host.render_if_visible();
-                    let outcome = {
-                        let _guard = r.official_tx.lock().await;
-                        if view.running || view.recovery_pending {
-                            r.gateway(cid)
-                                .stop_checked(view.config_revision.as_deref())
-                                .await
-                                .map_err(|e| r.config_failure(cid, e))
-                        } else if cid == ClientId::Codex && official::blocks_gateway(&r.data) {
-                            Err(crate::storage::AppError::new(
-                                crate::errors::code::OFFICIAL_MODE,
-                                "请先关闭官方账号连接，再启动 Codex 网关",
-                            ))
-                        } else {
-                            match r.home(cid) {
-                                Ok(home) => r
-                                    .gateway(cid)
-                                    .start_checked(
-                                        &view.revision,
-                                        &home,
-                                        view.config_revision.as_deref(),
-                                    )
-                                    .await
-                                    .map_err(|e| r.config_failure(cid, e)),
-                                Err(e) => Err(e),
-                            }
-                        }
+                    let config = view.config_revision.as_deref();
+                    let outcome = if view.running || view.recovery_pending {
+                        crate::stop_gateway_for(&host.app, &r, cid, config).await
+                    } else {
+                        crate::start_gateway_for(&host.app, &r, cid, &view.revision, config).await
                     };
                     host.state.lock().busy = false;
                     match outcome {
                         Ok(_) => {
-                            r.window_wake.notify_one();
-                            let _ = crate::refresh(&host.app, &r);
                             host.set_notice(format!("配置已切换，请重新打开 {}", cid.name()));
                         }
                         Err(e) => host.set_error(e.message),
@@ -2113,55 +2106,20 @@ impl Host {
                         (!cur.enabled, cur.revision)
                     };
                     host.render_if_visible();
-                    let r_work = r.clone();
-                    let res = tauri::async_runtime::spawn_blocking(move || {
-                        r_work.power.set(target.0, &target.1)
-                    })
-                    .await;
+                    // The shared path publishes the new state or the error to
+                    // this panel and the main window alike.
+                    let res =
+                        crate::commands::set_clamshell(&host.app, &r, target.0, target.1).await;
+                    host.state.lock().power_busy = false;
                     match res {
-                        Ok(Ok(next)) => {
-                            let enabled = next.enabled;
-                            {
-                                let mut st = host.state.lock();
-                                st.power_busy = false;
-                                st.power_state = Some(next.clone());
-                                st.power_read_error = None;
-                                st.power_error = None;
-                            }
-                            let _ = host.app.emit("clamshell-state", &next);
-                            let _ = host
-                                .app
-                                .emit("clamshell-error", Option::<crate::storage::AppError>::None);
-                            host.set_notice(if enabled {
-                                "已开启合盖不休眠".into()
-                            } else {
-                                "已恢复电池休眠设置".into()
-                            });
-                        }
-                        Ok(Err(err)) => {
-                            {
-                                let mut st = host.state.lock();
-                                st.power_busy = false;
-                                st.power_error = Some(err.message);
-                            }
-                            let r_read = r.clone();
-                            if let Ok(Ok(cur)) =
-                                tauri::async_runtime::spawn_blocking(move || r_read.power.state())
-                                    .await
-                            {
-                                host.state.lock().power_state = Some(cur);
-                            }
-                            host.render_if_visible();
-                        }
-                        Err(_) => {
-                            {
-                                let mut st = host.state.lock();
-                                st.power_busy = false;
-                                st.power_error = Some("电源设置失败".into());
-                            }
-                            host.render_if_visible();
-                        }
+                        Ok(next) => host.set_notice(if next.enabled {
+                            "已开启合盖不休眠".into()
+                        } else {
+                            "已恢复电池休眠设置".into()
+                        }),
+                        Err(_) => host.render_if_visible(),
                     }
+                    host.bump_power_wake();
                 });
             }
             QuickAction::ForceQuit { target } => {
@@ -2187,19 +2145,10 @@ impl Host {
                         host.state.lock().quit_busy = None;
                         return;
                     };
-                    if r.force_quitting.swap(true, Ordering::AcqRel) {
-                        host.state.lock().quit_busy = None;
-                        host.set_error("正在退出客户端".into());
-                        return;
-                    }
-                    let res = tauri::async_runtime::spawn_blocking(move || {
-                        process_control::force_quit(target)
-                    })
-                    .await;
-                    r.force_quitting.store(false, Ordering::Release);
+                    let res = crate::commands::force_quit(&r, target).await;
                     host.state.lock().quit_busy = None;
                     match res {
-                        Ok(Ok(out)) => {
+                        Ok(out) => {
                             let failed = if out.failed > 0 {
                                 format!("，{} 个未能退出", out.failed)
                             } else {
@@ -2215,8 +2164,7 @@ impl Host {
                                 out.terminated
                             ));
                         }
-                        Ok(Err(e)) => host.set_error(e.message),
-                        Err(_) => host.set_error("退出客户端失败".into()),
+                        Err(e) => host.set_error(e.message),
                     }
                     host.render_if_visible();
                 });
@@ -2511,7 +2459,7 @@ impl Host {
 
     fn spawn_power_poller(self: &Arc<Self>) {
         let host = self.clone();
-        let mut wake_rx = self.wake_tx.subscribe();
+        let mut wake_rx = self.power_wake_tx.subscribe();
         tauri::async_runtime::spawn(async move {
             loop {
                 if !is_visible() {
@@ -2567,7 +2515,15 @@ impl Host {
                             r.gateway(cid).try_view().ok()
                         })
                         .is_some_and(|v| v.pending_requests.iter().any(|p| p.phase != "frozen"));
-                if !has_active_wait {
+                // The refresh button unlocks when a retry time passes.
+                let retry_due = is_visible() && {
+                    let now = gateway::quota::now();
+                    let selected = host.current_selected_client();
+                    host.state.lock().quotas.iter().any(|((cid, _), q)| {
+                        Some(*cid) == selected && q.retry_at.is_some_and(|at| at + 1 >= now)
+                    })
+                };
+                if !has_active_wait && !retry_due {
                     if wake_rx.changed().await.is_err() {
                         break;
                     }
@@ -2586,13 +2542,16 @@ impl Host {
 
 pub fn connect(app: &tauri::AppHandle) {
     let (wake_tx, _) = watch::channel(0u64);
+    let (power_wake_tx, _) = watch::channel(0u64);
     let host = Arc::new(Host {
         app: app.clone(),
         state: Mutex::new(EphemeralState::default()),
         render_mu: Mutex::new(()),
         pending_render: Mutex::new(None),
+        last_render: Mutex::new(None),
         wake_tx,
         wake_seq: std::sync::atomic::AtomicU64::new(0),
+        power_wake_tx,
     });
     if PANEL_HOST.set(host.clone()).is_ok() {
         let _ = app.run_on_main_thread(|| unsafe {
@@ -2612,6 +2571,7 @@ pub fn toggle(app: &tauri::AppHandle) {
     let do_toggle = move || {
         if unsafe { vela_quick_is_visible() } {
             host.pending_render.lock().take();
+            host.last_render.lock().take();
             let now_visible = unsafe { vela_quick_toggle(std::ptr::null()) };
             VISIBLE.store(now_visible, Ordering::Release);
             if let Some(r) = handle.try_state::<Arc<Runtime>>() {
@@ -2620,6 +2580,7 @@ pub fn toggle(app: &tauri::AppHandle) {
             host.bump_wake();
             return;
         }
+        host.prepare();
         let cstr = {
             let _guard = host.render_mu.lock();
             host.pending_render.lock().take();
@@ -2630,10 +2591,12 @@ pub fn toggle(app: &tauri::AppHandle) {
         let ptr = cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
         let now_visible = unsafe { vela_quick_toggle(ptr) };
         VISIBLE.store(now_visible, Ordering::Release);
+        *host.last_render.lock() = cstr.filter(|_| now_visible);
         if let Some(r) = handle.try_state::<Arc<Runtime>>() {
             r.mark_window_visible("quick", now_visible);
         }
         host.bump_wake();
+        host.bump_power_wake();
     };
     if objc2::MainThreadMarker::new().is_some() {
         do_toggle();
@@ -2649,6 +2612,7 @@ pub fn hide(app: &tauri::AppHandle) {
         VISIBLE.store(false, Ordering::Release);
         if let Some(host) = PANEL_HOST.get() {
             host.pending_render.lock().take();
+            host.last_render.lock().take();
         }
         drop(_guard);
         unsafe {
@@ -2670,6 +2634,9 @@ pub fn hide(app: &tauri::AppHandle) {
 
 pub fn notify_state_changed(_app: &tauri::AppHandle) {
     if let Some(host) = PANEL_HOST.get() {
+        if is_visible() {
+            host.prepare();
+        }
         host.bump_wake();
         host.render_if_visible();
     }
@@ -3017,6 +2984,160 @@ mod tests {
     }
 
     #[test]
+    fn quota_tone_tiers_and_gateway_power_switch_follow_their_thresholds() {
+        let quota = |remaining: f64, total: f64| QuotaView {
+            provider_id: "p1".into(),
+            version: "v1".into(),
+            state: "ok".into(),
+            source: None,
+            checked_at: Some(1000),
+            success_at: Some(1000),
+            retry_at: None,
+            next_refresh_at: None,
+            stale: false,
+            error: None,
+            key_status: None,
+            plans: vec![Plan {
+                name: "Fixture".into(),
+                remaining: Some(remaining),
+                used: None,
+                total: Some(total),
+                unit: "USD".into(),
+                unlimited: false,
+                reset_at: None,
+            }],
+            subscriptions: vec![],
+            expires_at: None,
+            expires_at_unix: None,
+            today: None,
+            total_usage: None,
+        };
+        for (remaining, tone) in [
+            (60.0, "good"),
+            (59.0, "normal"),
+            (26.0, "normal"),
+            (25.0, "warn"),
+            (9.0, "warn"),
+            (8.0, "critical"),
+            (0.0, "critical"),
+        ] {
+            assert_eq!(
+                quota_tone(Some(&quota(remaining, 100.0)), 1000),
+                tone,
+                "{remaining}"
+            );
+        }
+        // An expired subscription is critical whatever is left.
+        let mut expired = quota(90.0, 100.0);
+        expired.expires_at_unix = Some(1000);
+        assert_eq!(quota_tone(Some(&expired), 999), "good");
+        assert_eq!(quota_tone(Some(&expired), 1000), "critical");
+        let mut failed = quota(90.0, 100.0);
+        failed.state = "error".into();
+        assert_eq!(quota_tone(Some(&failed), 1000), "good");
+        failed.plans.clear();
+        assert_eq!(quota_tone(Some(&failed), 1000), "critical");
+        assert_eq!(quota_tone(None, 1000), "neutral");
+
+        // The switch is off only for a stopped gateway with nothing to start.
+        let dir = tempfile::tempdir().unwrap();
+        let gw = gateway::Gateway::new(dir.path().to_path_buf()).unwrap();
+        let mut view = gw.try_view().unwrap();
+        let card = |view: &gateway::View| {
+            derive_gateway_card(view, &HashMap::new(), 1000, 0, &HashSet::new())
+        };
+        view.running = false;
+        view.recovery_pending = false;
+        view.providers.clear();
+        assert!(card(&view).power_disabled);
+        view.recovery_pending = true;
+        assert!(!card(&view).power_disabled);
+        view.recovery_pending = false;
+        view.providers = vec![sample_provider("p1", "Primary")];
+        assert!(!card(&view).power_disabled);
+        view.providers.clear();
+        view.running = true;
+        let running = card(&view);
+        assert!(!running.power_disabled);
+        assert_eq!(
+            (running.status_label.as_str(), running.power_label.as_str()),
+            ("运行中", "停用网关")
+        );
+    }
+
+    /// The Swift panel decodes exactly what Rust serializes: every model
+    /// struct has the same property names on both sides.
+    #[test]
+    fn swift_models_declare_the_same_properties_as_the_rust_view_model() {
+        fn fields(source: &str, open: &str, keyword: &[&str]) -> Vec<String> {
+            let start = source
+                .find(open)
+                .unwrap_or_else(|| panic!("missing {open}"));
+            let body = &source[start..];
+            let body = &body[..body.find("\n}").expect("struct end")];
+            body.lines()
+                .skip(1)
+                .filter_map(|line| {
+                    let line = line.strip_prefix("    ")?;
+                    let rest = keyword.iter().find_map(|k| line.strip_prefix(k))?;
+                    let (name, kind) = rest.split_once(':')?;
+                    // A Swift computed property opens a block; it is not decoded.
+                    (!kind.contains('{') && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                        .then(|| name.to_owned())
+                })
+                .collect()
+        }
+        let camel = |name: &str| {
+            let mut out = String::new();
+            let mut upper = false;
+            for c in name.chars() {
+                if c == '_' {
+                    upper = true;
+                } else if std::mem::take(&mut upper) {
+                    out.extend(c.to_uppercase());
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        let rust = include_str!("quick_macos.rs");
+        let swift = include_str!("../native/quick_panel.swift");
+        let names = [
+            "FreezeStageModel",
+            "FreezeCardModel",
+            "ClientTabModel",
+            "LongWaitModel",
+            "QuotaPlanRowModel",
+            "QuotaSubscriptionDetailModel",
+            "QuotaUsageRowModel",
+            "QuotaDetailModel",
+            "QuotaCardModel",
+            "ProviderCardModel",
+            "GatewayCardModel",
+            "ControlsCardModel",
+            "QuickPanelViewModel",
+        ];
+        for name in names {
+            let mut ours: Vec<_> = fields(rust, &format!("pub struct {name} {{"), &["pub "])
+                .iter()
+                .map(|f| camel(f))
+                .collect();
+            let mut theirs = fields(swift, &format!("struct {name}: "), &["let ", "var "]);
+            assert!(!ours.is_empty(), "{name}");
+            ours.sort();
+            theirs.sort();
+            assert_eq!(ours, theirs, "{name}");
+        }
+        // Every Codable model in the Swift file is covered above.
+        let declared = swift
+            .lines()
+            .filter(|l| l.starts_with("struct ") && l.contains("Codable"))
+            .count();
+        assert_eq!(declared, names.len());
+    }
+
+    #[test]
     fn validators_and_notice_ttl_enforce_exact_boundaries() {
         assert_eq!(validate_provider_name("  OpenAI  ").unwrap(), "OpenAI");
         assert!(validate_provider_name("   ").is_err());
@@ -3030,12 +3151,13 @@ mod tests {
         assert!(validate_limit_input("12.5").is_err());
 
         let t0 = Instant::now();
-        let notice = ("已重置熔断".to_owned(), t0 + NOTICE_TTL);
+        let notice = Some(("已重置熔断", t0 + NOTICE_TTL));
         assert_eq!(
-            active_notice_at(Some(&notice), t0 + Duration::from_millis(6499)).as_deref(),
+            active_notice_at(notice, t0 + Duration::from_millis(6499)).as_deref(),
             Some("已重置熔断")
         );
-        assert!(active_notice_at(Some(&notice), t0 + NOTICE_TTL).is_none());
+        assert!(active_notice_at(notice, t0 + NOTICE_TTL).is_none());
+        assert!(active_notice_at(None, t0).is_none());
     }
 
     #[test]

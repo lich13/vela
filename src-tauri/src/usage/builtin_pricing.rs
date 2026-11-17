@@ -57,6 +57,7 @@ pub fn aliases() -> &'static BTreeMap<String, String> {
             ("grok-4.5-latest", "grok-4.5"),
             ("grok-4.6-latest", "grok-4.6"),
             ("grok-4.7-latest", "grok-4.7"),
+            ("grok-4.7-build", "grok-4.7"),
             ("grok-4.7-build-fast", "grok-4.7-fast"),
             ("grok-build", "grok-build-0.1"),
             ("grok-build-latest", "grok-build-0.1"),
@@ -71,21 +72,9 @@ pub fn aliases() -> &'static BTreeMap<String, String> {
         ] {
             aliases.insert(alias.into(), model.into());
         }
-        for model in [
-            "gemini-3.6-flash",
-            "gemini-3.7-flash",
-            "gemini-3.8-flash",
-            "gemini-4-argon",
-            "gemini-4-argon-f",
-            "claude-opus-5-5",
-            "claude-sonnet-5-5",
-        ] {
-            let target = aliases.get(model).cloned().unwrap_or_else(|| model.into());
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5"] {
             for tier in ["high", "medium", "low"] {
-                aliases.insert(format!("{model}-{tier}"), target.clone());
-            }
-            if model.starts_with("gemini-") {
-                aliases.insert(format!("{model}-tiered"), target);
+                aliases.insert(format!("{model}-{tier}"), model.into());
             }
         }
         let hyphenated: Vec<_> = aliases
@@ -121,9 +110,35 @@ fn codex_suffix(suffix: &str) -> bool {
             | "openai-compact"
     )
 }
+/// A Gemini id without its effort and `tiered` suffix, e.g.
+/// `gemini-4-hydrogen-tiered-high` -> `gemini-4-hydrogen`.
+fn gemini_base(bare: &str) -> Option<&str> {
+    if !bare.starts_with("gemini-") {
+        return None;
+    }
+    let base = ["minimal", "low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .find_map(|tier| bare.strip_suffix(tier)?.strip_suffix('-'))
+        .unwrap_or(bare);
+    let base = base.strip_suffix("-tiered").unwrap_or(base);
+    (base != bare).then_some(base)
+}
+pub fn canonical(id: &str) -> Option<String> {
+    canonical_with(id, |_| None)
+}
+/// `known` resolves a name against the caller's own price keys. Gemini effort
+/// and `tiered` suffixes are dropped only when the remaining name is priced.
+pub fn canonical_with(id: &str, known: impl Fn(&str) -> Option<String>) -> Option<String> {
+    if let Some(model) = published(id) {
+        return Some(model);
+    }
+    let id = id.trim().to_ascii_lowercase();
+    let base = gemini_base(id.rsplit('/').next()?)?;
+    known(base).or_else(|| published(base))
+}
 /// Only published cards and enumerated aliases gain suffix handling. Unknown
 /// families never inherit a tariff merely because their names share a keyword.
-pub fn canonical(id: &str) -> Option<String> {
+fn published(id: &str) -> Option<String> {
     let id = id.trim().to_ascii_lowercase();
     let bare = id.rsplit('/').next()?;
     if matches!(bare, "kimi-k2-0905" | "kimi-k2-0711" | "kimi-k3[1m]") {
@@ -290,6 +305,9 @@ mod tests {
         for (model, cost) in [
             ("gemini-4-argon-f", "0.003"),
             ("gemini-4-argon-high", "0.003"),
+            ("gemini-4-argon-tiered-high", "0.003"),
+            ("gemini-3.8-flash-tiered", "0.001125"),
+            ("google/gemini-3.8-flash-tiered-low", "0.001125"),
             ("gemini-4-argon-cyber-permissive", "0.006"),
             ("gemini-3.8-flash", "0.001125"),
             ("claude-opus-5.5", "0.006"),
@@ -331,9 +349,28 @@ mod tests {
             "deepseek-future",
             "gemini-4-argon-cyber-unknown",
             "claude-opus-999",
+            "gemini-9-unknown-high",
+            "gemini-9-unknown-tiered-high",
+            "fixture-model-high",
+            "grok-4.7-tiered-high",
         ] {
             assert!(canonical(unknown).is_none(), "{unknown}");
         }
+        assert_eq!(canonical("grok-4.7-build").as_deref(), Some("grok-4.7"));
+        // A caller's own price key is accepted once the Gemini suffix is dropped.
+        let known = |name: &str| (name == "gemini-4-hydrogen").then(|| name.to_owned());
+        for alias in [
+            "gemini-4-hydrogen-tiered-high",
+            "gemini-4-hydrogen-high",
+            "gemini-4-hydrogen-tiered",
+        ] {
+            assert_eq!(
+                canonical_with(alias, known).as_deref(),
+                Some("gemini-4-hydrogen"),
+                "{alias}"
+            );
+        }
+        assert!(canonical_with("gemini-4-hydrogen", known).is_none());
     }
     #[test]
     fn tiers_ttl_context_boundaries_and_peak_times() {

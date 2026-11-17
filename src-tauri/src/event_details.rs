@@ -250,6 +250,8 @@ pub(crate) fn safe_upstream_reason(value: &str) -> Option<String> {
         "server_is_overloaded",
         "slow_down",
         "usage_limit_reached",
+        "five_hour",
+        "seven_day",
     ]
     .into_iter()
     .find(|known| known.eq_ignore_ascii_case(value.trim()))

@@ -2,7 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Eye, EyeOff, LoaderCircle } from "lucide-react";
 import { subscriptions } from "./subscriptions";
 import { command } from "./bridge";
-import { errorOf, type ClientId, type Provider } from "./types";
+import {
+  DEFAULT_UPSTREAM_RETRY_SECONDS,
+  errorOf,
+  type ClientId,
+  type Provider,
+} from "./types";
 import type { GatewayEdit } from "./bridge-contracts";
 import type { EditRevision } from "./gateway-edit";
 import Modal from "./Modal";
@@ -55,7 +60,7 @@ export default function GatewayDialog({
     Boolean(dialog.item?.endlessMode),
   );
   const [upstreamRetrySeconds, setUpstreamRetrySeconds] = useState(
-    String(dialog.item?.upstreamRetrySeconds ?? 5),
+    String(dialog.item?.upstreamRetrySeconds ?? DEFAULT_UPSTREAM_RETRY_SECONDS),
   );
 
   const [revealed, setRevealed] = useState<{
@@ -203,7 +208,7 @@ export default function GatewayDialog({
                         endlessMode,
                         upstreamRetrySeconds: endlessMode
                           ? Number(upstreamRetrySeconds)
-                          : (dialog.item?.upstreamRetrySeconds ?? 5),
+                          : (dialog.item?.upstreamRetrySeconds ?? DEFAULT_UPSTREAM_RETRY_SECONDS),
                       }
                     : {}),
                   ...(clientId === "codex" && dialog.item

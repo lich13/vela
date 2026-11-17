@@ -54,13 +54,16 @@ it("selects a used model, syncs 5 unit prices and ratios bidirectionally, and im
     />,
   );
   await screen.findByRole("option", { name: "Fixture provider" });
-  await screen.findByRole("option", { name: "claude-fable-5-2" });
+  await waitFor(() =>
+    expect(
+      document.querySelector('datalist option[value="claude-fable-5-2"]'),
+    ).not.toBeNull(),
+  );
 
   // Rule 1: selecting a priced model fills all 5 unit prices and ratios.
-  await user.selectOptions(
-    screen.getByLabelText("已使用模型"),
-    "claude-fable-5-2",
-  );
+  fireEvent.change(screen.getByLabelText("模型"), {
+    target: { value: "claude-fable-5-2" },
+  });
   expect(screen.getByLabelText("模型")).toHaveValue("claude-fable-5-2");
   expect(screen.getByLabelText("输入单价 / 美元每百万")).toHaveValue(8);
   expect(screen.getByLabelText("输出单价 / 美元每百万")).toHaveValue(40);
@@ -78,10 +81,9 @@ it("selects a used model, syncs 5 unit prices and ratios bidirectionally, and im
   expect(screen.getByLabelText("创建 1 小时缓存倍率")).toHaveValue(2);
 
   // Unpriced model only updates model text, keeping existing prices & ratios.
-  await user.selectOptions(
-    screen.getByLabelText("已使用模型"),
-    "claude-unpriced",
-  );
+  fireEvent.change(screen.getByLabelText("模型"), {
+    target: { value: "claude-unpriced" },
+  });
   expect(screen.getByLabelText("模型")).toHaveValue("claude-unpriced");
   expect(screen.getByLabelText("输入单价 / 美元每百万")).toHaveValue(8);
   expect(screen.getByLabelText("创建 1 小时缓存单价 / 美元每百万")).toHaveValue(
@@ -204,5 +206,32 @@ it("keeps manual inputs after a calculation failure and permits retry", async ()
   expect(command).not.toHaveBeenCalledWith(
     "get_usage_calculator_totals",
     expect.anything(),
+  );
+});
+
+it("sends the prices on screen once an emptied ratio is valid again", async () => {
+  const user = userEvent.setup();
+  render(<UsageCostCalculator filter={{ client: "claude" }} close={() => {}} />);
+  await waitFor(() =>
+    expect(
+      document.querySelector('datalist option[value="claude-fable-5-2"]'),
+    ).not.toBeNull(),
+  );
+  fireEvent.change(screen.getByLabelText("模型"), {
+    target: { value: "claude-fable-5-2" },
+  });
+  fireEvent.change(screen.getByLabelText("输出倍率"), { target: { value: "" } });
+  fireEvent.change(screen.getByLabelText("输出倍率"), {
+    target: { value: "3" },
+  });
+  expect(screen.getByLabelText("输出单价 / 美元每百万")).toHaveValue(24);
+  await user.click(screen.getByRole("button", { name: "计算" }));
+  await waitFor(() =>
+    expect(command).toHaveBeenCalledWith("calculate_usage_cost", {
+      input: expect.objectContaining({
+        outputRatio: "3",
+        rates: ["8", "24", "0.2", "10", "16"],
+      }),
+    }),
   );
 });

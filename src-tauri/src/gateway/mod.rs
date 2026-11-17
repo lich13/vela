@@ -54,6 +54,7 @@ mod endpoints;
 mod event_policy_tests;
 pub(crate) mod failover;
 mod failure_policy;
+pub(crate) use failure_policy::{external_details, unavailable_429};
 #[cfg(test)]
 mod failure_policy_tests;
 pub mod failure_rules;

@@ -612,3 +612,141 @@ fn custom_rule_can_replace_temporary_text_rejected_by_http_status() {
         );
     }
 }
+
+#[test]
+fn bare_unavailable_429_is_capacity_not_an_unclassified_limit() {
+    for value in [
+        json!({"error":{"type":"error","message":"Service Unavailable"}}),
+        json!({"type":"error","message":"service  unavailable."}),
+        json!({"error":{"code":429,"message":"Service Temporarily Unavailable"}}),
+        json!("Service Unavailable"),
+        json!({"error":{"message":"服务暂时不可用"}}),
+    ] {
+        let d = classify(429, value.clone());
+        assert_eq!(d.error_basis, Some(B::Capacity), "{value}");
+        let p = policy::decision(Some(429), &d);
+        assert!(p.temporary && p.retryable && !p.hard && !p.counted_failure);
+    }
+    // Only the whole message counts, and only for 429.
+    let d = classify(
+        429,
+        json!({"error":{"message":"fixture said service unavailable in a longer sentence"}}),
+    );
+    assert_eq!(d.error_basis, Some(B::UnknownRateLimit));
+    let d = classify(503, json!({"error":{"message":"Service Unavailable"}}));
+    assert_ne!(d.error_basis, Some(B::Capacity));
+}
+
+#[test]
+fn anthropic_error_types_and_messages_have_a_basis() {
+    for (status, kind, message, basis) in [
+        (429, "rate_limit_error", "This request would exceed your organization's rate limit of 50 requests per minute", B::Rpm),
+        (429, "rate_limit_error", "This request would exceed your organization's rate limit of 40,000 input tokens per minute", B::InputTokens),
+        (429, "rate_limit_error", "This request would exceed your organization's rate limit of 8,000 output tokens per minute", B::OutputTokens),
+        (429, "rate_limit_error", "This request would exceed your account's rate limit. Please try again later.", B::UnknownRateLimit),
+        (529, "overloaded_error", "Overloaded", B::Capacity),
+        (529, "error", "fixture", B::Capacity),
+        (400, "invalid_request_error", "prompt is too long: 250000 tokens > 200000 maximum", B::RequestTooLarge),
+        (400, "invalid_request_error", "input length and max_tokens exceed context limit: 190000 + 20000 > 200000", B::RequestTooLarge),
+        (400, "invalid_request_error", "fixture field is required", B::InvalidRequest),
+        (413, "request_too_large", "Request exceeds the maximum allowed number of bytes", B::RequestTooLarge),
+        (401, "authentication_error", "invalid x-api-key", B::Authentication),
+        (402, "billing_error", "fixture", B::Billing),
+        (403, "permission_error", "fixture", B::Permission),
+        (404, "not_found_error", "model: fixture-model", B::ModelUnavailable),
+        (404, "not_found_error", "fixture resource could not be found", B::InvalidRequest),
+        (404, "error", "fixture", B::InvalidRequest),
+        (504, "timeout_error", "fixture", B::ServiceError),
+        (504, "error", "fixture", B::ServiceError),
+        (408, "error", "fixture", B::ServiceError),
+        (500, "api_error", "Internal server error", B::ServiceError),
+    ] {
+        let d = classify(
+            status,
+            json!({"type":"error","error":{"type":kind,"message":message}}),
+        );
+        assert_eq!(d.error_basis, Some(basis), "{status} {kind} {message}");
+    }
+}
+
+#[test]
+fn unified_subscription_headers_name_the_window_and_wait() {
+    let body = br#"{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}}"#;
+    let reset = chrono::Utc::now().timestamp() + 3600;
+    let headers = |pairs: &[(&'static str, String)]| {
+        let mut h = HeaderMap::new();
+        for (name, value) in pairs {
+            h.insert(*name, value.parse().unwrap());
+        }
+        h
+    };
+    for (pairs, window) in [
+        (
+            vec![
+                ("anthropic-ratelimit-unified-status", "rejected".to_string()),
+                (
+                    "anthropic-ratelimit-unified-representative-claim",
+                    "five_hour".to_string(),
+                ),
+                ("anthropic-ratelimit-unified-reset", reset.to_string()),
+            ],
+            Some("five_hour"),
+        ),
+        (
+            vec![
+                ("anthropic-ratelimit-unified-status", "rejected".to_string()),
+                (
+                    "anthropic-ratelimit-unified-representative-claim",
+                    "seven_day_opus".to_string(),
+                ),
+                ("anthropic-ratelimit-unified-7d-reset", reset.to_string()),
+            ],
+            Some("seven_day"),
+        ),
+        (
+            vec![
+                (
+                    "anthropic-ratelimit-unified-7d-status",
+                    "rejected".to_string(),
+                ),
+                ("anthropic-ratelimit-unified-reset", reset.to_string()),
+            ],
+            Some("seven_day"),
+        ),
+        (
+            vec![
+                ("anthropic-ratelimit-unified-status", "rejected".to_string()),
+                ("anthropic-ratelimit-unified-reset", reset.to_string()),
+            ],
+            // Without a named window the upstream's own reason is kept.
+            Some("rate_limit_error"),
+        ),
+    ] {
+        let (d, retry) = policy::test_support::http(429, &headers(&pairs), body);
+        assert_eq!(d.error_basis, Some(B::UsageLimit), "{pairs:?}");
+        assert_eq!(d.upstream_reason.as_deref(), window, "{pairs:?}");
+        let secs = retry.unwrap().as_secs();
+        assert!((3590..=3600).contains(&secs), "{secs}");
+    }
+    // An allowed window leaves the classification alone.
+    let (d, retry) = policy::test_support::http(
+        429,
+        &headers(&[
+            ("anthropic-ratelimit-unified-status", "allowed".to_string()),
+            ("anthropic-ratelimit-unified-reset", reset.to_string()),
+        ]),
+        body,
+    );
+    assert_eq!(d.error_basis, Some(B::UnknownRateLimit));
+    assert_eq!(
+        (d.upstream_reason.as_deref(), retry),
+        (Some("rate_limit_error"), None)
+    );
+    // A concrete dimension in the body is not replaced by the window.
+    let (d, _) = policy::test_support::http(
+        429,
+        &headers(&[("anthropic-ratelimit-unified-status", "rejected".to_string())]),
+        br#"{"error":{"type":"rate_limit_error","message":"rate limit of 50 requests per minute"}}"#,
+    );
+    assert_eq!(d.error_basis, Some(B::Rpm));
+}

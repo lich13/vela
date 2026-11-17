@@ -266,8 +266,16 @@ fn claude_rejection_response(
             _ => StatusCode::BAD_GATEWAY,
         }
     };
+    // "error" is the envelope's own type, not a kind Claude Code understands.
     let err_type = upstream_type
-        .unwrap_or_else(|| super::claude_stream::anthropic_error_type(mapped_status.as_u16()));
+        .filter(|kind| !kind.eq_ignore_ascii_case("error"))
+        .unwrap_or_else(|| {
+            if details.error_basis == Some(ErrorBasis::Capacity) {
+                "overloaded_error"
+            } else {
+                super::claude_stream::anthropic_error_type(mapped_status.as_u16())
+            }
+        });
     let err_msg = details
         .message
         .as_deref()
@@ -3444,6 +3452,11 @@ async fn forward_inner(
         );
     }
     if request.method() == hyper::Method::GET {
+        if let Some(response) =
+            super::catalog::codex_catalog(&gateway, &ids, request.uri(), request.headers()).await
+        {
+            return response;
+        }
         if let Some(response) =
             super::catalog::local_list(&gateway, request.uri(), request.headers())
         {

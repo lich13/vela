@@ -816,6 +816,11 @@ describe("window lifecycle and close draft guard", () => {
       await mocks.listeners.get("main-close-requested")?.({ hidden: false });
     });
     expect(mocks.command).toHaveBeenCalledWith("close_main");
+    const names = mocks.command.mock.calls.map(([name]) => name);
+    expect(names.indexOf("ack_main_close")).toBeGreaterThanOrEqual(0);
+    expect(names.indexOf("ack_main_close")).toBeLessThan(
+      names.indexOf("close_main"),
+    );
   });
 
   it("restores hidden main window before confirming unsaved settings or Antigravity drafts on close", async () => {

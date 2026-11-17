@@ -54,6 +54,12 @@ it("shows a live quota check during owner waiting without claiming a known balan
   expect(limitLabel({ upstreamReason: "MONTHLY_LIMIT_EXCEEDED" })).toBe(
     "月额度已用尽",
   );
+  expect(
+    limitLabel({ errorBasis: "usage_limit", upstreamReason: "five_hour" }),
+  ).toBe("5 小时额度已用尽");
+  expect(
+    limitLabel({ errorBasis: "usage_limit", upstreamReason: "seven_day" }),
+  ).toBe("7 天额度已用尽");
   expect(limitLabel({ errorBasis: "future_reason" })).toBe("");
   expect(limitLabel()).toBe("");
 });

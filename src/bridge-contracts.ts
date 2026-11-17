@@ -592,6 +592,7 @@ export type CommandMap = {
   open_update_release: Call<None, void>;
   frontend_ready: Call<None, void>;
   close_main: Call<None, void>;
+  ack_main_close: Call<None, void>;
   open_main: Call<
     {
       page?: string | null;

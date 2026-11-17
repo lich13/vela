@@ -35,12 +35,12 @@ const subRatioKeys: SubRatioKey[] = [
   "cacheWrite5mRatio",
   "cacheWrite1hRatio",
 ];
-const ratioFields: [
-  keyof Omit<CostCalculatorInput, "rates" | "tokens">,
-  string,
-][] = [
+type RatioField = [keyof Omit<CostCalculatorInput, "rates" | "tokens">, string];
+const baseFields: RatioField[] = [
   ["basePrice", "基准价格 / 美元每百万"],
   ["groupRatio", "分组倍率"],
+];
+const ratioFields: RatioField[] = [
   ["modelRatio", "模型倍率"],
   ["outputRatio", "输出倍率"],
   ["cacheReadRatio", "缓存读取倍率"],
@@ -146,6 +146,8 @@ export default function UsageCostCalculator({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const editedRef = useRef(false);
+  // A ratio was left invalid, which dropped the exact prices.
+  const invalidRatioRef = useRef(false);
 
   const applyModelRates = (rates: FiveTuple) => {
     setUnitPrices(rates);
@@ -250,33 +252,52 @@ export default function UsageCostCalculator({
     setValues(nextValues);
     if (key === "groupRatio") return;
     if (!parseDec(nextVal)) {
+      invalidRatioRef.current = true;
       setExactRates(null);
       return;
     }
+    // Once every ratio is valid again the prices on screen are the exact
+    // ones, so the result matches what is shown.
+    const restore = (prices: FiveTuple) => {
+      const valid =
+        prices.every((v) => parseDec(v)) &&
+        Object.values(nextValues).every((v) => parseDec(v));
+      if (invalidRatioRef.current && valid) {
+        invalidRatioRef.current = false;
+        setExactRates(prices);
+        return true;
+      }
+      return false;
+    };
     if (key === "basePrice" || key === "modelRatio") {
       setExactRates(null);
       const pIn = mul8(nextValues.basePrice, nextValues.modelRatio);
       if (pIn === null) return;
       const pInExact =
         mulExact(nextValues.basePrice, nextValues.modelRatio) ?? pIn;
-      setUnitPrices([
+      const nextPrices: FiveTuple = [
         pIn,
         mul8(pInExact, nextValues.outputRatio) ?? unitPrices[1],
         mul8(pInExact, nextValues.cacheReadRatio) ?? unitPrices[2],
         mul8(pInExact, nextValues.cacheWrite5mRatio) ?? unitPrices[3],
         mul8(pInExact, nextValues.cacheWrite1hRatio) ?? unitPrices[4],
-      ]);
+      ];
+      setUnitPrices(nextPrices);
+      restore(nextPrices);
       return;
     }
     const subIdx = subRatioKeys.indexOf(key as SubRatioKey);
     if (subIdx >= 0) {
       const priceIdx = subIdx + 1;
       const computed = mul8(unitPrices[0], nextVal);
-      if (computed !== null) {
-        setUnitPrices(
-          unitPrices.map((v, i) => (i === priceIdx ? computed : v)) as FiveTuple,
-        );
-      }
+      const nextPrices =
+        computed === null
+          ? unitPrices
+          : (unitPrices.map((v, i) =>
+              i === priceIdx ? computed : v,
+            ) as FiveTuple);
+      if (computed !== null) setUnitPrices(nextPrices);
+      if (restore(nextPrices)) return;
       if (exactRates) {
         const exact = mulExact(exactRates[0], nextVal);
         setExactRates(
@@ -331,8 +352,6 @@ export default function UsageCostCalculator({
       setBusy(false);
     }
   };
-
-  const selectedUsedModel = models.some((m) => m.model === model) ? model : "";
 
   return (
     <Drawer title="倍率换算" onClose={close}>
@@ -391,34 +410,27 @@ export default function UsageCostCalculator({
               </select>
             </label>
           </div>
-          <label className="usage-field">
-            已使用模型
-            <select
-              value={selectedUsedModel}
-              onChange={(e) => {
-                editedRef.current = true;
-                const chosen = e.target.value;
-                setModel(chosen);
-                const found = models.find((item) => item.model === chosen);
-                if (found?.rates) applyModelRates(found.rates);
-              }}
-            >
-              <option value="">选择已使用模型</option>
-              {models.map((item) => (
-                <option key={item.model} value={item.model}>
-                  {item.model}
-                </option>
-              ))}
-            </select>
-          </label>
           <div className="usage-calculator-source">
             <label className="usage-field">
               模型
               <input
                 value={model}
-                placeholder="全部模型"
-                onChange={(e) => setModel(e.target.value)}
+                list="usage-calculator-models"
+                placeholder="全部模型，可选择已使用模型"
+                onChange={(e) => {
+                  const chosen = e.target.value;
+                  setModel(chosen);
+                  // A used model brings its prices along.
+                  const found = models.find((item) => item.model === chosen);
+                  if (found) editedRef.current = true;
+                  if (found?.rates) applyModelRates(found.rates);
+                }}
               />
+              <datalist id="usage-calculator-models">
+                {models.map((item) => (
+                  <option key={item.model} value={item.model} />
+                ))}
+              </datalist>
             </label>
             <button
               type="button"
@@ -428,7 +440,7 @@ export default function UsageCostCalculator({
               填入当前范围用量
             </button>
           </div>
-          <div className="usage-price-fields usage-calculator-section">
+          <div className="usage-price-fields usage-calculator-triple usage-calculator-section">
             {quantities.map((label, index) => (
               <label key={label} className="usage-field">
                 {label}单价 / 美元每百万
@@ -443,22 +455,31 @@ export default function UsageCostCalculator({
               </label>
             ))}
           </div>
-          <div className="usage-price-fields usage-calculator-ratios">
-            {ratioFields.map(([key, label]) => (
-              <label key={key} className="usage-field">
-                {label}
-                <input
-                  required
-                  min="0"
-                  step="any"
-                  type="number"
-                  value={values[key]}
-                  onChange={(e) => updateRatio(key, e.target.value)}
-                />
-              </label>
-            ))}
-          </div>
-          <div className="usage-price-fields usage-calculator-section">
+          {[baseFields, ratioFields].map((fields, row) => (
+            <div
+              key={row}
+              className={
+                row === 0
+                  ? "usage-price-fields usage-calculator-ratios"
+                  : "usage-price-fields usage-calculator-triple"
+              }
+            >
+              {fields.map(([key, label]) => (
+                <label key={key} className="usage-field">
+                  {label}
+                  <input
+                    required
+                    min="0"
+                    step="any"
+                    type="number"
+                    value={values[key]}
+                    onChange={(e) => updateRatio(key, e.target.value)}
+                  />
+                </label>
+              ))}
+            </div>
+          ))}
+          <div className="usage-price-fields usage-calculator-triple usage-calculator-section">
             {quantities.map((label, index) => (
               <label key={label} className="usage-field">
                 {label} Tokens

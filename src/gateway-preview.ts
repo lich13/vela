@@ -11,6 +11,7 @@ import type {
   Provider,
   ProviderQuota,
 } from "./types";
+import { DEFAULT_UPSTREAM_RETRY_SECONDS } from "./types";
 import { densePreview } from "./preview-fixtures";
 const healthy: Health = {
   state: "closed",
@@ -35,7 +36,7 @@ const idle = {
   filterCountTokens: false,
   bufferCompleteResponse: false,
   endlessMode: false,
-  upstreamRetrySeconds: 5,
+  upstreamRetrySeconds: DEFAULT_UPSTREAM_RETRY_SECONDS,
 } satisfies Partial<Provider>;
 export const gatewayDemo: GatewayState = {
   clientId: "codex",
@@ -723,7 +724,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           filterCountTokens: Boolean(e.filterCountTokens),
           bufferCompleteResponse: Boolean(e.bufferCompleteResponse),
           endlessMode: Boolean(e.endlessMode),
-          upstreamRetrySeconds: Number(e.upstreamRetrySeconds ?? 5),
+          upstreamRetrySeconds: Number(e.upstreamRetrySeconds ?? DEFAULT_UPSTREAM_RETRY_SECONDS),
           name: new URL(String(e.baseUrl)).hostname,
           baseUrl: String(e.baseUrl),
           preferredBaseUrl: String(e.baseUrl),

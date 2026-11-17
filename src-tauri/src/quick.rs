@@ -101,11 +101,16 @@ impl Lifecycle {
         true
     }
 
-    fn on_destroyed(&mut self) -> bool {
+    /// A `Destroyed` event that arrives after the state already moved on
+    /// belongs to the previous window and changes nothing.
+    fn on_destroyed(&mut self) -> Option<bool> {
+        if self.phase != QuickWindowPhase::Destroying {
+            return None;
+        }
         self.phase = QuickWindowPhase::Absent;
         self.focused = false;
         self.showing = false;
-        self.want_show
+        Some(self.want_show)
     }
 }
 
@@ -274,6 +279,7 @@ impl Panel {
         tauri::async_runtime::spawn(async move {
             let panel = app.state::<Panel>();
             let _guard = panel.create_lock.lock().await;
+            let mut absent_polls = 0u32;
             let gen = loop {
                 let notified = panel.destroyed_notify.notified();
                 tokio::pin!(notified);
@@ -286,8 +292,13 @@ impl Panel {
                     match life.phase {
                         QuickWindowPhase::Destroying => {
                             if app.get_webview_window("quick").is_none() {
-                                life.on_destroyed();
-                                continue;
+                                absent_polls += 1;
+                                if absent_polls >= 20 {
+                                    life.on_destroyed();
+                                    continue;
+                                }
+                            } else {
+                                absent_polls = 0;
                             }
                         }
                         QuickWindowPhase::Creating | QuickWindowPhase::Ready => return,
@@ -400,7 +411,9 @@ impl Panel {
         #[cfg(not(target_os = "macos"))]
         {
             let panel = app.state::<Panel>();
-            let reopen = panel.lifecycle.lock().on_destroyed();
+            let Some(reopen) = panel.lifecycle.lock().on_destroyed() else {
+                return;
+            };
             panel.destroyed_notify.notify_waiters();
             if reopen {
                 Self::spawn_ensure_window(app.clone());
@@ -702,12 +715,16 @@ mod tests {
             panel.lifecycle.lock().begin_creating().is_none(),
             "cannot build WebView while previous instance is still Destroying"
         );
-        assert!(
+        assert_eq!(
             panel.lifecycle.lock().on_destroyed(),
+            Some(true),
             "Destroyed must report pending reopen"
         );
         assert_eq!(panel.lifecycle.lock().phase, QuickWindowPhase::Absent);
         let gen2 = panel.lifecycle.lock().begin_creating().unwrap();
+        // A late Destroyed event from the previous window must not reset the new one.
+        assert_eq!(panel.lifecycle.lock().on_destroyed(), None);
+        assert_eq!(panel.lifecycle.lock().phase, QuickWindowPhase::Creating);
         // Hide while Creating suppresses show when ready arrives.
         let _ = panel.lifecycle.lock().request_hide();
         assert!(!panel.lifecycle.lock().finish_ready(Some(gen2)));
