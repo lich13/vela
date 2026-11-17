@@ -36,6 +36,7 @@ extern "C" {
     fn vela_quick_toggle(json: *const c_char) -> bool;
     fn vela_quick_render(json: *const c_char);
     fn vela_quick_hide();
+    fn vela_quick_is_visible() -> bool;
 }
 
 pub const NOTICE_TTL: Duration = Duration::from_millis(6500);
@@ -1102,9 +1103,52 @@ pub fn active_notice_at(notice: Option<&(String, Instant)>, now: Instant) -> Opt
         .map(|(text, _)| text.clone())
 }
 
+pub fn reconcile_startup_error(
+    local_error: &mut Option<String>,
+    local_error_from_startup: &mut bool,
+    seeded_startup_message: &mut Option<String>,
+    startup_now: Option<&str>,
+) {
+    if *local_error_from_startup && startup_now.is_none() {
+        *local_error = None;
+        *local_error_from_startup = false;
+    }
+    if let Some(msg) = startup_now {
+        if seeded_startup_message.as_deref() != Some(msg) {
+            *seeded_startup_message = Some(msg.to_owned());
+            if local_error.is_none() || *local_error_from_startup {
+                *local_error = Some(msg.to_owned());
+                *local_error_from_startup = true;
+            }
+        }
+    }
+}
+
+pub fn synthesize_quota_error_view(
+    provider: &ProviderView,
+    cached: Option<&QuotaView>,
+    error_message: String,
+    refresh_seconds: u64,
+    now_secs: u64,
+) -> QuotaView {
+    let mut base = cached
+        .filter(|q| q.version == provider.quota_version)
+        .or(provider.quota.as_ref())
+        .cloned()
+        .unwrap_or_else(|| QuotaView::empty(&provider.id, &provider.quota_version));
+    base.state = "error".into();
+    base.stale = base.success_at.is_some();
+    base.checked_at = Some(now_secs);
+    base.error = Some(error_message);
+    base.next_refresh_at = (refresh_seconds > 0).then(|| now_secs.saturating_add(refresh_seconds));
+    base
+}
+
 pub fn next_quota_schedule_step(
     providers: &[ProviderView],
     cached: &HashMap<String, QuotaView>,
+    in_flight: &HashSet<String>,
+    backoff_until: &HashMap<String, u64>,
     refresh_seconds: u64,
     now_secs: u64,
 ) -> (Vec<String>, u64) {
@@ -1121,6 +1165,9 @@ pub fn next_quota_schedule_step(
     let mut due = Vec::new();
     let mut next_at = u64::MAX;
     for p in providers {
+        if in_flight.contains(&p.id) {
+            continue;
+        }
         let q = cached
             .get(&p.id)
             .filter(|q| q.version == p.quota_version)
@@ -1132,7 +1179,9 @@ pub fn next_quota_schedule_step(
                     .map(|c| c.saturating_add(delay_for(q)))
             })
             .unwrap_or(0);
-        let at = scheduled.max(q.and_then(|v| v.retry_at).unwrap_or(0));
+        let at = scheduled
+            .max(q.and_then(|v| v.retry_at).unwrap_or(0))
+            .max(backoff_until.get(&p.id).copied().unwrap_or(0));
         if at <= now_secs {
             due.push(p.id.clone());
         } else {
@@ -1332,7 +1381,8 @@ struct EphemeralState {
     freeze_busy: bool,
     freeze_error: Option<String>,
     local_error: Option<String>,
-    startup_seeded: bool,
+    local_error_from_startup: bool,
+    seeded_startup_message: Option<String>,
     notice: Option<(String, Instant, u64)>,
     notice_seq: u64,
     limit_error: Option<String>,
@@ -1341,6 +1391,7 @@ struct EphemeralState {
     cancelling_waits: HashSet<String>,
     quotas: HashMap<(ClientId, String), QuotaView>,
     in_flight_quotas: HashSet<(ClientId, String)>,
+    quota_backoff_until: HashMap<(ClientId, String), u64>,
     pending_snapshot_key: Option<PendingSnapshotKey>,
     pending_snapshot_at: Option<Instant>,
     power_state: Option<power::State>,
@@ -1353,6 +1404,8 @@ struct EphemeralState {
 struct Host {
     app: tauri::AppHandle,
     state: Mutex<EphemeralState>,
+    render_mu: Mutex<()>,
+    pending_render: Mutex<Option<CString>>,
     wake_tx: watch::Sender<u64>,
     wake_seq: std::sync::atomic::AtomicU64,
 }
@@ -1409,7 +1462,11 @@ impl Host {
     }
 
     fn set_error(&self, text: String) {
-        self.state.lock().local_error = Some(text);
+        {
+            let mut st = self.state.lock();
+            st.local_error = Some(text);
+            st.local_error_from_startup = false;
+        }
         self.render_if_visible();
     }
 
@@ -1459,14 +1516,16 @@ impl Host {
         let now_inst = Instant::now();
         let now_secs = gateway::quota::now();
 
+        let startup_now = r.startup_error.lock().clone();
         let mut st = self.state.lock();
-        if !st.startup_seeded {
-            st.startup_seeded = true;
-            if st.local_error.is_none() {
-                if let Some(err) = r.startup_error.lock().clone() {
-                    st.local_error = Some(err.message);
-                }
-            }
+        {
+            let st_ref = &mut *st;
+            reconcile_startup_error(
+                &mut st_ref.local_error,
+                &mut st_ref.local_error_from_startup,
+                &mut st_ref.seeded_startup_message,
+                startup_now.as_ref().map(|e| e.message.as_str()),
+            );
         }
         let notice_banner = st
             .notice
@@ -1570,15 +1629,25 @@ impl Host {
         if !is_visible() {
             return;
         }
-        let Some(cstr) = self.build_view_model_json() else {
+        {
+            let _guard = self.render_mu.lock();
+            let Some(cstr) = self.build_view_model_json() else {
+                return;
+            };
+            *self.pending_render.lock() = Some(cstr);
+        }
+        let Some(host) = PANEL_HOST.get().cloned() else {
             return;
         };
-        let app = self.app.clone();
-        let _ = app.run_on_main_thread(move || {
+        let _ = self.app.run_on_main_thread(move || {
             if is_visible() {
-                unsafe {
-                    vela_quick_render(cstr.as_ptr());
+                if let Some(cstr) = host.pending_render.lock().take() {
+                    unsafe {
+                        vela_quick_render(cstr.as_ptr());
+                    }
                 }
+            } else {
+                host.pending_render.lock().take();
             }
         });
     }
@@ -1732,6 +1801,7 @@ impl Host {
                         }
                         st.busy = true;
                         st.local_error = None;
+                        st.local_error_from_startup = false;
                     }
                     host.render_if_visible();
                     let outcome = {
@@ -2157,6 +2227,7 @@ impl Host {
             st.busy = true;
             if surface_in_banner {
                 st.local_error = None;
+                st.local_error_from_startup = false;
             }
         }
         self.render_if_visible();
@@ -2192,6 +2263,7 @@ impl Host {
                 let mut st = self.state.lock();
                 if surface_in_banner {
                     st.local_error = Some(e.message);
+                    st.local_error_from_startup = false;
                 } else {
                     st.limit_error = Some(e.message);
                 }
@@ -2213,25 +2285,76 @@ impl Host {
         }
         let host = self.clone();
         tauri::async_runtime::spawn(async move {
+            let mut force_banner_err: Option<String> = None;
             if let Some(r) = host
                 .app
                 .try_state::<Arc<Runtime>>()
                 .map(|s| s.inner().clone())
             {
+                let refresh_seconds = r.core.lock().preferences().quota_refresh_seconds;
                 match r.gateway(client_id).query_quota(&provider_id, force).await {
                     Ok(view) => {
-                        host.state
-                            .lock()
-                            .quotas
-                            .insert((client_id, provider_id.clone()), view);
+                        let now_secs = gateway::quota::now();
+                        let unscheduled = view.checked_at.is_none()
+                            && view.next_refresh_at.is_none()
+                            && view.retry_at.is_none();
+                        let mut st = host.state.lock();
+                        if unscheduled {
+                            st.quota_backoff_until
+                                .insert(key.clone(), now_secs.saturating_add(1));
+                        } else {
+                            st.quota_backoff_until.remove(&key);
+                        }
+                        st.quotas.insert(key.clone(), view);
                     }
-                    Err(e) if force => {
-                        host.set_error(e.message);
+                    Err(e) => {
+                        let now_secs = gateway::quota::now();
+                        if e.code == crate::errors::code::STALE {
+                            host.state
+                                .lock()
+                                .quota_backoff_until
+                                .insert(key.clone(), now_secs.saturating_add(1));
+                        } else {
+                            if force {
+                                force_banner_err = Some(e.message.clone());
+                            }
+                            let cur_provider = r.gateway(client_id).try_view().ok().and_then(|v| {
+                                v.providers.into_iter().find(|p| p.id == provider_id)
+                            });
+                            let mut st = host.state.lock();
+                            if let Some(p) = cur_provider {
+                                let err_view = synthesize_quota_error_view(
+                                    &p,
+                                    st.quotas.get(&key),
+                                    e.message,
+                                    refresh_seconds,
+                                    now_secs,
+                                );
+                                st.quotas.insert(key.clone(), err_view);
+                                if refresh_seconds == 0 {
+                                    st.quota_backoff_until
+                                        .insert(key.clone(), now_secs.saturating_add(5));
+                                } else {
+                                    st.quota_backoff_until.remove(&key);
+                                }
+                            } else {
+                                st.quota_backoff_until.insert(
+                                    key.clone(),
+                                    now_secs.saturating_add(refresh_seconds.max(5)),
+                                );
+                            }
+                        }
                     }
-                    Err(_) => {}
                 }
             }
-            host.state.lock().in_flight_quotas.remove(&key);
+            {
+                let mut st = host.state.lock();
+                st.in_flight_quotas.remove(&key);
+                if let Some(msg) = force_banner_err {
+                    st.local_error = Some(msg);
+                    st.local_error_from_startup = false;
+                }
+            }
             host.bump_wake();
             host.render_if_visible();
         });
@@ -2271,17 +2394,33 @@ impl Host {
                         return None;
                     }
                     let now_secs = gateway::quota::now();
-                    let client_quotas: HashMap<String, QuotaView> = host
-                        .state
-                        .lock()
-                        .quotas
-                        .iter()
-                        .filter(|((c, _), _)| *c == cid)
-                        .map(|((_, pid), q)| (pid.clone(), q.clone()))
-                        .collect();
+                    let (client_quotas, client_in_flight, client_backoff) = {
+                        let st = host.state.lock();
+                        let quotas: HashMap<String, QuotaView> = st
+                            .quotas
+                            .iter()
+                            .filter(|((c, _), _)| *c == cid)
+                            .map(|((_, pid), q)| (pid.clone(), q.clone()))
+                            .collect();
+                        let in_flight: HashSet<String> = st
+                            .in_flight_quotas
+                            .iter()
+                            .filter(|(c, _)| *c == cid)
+                            .map(|(_, pid)| pid.clone())
+                            .collect();
+                        let backoff: HashMap<String, u64> = st
+                            .quota_backoff_until
+                            .iter()
+                            .filter(|((c, _), _)| *c == cid)
+                            .map(|((_, pid), &until)| (pid.clone(), until))
+                            .collect();
+                        (quotas, in_flight, backoff)
+                    };
                     let (due, next_at) = next_quota_schedule_step(
                         &view.providers,
                         &client_quotas,
+                        &client_in_flight,
+                        &client_backoff,
                         refresh_seconds,
                         now_secs,
                     );
@@ -2296,19 +2435,17 @@ impl Host {
                         }
                     }
                     Some((cid, due, sleep_for)) => {
-                        if !due.is_empty() {
-                            for pid in due {
-                                host.spawn_quota_query(cid, pid, false);
-                            }
-                            tokio::select! {
-                                res = wake_rx.changed() => if res.is_err() { break; },
-                                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-                            }
+                        for pid in &due {
+                            host.spawn_quota_query(cid, pid.clone(), false);
+                        }
+                        let delay = if due.is_empty() {
+                            sleep_for
                         } else {
-                            tokio::select! {
-                                res = wake_rx.changed() => if res.is_err() { break; },
-                                _ = tokio::time::sleep(sleep_for) => {}
-                            }
+                            Duration::from_secs(1)
+                        };
+                        tokio::select! {
+                            res = wake_rx.changed() => if res.is_err() { break; },
+                            _ = tokio::time::sleep(delay) => {}
                         }
                     }
                 }
@@ -2396,6 +2533,8 @@ pub fn connect(app: &tauri::AppHandle) {
     let host = Arc::new(Host {
         app: app.clone(),
         state: Mutex::new(EphemeralState::default()),
+        render_mu: Mutex::new(()),
+        pending_render: Mutex::new(None),
         wake_tx,
         wake_seq: std::sync::atomic::AtomicU64::new(0),
     });
@@ -2413,9 +2552,25 @@ pub fn toggle(app: &tauri::AppHandle) {
     let Some(host) = PANEL_HOST.get().cloned() else {
         return;
     };
-    let cstr = host.build_view_model_json();
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    let do_toggle = move || {
+        if unsafe { vela_quick_is_visible() } {
+            host.pending_render.lock().take();
+            let now_visible = unsafe { vela_quick_toggle(std::ptr::null()) };
+            VISIBLE.store(now_visible, Ordering::Release);
+            if let Some(r) = handle.try_state::<Arc<Runtime>>() {
+                r.mark_window_visible("quick", now_visible);
+            }
+            host.bump_wake();
+            return;
+        }
+        let cstr = {
+            let _guard = host.render_mu.lock();
+            host.pending_render.lock().take();
+            let built = host.build_view_model_json();
+            VISIBLE.store(true, Ordering::Release);
+            built
+        };
         let ptr = cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
         let now_visible = unsafe { vela_quick_toggle(ptr) };
         VISIBLE.store(now_visible, Ordering::Release);
@@ -2423,7 +2578,12 @@ pub fn toggle(app: &tauri::AppHandle) {
             r.mark_window_visible("quick", now_visible);
         }
         host.bump_wake();
-    });
+    };
+    if objc2::MainThreadMarker::new().is_some() {
+        do_toggle();
+    } else {
+        let _ = app.run_on_main_thread(do_toggle);
+    }
 }
 
 pub fn hide(app: &tauri::AppHandle) {
@@ -2432,6 +2592,7 @@ pub fn hide(app: &tauri::AppHandle) {
         r.mark_window_visible("quick", false);
     }
     if let Some(host) = PANEL_HOST.get() {
+        host.pending_render.lock().take();
         host.bump_wake();
     }
     if objc2::MainThreadMarker::new().is_some() {
@@ -2452,12 +2613,28 @@ pub fn notify_state_changed(_app: &tauri::AppHandle) {
     }
 }
 
+pub fn on_freeze_changed(_app: &tauri::AppHandle) {
+    if let Some(host) = PANEL_HOST.get() {
+        host.state.lock().freeze_error = None;
+        host.bump_wake();
+        host.render_if_visible();
+    }
+}
+
 pub fn push_quota(_app: &tauri::AppHandle, client_id: ClientId, quota: QuotaView) {
     if let Some(host) = PANEL_HOST.get() {
-        host.state
-            .lock()
-            .quotas
-            .insert((client_id, quota.provider_id.clone()), quota);
+        let key = (client_id, quota.provider_id.clone());
+        let clear_backoff = quota.state != "loading"
+            && (quota.checked_at.is_some()
+                || quota.next_refresh_at.is_some()
+                || quota.retry_at.is_some());
+        {
+            let mut st = host.state.lock();
+            if clear_backoff {
+                st.quota_backoff_until.remove(&key);
+            }
+            st.quotas.insert(key, quota);
+        }
         host.bump_wake();
         host.render_if_visible();
     }
@@ -2808,11 +2985,58 @@ mod tests {
             },
         );
 
-        let providers = vec![p_due, p_unsup, p_retry];
-        let (due, next_at) = next_quota_schedule_step(&providers, &cached, 60, 1_100);
+        let providers = vec![p_due.clone(), p_unsup, p_retry];
+        let (due, next_at) = next_quota_schedule_step(
+            &providers,
+            &cached,
+            &HashSet::new(),
+            &HashMap::new(),
+            60,
+            1_100,
+        );
         assert_eq!(due, vec!["due".to_owned()]);
         // retry_at=1200 is earlier than unsupported's 1000 + 86400 = 87400
         assert_eq!(next_at, 1_200);
+
+        // In-flight provider is not re-dispatched while its query is running.
+        let in_flight = HashSet::from(["due".to_owned()]);
+        let (due_inflight, next_inflight) =
+            next_quota_schedule_step(&providers, &cached, &in_flight, &HashMap::new(), 60, 1_100);
+        assert!(due_inflight.is_empty());
+        assert_eq!(next_inflight, 1_200);
+
+        // Failed query synthesizes error view with next_refresh_at so scheduler never spins at 0ms.
+        let mut prior_ok = empty_quota("due", "v1");
+        prior_ok.state = "ok".into();
+        prior_ok.success_at = Some(950);
+        let err_view =
+            synthesize_quota_error_view(&p_due, Some(&prior_ok), "上游连接超时".into(), 60, 1_100);
+        assert_eq!(err_view.state, "error");
+        assert!(err_view.stale);
+        assert_eq!(err_view.error.as_deref(), Some("上游连接超时"));
+        assert_eq!(err_view.next_refresh_at, Some(1_160));
+        cached.insert("due".into(), err_view);
+        let (due_after_err, next_after_err) = next_quota_schedule_step(
+            &providers,
+            &cached,
+            &HashSet::new(),
+            &HashMap::new(),
+            60,
+            1_100,
+        );
+        assert!(
+            due_after_err.is_empty(),
+            "error view must back off until next_refresh_at"
+        );
+        assert_eq!(next_after_err, 1_160);
+
+        // Transient STALE / BUSY backoff floor also suppresses immediate re-query when cached is empty.
+        cached.remove("due");
+        let backoff = HashMap::from([("due".to_owned(), 1_105_u64)]);
+        let (due_backoff, next_backoff) =
+            next_quota_schedule_step(&providers, &cached, &HashSet::new(), &backoff, 60, 1_100);
+        assert!(due_backoff.is_empty());
+        assert_eq!(next_backoff, 1_105);
 
         cached.insert(
             "due".into(),
@@ -2823,9 +3047,88 @@ mod tests {
                 ..empty_quota("due", "v1")
             },
         );
-        let (due2, next_at2) = next_quota_schedule_step(&providers, &cached, 60, 1_200);
+        let (due2, next_at2) = next_quota_schedule_step(
+            &providers,
+            &cached,
+            &HashSet::new(),
+            &HashMap::new(),
+            60,
+            1_200,
+        );
         assert_eq!(due2, vec!["retry".to_owned()]);
         // unsupported checked_at=1000 + max(60, 86400) = 87_400
         assert_eq!(next_at2, 87_400);
+    }
+
+    #[test]
+    fn reconcile_startup_error_tracks_async_arrival_and_main_consumption() {
+        let mut local_error: Option<String> = None;
+        let mut from_startup = false;
+        let mut seeded: Option<String> = None;
+
+        // 1. Opening quick before async gateway resume finishes does not lock out later arrival.
+        reconcile_startup_error(&mut local_error, &mut from_startup, &mut seeded, None);
+        assert!(local_error.is_none());
+        assert!(!from_startup);
+        assert!(seeded.is_none());
+
+        // 2. Async resume error arrives and seeds the banner.
+        reconcile_startup_error(
+            &mut local_error,
+            &mut from_startup,
+            &mut seeded,
+            Some("Codex：端口占用"),
+        );
+        assert_eq!(local_error.as_deref(), Some("Codex：端口占用"));
+        assert!(from_startup);
+
+        // 3. Subsequent startup overwrite (e.g. second client resume failure) updates startup banner.
+        reconcile_startup_error(
+            &mut local_error,
+            &mut from_startup,
+            &mut seeded,
+            Some("Claude：配置损坏"),
+        );
+        assert_eq!(local_error.as_deref(), Some("Claude：配置损坏"));
+        assert!(from_startup);
+
+        // 4. If user triggers an action inside quick that clears local_error while main is still unopened,
+        // the same startup error is not re-seeded on subsequent quick renders.
+        local_error = None;
+        from_startup = false;
+        reconcile_startup_error(
+            &mut local_error,
+            &mut from_startup,
+            &mut seeded,
+            Some("Claude：配置损坏"),
+        );
+        assert!(local_error.is_none());
+        assert!(!from_startup);
+
+        // 5. If startup banner was active and "main" consumes startup_error, quick clears it immediately.
+        let mut local2: Option<String> = None;
+        let mut from_startup2 = false;
+        let mut seeded2: Option<String> = None;
+        reconcile_startup_error(
+            &mut local2,
+            &mut from_startup2,
+            &mut seeded2,
+            Some("Claude：配置损坏"),
+        );
+        assert_eq!(local2.as_deref(), Some("Claude：配置损坏"));
+        reconcile_startup_error(&mut local2, &mut from_startup2, &mut seeded2, None);
+        assert!(local2.is_none());
+        assert!(!from_startup2);
+
+        // 6. Non-startup runtime error is preserved when startup_error is None.
+        let mut runtime_err = Some("切换失败".to_owned());
+        let mut runtime_from_startup = false;
+        reconcile_startup_error(
+            &mut runtime_err,
+            &mut runtime_from_startup,
+            &mut seeded2,
+            None,
+        );
+        assert_eq!(runtime_err.as_deref(), Some("切换失败"));
     }
 }

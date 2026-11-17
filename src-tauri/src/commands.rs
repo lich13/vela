@@ -6,6 +6,8 @@ use crate::{
 };
 use std::sync::{atomic::Ordering, Arc};
 use tauri::Emitter;
+#[cfg(target_os = "macos")]
+use tauri::Manager;
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
 fn publish_power_result(
     app: &tauri::AppHandle,
@@ -92,12 +94,21 @@ pub async fn force_quit_agent_clients(
     runtime.force_quitting.store(false, Ordering::Release);
     result?
 }
+#[cfg(test)]
 pub(crate) fn consume_startup_error_for_label(
     slot: &parking_lot::Mutex<Option<AppError>>,
     label: &str,
 ) -> Option<AppError> {
+    take_startup_error_for_label(slot, &std::sync::atomic::AtomicBool::new(false), label)
+}
+pub(crate) fn take_startup_error_for_label(
+    slot: &parking_lot::Mutex<Option<AppError>>,
+    consumed_by_main: &std::sync::atomic::AtomicBool,
+    label: &str,
+) -> Option<AppError> {
     let mut guard = slot.lock();
     if label == "main" {
+        consumed_by_main.store(true, Ordering::Release);
         guard.take()
     } else {
         guard.clone()
@@ -105,7 +116,13 @@ pub(crate) fn consume_startup_error_for_label(
 }
 #[tauri::command]
 pub fn get_startup_error(window: tauri::WebviewWindow, r: R<'_>) -> Option<AppError> {
-    consume_startup_error_for_label(&r.startup_error, window.label())
+    let label = window.label();
+    let out = take_startup_error_for_label(&r.startup_error, &r.startup_error_consumed, label);
+    #[cfg(target_os = "macos")]
+    if label == "main" && out.is_some() {
+        crate::quick_macos::notify_state_changed(window.app_handle());
+    }
+    out
 }
 
 #[tauri::command]
@@ -309,5 +326,15 @@ mod startup_error_tests {
         );
         assert!(consume_startup_error_for_label(&slot, "main").is_none());
         assert!(consume_startup_error_for_label(&slot, "quick").is_none());
+    }
+
+    #[test]
+    fn main_marks_consumed_even_before_async_startup_error_arrives() {
+        let slot = Mutex::new(None);
+        let consumed = std::sync::atomic::AtomicBool::new(false);
+        assert!(take_startup_error_for_label(&slot, &consumed, "quick").is_none());
+        assert!(!consumed.load(Ordering::Acquire));
+        assert!(take_startup_error_for_label(&slot, &consumed, "main").is_none());
+        assert!(consumed.load(Ordering::Acquire));
     }
 }

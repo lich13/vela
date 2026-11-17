@@ -454,19 +454,26 @@ struct QuickFreezeCardView: View {
             }
 
             if !freeze.stages.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(freeze.stages) { stage in
-                        HStack(spacing: 4) {
-                            Text(stage.name)
-                                .foregroundColor(palette.muted)
-                            Text("\(stage.count)")
-                                .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                                .foregroundColor(palette.ink)
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Array(stageRows.enumerated()), id: \.offset) { _, row in
+                        HStack(spacing: 6) {
+                            ForEach(row) { stage in
+                                HStack(spacing: 4) {
+                                    Text(stage.name)
+                                        .foregroundColor(palette.muted)
+                                        .lineLimit(1)
+                                    Text("\(stage.count)")
+                                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                                        .foregroundColor(palette.ink)
+                                        .lineLimit(1)
+                                }
+                                .font(.system(size: 12))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(palette.surfaceSubtle))
+                                .fixedSize(horizontal: true, vertical: false)
+                            }
                         }
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(palette.surfaceSubtle))
                     }
                 }
             }
@@ -510,6 +517,31 @@ struct QuickFreezeCardView: View {
             x: 0,
             y: 2
         )
+    }
+
+    private var stageRows: [[FreezeStageModel]] {
+        let maxRowWidth: CGFloat = 368.0
+        var rows: [[FreezeStageModel]] = []
+        var current: [FreezeStageModel] = []
+        var currentWidth: CGFloat = 0
+        for stage in freeze.stages {
+            let chipWidth = CGFloat(stage.name.count) * 12.5
+                + CGFloat(String(stage.count).count) * 7.5
+                + 22.0
+            let nextWidth = current.isEmpty ? chipWidth : (currentWidth + 6.0 + chipWidth)
+            if !current.isEmpty && nextWidth > maxRowWidth {
+                rows.append(current)
+                current = [stage]
+                currentWidth = chipWidth
+            } else {
+                current.append(stage)
+                currentWidth = nextWidth
+            }
+        }
+        if !current.isEmpty {
+            rows.append(current)
+        }
+        return rows
     }
 }
 

@@ -73,6 +73,7 @@ struct Runtime {
     force_quitting: AtomicBool,
     power: power::Service,
     startup_error: Mutex<Option<AppError>>,
+    startup_error_consumed: AtomicBool,
     official_tx: tokio::sync::Mutex<()>,
     window_wake: tokio::sync::Notify,
     window_visible: [AtomicBool; 2],
@@ -397,6 +398,31 @@ pub(crate) fn emit_switch_error(app: &tauri::AppHandle, error: AppError) {
             r.pending_main.record_switch_error(error.clone());
         }
     }
+    let _ = app.emit("switch-error", error);
+}
+pub(crate) fn record_startup_error(
+    app: &tauri::AppHandle,
+    r: &Runtime,
+    error: AppError,
+    overwrite: bool,
+) {
+    let already_consumed = {
+        let mut slot = r.startup_error.lock();
+        if r.startup_error_consumed.load(Ordering::Acquire) {
+            true
+        } else {
+            if overwrite || slot.is_none() {
+                *slot = Some(error.clone());
+            }
+            false
+        }
+    };
+    if already_consumed {
+        emit_switch_error(app, error);
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    quick_macos::notify_state_changed(app);
     let _ = app.emit("switch-error", error);
 }
 pub(crate) fn emit_if_main_visible<S: serde::Serialize + Clone>(
@@ -1956,6 +1982,7 @@ pub fn run() {
                 power,
                 force_quitting: AtomicBool::new(false),
                 startup_error: Mutex::new(codex_import_error.or(claude_import_error).or(grok_import_error).or(vertex_error)),
+                startup_error_consumed: AtomicBool::new(false),
                 official_tx: tokio::sync::Mutex::new(()),
                 window_wake: tokio::sync::Notify::new(),
                 window_visible: [AtomicBool::new(false), AtomicBool::new(false)],
@@ -2016,8 +2043,7 @@ pub fn run() {
                             {
                                 r.diagnostics.emit(record);
                             }
-                            *r.startup_error.lock() = Some(e.clone());
-                            emit_switch_error(&resume_app, e);
+                            record_startup_error(&resume_app, &r, e, true);
                         }
                         publish_gateway(&resume_app, r.gateway(client));
                     }
@@ -2039,8 +2065,7 @@ pub fn run() {
                 let r = runtime.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) = links::ensure_association(&handle).await {
-                        r.startup_error.lock().get_or_insert(error.clone());
-                        emit_switch_error(&handle, error);
+                        record_startup_error(&handle, &r, error, false);
                     }
                 });
             }
@@ -2068,7 +2093,7 @@ pub fn run() {
                         let _ = window.emit("gateway-freeze", &view);
                     }
                     #[cfg(target_os = "macos")]
-                    quick_macos::notify_state_changed(&freeze_app);
+                    quick_macos::on_freeze_changed(&freeze_app);
                     if power::close_after_freeze(&mut power_attempted, view.frozen, view.draining) {
                         let gate = freeze.clone();
                         let r = freeze_runtime.clone();
