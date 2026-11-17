@@ -1575,9 +1575,19 @@ struct QuickQuotaDetailOverlayView: View {
 
 struct QuickPanelRootView: View {
     @ObservedObject var store: QuickPanelStore
+    @Environment(\.colorScheme) private var systemColorScheme
 
     private var palette: QuickPalette {
-        QuickPalette(isDark: store.model.theme != "light")
+        let isDark: Bool
+        switch store.model.appearanceMode {
+        case "dark":
+            isDark = true
+        case "light":
+            isDark = false
+        default:
+            isDark = (systemColorScheme == .dark)
+        }
+        return QuickPalette(isDark: isDark)
     }
 
     var body: some View {

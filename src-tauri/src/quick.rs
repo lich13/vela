@@ -197,6 +197,24 @@ impl Panel {
         Ok(next)
     }
 
+    #[cfg(any(target_os = "macos", test))]
+    pub fn sync_selected_client(&self, selected: crate::gateway::ClientId) -> Result<Preferences> {
+        let mut prefs = self.preferences.lock();
+        if prefs.selected_client == Some(selected) {
+            return Ok(prefs.clone());
+        }
+        let mut next = prefs.clone();
+        next.selected_client = Some(selected);
+        storage::atomic_write(
+            &self.path,
+            &serde_json::to_vec(&next)
+                .map_err(|_| AppError::new(code::PANEL, "无法保存快捷设置"))?,
+            None,
+        )?;
+        *prefs = next.clone();
+        Ok(next)
+    }
+
     pub fn is_ready(&self) -> bool {
         #[cfg(target_os = "macos")]
         {
@@ -738,5 +756,28 @@ mod preference_tests {
         assert!(loaded.pinned);
         assert_eq!(loaded.hidden_clients, prefs.hidden_clients);
         assert_eq!(loaded.selected_client, Some(crate::gateway::ClientId::Grok));
+    }
+    #[test]
+    fn sync_selected_client_persists_fallback_without_app_handle_reentry() {
+        let dir = tempfile::tempdir().unwrap();
+        let panel = Panel::new(dir.path()).unwrap();
+        assert_eq!(panel.snapshot().selected_client, None);
+        let updated = panel
+            .sync_selected_client(crate::gateway::ClientId::Claude)
+            .unwrap();
+        assert_eq!(
+            updated.selected_client,
+            Some(crate::gateway::ClientId::Claude)
+        );
+        // Second call with identical selection is a no-op and returns current snapshot.
+        let again = panel
+            .sync_selected_client(crate::gateway::ClientId::Claude)
+            .unwrap();
+        assert_eq!(again, updated);
+        let reopened = Panel::new(dir.path()).unwrap();
+        assert_eq!(
+            reopened.snapshot().selected_client,
+            Some(crate::gateway::ClientId::Claude)
+        );
     }
 }

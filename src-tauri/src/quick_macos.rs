@@ -1144,14 +1144,27 @@ pub fn synthesize_quota_error_view(
     base
 }
 
+pub fn should_accept_quota_push(
+    providers: Option<&[ProviderView]>,
+    existing_cached: Option<&QuotaView>,
+    incoming: &QuotaView,
+) -> bool {
+    if let Some(list) = providers {
+        return list
+            .iter()
+            .any(|p| p.id == incoming.provider_id && p.quota_version == incoming.version);
+    }
+    existing_cached.is_none_or(|c| c.version == incoming.version)
+}
+
 pub fn next_quota_schedule_step(
     providers: &[ProviderView],
     cached: &HashMap<String, QuotaView>,
-    in_flight: &HashSet<String>,
-    backoff_until: &HashMap<String, u64>,
+    in_flight: &HashSet<(String, String)>,
+    backoff_until: &HashMap<(String, String), u64>,
     refresh_seconds: u64,
     now_secs: u64,
-) -> (Vec<String>, u64) {
+) -> (Vec<(String, String)>, u64) {
     if providers.is_empty() || refresh_seconds == 0 {
         return (Vec::new(), now_secs.saturating_add(refresh_seconds.max(1)));
     }
@@ -1165,7 +1178,9 @@ pub fn next_quota_schedule_step(
     let mut due = Vec::new();
     let mut next_at = u64::MAX;
     for p in providers {
-        if in_flight.contains(&p.id) {
+        let pv = (p.id.clone(), p.quota_version.clone());
+        let wildcard = (p.id.clone(), String::new());
+        if in_flight.contains(&pv) || in_flight.contains(&wildcard) {
             continue;
         }
         let q = cached
@@ -1179,11 +1194,16 @@ pub fn next_quota_schedule_step(
                     .map(|c| c.saturating_add(delay_for(q)))
             })
             .unwrap_or(0);
+        let backoff = backoff_until
+            .get(&pv)
+            .copied()
+            .unwrap_or(0)
+            .max(backoff_until.get(&wildcard).copied().unwrap_or(0));
         let at = scheduled
             .max(q.and_then(|v| v.retry_at).unwrap_or(0))
-            .max(backoff_until.get(&p.id).copied().unwrap_or(0));
+            .max(backoff);
         if at <= now_secs {
-            due.push(p.id.clone());
+            due.push(pv);
         } else {
             next_at = next_at.min(at);
         }
@@ -1374,6 +1394,7 @@ enum QuickAction {
 }
 
 type PendingSnapshotKey = (ClientId, Vec<(String, u64, String)>);
+type QuotaSchedulePlan = (ClientId, Vec<(String, String)>, Duration);
 
 #[derive(Default)]
 struct EphemeralState {
@@ -1390,8 +1411,8 @@ struct EphemeralState {
     rename_close_seq: u64,
     cancelling_waits: HashSet<String>,
     quotas: HashMap<(ClientId, String), QuotaView>,
-    in_flight_quotas: HashSet<(ClientId, String)>,
-    quota_backoff_until: HashMap<(ClientId, String), u64>,
+    in_flight_quotas: HashSet<(ClientId, String, String)>,
+    quota_backoff_until: HashMap<(ClientId, String, String), u64>,
     pending_snapshot_key: Option<PendingSnapshotKey>,
     pending_snapshot_at: Option<Instant>,
     power_state: Option<power::State>,
@@ -1482,9 +1503,11 @@ impl Host {
             .selected_client
             .filter(|id| visible_clients.contains(id))
             .or_else(|| visible_clients.first().copied());
-        if selected_client != prefs.selected_client && selected_client.is_some() {
-            if let Ok(updated) = panel.update(&self.app, None, None, selected_client) {
-                prefs = updated;
+        if selected_client != prefs.selected_client {
+            if let Some(cid) = selected_client {
+                if let Ok(updated) = panel.sync_selected_client(cid) {
+                    prefs = updated;
+                }
             }
         }
         let client_visible = selected_client.is_some();
@@ -1682,9 +1705,8 @@ impl Host {
             QuickAction::TogglePinned => {
                 if let Some(panel) = self.app.try_state::<quick::Panel>() {
                     let current = panel.snapshot().pinned;
-                    match panel.update(&self.app, Some(!current), None, None) {
-                        Ok(_) => self.render_if_visible(),
-                        Err(e) => self.set_error(e.message),
+                    if let Err(e) = panel.update(&self.app, Some(!current), None, None) {
+                        self.set_error(e.message);
                     }
                 }
             }
@@ -1693,9 +1715,8 @@ impl Host {
                     self.state.lock().limit_error = None;
                     if let Err(e) = panel.update(&self.app, None, None, Some(client_id)) {
                         self.set_error(e.message);
+                        self.bump_wake();
                     }
-                    self.bump_wake();
-                    self.render_if_visible();
                 }
             }
             QuickAction::OpenMain {
@@ -1917,7 +1938,7 @@ impl Host {
                 let Some(cid) = self.current_selected_client() else {
                     return;
                 };
-                self.spawn_quota_query(cid, id, true);
+                self.spawn_quota_query(cid, id, None, true);
             }
             QuickAction::SelectProvider { id } => {
                 let Some(cid) = self.current_selected_client() else {
@@ -2275,14 +2296,29 @@ impl Host {
         }
     }
 
-    fn spawn_quota_query(self: &Arc<Self>, client_id: ClientId, provider_id: String, force: bool) {
-        let key = (client_id, provider_id.clone());
+    fn spawn_quota_query(
+        self: &Arc<Self>,
+        client_id: ClientId,
+        provider_id: String,
+        expected_version: Option<String>,
+        force: bool,
+    ) {
+        let resolved_version = expected_version.unwrap_or_else(|| {
+            self.app
+                .try_state::<Arc<Runtime>>()
+                .and_then(|r| r.gateway(client_id).try_view().ok())
+                .and_then(|v| v.providers.into_iter().find(|p| p.id == provider_id))
+                .map(|p| p.quota_version)
+                .unwrap_or_default()
+        });
+        let flight_key = (client_id, provider_id.clone(), resolved_version.clone());
         {
             let mut st = self.state.lock();
-            if !st.in_flight_quotas.insert(key.clone()) {
+            if !st.in_flight_quotas.insert(flight_key.clone()) {
                 return;
             }
         }
+        let cache_key = (client_id, provider_id.clone());
         let host = self.clone();
         tauri::async_runtime::spawn(async move {
             let mut force_banner_err: Option<String> = None;
@@ -2294,18 +2330,29 @@ impl Host {
                 let refresh_seconds = r.core.lock().preferences().quota_refresh_seconds;
                 match r.gateway(client_id).query_quota(&provider_id, force).await {
                     Ok(view) => {
+                        let cur_providers =
+                            r.gateway(client_id).try_view().ok().map(|v| v.providers);
                         let now_secs = gateway::quota::now();
                         let unscheduled = view.checked_at.is_none()
                             && view.next_refresh_at.is_none()
                             && view.retry_at.is_none();
                         let mut st = host.state.lock();
-                        if unscheduled {
-                            st.quota_backoff_until
-                                .insert(key.clone(), now_secs.saturating_add(1));
-                        } else {
-                            st.quota_backoff_until.remove(&key);
+                        if should_accept_quota_push(
+                            cur_providers.as_deref(),
+                            st.quotas.get(&cache_key),
+                            &view,
+                        ) {
+                            let ver_key = (client_id, provider_id.clone(), view.version.clone());
+                            let wild_key = (client_id, provider_id.clone(), String::new());
+                            if unscheduled {
+                                st.quota_backoff_until
+                                    .insert(ver_key, now_secs.saturating_add(1));
+                            } else {
+                                st.quota_backoff_until.remove(&ver_key);
+                                st.quota_backoff_until.remove(&wild_key);
+                            }
+                            st.quotas.insert(cache_key.clone(), view);
                         }
-                        st.quotas.insert(key.clone(), view);
                     }
                     Err(e) => {
                         let now_secs = gateway::quota::now();
@@ -2313,7 +2360,7 @@ impl Host {
                             host.state
                                 .lock()
                                 .quota_backoff_until
-                                .insert(key.clone(), now_secs.saturating_add(1));
+                                .insert(flight_key.clone(), now_secs.saturating_add(1));
                         } else {
                             if force {
                                 force_banner_err = Some(e.message.clone());
@@ -2322,26 +2369,35 @@ impl Host {
                                 v.providers.into_iter().find(|p| p.id == provider_id)
                             });
                             let mut st = host.state.lock();
-                            if let Some(p) = cur_provider {
-                                let err_view = synthesize_quota_error_view(
-                                    &p,
-                                    st.quotas.get(&key),
-                                    e.message,
-                                    refresh_seconds,
-                                    now_secs,
-                                );
-                                st.quotas.insert(key.clone(), err_view);
-                                if refresh_seconds == 0 {
-                                    st.quota_backoff_until
-                                        .insert(key.clone(), now_secs.saturating_add(5));
-                                } else {
-                                    st.quota_backoff_until.remove(&key);
+                            match cur_provider {
+                                Some(p)
+                                    if resolved_version.is_empty()
+                                        || p.quota_version == resolved_version =>
+                                {
+                                    let err_view = synthesize_quota_error_view(
+                                        &p,
+                                        st.quotas.get(&cache_key),
+                                        e.message,
+                                        refresh_seconds,
+                                        now_secs,
+                                    );
+                                    let ver_key =
+                                        (client_id, provider_id.clone(), p.quota_version.clone());
+                                    st.quotas.insert(cache_key.clone(), err_view);
+                                    if refresh_seconds == 0 {
+                                        st.quota_backoff_until
+                                            .insert(ver_key, now_secs.saturating_add(5));
+                                    } else {
+                                        st.quota_backoff_until.remove(&ver_key);
+                                    }
                                 }
-                            } else {
-                                st.quota_backoff_until.insert(
-                                    key.clone(),
-                                    now_secs.saturating_add(refresh_seconds.max(5)),
-                                );
+                                Some(_) => {}
+                                None => {
+                                    st.quota_backoff_until.insert(
+                                        flight_key.clone(),
+                                        now_secs.saturating_add(refresh_seconds.max(5)),
+                                    );
+                                }
                             }
                         }
                     }
@@ -2349,7 +2405,7 @@ impl Host {
             }
             {
                 let mut st = host.state.lock();
-                st.in_flight_quotas.remove(&key);
+                st.in_flight_quotas.remove(&flight_key);
                 if let Some(msg) = force_banner_err {
                     st.local_error = Some(msg);
                     st.local_error_from_startup = false;
@@ -2371,7 +2427,7 @@ impl Host {
                     }
                     continue;
                 }
-                let plan = (|| -> Option<(ClientId, Vec<String>, Duration)> {
+                let plan = (|| -> Option<QuotaSchedulePlan> {
                     let r = host.app.try_state::<Arc<Runtime>>()?;
                     if r.quitting.load(Ordering::Relaxed) {
                         return None;
@@ -2402,17 +2458,17 @@ impl Host {
                             .filter(|((c, _), _)| *c == cid)
                             .map(|((_, pid), q)| (pid.clone(), q.clone()))
                             .collect();
-                        let in_flight: HashSet<String> = st
+                        let in_flight: HashSet<(String, String)> = st
                             .in_flight_quotas
                             .iter()
-                            .filter(|(c, _)| *c == cid)
-                            .map(|(_, pid)| pid.clone())
+                            .filter(|(c, _, _)| *c == cid)
+                            .map(|(_, pid, ver)| (pid.clone(), ver.clone()))
                             .collect();
-                        let backoff: HashMap<String, u64> = st
+                        let backoff: HashMap<(String, String), u64> = st
                             .quota_backoff_until
                             .iter()
-                            .filter(|((c, _), _)| *c == cid)
-                            .map(|((_, pid), &until)| (pid.clone(), until))
+                            .filter(|((c, _, _), _)| *c == cid)
+                            .map(|((_, pid, ver), &until)| ((pid.clone(), ver.clone()), until))
                             .collect();
                         (quotas, in_flight, backoff)
                     };
@@ -2435,8 +2491,8 @@ impl Host {
                         }
                     }
                     Some((cid, due, sleep_for)) => {
-                        for pid in &due {
-                            host.spawn_quota_query(cid, pid.clone(), false);
+                        for (pid, ver) in &due {
+                            host.spawn_quota_query(cid, pid.clone(), Some(ver.clone()), false);
                         }
                         let delay = if due.is_empty() {
                             sleep_for
@@ -2587,22 +2643,28 @@ pub fn toggle(app: &tauri::AppHandle) {
 }
 
 pub fn hide(app: &tauri::AppHandle) {
-    VISIBLE.store(false, Ordering::Release);
-    if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        r.mark_window_visible("quick", false);
-    }
-    if let Some(host) = PANEL_HOST.get() {
-        host.pending_render.lock().take();
-        host.bump_wake();
-    }
-    if objc2::MainThreadMarker::new().is_some() {
+    let handle = app.clone();
+    let do_hide = move || {
+        let _guard = PANEL_HOST.get().map(|h| h.render_mu.lock());
+        VISIBLE.store(false, Ordering::Release);
+        if let Some(host) = PANEL_HOST.get() {
+            host.pending_render.lock().take();
+        }
+        drop(_guard);
         unsafe {
             vela_quick_hide();
         }
+        if let Some(r) = handle.try_state::<Arc<Runtime>>() {
+            r.mark_window_visible("quick", false);
+        }
+        if let Some(host) = PANEL_HOST.get() {
+            host.bump_wake();
+        }
+    };
+    if objc2::MainThreadMarker::new().is_some() {
+        do_hide();
     } else {
-        let _ = app.run_on_main_thread(|| unsafe {
-            vela_quick_hide();
-        });
+        let _ = app.run_on_main_thread(do_hide);
     }
 }
 
@@ -2621,22 +2683,42 @@ pub fn on_freeze_changed(_app: &tauri::AppHandle) {
     }
 }
 
-pub fn push_quota(_app: &tauri::AppHandle, client_id: ClientId, quota: QuotaView) {
+pub fn push_quota(app: &tauri::AppHandle, client_id: ClientId, quota: QuotaView) {
     if let Some(host) = PANEL_HOST.get() {
+        let cur_providers = app
+            .try_state::<Arc<Runtime>>()
+            .and_then(|r| r.gateway(client_id).try_view().ok())
+            .map(|v| v.providers);
         let key = (client_id, quota.provider_id.clone());
         let clear_backoff = quota.state != "loading"
             && (quota.checked_at.is_some()
                 || quota.next_refresh_at.is_some()
                 || quota.retry_at.is_some());
-        {
+        let accepted = {
             let mut st = host.state.lock();
-            if clear_backoff {
-                st.quota_backoff_until.remove(&key);
+            if should_accept_quota_push(cur_providers.as_deref(), st.quotas.get(&key), &quota) {
+                if clear_backoff {
+                    st.quota_backoff_until.remove(&(
+                        client_id,
+                        quota.provider_id.clone(),
+                        quota.version.clone(),
+                    ));
+                    st.quota_backoff_until.remove(&(
+                        client_id,
+                        quota.provider_id.clone(),
+                        String::new(),
+                    ));
+                }
+                st.quotas.insert(key, quota);
+                true
+            } else {
+                false
             }
-            st.quotas.insert(key, quota);
+        };
+        if accepted {
+            host.bump_wake();
+            host.render_if_visible();
         }
-        host.bump_wake();
-        host.render_if_visible();
     }
 }
 
@@ -2994,16 +3076,48 @@ mod tests {
             60,
             1_100,
         );
-        assert_eq!(due, vec!["due".to_owned()]);
+        assert_eq!(due, vec![("due".to_owned(), "v1".to_owned())]);
         // retry_at=1200 is earlier than unsupported's 1000 + 86400 = 87400
         assert_eq!(next_at, 1_200);
 
-        // In-flight provider is not re-dispatched while its query is running.
-        let in_flight = HashSet::from(["due".to_owned()]);
+        // In-flight provider is not re-dispatched while its same-version query is running,
+        // whereas editing the provider to v2 dispatches v2 immediately without waiting for v1.
+        let in_flight = HashSet::from([("due".to_owned(), "v1".to_owned())]);
         let (due_inflight, next_inflight) =
             next_quota_schedule_step(&providers, &cached, &in_flight, &HashMap::new(), 60, 1_100);
         assert!(due_inflight.is_empty());
         assert_eq!(next_inflight, 1_200);
+
+        let mut p_due_v2 = p_due.clone();
+        p_due_v2.quota_version = "v2".into();
+        let (due_v2, _) = next_quota_schedule_step(
+            &[p_due_v2.clone()],
+            &cached,
+            &in_flight,
+            &HashMap::from([(("due".to_owned(), "v1".to_owned()), 1_500_u64)]),
+            60,
+            1_100,
+        );
+        assert_eq!(
+            due_v2,
+            vec![("due".to_owned(), "v2".to_owned())],
+            "new quota_version must not be blocked by stale v1 flight or v1 backoff"
+        );
+        assert!(!should_accept_quota_push(
+            Some(&[p_due_v2.clone()]),
+            None,
+            &empty_quota("due", "v1"),
+        ));
+        assert!(should_accept_quota_push(
+            Some(&[p_due_v2]),
+            Some(&empty_quota("due", "v1")),
+            &empty_quota("due", "v2"),
+        ));
+        assert!(!should_accept_quota_push(
+            None,
+            Some(&empty_quota("due", "v2")),
+            &empty_quota("due", "v1"),
+        ));
 
         // Failed query synthesizes error view with next_refresh_at so scheduler never spins at 0ms.
         let mut prior_ok = empty_quota("due", "v1");
@@ -3032,7 +3146,7 @@ mod tests {
 
         // Transient STALE / BUSY backoff floor also suppresses immediate re-query when cached is empty.
         cached.remove("due");
-        let backoff = HashMap::from([("due".to_owned(), 1_105_u64)]);
+        let backoff = HashMap::from([(("due".to_owned(), "v1".to_owned()), 1_105_u64)]);
         let (due_backoff, next_backoff) =
             next_quota_schedule_step(&providers, &cached, &HashSet::new(), &backoff, 60, 1_100);
         assert!(due_backoff.is_empty());
@@ -3055,7 +3169,7 @@ mod tests {
             60,
             1_200,
         );
-        assert_eq!(due2, vec!["retry".to_owned()]);
+        assert_eq!(due2, vec![("retry".to_owned(), "v1".to_owned())]);
         // unsupported checked_at=1000 + max(60, 86400) = 87_400
         assert_eq!(next_at2, 87_400);
     }
