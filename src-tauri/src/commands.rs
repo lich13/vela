@@ -22,6 +22,7 @@ fn publish_power_result(
             let _ = app.emit("clamshell-state", state);
             let _ = app.emit("clamshell-error", Option::<AppError>::None);
         }
+        #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
         Err(err) => {
             if let Ok(state) = power.state() {
                 #[cfg(target_os = "macos")]

@@ -38,9 +38,9 @@ mod business_ua_tests;
 pub mod catalog;
 pub(crate) mod circuit;
 mod compaction;
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) use admission::CapacityRetry;
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) use compaction::HandoffWaiting;
 #[cfg(test)]
 mod config_poll_tests;
