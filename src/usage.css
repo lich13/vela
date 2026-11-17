@@ -974,9 +974,13 @@
   margin-bottom: 14px;
   flex-shrink: 0;
 }
-.usage-calculator-ratios {
+.usage-calculator-ratios,
+.usage-calculator-section {
   padding-top: 16px;
   border-top: 1px solid var(--line);
+}
+.usage-calculator input {
+  font-variant-numeric: tabular-nums;
 }
 .usage-calculator .usage-form-actions {
   margin-top: 4px;
@@ -1215,24 +1219,61 @@
 .usage-range-dialog {
   position: fixed;
   margin: 0;
-  width: 336px;
+  width: 196px;
   max-width: calc(100vw - 24px);
   max-height: calc(100dvh - 24px);
   box-sizing: border-box;
   overflow: auto;
-  padding: 18px;
+  padding: 6px;
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: var(--surface);
   color: var(--ink);
   box-shadow: var(--shadow-lg);
+  font-size: 13px;
+}
+.usage-range-dialog.custom-open {
+  width: 316px;
 }
 .usage-range-dialog::backdrop {
-  background: rgba(3, 8, 20, 0.42);
-  backdrop-filter: blur(3px);
+  background: transparent;
+}
+.usage-range-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.usage-range-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.usage-range-option:hover {
+  background: var(--surface-subtle);
+}
+.usage-range-option.active {
+  background: color-mix(in srgb, var(--accent-soft) 68%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.usage-range-custom {
+  margin-top: 6px;
+  padding: 12px 10px 8px;
+  border-top: 1px solid var(--line);
 }
 .usage-range-dialog .usage-form-actions {
-  margin-top: 16px;
+  margin-top: 12px;
 }
 .usage-range-fields .usage-field {
   margin-bottom: 12px;

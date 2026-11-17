@@ -218,7 +218,14 @@ export default function Pricing({
           <Download size={14} />
           立即更新
         </button>
-        <button onClick={() => setCalculator(true)}>倍率换算</button>
+        <button
+          onClick={(e) => {
+            e.currentTarget.focus();
+            setCalculator(true);
+          }}
+        >
+          倍率换算
+        </button>
         <details className="usage-more">
           <summary aria-label="定价高级操作">•••</summary>
           <div>

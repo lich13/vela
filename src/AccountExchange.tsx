@@ -7,8 +7,12 @@ import { errorOf, type ViewState } from "./types";
 import type { AccountImportPreview as Preview, AccountExportPreview as ExportPreview } from "./bridge-contracts";
 const formatName = (format: string) => ({ codex: "Codex", sub2api: "Sub2API", cliproxyapi: "CLIProxyAPI" }[format] ?? format);
 
-export default function AccountExchange({ mode, close, update, notify }: {
-  mode: "import" | "export"; close: () => void; update: (state: ViewState) => void; notify: (message: string) => void;
+export default function AccountExchange({ mode, close, update, notify, onDirtyChange }: {
+  mode: "import" | "export";
+  close: () => void;
+  update: (state: ViewState) => void;
+  notify: (message: string) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [exportPreview, setExportPreview] = useState<ExportPreview | null>(null);
@@ -18,6 +22,11 @@ export default function AccountExchange({ mode, close, update, notify }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [stale, setStale] = useState(false);
+  const isDirty = preview !== null || template !== null;
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const token = useRef<string | null>(null), templateToken = useRef<string | null>(null);
   const mounted = useRef(true), started = useRef(false), submitting = useRef(false);
   const perform = async (work: () => Promise<void>) => {

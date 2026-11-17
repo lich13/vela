@@ -1578,7 +1578,6 @@ impl Protocol {
             code::CANCELLED => EndCause::ClientCancelled,
             _ if self.status.is_some_and(|s| s >= 400) => EndCause::UpstreamRejected,
             code::FIRST_BYTE_TIMEOUT => EndCause::FirstByteTimeout,
-            code::RETRY_BUDGET_EXHAUSTED => EndCause::WaitBudgetExhausted,
             code::STREAM_TIMEOUT => EndCause::StreamTimeout,
             code::STREAM_INTERRUPTED => EndCause::UpstreamDisconnected,
             code::NETWORK | code::TLS => EndCause::ConnectFailed,

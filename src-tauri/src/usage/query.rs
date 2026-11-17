@@ -460,6 +460,26 @@ pub fn calculator_totals(c: &Connection, filter: &Filter) -> Result<Totals> {
     )
 }
 
+pub fn calculator_models(c: &Connection, client: &str) -> Result<Vec<String>> {
+    let scope = Filter {
+        client: (!client.is_empty()).then(|| client.into()),
+        ..Filter::default()
+    };
+    let (cte, args) = selection(&scope);
+    let sql = native_sql(format!(
+        "{cte} SELECT model, coalesce(sum(attempts), 0) AS n FROM m
+         WHERE model IS NOT NULL AND model <> '' AND model <> 'unknown' AND model <> 'web_search'
+         GROUP BY model ORDER BY n DESC, model ASC"
+    ));
+    let mut stmt = db(c.prepare(&sql))?;
+    let rows = db(
+        stmt.query_map(rusqlite::params_from_iter(args.iter()), |row| {
+            row.get::<_, String>(0)
+        }),
+    )?;
+    rows.map(db).collect()
+}
+
 pub fn overview_key(c: &Connection, f: &Filter) -> Result<String> {
     let mut f = f.clone();
     f.status = None;

@@ -391,6 +391,11 @@ export default function Usage({
   useEffect(() => {
     if (!visible) return;
     let gone = false;
+    const seenAgKeyRef = { current: null as string | null };
+    const agSignature = (ag: AntigravityAuthState | null) =>
+      ag
+        ? `${ag.revision ?? ""}:${ag.mode ?? ""}:${Boolean(ag.enableAdc)}:${(ag.accounts ?? []).map((a) => `${a.id}:${a.kind}:${Boolean(a.current)}`).join(",")}`
+        : "none";
     const updateAccounts = (ag: AntigravityAuthState | null) => {
       const kind =
         ag?.mode === "vertex_key"
@@ -427,16 +432,25 @@ export default function Usage({
         setClaudeProviders(
           Object.fromEntries(claude.providers.map((p) => [p.id, p.name])),
         );
-        const agMap = updateAccounts(ag);
-        setProviders({ ...gw, ...agMap });
+        if (seenAgKeyRef.current === null) {
+          seenAgKeyRef.current = agSignature(ag);
+          const agMap = updateAccounts(ag);
+          setProviders({ ...gw, ...agMap });
+        } else {
+          setProviders((prev) => ({ ...gw, ...prev }));
+        }
       })
       .catch(() => {});
     const events = subscriptions((e) => setError(errorOf(e).message));
     events.watch("antigravity-auth-state", (ag) => {
       if (gone) return;
+      const sig = agSignature(ag);
+      const changed =
+        seenAgKeyRef.current !== null && seenAgKeyRef.current !== sig;
+      seenAgKeyRef.current = sig;
       const agMap = updateAccounts(ag);
       setProviders((prev) => ({ ...prev, ...agMap }));
-      reloadAccountStats();
+      if (changed) reloadAccountStats();
     });
     return () => {
       gone = true;
@@ -661,8 +675,8 @@ export default function Usage({
             ["requests", "请求日志"],
             ["providers", "供应商"],
             ["models", "模型"],
-            ["antigravity", "Antigravity"],
             ["claude", "Claude Code"],
+            ["antigravity", "Antigravity"],
             ["pricing", "定价"],
           ].map(([id, n]) => (
             <button
@@ -870,37 +884,41 @@ function TimeRange({
   const [draft, setDraft] = useState({ range, from, to, live }),
     [error, setError] = useState("");
   const ref = useRef<HTMLDialogElement>(null);
+  const customExpanded = draft.range === "custom";
   useEffect(() => {
     const dialog = ref.current;
-    dialog?.showModal();
-    if (dialog && anchor) {
-      const rect = anchor.getBoundingClientRect();
-      dialog.style.left = `${Math.max(12, Math.min(rect.right - 330, window.innerWidth - 342))}px`;
-      dialog.style.top = `${Math.min(rect.bottom + 6, Math.max(12, window.innerHeight - dialog.offsetHeight - 12))}px`;
-    }
+    if (dialog && !dialog.open) dialog.showModal();
     return () => {
       dialog?.close();
       anchor?.focus({ preventScroll: true });
     };
   }, [anchor]);
+  useEffect(() => {
+    const dialog = ref.current;
+    if (dialog && anchor) {
+      const rect = anchor.getBoundingClientRect();
+      const width = customExpanded ? 316 : 196;
+      dialog.style.left = `${Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12))}px`;
+      dialog.style.top = `${Math.min(rect.bottom + 6, Math.max(12, window.innerHeight - dialog.offsetHeight - 12))}px`;
+    }
+  }, [anchor, customExpanded]);
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (
-      draft.range === "custom" &&
-      (!Number.isFinite(new Date(draft.from).getTime()) ||
-        !Number.isFinite(new Date(draft.to).getTime()) ||
-        new Date(draft.from).getTime() >
-          (draft.live ? Date.now() : new Date(draft.to).getTime()))
+      !Number.isFinite(new Date(draft.from).getTime()) ||
+      !Number.isFinite(new Date(draft.to).getTime()) ||
+      new Date(draft.from).getTime() >
+        (draft.live ? Date.now() : new Date(draft.to).getTime())
     ) {
       setError("请选择有效时间范围");
       return;
     }
-    apply(draft);
+    apply({ ...draft, range: "custom" });
   };
   return (
     <dialog
       ref={ref}
-      className="usage-range-dialog"
+      className={`usage-range-dialog${customExpanded ? " custom-open" : ""}`}
       aria-label="选择时间范围"
       onCancel={(e) => {
         e.preventDefault();
@@ -919,28 +937,31 @@ function TimeRange({
         }
       }}
     >
-      <form onSubmit={submit}>
-        <label className="usage-field">
-          时间范围
-          <select
-            aria-label="用量时间范围"
-            value={draft.range}
-            onChange={(e) =>
-              setDraft({
-                ...draft,
-                range: e.target.value,
-                live: e.target.value === "custom" ? draft.live : true,
-              })
-            }
-          >
-            {ranges.map(([v, n]) => (
-              <option key={v} value={v}>
-                {n}
-              </option>
-            ))}
-          </select>
-        </label>
-        {draft.range === "custom" && (
+      <div className="usage-range-menu" role="group" aria-label="时间范围选项">
+        {ranges.map(([v, n]) => {
+          const active = draft.range === v;
+          return (
+            <button
+              type="button"
+              key={v}
+              className={`usage-range-option${active ? " active" : ""}`}
+              aria-pressed={active}
+              onClick={() => {
+                setError("");
+                if (v === "custom") {
+                  setDraft((prev) => ({ ...prev, range: "custom" }));
+                  return;
+                }
+                apply({ range: v, from, to, live: true });
+              }}
+            >
+              <span>{n}</span>
+            </button>
+          );
+        })}
+      </div>
+      {customExpanded && (
+        <form className="usage-range-custom" onSubmit={submit}>
           <div className="usage-range-fields">
             <label className="usage-field">
               开始时间
@@ -968,19 +989,19 @@ function TimeRange({
               跟随当前
             </label>
           </div>
-        )}
-        {error && (
-          <p role="alert" className="form-error">
-            {error}
-          </p>
-        )}
-        <div className="usage-form-actions">
-          <button type="button" onClick={close}>
-            取消
-          </button>
-          <button className="primary">确定</button>
-        </div>
-      </form>
+          {error && (
+            <p role="alert" className="form-error">
+              {error}
+            </p>
+          )}
+          <div className="usage-form-actions">
+            <button type="button" onClick={close}>
+              取消
+            </button>
+            <button className="primary">确定</button>
+          </div>
+        </form>
+      )}
     </dialog>
   );
 }

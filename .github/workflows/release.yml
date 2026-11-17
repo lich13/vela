@@ -86,7 +86,7 @@ jobs:
         shell: pwsh
         run: >-
           cargo test --locked --manifest-path src-tauri/Cargo.toml --
-          storage:: links:: startup:: cleanup_spool:: process_control:: notifications:: power::
+          storage:: links:: startup:: cleanup_spool:: process_control:: notifications:: power:: quick::
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Installed Windows launch check

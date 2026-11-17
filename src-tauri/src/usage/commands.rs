@@ -12,6 +12,29 @@ pub fn calculate_usage_cost(
 ) -> Result<super::calculator::Calculation> {
     super::calculator::calculate(input)
 }
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculatorModel {
+    pub model: String,
+    pub rates: Option<[String; 5]>,
+}
+#[tauri::command]
+pub async fn get_usage_calculator_models(r: R<'_>, client: String) -> Result<Vec<CalculatorModel>> {
+    let service = r.usage.clone();
+    let prices = r.usage.prices()?.clone();
+    tokio::task::spawn_blocking(move || {
+        let models = service.read(|db| super::query::calculator_models(&db.connection, &client))?;
+        Ok(models
+            .into_iter()
+            .map(|model| {
+                let rates = prices.quote(Some(&model), "1").million_rates();
+                CalculatorModel { model, rates }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|_| failure("用量模型查询中断"))?
+}
 #[tauri::command]
 pub async fn get_usage_calculator_totals(r: R<'_>, filter: Filter) -> Result<Totals> {
     let service = r.usage.clone();

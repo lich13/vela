@@ -174,3 +174,39 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
   });
   expect(screen.getByText("剩余 228 秒")).toBeInTheDocument();
 });
+
+it("maps buffering phase to 缓冲响应 with elapsed seconds and cancellation", async () => {
+  const start = Math.floor(Date.now() / 1000);
+  mock.command.mockResolvedValueOnce(true);
+  render(
+    <QuickWaits
+      gateway={{
+        ...gatewayDemo,
+        pendingRequests: [
+          {
+            requestId: "fixture-buffering",
+            providerId: "primary",
+            model: "claude-opus-4-6",
+            startedAt: start - 75,
+            elapsedSeconds: 75,
+            remainingSeconds: null,
+            phase: "buffering",
+          },
+        ],
+      }}
+      clientId="claude"
+      visible
+      notify={vi.fn()}
+      error={vi.fn()}
+    />,
+  );
+  expect(screen.getByText("缓冲响应")).toBeInTheDocument();
+  expect(screen.getByText("已用 75 秒")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "中止" }));
+  await waitFor(() =>
+    expect(mock.command).toHaveBeenCalledWith("cancel_gateway_wait", {
+      clientId: "claude",
+      requestId: "fixture-buffering",
+    }),
+  );
+});

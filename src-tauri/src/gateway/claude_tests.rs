@@ -363,20 +363,31 @@ async fn real_claude_http_and_cli_stream_isolated() {
 
 #[tokio::test]
 async fn hint_headers_takeover_restores_original_and_preserves_external_edits() {
-    for original in [None, Some("0"), Some("custom")] {
+    for (hint_orig, watchdog_orig) in [
+        (None, None),
+        (Some("0"), Some("1")),
+        (Some("custom"), Some("custom-watchdog")),
+    ] {
         let (_temp, _codex, claude, home) =
             claude_fixture("https://example.invalid/v1", "fixture-token").await;
         let path = home.join("settings.json");
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        if let Some(value_before) = original {
+        if let Some(value_before) = hint_orig {
             value["env"][super::super::claude_config::HINT_HEADERS] = value_before.into();
+        }
+        if let Some(watchdog_before) = watchdog_orig {
+            value["env"][super::super::claude_config::STREAM_WATCHDOG] = watchdog_before.into();
         }
         std::fs::write(&path, value.to_string()).unwrap();
         claude.start(&claude.view().revision, &home).await.unwrap();
         let mut live: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(live["env"][super::super::claude_config::HINT_HEADERS], "1");
+        assert_eq!(
+            live["env"][super::super::claude_config::STREAM_WATCHDOG],
+            "0"
+        );
         live["customFixture"] = true.into();
         std::fs::write(&path, live.to_string()).unwrap();
         claude.stop().await.unwrap();
@@ -386,14 +397,20 @@ async fn hint_headers_takeover_restores_original_and_preserves_external_edits() 
             restored["env"]
                 .get(super::super::claude_config::HINT_HEADERS)
                 .and_then(|v| v.as_str()),
-            original
+            hint_orig
+        );
+        assert_eq!(
+            restored["env"]
+                .get(super::super::claude_config::STREAM_WATCHDOG)
+                .and_then(|v| v.as_str()),
+            watchdog_orig
         );
         assert_eq!(restored["customFixture"], true);
     }
 }
 
 #[tokio::test]
-async fn hint_headers_conflict_preserves_recovery_and_old_journal_leaves_it_unmanaged() {
+async fn external_managed_env_edits_are_preserved_and_legacy_journal_is_compatible() {
     let (_temp, _codex, claude, home) =
         claude_fixture("https://example.invalid/v1", "fixture-token").await;
     let path = home.join("settings.json");
@@ -401,29 +418,40 @@ async fn hint_headers_conflict_preserves_recovery_and_old_journal_leaves_it_unma
     let live = std::fs::read_to_string(&path).unwrap();
     let mut foreign: serde_json::Value = serde_json::from_str(&live).unwrap();
     foreign["env"][super::super::claude_config::HINT_HEADERS] = "0".into();
+    foreign["env"][super::super::claude_config::STREAM_WATCHDOG] = "1".into();
     let revision = storage::revision(Some(live.as_bytes()));
-    assert!(claude
+    claude
         .save_config(&home, &foreign.to_string(), &revision)
-        .is_err());
-    std::fs::write(&path, foreign.to_string()).unwrap();
-    assert!(claude.stop().await.is_err());
-    assert!(claude.0.data.join("gateway-recovery.json").exists());
+        .unwrap();
+    claude.stop().await.unwrap();
+    let after_external: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
-        foreign
+        after_external["env"][super::super::claude_config::HINT_HEADERS],
+        "0"
     );
-    std::fs::write(&path, &live).unwrap();
+    assert_eq!(
+        after_external["env"][super::super::claude_config::STREAM_WATCHDOG],
+        "1"
+    );
+
+    // Simulate a v0.29.0 recovery journal without watchdog fields.
+    claude.start(&claude.view().revision, &home).await.unwrap();
     let journal_path = claude.0.data.join("gateway-recovery.json");
     let mut journal: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
-    journal.as_object_mut().unwrap().remove("claude_hint");
+    journal["claude_hint"] = serde_json::json!({"before": "0", "existed": true});
     std::fs::write(&journal_path, journal.to_string()).unwrap();
     claude.stop().await.unwrap();
     let restored: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(
         restored["env"][super::super::claude_config::HINT_HEADERS],
-        "1"
+        "0"
+    );
+    assert_eq!(
+        restored["env"][super::super::claude_config::STREAM_WATCHDOG],
+        "0"
     );
     assert!(!journal_path.exists());
 }

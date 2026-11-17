@@ -14,13 +14,22 @@ fn publish_power_result(
 ) -> Result<power::State> {
     match &result {
         Ok(state) => {
+            #[cfg(target_os = "macos")]
+            {
+                crate::quick_macos::push_power_state(app, state.clone());
+                crate::quick_macos::push_power_error(app, None);
+            }
             let _ = app.emit("clamshell-state", state);
             let _ = app.emit("clamshell-error", Option::<AppError>::None);
         }
-        Err(_) => {
+        Err(err) => {
             if let Ok(state) = power.state() {
+                #[cfg(target_os = "macos")]
+                crate::quick_macos::push_power_state(app, state.clone());
                 let _ = app.emit("clamshell-state", state);
             }
+            #[cfg(target_os = "macos")]
+            crate::quick_macos::push_power_error(app, Some(err.message.clone()));
         }
     }
     result
@@ -82,9 +91,20 @@ pub async fn force_quit_agent_clients(
     runtime.force_quitting.store(false, Ordering::Release);
     result?
 }
+pub(crate) fn consume_startup_error_for_label(
+    slot: &parking_lot::Mutex<Option<AppError>>,
+    label: &str,
+) -> Option<AppError> {
+    let mut guard = slot.lock();
+    if label == "main" {
+        guard.take()
+    } else {
+        guard.clone()
+    }
+}
 #[tauri::command]
-pub fn get_startup_error(r: R<'_>) -> Option<AppError> {
-    r.startup_error.lock().clone()
+pub fn get_startup_error(window: tauri::WebviewWindow, r: R<'_>) -> Option<AppError> {
+    consume_startup_error_for_label(&r.startup_error, window.label())
 }
 
 #[tauri::command]
@@ -264,4 +284,29 @@ pub async fn export_accounts(
     })
     .await
     .map_err(|_| AppError::new(code::EXPORT, "账号导出失败"))?
+}
+
+#[cfg(test)]
+mod startup_error_tests {
+    use super::*;
+    use parking_lot::Mutex;
+
+    #[test]
+    fn quick_reads_preserve_startup_error_until_main_consumes_it_once() {
+        let slot = Mutex::new(Some(AppError::new(code::GATEWAY, "端口占用")));
+        assert_eq!(
+            consume_startup_error_for_label(&slot, "quick")
+                .as_ref()
+                .map(|e| e.message.as_str()),
+            Some("端口占用")
+        );
+        assert_eq!(
+            consume_startup_error_for_label(&slot, "main")
+                .as_ref()
+                .map(|e| e.message.as_str()),
+            Some("端口占用")
+        );
+        assert!(consume_startup_error_for_label(&slot, "main").is_none());
+        assert!(consume_startup_error_for_label(&slot, "quick").is_none());
+    }
 }

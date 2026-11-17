@@ -237,8 +237,8 @@ fn parse_usage(
         .or_else(|| usage.get("completion_tokens_details"))
         .unwrap_or(&Value::Null);
     let output = count(usage, &["output_tokens", "completion_tokens"]);
-    let reasoning = count(usage, &["reasoning_tokens"])
-        .or_else(|| count(output_details, &["reasoning_tokens"]));
+    let reasoning = count(usage, &["reasoning_tokens", "thinking_tokens"])
+        .or_else(|| count(output_details, &["reasoning_tokens", "thinking_tokens"]));
     let image_cache_read = details
         .get("cached_tokens_details")
         .and_then(|cached| count(cached, &["image_tokens"]))
@@ -311,6 +311,31 @@ pub struct Meter {
     pub parse_reasons: Vec<String>,
     #[serde(skip)]
     pub(crate) reported_cache_write: Option<u64>,
+    #[serde(skip)]
+    pub(crate) thinking_seen: bool,
+}
+
+pub(crate) fn has_thinking_block(v: &Value) -> bool {
+    let block_is_thinking = |b: &Value| {
+        matches!(
+            b.get("type").and_then(Value::as_str),
+            Some("thinking" | "redacted_thinking")
+        )
+    };
+    block_is_thinking(&v["content_block"])
+        || matches!(
+            v["delta"]["type"].as_str(),
+            Some("thinking_delta" | "signature_delta")
+        )
+        || v["delta"]["thinking"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+        || v["content"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(block_is_thinking))
+        || v["message"]["content"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(block_is_thinking))
 }
 
 pub fn speed(value: &Value) -> Option<String> {
@@ -380,6 +405,7 @@ impl Meter {
         while cursor < envelopes.len() && cursor < 16 {
             let v = envelopes[cursor];
             cursor += 1;
+            self.thinking_seen |= has_thinking_block(v);
             if event.starts_with("message_") || v["type"] == "message" {
                 self.anthropic = Some(true);
             } else if event.starts_with("response.")
@@ -468,6 +494,9 @@ impl Meter {
                     self.response_speed = Some(speed);
                 }
                 self.tokens.merge(&parsed);
+                if self.thinking_seen && self.tokens.reasoning == Some(0) {
+                    self.tokens.reasoning = None;
+                }
                 if self.tokens.cache_write_5m.is_some() || self.tokens.cache_write_1h.is_some() {
                     let parts = self
                         .tokens
@@ -518,6 +547,9 @@ impl Meter {
                 self.input_basis = Some("inclusive".into());
                 self.output_reported = answer.map(|_| true).or(self.output_reported);
                 self.tokens.merge(&parsed);
+                if self.thinking_seen && self.tokens.reasoning == Some(0) {
+                    self.tokens.reasoning = None;
+                }
                 if cache.zip(input).is_some_and(|(c, i)| c > i) {
                     self.parse_incomplete = true;
                 }
@@ -560,6 +592,9 @@ impl Meter {
         }
         if terminal && self.tokens.output.is_some() {
             self.output_reported = Some(true);
+        }
+        if self.thinking_seen && self.tokens.reasoning == Some(0) {
+            self.tokens.reasoning = None;
         }
         if let Some(id) = response_id(outer) {
             self.response_id = Some(safe_id(id));
@@ -702,7 +737,6 @@ pub enum EndCause {
     UpstreamDisconnected,
     ConnectFailed,
     FirstByteTimeout,
-    WaitBudgetExhausted,
     StreamTimeout,
     ParseIncomplete,
     Unsettled,

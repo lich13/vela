@@ -636,14 +636,31 @@ fn raw_log_message(value: &str) -> Option<String> {
 }
 /// Feeds `on_line` the complete lines appended to `path` since the last scan.
 /// The first scan of a file starts at most `backlog` bytes before its end.
+#[cfg(unix)]
+type SourceStamp = (u64, u64);
+#[cfg(not(unix))]
+type SourceStamp = Option<SystemTime>;
+
+fn source_stamp(meta: &std::fs::Metadata) -> SourceStamp {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        meta.created().ok()
+    }
+}
+
 fn source_identity(path: &Path, meta: &std::fs::Metadata) -> String {
     #[cfg(unix)]
     let id = {
-        use std::os::unix::fs::MetadataExt;
-        format!("{}:{}", meta.dev(), meta.ino())
+        let (dev, ino) = source_stamp(meta);
+        format!("{dev}:{ino}")
     };
     #[cfg(not(unix))]
-    let id = format!("{:?}", meta.created().ok());
+    let id = format!("{:?}", source_stamp(meta));
     storage::digest(format!("{}:{id}", path.to_string_lossy()).as_bytes())
 }
 
@@ -656,9 +673,8 @@ fn scan_new_lines(
     mut on_line: impl FnMut(u64, &[u8]),
 ) {
     use std::io::{Read, Seek, SeekFrom};
-    let identity = source_identity(path, meta);
     if cursors.get(path).is_some_and(|c| {
-        c.identity == identity
+        c.stamp == source_stamp(meta)
             && c.len == meta.len()
             && c.modified == meta.modified().ok()
             && c.offset == meta.len()
@@ -671,6 +687,7 @@ fn scan_new_lines(
     let Ok(meta) = file.metadata() else {
         return;
     };
+    let stamp = source_stamp(&meta);
     let identity = source_identity(path, &meta);
     let file_len = meta.len();
     let modified = meta.modified().ok();
@@ -688,6 +705,7 @@ fn scan_new_lines(
         |c| c.offset,
     );
     let mut discarding = previous.is_some_and(|c| c.discarding);
+    let mut positioned = false;
     if previous.is_none() && offset > 0 {
         // A clear can occur while a source is halfway through writing a line.
         let mut last = [0];
@@ -695,13 +713,14 @@ fn scan_new_lines(
             return;
         }
         discarding = last[0] != b'\n';
+        positioned = true;
     }
     if offset == 0 && file_len > backlog {
         offset = file_len - backlog;
         discarding = true;
     }
-    if file.seek(SeekFrom::Start(offset)).is_err() {
-        return;
+    if offset > 0 && !positioned {
+        let _ = file.seek(SeekFrom::Start(offset));
     }
     let mut reader = BufReader::new(file.take(file_len - offset));
     let mut line = Vec::new();
@@ -743,6 +762,7 @@ fn scan_new_lines(
             modified,
             offset,
             discarding,
+            stamp,
             identity,
         },
     );
@@ -1043,6 +1063,7 @@ struct FileCursor {
     modified: Option<SystemTime>,
     offset: u64,
     discarding: bool,
+    stamp: SourceStamp,
     identity: String,
 }
 type FileCursors = std::collections::HashMap<std::path::PathBuf, FileCursor>;

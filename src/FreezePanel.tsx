@@ -116,12 +116,11 @@ function Platform({
           onSubmit={(event) => {
             event.preventDefault();
             const at = new Date(time).getTime();
-            if (!Number.isFinite(at) || at <= Date.now()) {
-              setError("请选择晚于当前时间的恢复时间");
-              return;
-            }
             void run(async () => {
-              await control.setResume(state.clientId, at);
+              await control.setResume(
+                state.clientId,
+                Number.isFinite(at) ? Math.trunc(at) : 0,
+              );
               setEditing(false);
             });
           }}

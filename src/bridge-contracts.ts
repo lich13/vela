@@ -1,6 +1,7 @@
 import type {
   BillRequest,
   BillExport,
+  CalculatorModel,
   CostCalculatorInput,
   CostCalculation,
 } from "./usage-types";
@@ -65,6 +66,7 @@ export type QuickPreferences = {
   pinned: boolean;
   visible?: boolean;
   hiddenClients?: ClientId[];
+  selectedClient?: ClientId;
 };
 export type NotificationState = {
   permission: string;
@@ -589,6 +591,7 @@ export type CommandMap = {
   open_github: Call<None, void>;
   open_update_release: Call<None, void>;
   frontend_ready: Call<None, void>;
+  close_main: Call<None, void>;
   open_main: Call<
     {
       page?: string | null;
@@ -604,9 +607,11 @@ export type CommandMap = {
     {
       pinned?: boolean;
       hiddenClients?: ClientId[];
+      selectedClient?: ClientId;
     },
     QuickPreferences
   >;
+  quick_ready: Call<None, void>;
   hide_quick: Call<None, void>;
   cancel_gateway_wait: Call<Client & { requestId: string }, boolean>;
   get_gateway: Call<Client, GatewayState>;
@@ -796,6 +801,7 @@ export type CommandMap = {
   sync_usage: Call<{ rebuild?: string }, UsageState>;
   get_pricing: Call<None, PricingView>;
   calculate_usage_cost: Call<{ input: CostCalculatorInput }, CostCalculation>;
+  get_usage_calculator_models: Call<{ client: string }, CalculatorModel[]>;
   get_usage_calculator_totals: Call<{ filter: UsageFilter }, Totals>;
   search_pricing: Call<
     { query: string; offset: number; limit: number },
@@ -876,5 +882,6 @@ export type EventMap = {
     clientId: ClientId;
     action?: ProviderAction;
   };
+  "main-close-requested": { hidden?: boolean } | null;
   navigate: string;
 };

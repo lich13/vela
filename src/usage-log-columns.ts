@@ -56,7 +56,6 @@ export function interruption(a: Attempt): "reported" | "partial" | null {
       "upstream_disconnected",
       "stream_timeout",
       "first_byte_timeout",
-      "wait_budget_exhausted",
     ].includes(a.end.cause)
   )
     return null;

@@ -4,6 +4,7 @@ import { errorOf, type ClientId, type GatewayState } from "./types";
 const phases: Record<string, string> = {
   admission: "等待准入",
   headers: "等待首字节",
+  buffering: "缓冲响应",
   capacity: "容量等待",
   retry: "等待重试",
   ws_wait: "等待重连",

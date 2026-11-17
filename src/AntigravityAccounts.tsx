@@ -26,6 +26,7 @@ import { errorOf } from "./types";
 type Props = {
   notify: (msg: string) => void;
   setError: (msg: string) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 };
 
 type DialogState =
@@ -75,7 +76,11 @@ function parseAdcPreview(raw: string): {
   }
 }
 
-export default function AntigravityAccounts({ notify, setError }: Props) {
+export default function AntigravityAccounts({
+  notify,
+  setError,
+  onDirtyChange,
+}: Props) {
   const [state, setState] = useState<AntigravityAuthState | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<"all" | "oauth" | "adc" | "vertex_key">("all");
@@ -94,6 +99,29 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
   const [models, setModels] = useState("");
   const [dialogError, setDialogError] = useState("");
   const [dialogRevision, setDialogRevision] = useState("");
+  const isDialogDirty =
+    dialog?.type === "import"
+      ? dialog.item
+        ? name !== dialog.item.name ||
+          apiKey !== "" ||
+          projectId !== (dialog.item.projectId ?? "") ||
+          location !== (dialog.item.vertex?.location ?? "global") ||
+          models !== (dialog.item.vertex?.models ?? []).join("\n") ||
+          activate !== dialog.item.current
+        : name.trim() !== "" ||
+          jsonText.trim() !== "" ||
+          quotaProjectId.trim() !== "" ||
+          apiKey !== "" ||
+          projectId.trim() !== "" ||
+          location !== "global" ||
+          models.trim() !== ""
+      : dialog?.type === "rename"
+        ? name !== dialog.item.name
+        : false;
+  useEffect(() => {
+    onDirtyChange?.(isDialogDirty);
+  }, [isDialogDirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const closeDialog = () => {
     setDialog(null);
     setApiKey("");

@@ -28,6 +28,8 @@ mod power_macos;
 mod process_control;
 mod provider_testing;
 mod quick;
+#[cfg(target_os = "macos")]
+mod quick_macos;
 mod startup;
 #[cfg(target_os = "macos")]
 mod startup_macos;
@@ -68,8 +70,6 @@ struct Runtime {
     quitting: AtomicBool,
     quit_pending: AtomicBool,
     startup: startup::Service,
-    start_silently: bool,
-    frontend_started: AtomicBool,
     force_quitting: AtomicBool,
     power: power::Service,
     startup_error: Mutex<Option<AppError>>,
@@ -77,7 +77,91 @@ struct Runtime {
     window_wake: tokio::sync::Notify,
     window_visible: [AtomicBool; 2],
     pending_main: PendingMainEvents,
+    main_window: Mutex<MainWindowState>,
+    main_create_lock: tokio::sync::Mutex<()>,
+    main_destroyed: tokio::sync::Notify,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum MainWindowPhase {
+    #[default]
+    Absent,
+    Creating,
+    Ready,
+    Destroying,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MainTarget {
+    Page(String),
+    ProviderSettings {
+        id: String,
+        client_id: gateway::ClientId,
+        action: ProviderAction,
+    },
+    EventLog {
+        id: String,
+        client_id: gateway::ClientId,
+        provider_id: Option<String>,
+    },
+}
+
+#[derive(Default)]
+pub(crate) struct MainWindowState {
+    pub(crate) phase: MainWindowPhase,
+    pub(crate) generation: u64,
+    pub(crate) want_show: bool,
+    pub(crate) pending_target: Option<MainTarget>,
+}
+
+impl MainWindowState {
+    pub(crate) fn request_open(&mut self, target: Option<MainTarget>) -> MainWindowPhase {
+        self.want_show = true;
+        if let Some(t) = target {
+            self.pending_target = Some(t);
+        }
+        self.phase
+    }
+
+    pub(crate) fn begin_creating(&mut self) -> Option<u64> {
+        if !self.want_show || self.phase != MainWindowPhase::Absent {
+            return None;
+        }
+        self.phase = MainWindowPhase::Creating;
+        self.generation += 1;
+        Some(self.generation)
+    }
+
+    pub(crate) fn finish_ready(&mut self) -> Option<(bool, Option<MainTarget>)> {
+        if !matches!(
+            self.phase,
+            MainWindowPhase::Creating | MainWindowPhase::Ready
+        ) {
+            return None;
+        }
+        self.phase = MainWindowPhase::Ready;
+        Some((self.want_show, self.pending_target.take()))
+    }
+
+    pub(crate) fn begin_destroying(&mut self) -> bool {
+        self.want_show = false;
+        self.pending_target = None;
+        if matches!(
+            self.phase,
+            MainWindowPhase::Absent | MainWindowPhase::Destroying
+        ) {
+            return false;
+        }
+        self.phase = MainWindowPhase::Destroying;
+        true
+    }
+
+    pub(crate) fn on_destroyed(&mut self) -> bool {
+        self.phase = MainWindowPhase::Absent;
+        self.want_show
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MainSignal {
     ProviderTests,
@@ -102,6 +186,7 @@ pub(crate) struct DrainedMainEvents {
     usage_state: bool,
     config_states: Vec<serde_json::Value>,
     antigravity_auth: Option<antigravity::auth::AntigravityAuthState>,
+    switch_error: Option<AppError>,
 }
 
 #[derive(Default)]
@@ -110,11 +195,15 @@ pub(crate) struct PendingMainEvents {
     notification_state: Mutex<Option<notifications::State>>,
     config_states: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
     antigravity_auth: Mutex<Option<antigravity::auth::AntigravityAuthState>>,
+    switch_error: Mutex<Option<AppError>>,
     provider_tests: AtomicBool,
     pricing_state: AtomicBool,
     usage_state: AtomicBool,
 }
 impl PendingMainEvents {
+    fn record_switch_error(&self, error: AppError) {
+        *self.switch_error.lock() = Some(error);
+    }
     fn record_antigravity_auth(&self, state: &antigravity::auth::AntigravityAuthState) {
         let mut slot = self.antigravity_auth.lock();
         let mut next = state.clone();
@@ -154,6 +243,7 @@ impl PendingMainEvents {
     fn drain(&self) -> DrainedMainEvents {
         let app_event = self.app_event.lock().take();
         let notification_state = self.notification_state.lock().take();
+        let switch_error = self.switch_error.lock().take();
         let provider_tests = self.provider_tests.swap(false, Ordering::Relaxed);
         let pricing_state = self.pricing_state.swap(false, Ordering::Relaxed);
         let usage_state = self.usage_state.swap(false, Ordering::Relaxed);
@@ -168,6 +258,7 @@ impl PendingMainEvents {
             pricing_state,
             usage_state,
             config_states,
+            switch_error,
         }
     }
     fn drain_for_window(&self, label: &str) -> Option<DrainedMainEvents> {
@@ -264,15 +355,49 @@ fn login_active(s: &login::LoginState) -> bool {
     ["starting", "waiting", "cancelling"].contains(&s.phase.as_str())
 }
 pub(crate) fn visible_windows(app: &tauri::AppHandle) -> Vec<tauri::WebviewWindow> {
+    let main_ready = app
+        .try_state::<Arc<Runtime>>()
+        .is_none_or(|r| r.main_window.lock().phase == MainWindowPhase::Ready);
+    let quick_ready = app.try_state::<quick::Panel>().is_none_or(|p| p.is_ready());
     ["main", "quick"]
         .into_iter()
+        .filter(|&name| (name == "main" && main_ready) || (name == "quick" && quick_ready))
         .filter_map(|name| app.get_webview_window(name))
         .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
         .collect()
 }
+pub(crate) fn has_visible_ui(app: &tauri::AppHandle) -> bool {
+    #[cfg(target_os = "macos")]
+    if quick_macos::is_visible() {
+        return true;
+    }
+    !visible_windows(app).is_empty()
+}
 pub(crate) fn main_visible_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    if app
+        .try_state::<Arc<Runtime>>()
+        .is_some_and(|r| r.main_window.lock().phase != MainWindowPhase::Ready)
+    {
+        return None;
+    }
     app.get_webview_window("main")
         .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
+}
+pub(crate) fn emit_switch_notice(app: &tauri::AppHandle, message: impl Into<String>) {
+    let message = message.into();
+    #[cfg(target_os = "macos")]
+    quick_macos::push_notice(app, message.clone());
+    let _ = app.emit("switch-notice", message);
+}
+pub(crate) fn emit_switch_error(app: &tauri::AppHandle, error: AppError) {
+    #[cfg(target_os = "macos")]
+    quick_macos::push_error(app, error.message.clone());
+    if let Some(r) = app.try_state::<Arc<Runtime>>() {
+        if r.main_window.lock().phase != MainWindowPhase::Ready {
+            r.pending_main.record_switch_error(error.clone());
+        }
+    }
+    let _ = app.emit("switch-error", error);
 }
 pub(crate) fn emit_if_main_visible<S: serde::Serialize + Clone>(
     app: &tauri::AppHandle,
@@ -330,8 +455,21 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     let Some(r) = app.try_state::<Arc<Runtime>>() else {
         return;
     };
+    if label == "main" && r.main_window.lock().phase != MainWindowPhase::Ready {
+        return;
+    }
+    if label == "quick"
+        && app
+            .try_state::<quick::Panel>()
+            .is_some_and(|p| !p.is_ready())
+    {
+        return;
+    }
     let was_visible = r.mark_window_visible(label, true);
     if let Some(drained) = r.pending_main.drain_for_window(label) {
+        if let Some(err) = drained.switch_error {
+            let _ = window.emit("switch-error", err);
+        }
         if let Some(state) = drained.antigravity_auth {
             let _ = window.emit("antigravity-auth-state", &state);
             if state.oauth_added {
@@ -380,21 +518,247 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
         let _ = window.emit("pricing-state", ());
     }
 }
-fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
-    notifications::on_manual_open(app);
+pub(crate) const fn resolve_window_background_color(
+    pref_theme: &str,
+    system_dark: bool,
+) -> tauri::window::Color {
+    let is_dark = match pref_theme.as_bytes() {
+        b"dark" => true,
+        b"light" => false,
+        _ => system_dark,
+    };
+    if is_dark {
+        tauri::window::Color(0x07, 0x0B, 0x14, 0xFF)
+    } else {
+        tauri::window::Color(0xF3, 0xF6, 0xFC, 0xFF)
+    }
+}
+#[cfg(windows)]
+fn apps_use_dark_theme() -> bool {
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+        .and_then(|key| key.get_value::<u32, _>("AppsUseLightTheme"))
+        .unwrap_or(1)
+        == 0
+}
+fn system_apps_dark() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        quick_macos::effective_dark()
+    }
+    #[cfg(windows)]
+    {
+        apps_use_dark_theme()
+    }
+}
+pub(crate) fn window_background_color_for_theme(pref_theme: &str) -> tauri::window::Color {
+    resolve_window_background_color(pref_theme, system_apps_dark())
+}
+pub(crate) fn window_background_color(app: &tauri::AppHandle) -> tauri::window::Color {
+    let pref = app
+        .try_state::<Arc<Runtime>>()
+        .map(|r| r.core.lock().preferences().theme)
+        .unwrap_or_else(|| "system".into());
+    window_background_color_for_theme(&pref)
+}
+fn emit_main_target(window: &tauri::WebviewWindow, target: MainTarget) {
+    match target {
+        MainTarget::Page(page) => {
+            let _ = window.emit("navigate", page);
+        }
+        MainTarget::ProviderSettings {
+            id,
+            client_id,
+            action,
+        } => {
+            let _ = window.emit(
+                "provider-settings",
+                serde_json::json!({"id": id, "clientId": client_id, "action": action}),
+            );
+        }
+        MainTarget::EventLog {
+            id,
+            client_id,
+            provider_id,
+        } => {
+            let _ = window.emit(
+                "event-log",
+                serde_json::json!({"id": id, "clientId": client_id, "providerId": provider_id}),
+            );
+        }
+    }
+}
+fn present_main_window(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    target: Option<MainTarget>,
+) -> Result<()> {
     #[cfg(target_os = "macos")]
     app.set_activation_policy(tauri::ActivationPolicy::Regular)
         .map_err(|_| AppError::new(code::WINDOW, "无法显示主窗口"))?;
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.unminimize();
-        w.show()
-            .map_err(|_| AppError::new(code::WINDOW, "无法显示主窗口"))?;
-        let _ = w.set_focus();
-        let _ = w.emit("app-visibility", true);
-        sync_window_on_show(app, "main");
-        if let Some(page) = page {
-            let _ = w.emit("navigate", page);
+    let _ = window.unminimize();
+    window
+        .show()
+        .map_err(|_| AppError::new(code::WINDOW, "无法显示主窗口"))?;
+    let _ = window.set_focus();
+    let _ = window.emit("app-visibility", true);
+    sync_window_on_show(app, "main");
+    if let Some(target) = target {
+        emit_main_target(window, target);
+    }
+    Ok(())
+}
+async fn ensure_main_window(app: &tauri::AppHandle, r: &Arc<Runtime>) -> Result<()> {
+    let _guard = r.main_create_lock.lock().await;
+    let gen = loop {
+        let notified = r.main_destroyed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        {
+            let mut st = r.main_window.lock();
+            if !st.want_show || r.quitting.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            match st.phase {
+                MainWindowPhase::Destroying => {
+                    if app.get_webview_window("main").is_none() {
+                        st.on_destroyed();
+                        continue;
+                    }
+                }
+                MainWindowPhase::Creating => return Ok(()),
+                MainWindowPhase::Ready => {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let target = st.pending_target.take();
+                        drop(st);
+                        return present_main_window(app, &w, target);
+                    }
+                    st.phase = MainWindowPhase::Absent;
+                    continue;
+                }
+                MainWindowPhase::Absent => {
+                    let Some(gen) = st.begin_creating() else {
+                        return Ok(());
+                    };
+                    break gen;
+                }
+            }
         }
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), notified).await;
+    };
+
+    let bg = window_background_color(app);
+    let build_app = app.clone();
+    let built = tauri::async_runtime::spawn_blocking(move || {
+        tauri::WebviewWindowBuilder::new(
+            &build_app,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title("Vela")
+        .inner_size(960., 680.)
+        .min_inner_size(760., 540.)
+        .center()
+        .visible(false)
+        .background_color(bg)
+        .build()
+    })
+    .await;
+
+    match built {
+        Ok(Ok(_)) => {
+            let fallback_app = app.clone();
+            let fallback_r = r.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let still_creating = {
+                    let st = fallback_r.main_window.lock();
+                    st.phase == MainWindowPhase::Creating && st.generation == gen && st.want_show
+                };
+                if still_creating {
+                    if let Some(w) = fallback_app.get_webview_window("main") {
+                        #[cfg(target_os = "macos")]
+                        let _ =
+                            fallback_app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+            });
+            Ok(())
+        }
+        _ => {
+            r.main_window.lock().phase = MainWindowPhase::Absent;
+            Err(AppError::new(code::WINDOW, "无法创建主窗口"))
+        }
+    }
+}
+fn destroy_main_window(app: &tauri::AppHandle) -> Result<()> {
+    let Some(r) = app.try_state::<Arc<Runtime>>() else {
+        return Ok(());
+    };
+    if !r.main_window.lock().begin_destroying() {
+        return Ok(());
+    }
+    r.mark_window_visible("main", false);
+    r.grok.cancel_grok_import(None);
+    r.core.lock().exchange_clear();
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.emit("app-visibility", false);
+        w.destroy()
+            .map_err(|_| AppError::new(code::WINDOW, "无法关闭主窗口"))?;
+    } else {
+        on_main_window_destroyed(app);
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    Ok(())
+}
+fn on_main_window_destroyed(app: &tauri::AppHandle) {
+    let Some(r) = app.try_state::<Arc<Runtime>>().map(|s| s.inner().clone()) else {
+        return;
+    };
+    r.mark_window_visible("main", false);
+    r.grok.cancel_grok_import(None);
+    r.core.lock().exchange_clear();
+    let reopen = r.main_window.lock().on_destroyed() && !r.quitting.load(Ordering::Relaxed);
+    r.main_destroyed.notify_waiters();
+    if reopen {
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = ensure_main_window(&handle, &r).await {
+                emit_switch_error(&handle, e);
+            }
+        });
+    } else {
+        #[cfg(target_os = "macos")]
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    }
+}
+pub(crate) fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
+    notifications::on_manual_open(app);
+    let Some(r) = app.try_state::<Arc<Runtime>>().map(|s| s.inner().clone()) else {
+        return Ok(());
+    };
+    let phase = r
+        .main_window
+        .lock()
+        .request_open(page.map(|p| MainTarget::Page(p.to_owned())));
+    if phase == MainWindowPhase::Ready {
+        if let Some(w) = app.get_webview_window("main") {
+            let target = r.main_window.lock().pending_target.take();
+            return present_main_window(app, &w, target);
+        }
+        r.main_window.lock().phase = MainWindowPhase::Absent;
+    }
+    if phase != MainWindowPhase::Creating {
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = ensure_main_window(&handle, &r).await {
+                emit_switch_error(&handle, e);
+            }
+        });
     }
     Ok(())
 }
@@ -428,9 +792,9 @@ fn open_github() -> Result<()> {
 fn open_update_release() -> Result<()> {
     update::open_releases()
 }
-#[derive(Default, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-enum ProviderAction {
+pub(crate) enum ProviderAction {
     #[default]
     Settings,
     Testing,
@@ -442,7 +806,7 @@ fn valid_main_page(page: &str) -> bool {
     .contains(&page)
 }
 #[tauri::command]
-fn open_main(
+async fn open_main(
     app: tauri::AppHandle,
     page: Option<String>,
     provider_id: Option<String>,
@@ -453,26 +817,43 @@ fn open_main(
     if page.as_deref().is_some_and(|p| !valid_main_page(p)) {
         return Err(AppError::new(code::WINDOW, "无效页面"));
     }
-    quick::hide_quick(app.clone())?;
-    if let Some(id) = event_id {
+    let target = if let Some(id) = event_id {
         uuid::Uuid::parse_str(&id).map_err(|_| AppError::new(code::EVENT, "日志标识无效"))?;
-        show(&app, None)?;
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.emit("event-log", serde_json::json!({"id":id,"clientId":client_id.unwrap_or_default(),"providerId":provider_id}));
-        }
-        Ok(())
+        Some(MainTarget::EventLog {
+            id,
+            client_id: client_id.unwrap_or_default(),
+            provider_id,
+        })
     } else if let Some(id) = provider_id {
-        show(&app, None)?;
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.emit(
-                "provider-settings",
-                serde_json::json!({"id":id,"clientId":client_id.unwrap_or_default(),"action":provider_action.unwrap_or_default()}),
-            );
-        }
-        Ok(())
+        Some(MainTarget::ProviderSettings {
+            id,
+            client_id: client_id.unwrap_or_default(),
+            action: provider_action.unwrap_or_default(),
+        })
     } else {
-        show(&app, page.as_deref())
+        page.map(MainTarget::Page)
+    };
+    quick::hide_quick(app.clone())?;
+    notifications::on_manual_open(&app);
+    let Some(r) = app.try_state::<Arc<Runtime>>().map(|s| s.inner().clone()) else {
+        return Ok(());
+    };
+    let phase = r.main_window.lock().request_open(target);
+    if phase == MainWindowPhase::Ready {
+        if let Some(w) = app.get_webview_window("main") {
+            let pending = r.main_window.lock().pending_target.take();
+            return present_main_window(&app, &w, pending);
+        }
+        r.main_window.lock().phase = MainWindowPhase::Absent;
     }
+    ensure_main_window(&app, &r).await
+}
+#[tauri::command]
+fn close_main(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<()> {
+    if window.label() != "main" {
+        return Ok(());
+    }
+    destroy_main_window(&app)
 }
 const VISIBLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const HIDDEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
@@ -574,6 +955,8 @@ fn publish(app: &tauri::AppHandle, state: ViewState) {
     for window in visible_windows(app) {
         let _ = window.emit("switch-state", &state);
     }
+    #[cfg(target_os = "macos")]
+    quick_macos::notify_state_changed(app);
 }
 fn refresh(app: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
     let state = state_for(r)?;
@@ -622,7 +1005,11 @@ mod gateway_broadcast_tests {
 }
 fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
     let windows = visible_windows(app);
-    if windows.is_empty() {
+    #[cfg(target_os = "macos")]
+    let macos_quick = quick_macos::is_visible();
+    #[cfg(not(target_os = "macos"))]
+    let macos_quick = false;
+    if windows.is_empty() && !macos_quick {
         return;
     }
     match gateway.try_view() {
@@ -630,9 +1017,13 @@ fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
             for window in windows {
                 let _ = window.emit("gateway-state", &view);
             }
+            #[cfg(target_os = "macos")]
+            if macos_quick {
+                quick_macos::notify_state_changed(app);
+            }
         }
         Err(error) => {
-            let _ = app.emit("switch-error", error);
+            emit_switch_error(app, error);
         }
     }
 }
@@ -742,7 +1133,7 @@ async fn use_official_account(
             .map(|_| ())
     })?;
     let next = refresh(&app, &r)?;
-    let _ = app.emit("switch-notice", "官方账号已启用，请重新打开 Codex");
+    emit_switch_notice(&app, "官方账号已启用，请重新打开 Codex");
     Ok(next)
 }
 
@@ -755,7 +1146,7 @@ async fn disable_official_account(
     let home = r.home(gateway::ClientId::Codex)?;
     official::disable(&r.data, &home)?;
     let next = refresh(&app, &r)?;
-    let _ = app.emit("switch-notice", "官方连接已关闭，配置已恢复");
+    emit_switch_notice(&app, "官方连接已关闭，配置已恢复");
     Ok(next)
 }
 #[tauri::command]
@@ -923,6 +1314,12 @@ async fn set_preferences(
     r.claude.observe_home(&r.home(gateway::ClientId::Claude)?);
     r.grok.observe_home(&r.home(gateway::ClientId::Grok)?);
     r.dsh.observe_home(&r.home(gateway::ClientId::Dsh)?);
+    let bg = window_background_color_for_theme(&s.preferences.theme);
+    for label in ["main", "quick"] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.set_background_color(Some(bg));
+        }
+    }
     publish(&app, s.clone());
     Ok(s)
 }
@@ -1107,7 +1504,7 @@ fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
     tauri::async_runtime::spawn(async move {
         if let Err(e) = runtime.stop_gateways().await {
             runtime.quit_pending.store(false, Ordering::Relaxed);
-            let _ = app.emit("switch-error", e);
+            emit_switch_error(&app, e);
             let _ = show(&app, Some("gateway"));
             return;
         }
@@ -1376,8 +1773,8 @@ async fn update_gateway(
         .map_err(|e| r.config_failure(client_id, e))?;
     let _ = refresh(&app, &r);
     if selected {
-        let _ = app.emit(
-            "switch-notice",
+        emit_switch_notice(
+            &app,
             if result.running {
                 "已切换供应商，新请求立即生效".to_string()
             } else {
@@ -1414,10 +1811,7 @@ async fn start_gateway(
         .map_err(|e| r.config_failure(client_id, e))?;
     r.window_wake.notify_one();
     let _ = refresh(&app, &r);
-    let _ = app.emit(
-        "switch-notice",
-        format!("网关已启用，请重新打开 {}", client_id.name()),
-    );
+    emit_switch_notice(&app, format!("网关已启用，请重新打开 {}", client_id.name()));
     Ok(result)
 }
 #[tauri::command]
@@ -1435,8 +1829,8 @@ async fn stop_gateway(
         .map_err(|e| r.config_failure(client_id, e))?;
     r.window_wake.notify_one();
     let _ = refresh(&app, &r);
-    let _ = app.emit(
-        "switch-notice",
+    emit_switch_notice(
+        &app,
         format!("已写入当前供应商，请重新打开 {}", client_id.name()),
     );
     Ok(result)
@@ -1459,37 +1853,14 @@ async fn frontend_ready(
     if window.label() != "main" {
         return Ok(());
     }
-    if r.frontend_started.swap(true, Ordering::AcqRel) {
+    let Some((want_show, target)) = r.main_window.lock().finish_ready() else {
+        return Ok(());
+    };
+    if !want_show {
+        destroy_main_window(&app)?;
         return Ok(());
     }
-    if !r.start_silently {
-        notifications::on_manual_open(&app);
-    }
-    for client in [
-        gateway::ClientId::Codex,
-        gateway::ClientId::Claude,
-        gateway::ClientId::Grok,
-        gateway::ClientId::Dsh,
-    ] {
-        if (client == gateway::ClientId::Codex && official::blocks_gateway(&r.data))
-            || (client == gateway::ClientId::Claude && claude_profile::blocks(&r.data))
-        {
-            continue;
-        }
-        if let Err(e) = r.gateway(client).resume(&r.home(client)?).await {
-            let e = AppError::new(&e.code, &format!("{}：{}", client.name(), e.message));
-            if let Some(record) = events::Record::configuration_failure(client, &e, true) {
-                r.diagnostics.emit(record);
-            }
-            *r.startup_error.lock() = Some(e.clone());
-            let _ = app.emit("switch-error", e);
-        }
-        publish_gateway(&app, r.gateway(client));
-    }
-    if !r.start_silently {
-        show(&app, None)?;
-    }
-    Ok(())
+    present_main_window(&app, &window, target)
 }
 #[cfg(windows)]
 fn tray_is_dark() -> bool {
@@ -1582,15 +1953,16 @@ pub fn run() {
                 quitting: AtomicBool::new(false),
                 quit_pending: AtomicBool::new(false),
                 startup,
-                start_silently,
                 power,
-                frontend_started: AtomicBool::new(false),
                 force_quitting: AtomicBool::new(false),
                 startup_error: Mutex::new(codex_import_error.or(claude_import_error).or(grok_import_error).or(vertex_error)),
                 official_tx: tokio::sync::Mutex::new(()),
                 window_wake: tokio::sync::Notify::new(),
-                window_visible: [AtomicBool::new(!start_silently), AtomicBool::new(false)],
+                window_visible: [AtomicBool::new(false), AtomicBool::new(false)],
                 pending_main: PendingMainEvents::default(),
+                main_window: Mutex::new(MainWindowState::default()),
+                main_create_lock: tokio::sync::Mutex::new(()),
+                main_destroyed: tokio::sync::Notify::new(),
             });
             runtime
                 .gateway
@@ -1600,11 +1972,57 @@ pub fn run() {
                 .observe_home(&runtime.home(gateway::ClientId::Claude)?);
             let state = state_for(&runtime)?;
             app.manage(runtime.clone());
+            #[cfg(target_os = "macos")]
+            quick_macos::connect(app.handle());
             provider_testing::commands::connect(app.handle());
             notifications::connect(app.handle(), &runtime.diagnostics);
             usage::commands::connect(app.handle(), &runtime);
             runtime.grok.observe_home(&runtime.home(gateway::ClientId::Grok)?);
             runtime.dsh.observe_home(&runtime.home(gateway::ClientId::Dsh)?);
+            {
+                let resume_app = app.handle().clone();
+                let r = runtime.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _official_guard = r.official_tx.lock().await;
+                    for client in [
+                        gateway::ClientId::Codex,
+                        gateway::ClientId::Claude,
+                        gateway::ClientId::Grok,
+                        gateway::ClientId::Dsh,
+                    ] {
+                        if r.quit_pending.load(Ordering::Relaxed)
+                            || r.quitting.load(Ordering::Relaxed)
+                        {
+                            break;
+                        }
+                        if (client == gateway::ClientId::Codex
+                            && official::blocks_gateway(&r.data))
+                            || (client == gateway::ClientId::Claude
+                                && claude_profile::blocks(&r.data))
+                        {
+                            continue;
+                        }
+                        let outcome = match r.home(client) {
+                            Ok(home) => r.gateway(client).resume(&home).await,
+                            Err(e) => Err(e),
+                        };
+                        if let Err(e) = outcome {
+                            let e = AppError::new(
+                                &e.code,
+                                &format!("{}：{}", client.name(), e.message),
+                            );
+                            if let Some(record) =
+                                events::Record::configuration_failure(client, &e, true)
+                            {
+                                r.diagnostics.emit(record);
+                            }
+                            *r.startup_error.lock() = Some(e.clone());
+                            emit_switch_error(&resume_app, e);
+                        }
+                        publish_gateway(&resume_app, r.gateway(client));
+                    }
+                });
+            }
             for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = g.backfill_models().await {
@@ -1622,12 +2040,11 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) = links::ensure_association(&handle).await {
                         r.startup_error.lock().get_or_insert(error.clone());
-                        let _ = handle.emit("switch-error", error);
+                        emit_switch_error(&handle, error);
                     }
                 });
             }
             links::receive(app.handle(), args.iter().cloned());
-            quick::Panel::create(app.handle())?;
             let freeze = runtime.gateway.freeze_gate();
             let mut freeze_events = freeze.subscribe();
             let freeze_app = app.handle().clone();
@@ -1650,6 +2067,8 @@ pub fn run() {
                     for window in visible_windows(&freeze_app) {
                         let _ = window.emit("gateway-freeze", &view);
                     }
+                    #[cfg(target_os = "macos")]
+                    quick_macos::notify_state_changed(&freeze_app);
                     if power::close_after_freeze(&mut power_attempted, view.frozen, view.draining) {
                         let gate = freeze.clone();
                         let r = freeze_runtime.clone();
@@ -1657,11 +2076,18 @@ pub fn run() {
                         tauri::async_runtime::spawn_blocking(move || {
                             match r.power.disable_if_enabled(|| { let v = gate.view(); v.frozen && v.draining == 0 }) {
                                 Ok(Some(state)) => {
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        quick_macos::push_power_state(&app_handle, state.clone());
+                                        quick_macos::push_power_error(&app_handle, None);
+                                    }
                                     let _ = app_handle.emit("clamshell-state", state);
                                     let _ = app_handle.emit("clamshell-error", Option::<AppError>::None);
                                 }
                                 Ok(None) => {}
                                 Err(err) => {
+                                    #[cfg(target_os = "macos")]
+                                    quick_macos::push_power_error(&app_handle, Some(err.message.clone()));
                                     let _ = app_handle.emit("clamshell-error", Some(err));
                                 }
                             }
@@ -1675,6 +2101,9 @@ pub fn run() {
             }
             #[cfg(target_os = "macos")]
             app.set_menu(application_menu(app.handle())?)?;
+            if !start_silently {
+                let _ = show(app.handle(), None);
+            }
             for probe_gateway in [
                 runtime.gateway.clone(),
                 runtime.claude.clone(),
@@ -1717,11 +2146,13 @@ pub fn run() {
                             Ok(view) => {
                                 let windows = visible_windows(&quota_app);
                                 if !windows.is_empty() {
-                                    let payload = serde_json::json!({"clientId":client_id,"quota":view});
+                                    let payload = serde_json::json!({"clientId":client_id,"quota":&view});
                                     for window in windows {
                                         let _ = window.emit("provider-quota", &payload);
                                     }
                                 }
+                                #[cfg(target_os = "macos")]
+                                quick_macos::push_quota(&quota_app, client_id, view);
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                             Err(_) => break,
@@ -1801,14 +2232,14 @@ pub fn run() {
                             let handle = app.clone();
                             let _ = app.run_on_main_thread(move || {
                                 if let Err(e) = quick::Panel::show(&handle, Some(rect)) {
-                                    let _ = handle.emit("switch-error", e);
+                                    emit_switch_error(&handle, e);
                                 }
                             });
                         }
                         #[cfg(target_os = "macos")]
                         if button == MouseButton::Right && button_state == MouseButtonState::Down {
                             if let Err(e) = tray_macos::context_menu(tray) {
-                                let _ = tray.app_handle().emit("switch-error", e);
+                                emit_switch_error(tray.app_handle(), e);
                             }
                         }
                     }
@@ -1816,10 +2247,21 @@ pub fn run() {
                 .on_menu_event(|app, e| match e.id().as_ref() {
                     "quit" => quit(app, &app.state::<Arc<Runtime>>()),
                     "open" => {
-                        let _ = open_main(app.clone(), None, None, None, None, None);
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(err) = open_main(handle.clone(), None, None, None, None, None).await {
+                                emit_switch_error(&handle, err);
+                            }
+                        });
                     }
                     "config" | "gateway" | "settings" => {
-                        let _ = open_main(app.clone(), Some(e.id().as_ref().into()), None, None, None, None);
+                        let handle = app.clone();
+                        let page = e.id().as_ref().to_owned();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(err) = open_main(handle.clone(), Some(page), None, None, None, None).await {
+                                emit_switch_error(&handle, err);
+                            }
+                        });
                     }
                     "github" => {
                         let _ = update::open_repository();
@@ -1830,14 +2272,14 @@ pub fn run() {
                             match update::latest().await {
                                 Ok(info) if info.has_update => {
                                     let version = info.latest_version.as_deref().unwrap_or("latest");
-                                    let _ = handle.emit("switch-notice", format!("发现新版本 v{version}"));
+                                    emit_switch_notice(&handle, format!("发现新版本 v{version}"));
                                     let _ = update::open_releases();
                                 }
                                 Ok(_) => {
-                                    let _ = handle.emit("switch-notice", "已是最新版本".to_string());
+                                    emit_switch_notice(&handle, "已是最新版本");
                                 }
                                 Err(error) => {
-                                    let _ = handle.emit("switch-error", error);
+                                    emit_switch_error(&handle, error);
                                 }
                             }
                         });
@@ -1862,7 +2304,7 @@ pub fn run() {
                 #[cfg(windows)]
                 let mut last_tray_dark: Option<bool> = None;
                 loop {
-                    let has_visible = !visible_windows(&handle).is_empty();
+                    let has_visible = has_visible_ui(&handle);
                     wait_next_background_poll(has_visible, &runtime.window_wake).await;
                     if runtime.quitting.load(Ordering::Relaxed) {
                         break;
@@ -1883,7 +2325,7 @@ pub fn run() {
                         PollStateUpdate::Unchanged => {}
                     }
                     if should_poll_editor_configs(
-                        !visible_windows(&handle).is_empty(),
+                        has_visible_ui(&handle),
                         runtime.background_poll_active(),
                     ) {
                         for client in [
@@ -1990,6 +2432,14 @@ pub fn run() {
             }
         })
         .on_window_event(|w, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if w.label() == "quick" {
+                    quick::Panel::on_destroyed(w.app_handle());
+                } else if w.label() == "main" {
+                    on_main_window_destroyed(w.app_handle());
+                }
+                return;
+            }
             let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
             if matches!(event, tauri::WindowEvent::Focused(true))
                 || (matches!(event, tauri::WindowEvent::Focused(false)) && !visible)
@@ -2014,17 +2464,25 @@ pub fn run() {
                 }
                 return;
             }
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let r = w.state::<Arc<Runtime>>();
-                if !r.quitting.load(Ordering::Relaxed) {
-                    api.prevent_close();
-                    let _ = w.hide();
-                    let _ = w.emit("app-visibility", false);
-                    r.mark_window_visible("main", false);
-                    #[cfg(target_os = "macos")]
-                    let _ = w
-                        .app_handle()
-                        .set_activation_policy(tauri::ActivationPolicy::Accessory);
+            if w.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    let r = w.state::<Arc<Runtime>>();
+                    if !r.quitting.load(Ordering::Relaxed) {
+                        api.prevent_close();
+                        let phase = r.main_window.lock().phase;
+                        match phase {
+                            MainWindowPhase::Ready => {
+                                let _ = w.emit(
+                                    "main-close-requested",
+                                    serde_json::json!({ "hidden": !visible }),
+                                );
+                            }
+                            MainWindowPhase::Creating => {
+                                let _ = destroy_main_window(w.app_handle());
+                            }
+                            MainWindowPhase::Absent | MainWindowPhase::Destroying => {}
+                        }
+                    }
                 }
             }
         })
@@ -2053,6 +2511,7 @@ pub fn run() {
             usage::commands::sync_usage,
             usage::commands::get_pricing,
             usage::commands::calculate_usage_cost,
+            usage::commands::get_usage_calculator_models,
             usage::commands::get_usage_calculator_totals,
             usage::commands::search_pricing,
             usage::commands::get_models_dev,
@@ -2097,8 +2556,10 @@ pub fn run() {
             notifications::test_notification,
             notifications::open_notification_settings,
             open_main,
+            close_main,
             quick::get_quick,
             quick::set_quick,
+            quick::quick_ready,
             quick::hide_quick,
             get_gateway,
             get_gateway_freeze,
@@ -2171,11 +2632,13 @@ pub fn run() {
                     let _ = show(app, None);
                 }
             }
-            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
                 let r = app.state::<Arc<Runtime>>();
                 if !r.quitting.load(Ordering::Relaxed) {
                     api.prevent_exit();
-                    quit(app, &r);
+                    if code.is_some() {
+                        quit(app, &r);
+                    }
                 }
             }
             if let tauri::RunEvent::Exit = event {
@@ -2191,9 +2654,10 @@ pub fn run() {
 mod page_whitelist_tests {
     use super::{
         core::Core, emit_account_sync_diagnostic, events, gateway, poll_account_state_step,
-        should_poll_editor_configs, tray_tooltip_text, valid_main_page, wait_next_background_poll,
-        MainSignal, PendingMainEvents, PollStateUpdate, HIDDEN_POLL_INTERVAL,
-        VISIBLE_POLL_INTERVAL,
+        resolve_window_background_color, should_poll_editor_configs, tray_tooltip_text,
+        valid_main_page, wait_next_background_poll, AppError, MainSignal, MainTarget,
+        MainWindowPhase, MainWindowState, PendingMainEvents, PollStateUpdate, ProviderAction,
+        HIDDEN_POLL_INTERVAL, VISIBLE_POLL_INTERVAL,
     };
     use parking_lot::Mutex;
     use std::sync::Arc;
@@ -2454,5 +2918,83 @@ mod page_whitelist_tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn window_background_color_prioritizes_saved_theme_over_system() {
+        let dark = tauri::window::Color(0x07, 0x0B, 0x14, 0xFF);
+        let light = tauri::window::Color(0xF3, 0xF6, 0xFC, 0xFF);
+        assert_eq!(resolve_window_background_color("dark", false), dark);
+        assert_eq!(resolve_window_background_color("light", true), light);
+        assert_eq!(resolve_window_background_color("system", true), dark);
+        assert_eq!(resolve_window_background_color("system", false), light);
+    }
+
+    #[test]
+    fn main_window_state_machine_preserves_target_and_blocks_recreate_until_destroyed() {
+        let mut st = MainWindowState::default();
+        let target = MainTarget::ProviderSettings {
+            id: "p1".into(),
+            client_id: gateway::ClientId::Claude,
+            action: ProviderAction::Testing,
+        };
+        assert_eq!(
+            st.request_open(Some(target.clone())),
+            MainWindowPhase::Absent
+        );
+        let gen1 = st.begin_creating().expect("should enter Creating");
+        assert_eq!(gen1, 1);
+        assert_eq!(st.phase, MainWindowPhase::Creating);
+
+        // A bare show(app, None) (e.g. Dock Reopen) while Creating must NOT overwrite target!
+        assert_eq!(st.request_open(None), MainWindowPhase::Creating);
+        assert_eq!(
+            st.finish_ready(),
+            Some((true, Some(target))),
+            "frontend_ready must receive preserved ProviderSettings target"
+        );
+        assert_eq!(st.phase, MainWindowPhase::Ready);
+
+        // Destroy and request reopen before WindowEvent::Destroyed completes.
+        assert!(st.begin_destroying());
+        assert_eq!(st.phase, MainWindowPhase::Destroying);
+        let log_target = MainTarget::EventLog {
+            id: "00000000-0000-4000-8000-000000000099".into(),
+            client_id: gateway::ClientId::Codex,
+            provider_id: Some("p1".into()),
+        };
+        assert_eq!(
+            st.request_open(Some(log_target.clone())),
+            MainWindowPhase::Destroying
+        );
+        assert!(
+            st.begin_creating().is_none(),
+            "must not build second main WebView before Destroyed"
+        );
+        assert!(
+            st.on_destroyed(),
+            "Destroyed must report queued reopen request"
+        );
+        assert_eq!(st.phase, MainWindowPhase::Absent);
+        let gen2 = st
+            .begin_creating()
+            .expect("should recreate after Destroyed");
+        assert_eq!(gen2, 2);
+        assert_eq!(st.finish_ready(), Some((true, Some(log_target))));
+
+        // Buffered switch_error drains once for main and never leaks to quick.
+        let pending = PendingMainEvents::default();
+        pending.record_switch_error(AppError::new("CONFLICT", "恢复冲突"));
+        assert!(pending.drain_for_window("quick").is_none());
+        let drained = pending.drain_for_window("main").unwrap();
+        assert_eq!(
+            drained.switch_error.as_ref().map(|e| e.message.as_str()),
+            Some("恢复冲突")
+        );
+        assert!(pending
+            .drain_for_window("main")
+            .unwrap()
+            .switch_error
+            .is_none());
     }
 }

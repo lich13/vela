@@ -568,6 +568,14 @@ describe("Usage Antigravity statistics tab", () => {
     });
 
     const summary = await screen.findByLabelText("Token 构成与缓存节省");
+    await waitFor(() => {
+      expect(mock.command).toHaveBeenCalledWith("get_antigravity_auth_state");
+    });
+    expect(
+      mock.command.mock.calls.filter(
+        ([name]) => name === "get_antigravity_usage_stats",
+      ),
+    ).toHaveLength(1);
     expect(within(summary).getByText("54.0%")).toBeInTheDocument();
     expect(within(summary).getByText("78.3%")).toBeInTheDocument();
     expect(within(summary).getByText("$0.4860")).toBeInTheDocument();

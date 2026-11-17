@@ -196,65 +196,90 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
 }
 
 pub const HINT_HEADERS: &str = "CLAUDE_CODE_GATEWAY_HINT_HEADERS";
+pub const STREAM_WATCHDOG: &str = "CLAUDE_ENABLE_STREAM_WATCHDOG";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct HintSnapshot {
     before: Value,
     existed: bool,
+    #[serde(default)]
+    watchdog_before: Value,
+    #[serde(default)]
+    watchdog_existed: bool,
+    #[serde(default)]
+    watchdog_managed: bool,
 }
-pub(super) fn hint(text: &str) -> Result<Option<Value>> {
+fn env_value(text: &str, key: &str) -> Result<Option<Value>> {
     let (_, _, fields) = locations(text)?;
-    unique(&fields, HINT_HEADERS)?
+    unique(&fields, key)?
         .map(|m| serde_json::from_str(&text[m.span.clone()]).map_err(|_| invalid()))
         .transpose()
 }
+fn patch_env_value(text: &str, key: &str, target: Option<&Value>) -> Result<String> {
+    let current = env_value(text, key)?;
+    if current.as_ref() == target {
+        return Ok(text.to_owned());
+    }
+    let (_, env, fields) = locations(text)?;
+    let mut out = text.to_owned();
+    if let Some(member) = unique(&fields, key)? {
+        if let Some(value) = target {
+            out.replace_range(member.span.clone(), &value.to_string());
+        } else {
+            let index = fields.iter().position(|m| m.start == member.start).unwrap();
+            let span = if let Some(next) = fields.get(index + 1) {
+                member.start..next.start
+            } else if index > 0 {
+                fields[index - 1].span.end..member.span.end
+            } else {
+                member.start..member.span.end
+            };
+            out.replace_range(span, "");
+        }
+    } else if let Some(value) = target {
+        // The managed address/token patch creates env before this patch.
+        let (span, inserted) = insertion(
+            text,
+            env.ok_or_else(invalid)?.start,
+            &fields,
+            vec![(key.into(), value.to_string())],
+        );
+        out.replace_range(span, &inserted);
+    }
+    Ok(out)
+}
 impl HintSnapshot {
     pub fn new(text: &str) -> Result<Self> {
-        let before = hint(text)?;
+        let before = env_value(text, HINT_HEADERS)?;
+        let watchdog_before = env_value(text, STREAM_WATCHDOG)?;
         Ok(Self {
             existed: before.is_some(),
             before: before.unwrap_or(Value::Null),
+            watchdog_existed: watchdog_before.is_some(),
+            watchdog_before: watchdog_before.unwrap_or(Value::Null),
+            watchdog_managed: true,
         })
     }
     pub fn patch(&self, text: &str, apply: bool) -> Result<String> {
-        let current = hint(text)?;
-        let enabled = Some(Value::String("1".into()));
-        let before = self.existed.then_some(self.before.clone());
-        if current != before && current != enabled {
-            return Err(AppError::new(
-                code::CONFLICT,
-                "Claude 网关提示头设置已被外部修改，已保留现场与事务记录",
-            ));
-        }
-        let target = if apply { &enabled } else { &before };
-        if &current == target {
-            return Ok(text.to_owned());
-        }
-        let (_, env, fields) = locations(text)?;
-        let mut out = text.to_owned();
-        if let Some(member) = unique(&fields, HINT_HEADERS)? {
-            if let Some(value) = target {
-                out.replace_range(member.span.clone(), &value.to_string());
-            } else {
-                let index = fields.iter().position(|m| m.start == member.start).unwrap();
-                let span = if let Some(next) = fields.get(index + 1) {
-                    member.start..next.start
-                } else if index > 0 {
-                    fields[index - 1].span.end..member.span.end
-                } else {
-                    member.start..member.span.end
-                };
-                out.replace_range(span, "");
+        let hint_managed = Value::String("1".into());
+        let watchdog_managed = Value::String("0".into());
+        let mut out = if apply {
+            patch_env_value(text, HINT_HEADERS, Some(&hint_managed))?
+        } else if env_value(text, HINT_HEADERS)?.as_ref() == Some(&hint_managed) {
+            patch_env_value(text, HINT_HEADERS, self.existed.then_some(&self.before))?
+        } else {
+            text.to_owned()
+        };
+        if self.watchdog_managed {
+            if apply {
+                out = patch_env_value(&out, STREAM_WATCHDOG, Some(&watchdog_managed))?;
+            } else if env_value(&out, STREAM_WATCHDOG)?.as_ref() == Some(&watchdog_managed) {
+                out = patch_env_value(
+                    &out,
+                    STREAM_WATCHDOG,
+                    self.watchdog_existed.then_some(&self.watchdog_before),
+                )?;
             }
-        } else if let Some(value) = target {
-            // The managed address/token patch creates env before this patch.
-            let (span, inserted) = insertion(
-                text,
-                env.ok_or_else(invalid)?.start,
-                &fields,
-                vec![(HINT_HEADERS.into(), value.to_string())],
-            );
-            out.replace_range(span, &inserted);
         }
         Ok(out)
     }

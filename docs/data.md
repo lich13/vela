@@ -8,7 +8,7 @@ DSH 目录使用 profile 原有的 `cordis.patch.yml`、`.env` 和 `.credentials
 
 `gateway-listener.json` 保存四个客户端共用的端口及格式版本（v2）。Grok 明确导入不落盘事务记录：TOML、可选 `endpoint.env` 与供应商库任一写入失败时，在进程内还原已写入的文件并报错重试，遇外部修改保持原样。
 
-数据目录统一位于 `~/.vela`（权限 `0700`）。`accounts.json` 保存完整账号，`previous-auth.json`、`previous-config.toml`、`claude/previous-settings.json` 各保留一份最近写入前的文件。`quick.json` 保存快捷面板固定状态与 `hiddenClients`，旧设置默认显示全部平台。`gateway.json` 保存 Codex 状态，`claude/gateway.json` 保存 Claude 状态，`grok/gateway.json` 保存 Grok 状态（供应商、并发、RPM、模型白名单、访问令牌和恢复意图）；各客户端目录内的 `gateway-recovery.json` 保存版本化的连接事务与停止目标；普通 API 模式写入两文件时不另存恢复现场，失败即在进程内还原。61 秒 RPM 滑动窗口仅在内存中维护；`endpoint-owners.json` 持久化保存 7 天端点归属钉选。供应商 Token 仅用于其上游认证；凭据不写日志、不返回到列表或事件。文件采用当前用户权限，**未加密**，应像原 `auth.json` 一样保护。
+数据目录统一位于 `~/.vela`（权限 `0700`）。`accounts.json` 保存完整账号，`previous-auth.json`、`previous-config.toml`、`claude/previous-settings.json` 各保留一份最近写入前的文件。`quick.json` 保存快捷面板固定状态、`hiddenClients` 与 `selectedClient`，旧设置默认显示全部平台。`gateway.json` 保存 Codex 状态，`claude/gateway.json` 保存 Claude 状态，`grok/gateway.json` 保存 Grok 状态（供应商、并发、RPM、模型白名单、访问令牌和恢复意图）；各客户端目录内的 `gateway-recovery.json` 保存版本化的连接事务与停止目标；普通 API 模式写入两文件时不另存恢复现场，失败即在进程内还原。61 秒 RPM 滑动窗口仅在内存中维护；`endpoint-owners.json` 持久化保存 7 天端点归属钉选。供应商 Token 仅用于其上游认证；凭据不写日志、不返回到列表或事件。文件采用当前用户权限，**未加密**，应像原 `auth.json` 一样保护。
 
 损坏的用量设置保留原文件，并在同一私有目录保存按内容摘要去重的备份，通过已有错误通道反馈；正常设置和数据格式保持兼容。启动清理只处理客户端私有目录内可确认归属的遗留请求暂存文件，恢复事务不按年龄删除。
 
@@ -24,4 +24,4 @@ LM Detector 的 `lmBank` 更新元数据保存在同一文件中：检查时间�
 
 用量复用现有数据库、增量游标与去重凭据；本地采集接口仅执行只读查询，不保存消息正文或认证头。App 返回的会话标题与内部会话摘要保存在私有同步游标中，关闭 App 后仍可显示原名；标题变化只更新元数据，不重建历史记录。旧 CLI 历史日志与账单仍可读，其数据不计入 app。
 
-Antigravity OAuth 账号实际观测的 5h／7d 周期边界保存在现有用量数据库的 metadata 中，仅边界变化时写入；不新增状态文件或后台轮询。账号信息与凭据只在 Rust 读取，前端周期结果只包含账号名称、ID、类型、边界与汇总。macOS 上 App 的 OAuth 登录只读取登录钥匙串中的 Antigravity 项目，通过 Security.framework 原生访问；窗口可见时每 2 秒、隐藏时每 10 秒检查一次，复用当次凭据与指纹，未变化时跳过账号库解析。后台不弹授权框，手动刷新或切换允许系统授权；不再观察整库文件或读取、同步、删除旧 OAuth 令牌文件。账号归属使用现有激活时间记录，同账号令牌刷新不重置周期起点。Windows 继续读写令牌文件。
+Antigravity OAuth 账号实际观测的 5h／7d 周期边界保存在现有用量数据库的 metadata 中，仅边界变化时写入；不新增状态文件或后台轮询。账号信息与凭据只在 Rust 读取，前端周期结果只包含账号名称、ID、类型、边界与汇总。macOS 上 App 的 OAuth 登录只读取登录钥匙串中的 Antigravity 项目，通过系统 `/usr/bin/security` 访问（写回经 `security -i` 标准输入传入，命令上限 4096 字节），并按 `~/Library/Keychains/login.keychain-db` 的 `(ino, len, modified_ns)` 指纹缓存成功读取结果，未变化时不重复启动 `security` 子进程或解析账号库；写回或删除前后立即失效缓存。不再读取、同步或删除旧 OAuth 令牌文件。账号归属使用现有激活时间记录，同账号令牌刷新不重置周期起点。Windows 继续读写令牌文件。

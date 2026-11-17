@@ -83,8 +83,8 @@ const external = (origin: EventOrigin) =>
 const origins = {
   upstream: "上游报错",
   gateway: "网关内部",
-  antigravity: "Antigravity app",
   claude_code: "Claude Code",
+  antigravity: "Antigravity app",
 } as const satisfies Record<EventOrigin, string>;
 
 export type EventRecord = {

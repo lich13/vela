@@ -888,6 +888,38 @@ pub(super) fn cache_savings(
 }
 
 impl Quote {
+    pub fn million_rates(&self) -> Option<[String; 5]> {
+        let original = self.data.as_ref()?;
+        if original["mode"].as_str().is_some_and(|s| {
+            matches!(
+                s,
+                "video_generation" | "audio_transcription" | "image_generation"
+            )
+        }) {
+            return None;
+        }
+        let converted = if self.source == "models.dev" {
+            Some(crate::models_dev::rates(original, 0, false)?)
+        } else {
+            None
+        };
+        let data = converted.as_ref().map(|(data, _)| data).unwrap_or(original);
+        let per_million = |name: &str| -> Option<Decimal> {
+            let (_, rate, _) = unit_rate(data, name, 0, "")?;
+            rate.checked_mul(Decimal::from(1_000_000))
+        };
+        let input = per_million("input_cost_per_token")?;
+        let output = per_million("output_cost_per_token")?;
+        let cache_read = per_million("cache_read_input_token_cost").unwrap_or(Decimal::ZERO);
+        let cache_write_5m =
+            per_million("cache_creation_input_token_cost").unwrap_or(Decimal::ZERO);
+        let cache_write_1h =
+            per_million("cache_creation_input_token_cost_above_1hr").unwrap_or(cache_write_5m);
+        Some(
+            [input, output, cache_read, cache_write_5m, cache_write_1h]
+                .map(|v| v.normalize().to_string()),
+        )
+    }
     pub fn calculate(&self, t: &Tokens, tier: Option<&str>) -> Option<PriceSnapshot> {
         let original = self.data.as_ref()?;
         let tier = tier.unwrap_or("default").trim().to_ascii_lowercase();

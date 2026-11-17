@@ -864,6 +864,50 @@ fn keyring_values_decode_from_both_encodings_and_round_trip() {
 }
 
 #[test]
+fn keychain_stdin_command_enforces_4096_limit_and_fingerprint_cache_skips_repeat_reads() {
+    let cmd = build_keychain_write_command(r#"{"access_token":"fixture"}"#).unwrap();
+    assert!(
+        cmd.starts_with("add-generic-password -U -s gemini -a antigravity -w go-keyring-base64:")
+    );
+    assert!(cmd.ends_with('\n'));
+    let huge = "x".repeat(KEYCHAIN_COMMAND_LIMIT);
+    let err = build_keychain_write_command(&huge).unwrap_err();
+    assert_eq!(err.message, "Antigravity 登录凭据过大，无法写入钥匙串");
+
+    let cache = Mutex::new(None);
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let first = cached_keychain_read(Some((1, 100, 999)), &cache, || {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Some("cached-token".into()))
+    })
+    .unwrap();
+    assert_eq!(first.as_deref(), Some("cached-token"));
+    let second = cached_keychain_read(Some((1, 100, 999)), &cache, || {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Some("different".into()))
+    })
+    .unwrap();
+    assert_eq!(second.as_deref(), Some("cached-token"));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Errors are never cached; changed fingerprint refreshes.
+    let err_cache = Mutex::new(None);
+    assert!(cached_keychain_read(Some((1, 100, 999)), &err_cache, || {
+        Err(super::err(code::AUTH, "locked"))
+    })
+    .is_err());
+    assert!(err_cache.lock().is_none());
+
+    let third = cached_keychain_read(Some((1, 104, 1000)), &cache, || {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(None)
+    })
+    .unwrap();
+    assert_eq!(third, None);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[test]
 fn fixture_homes_never_reach_the_keychain() {
     let (_tmp, paths) = setup_paths();
     assert!(!paths.keychain());

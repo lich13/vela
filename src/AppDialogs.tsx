@@ -312,10 +312,12 @@ export function AddAccount({
 export function SettingsForm({
   preferences,
   onThemePreview,
+  onDirtyChange,
   onDone,
 }: {
   preferences: Preferences;
   onThemePreview: (theme: Preferences["theme"] | null) => void;
+  onDirtyChange?: (dirty: boolean) => void;
   onDone: (s: ViewState) => void;
 }) {
   const [prefs, setPrefs] = useState(preferences),
@@ -323,6 +325,13 @@ export function SettingsForm({
     [busy, setBusy] = useState(false),
     [checking, setChecking] = useState(false),
     [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const isDirty =
+    prefs.theme !== preferences.theme ||
+    prefs.systemNotifications !== preferences.systemNotifications;
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   useEffect(() => () => onThemePreview(null), [onThemePreview]);
   const checkForUpdates = () => {
     setChecking(true);
@@ -436,14 +445,21 @@ export function SettingsForm({
 
 export function AccountEdit({
   dialog,
+  onDirtyChange,
   onDone,
 }: {
   dialog: { action: "rename" | "delete"; account: Account };
+  onDirtyChange?: (dirty: boolean) => void;
   onDone: (s: ViewState) => void;
 }) {
   const [name, setName] = useState(dialog.account.name),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
+  const isDirty = dialog.action === "rename" && name !== dialog.account.name;
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   return (
     <form
       className="modal-content"

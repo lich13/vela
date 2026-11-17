@@ -10,9 +10,11 @@ import type { PendingImport as Pending } from "./bridge-contracts";
 export default function ProviderImports({
   notify,
   blocked = false,
+  onDirtyChange,
 }: {
   notify: (message: string) => void;
   blocked?: boolean;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [queue, setQueue] = useState<Pending[]>([]),
     [active, setActive] = useState<Pending | null>(null),
@@ -28,10 +30,19 @@ export default function ProviderImports({
       .catch((e) => setError(errorOf(e).message));
   }, []);
   useEffect(() => {
+    onDirtyChange?.(active !== null);
+  }, [active, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+  useEffect(() => {
+    let disposed = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
-    refresh();
-    events.watch("provider-imports", refresh);
-    return () => events.dispose();
+    void events.watch("provider-imports", refresh).then(() => {
+      if (!disposed) refresh();
+    });
+    return () => {
+      disposed = true;
+      events.dispose();
+    };
   }, [refresh]);
   useEffect(() => {
     const check = () => setAvailable(!document.querySelector("dialog[open]"));

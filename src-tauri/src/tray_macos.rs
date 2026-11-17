@@ -4,6 +4,7 @@ use crate::storage::{AppError, Result};
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::NSMenu;
 use std::cell::RefCell;
+use tauri::Manager;
 thread_local! { static CONTEXT_MENU: RefCell<Option<Retained<NSMenu>>> = const { RefCell::new(None) }; }
 pub fn install(tray: &tauri::tray::TrayIcon) -> Result<()> {
     tray.with_inner_tray_icon(|inner| -> Result<()> {
@@ -13,6 +14,7 @@ pub fn install(tray: &tauri::tray::TrayIcon) -> Result<()> {
         let status = inner
             .ns_status_item()
             .ok_or_else(|| AppError::new(code::TRAY, "托盘图标不可用"))?;
+        crate::quick_macos::attach_status_item(Retained::as_ptr(&status).cast());
         CONTEXT_MENU.with(|saved| saved.replace(status.menu(main)));
         status.setMenu(None);
         Ok(())
@@ -20,6 +22,14 @@ pub fn install(tray: &tauri::tray::TrayIcon) -> Result<()> {
     .map_err(|_| AppError::new(code::TRAY, "无法初始化托盘菜单"))?
 }
 pub fn context_menu(tray: &tauri::tray::TrayIcon) -> Result<()> {
+    let app = tray.app_handle();
+    if crate::quick_macos::is_visible()
+        && app
+            .try_state::<crate::quick::Panel>()
+            .is_some_and(|panel| !panel.snapshot().pinned)
+    {
+        crate::quick_macos::hide(app);
+    }
     tray.with_inner_tray_icon(|inner| -> Result<()> {
         let main =
             MainThreadMarker::new().ok_or_else(|| AppError::new(code::TRAY, "托盘需要主线程"))?;

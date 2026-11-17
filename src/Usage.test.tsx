@@ -394,14 +394,25 @@ function cancelDialog(dialog: HTMLElement) {
   fireEvent(dialog, new Event("cancel", { bubbles: true, cancelable: true }));
 }
 
+const rangeLabels: Record<string, string> = {
+  today: "今日",
+  "1": "最近 24 小时",
+  "7": "7 天",
+  "14": "14 天",
+  "30": "30 天",
+  all: "全部",
+  custom: "自定义",
+};
+
 async function chooseRange(value: string) {
   await userEvent.click(screen.getByRole("button", { name: "用量时间范围" }));
   const dialog = screen.getByRole("dialog", { name: "选择时间范围" });
-  await userEvent.selectOptions(
-    within(dialog).getByRole("combobox", { name: "用量时间范围" }),
-    value,
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: rangeLabels[value] ?? value }),
   );
-  await userEvent.click(within(dialog).getByRole("button", { name: "确定" }));
+  if (value === "custom") {
+    await userEvent.click(within(dialog).getByRole("button", { name: "确定" }));
+  }
 }
 
 describe("usage records", () => {
@@ -424,6 +435,11 @@ describe("usage records", () => {
     expect(
       screen.getByRole("tablist", { name: "用量明细" }).parentElement,
     ).toContainElement(toolbar);
+    expect(
+      within(screen.getByRole("tablist", { name: "用量明细" }))
+        .getAllByRole("tab")
+        .map((t) => t.textContent),
+    ).toEqual(["请求日志", "供应商", "模型", "Claude Code", "Antigravity", "定价"]);
     await userEvent.keyboard("{Escape}");
     expect(toolbar.querySelector("details")).not.toHaveAttribute("open");
     expect(columns).toHaveFocus();

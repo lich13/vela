@@ -35,8 +35,12 @@ pub struct Provider {
     pub buffer_complete_response: bool,
     #[serde(default)]
     pub endless_mode: bool,
-    #[serde(default = "default_rate_limit_seconds")]
+    #[serde(default = "default_upstream_retry_seconds")]
     pub upstream_retry_seconds: u64,
+}
+pub(crate) const DEFAULT_UPSTREAM_RETRY_SECONDS: u64 = 5;
+fn default_upstream_retry_seconds() -> u64 {
+    DEFAULT_UPSTREAM_RETRY_SECONDS
 }
 // Existing defaults: three retries allow four total upstream attempts.
 const DEFAULT_MAX_RETRIES: usize = 3;
@@ -95,7 +99,7 @@ fn default_transient_failure_threshold() -> u32 {
     6
 }
 fn default_rate_limit_seconds() -> u64 {
-    5
+    DEFAULT_UPSTREAM_RETRY_SECONDS
 }
 fn default_capacity_retry_seconds() -> u64 {
     60
@@ -635,9 +639,6 @@ impl Store {
                 name: display_name,
             } => {
                 let u = base_url(&raw, self.settings.port)?;
-                if upstream_retry_seconds == Some(0) {
-                    return Err(AppError::new(code::SETTINGS, "上游重试间隔必须大于 0 秒"));
-                }
                 if quota_access_token.as_ref().is_some_and(|value| {
                     value.len() > 16384
                         || value.chars().any(char::is_control)
@@ -719,7 +720,8 @@ impl Store {
                         filter_count_tokens: filter_count_tokens.unwrap_or(false),
                         buffer_complete_response: buffer_complete_response.unwrap_or(false),
                         endless_mode: endless_mode.unwrap_or(false),
-                        upstream_retry_seconds: upstream_retry_seconds.unwrap_or(5),
+                        upstream_retry_seconds: upstream_retry_seconds
+                            .unwrap_or(DEFAULT_UPSTREAM_RETRY_SECONDS),
                     });
                     if self.selected.is_none() {
                         self.selected = Some(id);

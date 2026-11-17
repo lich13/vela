@@ -368,6 +368,7 @@ export const usageCommands = [
   "sync_usage",
   "get_pricing",
   "calculate_usage_cost",
+  "get_usage_calculator_models",
   "get_usage_calculator_totals",
   "search_pricing",
   "configure_pricing",
@@ -447,17 +448,66 @@ export function usagePreview(
       attempts: matches.reduce((n, row) => n + row.attempts.length, 0),
     };
   }
+  if (name === "get_usage_calculator_models") {
+    const client = String(args.client ?? "");
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (client && row.client !== client) continue;
+      for (const a of row.attempts) {
+        const m = a.responseModel ?? a.requestedModel ?? a.pricingModel;
+        if (m && m !== "unknown" && m !== "web_search") seen.add(m);
+      }
+    }
+    return [...seen].map((model) => {
+      const card = price.models[model];
+      const num = (k: string) =>
+        card && typeof card[k] !== "undefined" ? Number(card[k]) * 1e6 : null;
+      const pIn = num("input_cost_per_token");
+      const pOut = num("output_cost_per_token");
+      if (pIn == null || pOut == null || !Number.isFinite(pIn) || !Number.isFinite(pOut)) {
+        return { model, rates: null };
+      }
+      const pCr = num("cache_read_input_token_cost") ?? 0;
+      const pCw5m = num("cache_creation_input_token_cost") ?? 0;
+      const pCw1h = num("cache_creation_input_token_cost_above_1hr") ?? pCw5m;
+      const fmt = (n: number) => String(Number(n.toFixed(8)));
+      return {
+        model,
+        rates: [fmt(pIn), fmt(pOut), fmt(pCr), fmt(pCw5m), fmt(pCw1h)],
+      };
+    });
+  }
   if (name === "calculate_usage_cost") {
     const input = args.input as CostCalculatorInput;
-    const base = Number(input.basePrice) * Number(input.modelRatio);
-    const rates = [
-      1,
+    const nums = [
+      input.basePrice,
+      input.modelRatio,
       input.outputRatio,
       input.cacheReadRatio,
-      input.cacheWriteRatio,
-    ].map((n) => base * Number(n));
+      input.cacheWrite5mRatio,
+      input.cacheWrite1hRatio,
+      input.groupRatio,
+      ...(input.rates ?? []),
+    ];
+    if (nums.some((v) => !String(v).trim() || Number(v) < 0 || !Number.isFinite(Number(v))))
+      throw { code: "USAGE", message: "价格和倍率须为非负数" };
+    const counts = input.tokens.map((t) => {
+      const s = String(t).trim();
+      if (!/^\d+$/.test(s)) throw { code: "USAGE", message: "Token 数须为有效的非负整数" };
+      return Number(s);
+    });
+    const base = Number(input.basePrice) * Number(input.modelRatio);
+    const rates = input.rates
+      ? input.rates.map(Number)
+      : [
+          1,
+          input.outputRatio,
+          input.cacheReadRatio,
+          input.cacheWrite5mRatio,
+          input.cacheWrite1hRatio,
+        ].map((n) => base * Number(n));
     const costs = rates.map(
-      (rate, i) => ((rate * input.tokens[i]) / 1e6) * Number(input.groupRatio),
+      (rate, i) => ((rate * counts[i]) / 1e6) * Number(input.groupRatio),
     );
     const format = (n: number) => String(Number(n.toFixed(12)));
     return {

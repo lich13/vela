@@ -377,6 +377,10 @@ impl Core {
         }
         self.exchange.templates.cancel(token);
     }
+    pub fn exchange_clear(&mut self) {
+        self.exchange.pending.take();
+        self.exchange.templates.clear();
+    }
     pub fn exchange_prune(&mut self) {
         if self
             .exchange

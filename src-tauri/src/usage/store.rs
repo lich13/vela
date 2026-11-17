@@ -104,6 +104,25 @@ impl Store {
             if version != 13 || !storage_v12::ready(&connection)? {
                 return Err(failure("用量数据库版本过旧或未就绪，已保留原文件"));
             }
+            let needs_backfill: bool = db(connection.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM metadata WHERE key='claude_thinking_backfill')
+                    AND EXISTS(SELECT 1 FROM cursors WHERE CASE WHEN json_valid(body) THEN json_extract(body,'$.source') END='claude')",
+                [],
+                |row| row.get(0),
+            ))?;
+            if needs_backfill {
+                let tx = db(connection.transaction())?;
+                db(tx.execute(
+                    "INSERT INTO metadata(key,value) VALUES('claude_thinking_backfill','1')",
+                    [],
+                ))?;
+                db(tx.execute(
+                    "INSERT INTO metadata(key,value) VALUES('source_generation_claude','1')
+                     ON CONFLICT(key) DO UPDATE SET value=cast(value AS INTEGER)+1",
+                    [],
+                ))?;
+                db(tx.commit())?;
+            }
             return Ok(Self {
                 connection,
                 overview_cache: Default::default(),
@@ -255,6 +274,12 @@ impl Store {
         changed |= Self::remove_superseded_in_tx(&tx, superseded_ids)?;
         if let Some((id, body)) = cursor {
             db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE cursors.body<>excluded.body",params![id,body]))?;
+            db(tx.execute(
+                "INSERT OR IGNORE INTO metadata(key,value)
+                 SELECT 'claude_thinking_backfill','1'
+                 WHERE CASE WHEN json_valid(?1) THEN json_extract(?1,'$.source') END='claude'",
+                [body],
+            ))?;
         }
         if changed {
             query::changed(&tx)?;
@@ -836,6 +861,12 @@ impl Store {
             [source],
         ))?;
         db(tx.execute("INSERT INTO cursors SELECT id,body FROM source_stage_cursors WHERE source=?1 ON CONFLICT(id) DO UPDATE SET body=excluded.body",[source]))?;
+        if source == "claude" {
+            db(tx.execute(
+                "INSERT OR IGNORE INTO metadata(key,value) VALUES('claude_thinking_backfill','1')",
+                [],
+            ))?;
+        }
         db(tx.execute("INSERT INTO metadata VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=cast(value AS INTEGER)+1",[format!("source_generation_{source}")]))?;
         db(tx.execute("DELETE FROM source_stage WHERE source=?1", [source]))?;
         db(tx.execute("DELETE FROM source_stage_cursors WHERE source=?1", [source]))?;

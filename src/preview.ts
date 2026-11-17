@@ -276,8 +276,10 @@ export async function run(
   if (name === "set_gateway_freeze_resume") {
     const state = freezeScopes.find((s) => s.clientId === args.clientId)!;
     const at = args.resumeAt as number | null;
-    if (at !== null && (!state.frozen || state.draining || at <= Date.now()))
-      throw { code: "TIME", message: "请在冻结完成后选择未来的恢复时间" };
+    if (at !== null && (!state.frozen || state.draining))
+      throw { code: "TIME", message: "请在冻结完成后设置恢复时间" };
+    if (at !== null && at <= Date.now())
+      throw { code: "TIME", message: "恢复时间应晚于当前时间" };
     state.resumeAt = at;
     scheduleFreeze();
     const view = freezeView();
@@ -354,7 +356,8 @@ export async function run(
     emit("quick-state", { ...quick });
     return { ...quick };
   }
-  if (name === "hide_quick") return;
+  if (name === "quick_ready" || name === "hide_quick" || name === "close_main")
+    return;
   if (name === "open_main") {
     location.search = "";
     return;

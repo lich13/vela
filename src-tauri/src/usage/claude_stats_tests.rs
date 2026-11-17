@@ -369,3 +369,130 @@ fn missing_retries_preserve_reported_totals_and_unpriced_providers_count_once() 
         assert!(!empty.token_mix.reasoning_reported);
     }
 }
+
+#[test]
+fn claude_thinking_tokens_guard_false_zeroes_and_backfill_via_source_generation_without_losing_history(
+) {
+    use crate::gateway::metadata::Projector;
+    use serde_json::json;
+
+    // 1) Live SSE Meter: content_block_start(redacted_thinking) prevents false 0, while positive thinking_tokens wins.
+    let mut meter = Meter::default();
+    for raw in [
+        json!({"type":"message_start","message":{"id":"msg_1","model":"claude-opus-4-6","usage":{"input_tokens":50,"output_tokens":0,"output_tokens_details":{"thinking_tokens":0}}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"enc"}}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20,"output_tokens_details":{"thinking_tokens":0}}}),
+    ] {
+        let mut proj = Projector::default();
+        proj.feed(raw.to_string().as_bytes());
+        let projected = proj.finish().unwrap();
+        meter.observe(&projected, 0);
+    }
+    assert_eq!(meter.tokens.reasoning, None);
+
+    let mut meter_pos = Meter::default();
+    let mut proj = Projector::default();
+    proj.feed(
+        json!({"type":"message","id":"msg_2","model":"claude-opus-4-6","content":[{"type":"thinking","thinking":"abc"},{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"output_tokens":30,"output_tokens_details":{"thinking_tokens":18}}})
+            .to_string()
+            .as_bytes(),
+    );
+    meter_pos.observe(&proj.finish().unwrap(), 0);
+    assert_eq!(meter_pos.tokens.reasoning, Some(18));
+
+    // 2) Existing v13 DB upgrade backfills live .jsonl via source_generation_claude without deleting cleaned history.
+    let dir = tempfile::tempdir().unwrap();
+    let claude_home = dir.path().join("claude_home");
+    let proj_dir = claude_home.join("projects/demo");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    let jsonl = proj_dir.join("session.jsonl");
+    let line1 = json!({"type":"assistant","sessionId":"sess-1","timestamp":"2026-11-16T10:00:00Z","message":{"id":"msg_live","model":"claude-opus-4-6","stop_reason":null,"content":[{"type":"thinking","thinking":"step"}],"usage":{"input_tokens":100,"output_tokens":1,"output_tokens_details":{"thinking_tokens":0}}}});
+    let line2 = json!({"type":"assistant","sessionId":"sess-1","timestamp":"2026-11-16T10:00:02Z","message":{"id":"msg_live","model":"claude-opus-4-6","stop_reason":"end_turn","content":[{"type":"text","text":"answer"}],"usage":{"input_tokens":100,"output_tokens":40,"output_tokens_details":{"thinking_tokens":25}}}});
+    let line3 = json!({"type":"assistant","sessionId":"sess-1","timestamp":"2026-11-16T10:00:05Z","message":{"id":"msg_false_zero","model":"claude-opus-4-6","stop_reason":null,"content":[{"type":"thinking","thinking":"hidden"}],"usage":{"input_tokens":50,"output_tokens":1,"output_tokens_details":{"thinking_tokens":0}}}});
+    let line4 = json!({"type":"assistant","sessionId":"sess-1","timestamp":"2026-11-16T10:00:06Z","message":{"id":"msg_false_zero","model":"claude-opus-4-6","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":50,"output_tokens":10,"output_tokens_details":{"thinking_tokens":0}}}});
+    std::fs::write(&jsonl, format!("{line1}\n{line2}\n{line3}\n{line4}\n")).unwrap();
+
+    let prices = Pricing::new(dir.path()).unwrap();
+    let settings = Settings::default();
+    {
+        let mut store = Store::open(dir.path()).unwrap();
+        // Seed an old cleaned-up session record and a pre-v0.30 proxy record + old session record without reasoning.
+        let mut archived = request(
+            "cleaned-history",
+            "claude",
+            "claude-opus-4-6",
+            Operation::Model,
+        );
+        archived.attempts[0].tokens.reasoning = None;
+        let mut proxy = request("proxy-live", "proxy", "claude-opus-4-6", Operation::Model);
+        proxy.started_at = 1_794_823_200_000;
+        proxy.finished_at = Some(1_794_823_202_000);
+        proxy.attempts[0].started_at = 1_794_823_200_000;
+        proxy.attempts[0].response_id = Some(safe_id("msg_live"));
+        proxy.attempts[0].tokens = Tokens {
+            input: Some(100),
+            output: Some(40),
+            ..Default::default()
+        };
+        store.write_batch(&[archived, proxy], None).unwrap();
+        // Simulate pre-v0.30 state: synced at generation 0 before claude_thinking_backfill existed.
+        super::sessions::sync(
+            &mut store,
+            &prices,
+            &settings,
+            "claude",
+            &claude_home,
+            false,
+        )
+        .unwrap();
+        store
+            .connection
+            .execute(
+                "DELETE FROM metadata WHERE key='claude_thinking_backfill'",
+                [],
+            )
+            .unwrap();
+        // Clear reasoning on proxy & session to simulate pre-v0.30 stored state while keeping cursor at EOF.
+        let mut stale_session = store
+            .detail(&safe_id(&format!("claude:{}", safe_id("msg_live"))))
+            .unwrap();
+        stale_session.attempts[0].tokens.reasoning = None;
+        let mut stale_proxy = store.detail(&safe_id("proxy-live")).unwrap();
+        stale_proxy.attempts[0].tokens.reasoning = None;
+        store
+            .write_batch(&[stale_session, stale_proxy], None)
+            .unwrap();
+    }
+
+    // Reopen Store: triggers one-time claude_thinking_backfill + source_generation_claude increment.
+    let mut reopened = Store::open(dir.path()).unwrap();
+    assert_eq!(reopened.source_generation("claude").unwrap(), 1);
+    super::sessions::sync(
+        &mut reopened,
+        &prices,
+        &settings,
+        "claude",
+        &claude_home,
+        false,
+    )
+    .unwrap();
+
+    // Cleaned historical record survives with reasoning == None.
+    let kept_history = reopened.detail(&safe_id("cleaned-history")).unwrap();
+    assert_eq!(kept_history.attempts[0].tokens.reasoning, None);
+
+    // Rescanned live message & deduplicated proxy record both get reasoning == Some(25).
+    let live_proxy = reopened.detail(&safe_id("proxy-live")).unwrap();
+    assert_eq!(live_proxy.attempts[0].tokens.reasoning, Some(25));
+
+    // False-zero message across two lines keeps reasoning == None.
+    let false_zero = reopened
+        .detail(&safe_id(&format!("claude:{}", safe_id("msg_false_zero"))))
+        .unwrap();
+    assert_eq!(false_zero.attempts[0].tokens.reasoning, None);
+
+    // Subsequent reopen does NOT bump source_generation_claude again.
+    drop(reopened);
+    let third = Store::open(dir.path()).unwrap();
+    assert_eq!(third.source_generation("claude").unwrap(), 1);
+}

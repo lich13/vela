@@ -58,17 +58,48 @@ async fn count_filter_is_provider_scoped_and_leaves_no_usage_or_health_failure()
     .await;
     let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
     options(&f, false, false, true);
+    let id = f.gateway.view().providers[0].id.clone();
+    f.edit(Edit::ConcurrencyProvider {
+        id: id.clone(),
+        max_concurrency: 1,
+    });
     f.start().await;
+    // Hold the sole concurrency slot to prove pre-admit filtering returns 404 without queuing.
+    let held = f
+        .gateway
+        .0
+        .admission
+        .acquire(
+            &[f.gateway.route(&id).unwrap()],
+            false,
+            100,
+            &mut super::super::admission::Budget::new(1),
+        )
+        .await
+        .unwrap();
     for path in [
-        "/messages/count_tokens",
+        "/v1/messages/count_tokens",
         "/v1/messages/count_tokens?beta=true",
     ] {
-        let response = request(&f.gateway, path, JSON_REQUEST).await;
+        let response = tokio::time::timeout(
+            Duration::from_millis(300),
+            request(&f.gateway, path, JSON_REQUEST),
+        )
+        .await
+        .expect("filtered count_tokens should bypass queue");
         assert_eq!(response.status(), 404);
         let body = response_bytes(response).await;
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["type"], "not_found_error");
     }
+    // Unprefixed /messages without /v1 is rejected at listener routing.
+    assert_eq!(
+        request(&f.gateway, "/messages/count_tokens", JSON_REQUEST)
+            .await
+            .status(),
+        404
+    );
+    drop(held);
     settled(&f).await;
     assert_eq!(hits.load(Ordering::SeqCst), 0);
     no_new_records(&f.usage, 0).await;
@@ -587,7 +618,7 @@ async fn explicit_compaction_headers_classify_usage_and_suspend_execution_timeou
     settings.retry_budget_seconds = 1;
     f.edit(Edit::Settings { settings });
     f.start().await;
-    for header in ["x-claude-code-compaction", "x-cc-compaction-request"] {
+    for header in ["x-claude-code-compaction"] {
         let client: HttpClient =
             Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));
         let token = f.gateway.0.inner.lock().store.local_token.clone();
@@ -611,7 +642,7 @@ async fn explicit_compaction_headers_classify_usage_and_suspend_execution_timeou
         response_bytes(response).await;
     }
     settled(&f).await;
-    let rows = recorded(&f.usage, 2).await;
+    let rows = recorded(&f.usage, 1).await;
     assert!(rows
         .iter()
         .all(|row| row.attempts[0].operation == Operation::Compaction));
@@ -632,7 +663,11 @@ async fn context_compacted_header_and_prompt_words_are_ordinary_messages() {
     .await;
     let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
     f.start().await;
-    for header in ["x-claude-code-context-compacted", "x-cc-context-compacted"] {
+    for header in [
+        "x-claude-code-context-compacted",
+        "x-cc-context-compacted",
+        "x-cc-compaction-request",
+    ] {
         let client: HttpClient =
             Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));
         let token = f.gateway.0.inner.lock().store.local_token.clone();
@@ -642,11 +677,168 @@ async fn context_compacted_header_and_prompt_words_are_ordinary_messages() {
         response_bytes(response).await;
     }
     settled(&f).await;
-    assert!(recorded(&f.usage, 2)
+    assert!(recorded(&f.usage, 3)
         .await
         .iter()
         .all(|row| row.attempts[0].operation == Operation::Model));
     f.stop().await;
+}
+
+#[tokio::test]
+async fn buffer_advances_phase_to_streaming_and_buffering_only_after_business_tokens() {
+    let ping_sent = Arc::new(tokio::sync::Notify::new());
+    let send_delta = Arc::new(tokio::sync::Notify::new());
+    let delta_sent = Arc::new(tokio::sync::Notify::new());
+    let finish_stream = Arc::new(tokio::sync::Notify::new());
+    let (ps, sd, ds, fs) = (
+        ping_sent.clone(),
+        send_delta.clone(),
+        delta_sent.clone(),
+        finish_stream.clone(),
+    );
+    let upstream = server(move |_, _| {
+        let (ps, sd, ds, fs) = (ps.clone(), sd.clone(), ds.clone(), fs.clone());
+        async move {
+            let stream = async_stream::stream! {
+                yield Ok::<_, BoxError>(Frame::data(Bytes::from_static(
+                    b"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+                )));
+                ps.notify_one();
+                sd.notified().await;
+                yield Ok(Frame::data(Bytes::from_static(PARTIAL)));
+                ds.notify_one();
+                fs.notified().await;
+                yield Ok(Frame::data(Bytes::from_static(
+                    b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                )));
+            };
+            Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(StreamBody::new(stream).boxed_unsync())
+                .unwrap()
+        }
+    })
+    .await;
+    let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
+    options(&f, true, false, false);
+    f.start().await;
+    let gw = f.gateway.clone();
+    let task = tokio::spawn(async move {
+        response_bytes(request(&gw, "/v1/messages", STREAM_REQUEST).await).await
+    });
+    ping_sent.notified().await;
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(f.gateway.view().pending_requests[0].phase, "headers");
+    assert_eq!(f.gateway.freeze_gate().view().streaming, 0);
+
+    send_delta.notify_one();
+    delta_sent.notified().await;
+    super::super::test_support::until(|| {
+        f.gateway
+            .view()
+            .pending_requests
+            .first()
+            .is_some_and(|r| r.phase == "buffering")
+            && f.gateway.freeze_gate().view().streaming == 1
+    })
+    .await;
+
+    finish_stream.notify_one();
+    let bytes = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("discard-partial"));
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn stream_and_initial_rejection_preserve_error_details_and_endless_keeps_circuit_closed() {
+    // 1) Gzipped 400 prompt-too-long on streamed & non-streamed requests preserves type/message/status.
+    let upstream = server(move |_, _| async move {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder
+            .write_all(
+                br#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}"#,
+            )
+            .unwrap();
+        Response::builder()
+            .status(400)
+            .header("content-type", "application/json")
+            .header("content-encoding", "gzip")
+            .body(full(encoder.finish().unwrap()))
+            .unwrap()
+    })
+    .await;
+    let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
+    options(&f, true, true, false);
+    f.start().await;
+    let sse_err = String::from_utf8(
+        response_bytes(request(&f.gateway, "/v1/messages", STREAM_REQUEST).await)
+            .await
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(sse_err.contains("invalid_request_error"), "{sse_err}");
+    assert!(sse_err.contains("prompt is too long"), "{sse_err}");
+
+    // HTTP 200 SSE carrying initial invalid_request_error maps to HTTP 400 on non-streamed fallback.
+    let sse_reject = server(move |_, _| async move {
+        sse(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long\"}}\n\n".as_slice())
+    })
+    .await;
+    let f2 = Fixture::new(ClientId::Claude, &[sse_reject.url("/v1")]).await;
+    options(&f2, true, true, false);
+    f2.start().await;
+    let non_stream = request(&f2.gateway, "/v1/messages", JSON_REQUEST).await;
+    assert_eq!(non_stream.status(), 400);
+    let body2 = String::from_utf8(response_bytes(non_stream).await.to_vec()).unwrap();
+    assert!(body2.contains("prompt is too long"), "{body2}");
+    f2.stop().await;
+    f.stop().await;
+
+    // 2) Endless retries do not open circuit or count failures, but expose health.cause during retry.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    let flaky = server(move |_, _| {
+        let seen = seen.clone();
+        async move {
+            let n = seen.fetch_add(1, Ordering::SeqCst);
+            if n < 3 {
+                Response::builder()
+                    .status(if n == 0 { 429 } else { 502 })
+                    .body(full("bad gateway"))
+                    .unwrap()
+            } else {
+                sse(COMPLETE)
+            }
+        }
+    })
+    .await;
+    let f3 = Fixture::new(ClientId::Claude, &[flaky.url("/v1")]).await;
+    options(&f3, true, true, false);
+    let mut settings = f3.gateway.view().settings;
+    settings.failure_threshold = 2;
+    settings.transient_failure_threshold = 2;
+    f3.edit(Edit::Settings { settings });
+    f3.start().await;
+    let gw3 = f3.gateway.clone();
+    let task3 = tokio::spawn(async move {
+        response_bytes(request(&gw3, "/v1/messages", STREAM_REQUEST).await).await
+    });
+    super::super::test_support::until(|| {
+        hits.load(Ordering::SeqCst) >= 2 && f3.gateway.view().providers[0].health.cause.is_some()
+    })
+    .await;
+    let mid = &f3.gateway.view().providers[0].health;
+    assert_eq!(mid.failures, 0);
+    assert_eq!(mid.state, super::super::circuit::CircuitState::Closed);
+    let done = tokio::time::timeout(Duration::from_secs(15), task3)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&done).contains("complete"));
+    let after = &f3.gateway.view().providers[0].health;
+    assert_eq!(after.failures, 0);
+    assert!(after.cause.is_none());
+    f3.stop().await;
 }
 
 #[tokio::test]
@@ -828,4 +1020,39 @@ async fn endless_retries_empty_200_and_first_event_timeout_before_business_deliv
         assert_eq!(hits.load(Ordering::SeqCst), 2);
         f.stop().await;
     }
+}
+
+#[tokio::test]
+async fn terminal_gateway_and_claude_rejections_disable_client_sdk_blind_retries() {
+    let upstream = server(|_, _| async {
+        Response::builder()
+            .status(429)
+            .header("content-type", "application/json")
+            .header("retry-after", "10")
+            .body(full(
+                r#"{"error":{"type":"rate_limit_error","message":"rate limit"}}"#,
+            ))
+            .unwrap()
+    })
+    .await;
+    let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
+    options(&f, true, false, false);
+    f.edit(Edit::Mode {
+        mode: "auto".into(),
+    });
+    let mut settings = f.gateway.view().settings;
+    settings.retry_budget_seconds = 1;
+    settings.rate_limit_seconds = 10;
+    f.edit(Edit::Settings { settings });
+    f.start().await;
+    let response = request(&f.gateway, "/v1/messages", JSON_REQUEST).await;
+    assert_eq!(response.status(), 504);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-should-retry")
+            .and_then(|v| v.to_str().ok()),
+        Some("false")
+    );
+    f.stop().await;
 }

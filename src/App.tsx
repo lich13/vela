@@ -98,8 +98,25 @@ export default function App() {
     pageRef = useRef(page);
   const gatewayDirty = useRef(false);
   const usageDirty = useRef(false);
+  const dialogDirty = useRef(false);
+  const agDirty = useRef(false);
+  const exchangeDirty = useRef(false);
+  const providerImportDirty = useRef(false);
+  const closingMain = useRef(false);
   const usageDraftChanged = useCallback((value: boolean) => {
     usageDirty.current = value;
+  }, []);
+  const dialogDraftChanged = useCallback((value: boolean) => {
+    dialogDirty.current = value;
+  }, []);
+  const agDraftChanged = useCallback((value: boolean) => {
+    agDirty.current = value;
+  }, []);
+  const exchangeDraftChanged = useCallback((value: boolean) => {
+    exchangeDirty.current = value;
+  }, []);
+  const providerImportDraftChanged = useCallback((value: boolean) => {
+    providerImportDirty.current = value;
   }, []);
   const [focusEvent, setFocusEvent] = useState<{
     id: string;
@@ -126,7 +143,7 @@ export default function App() {
       if (next === pageRef.current) return;
       if (!(await flushTestPrompt())) return;
       if (
-        (gatewayDirty.current || usageDirty.current) &&
+        (gatewayDirty.current || usageDirty.current || agDirty.current) &&
         !(await confirmAction("离开当前页面会丢弃未保存的表单。"))
       )
         return;
@@ -175,7 +192,105 @@ export default function App() {
     let receivedAccountState = false;
     let receivedLoginState = false;
     const events = subscriptions((e) => setError(errorOf(e).message));
-    void Promise.all([command("get_state"), command("get_login")])
+    const hasUnsavedDraft = () =>
+      gatewayDirty.current ||
+      usageDirty.current ||
+      dirtyRef.current ||
+      dialogDirty.current ||
+      agDirty.current ||
+      exchangeDirty.current;
+    const readyWatches = Promise.all([
+      events.watch("switch-state", (next) => {
+        receivedAccountState = true;
+        setState(next);
+      }),
+      events.watch("switch-notice", setMessage),
+      events.watch("switch-error", (p) => setError(errorOf(p).message)),
+      events.watch("navigate", (p) =>
+        p === "settings"
+          ? (async () => {
+              if (!(await flushTestPrompt())) return;
+              if (
+                hasUnsavedDraft() &&
+                !(await confirmAction("打开设置会丢弃未保存的草稿。"))
+              )
+                return;
+              if (disposed) return;
+              setPage("accounts");
+              setDirty(false);
+              setThemePreview(null);
+              setDialog("settings");
+            })()
+          : navigate(
+              p === "config" ||
+                p === "gateway" ||
+                p === "freeze" ||
+                p === "logs" ||
+                p === "usage"
+                ? p
+                : "accounts",
+            ),
+      ),
+      events.watch("provider-settings", async (p) => {
+        if (!(await flushTestPrompt())) return;
+        if (
+          hasUnsavedDraft() &&
+          !(await confirmAction(
+            `${p.action === "testing" ? "打开连接测试" : "打开白名单"}会丢弃未保存的草稿。`,
+          ))
+        )
+          return;
+        if (disposed) return;
+        setPage("gateway");
+        setDirty(false);
+        setFocusProvider({
+          ...p,
+          sequence: Date.now(),
+        });
+      }),
+      events.watch("event-log", async (p) => {
+        if (!(await flushTestPrompt())) return;
+        if (
+          hasUnsavedDraft() &&
+          !(await confirmAction("查看日志会丢弃未保存的草稿。"))
+        )
+          return;
+        if (disposed) return;
+        setPage("logs");
+        setDirty(false);
+        setFocusEvent({ ...p, sequence: Date.now() });
+      }),
+      events.watch("login-state", (next) => {
+        receivedLoginState = true;
+        setLogin(next);
+      }),
+      events.watch("main-close-requested", async (payload) => {
+        if (disposed || closingMain.current) return;
+        closingMain.current = true;
+        try {
+          let wasHidden = Boolean(payload?.hidden) || document.hidden;
+          const restoreIfHidden = async () => {
+            if (wasHidden) {
+              wasHidden = false;
+              await command("open_main", {}).catch(() => {});
+            }
+          };
+          if (!(await flushTestPrompt(restoreIfHidden))) return;
+          if (hasUnsavedDraft() || providerImportDirty.current) {
+            await restoreIfHidden();
+            if (!(await confirmAction("关闭窗口会丢弃未保存的修改。"))) return;
+          }
+          if (!disposed) {
+            await command("close_main");
+          }
+        } catch (e) {
+          if (!disposed) setError(errorOf(e).message);
+        } finally {
+          closingMain.current = false;
+        }
+      }),
+    ]);
+    void Promise.all([command("get_state"), command("get_login"), readyWatches])
       .then(([s, l]) => {
         if (!disposed) {
           if (!receivedAccountState) setState(s);
@@ -192,73 +307,14 @@ export default function App() {
             });
         }
       })
-      .catch((e) => setError(errorOf(e).message));
-    events.watch("switch-state", (next) => {
-      receivedAccountState = true;
-      setState(next);
-    });
-    events.watch("switch-notice", setMessage);
-    events.watch("switch-error", (p) => setError(errorOf(p).message));
-    events.watch("navigate", (p) =>
-      p === "settings"
-        ? (async () => {
-            if (!(await flushTestPrompt())) return;
-            if (
-              (gatewayDirty.current ||
-                usageDirty.current ||
-                dirtyRef.current) &&
-              !(await confirmAction("打开设置会丢弃未保存的草稿。"))
-            )
-              return;
-            if (disposed) return;
-            setPage("accounts");
-            setDirty(false);
-            setThemePreview(null);
-            setDialog("settings");
-          })()
-        : navigate(
-            p === "config" ||
-            p === "gateway" ||
-            p === "freeze" ||
-            p === "logs" ||
-            p === "usage"
-              ? p
-              : "accounts",
-          ),
-    );
-    events.watch("provider-settings", async (p) => {
-      if (!(await flushTestPrompt())) return;
-      if (
-        (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
-        !(await confirmAction(
-          `${p.action === "testing" ? "打开连接测试" : "打开白名单"}会丢弃未保存的草稿。`,
-        ))
-      )
-        return;
-      if (disposed) return;
-      setPage("gateway");
-      setDirty(false);
-      setFocusProvider({
-        ...p,
-        sequence: Date.now(),
+      .catch((e) => {
+        if (!disposed) {
+          setError(errorOf(e).message);
+          void readyWatches.then(() => {
+            if (!disposed) void command("frontend_ready").catch(() => {});
+          });
+        }
       });
-    });
-    events.watch("event-log", async (p) => {
-      if (!(await flushTestPrompt())) return;
-      if (
-        (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
-        !(await confirmAction("查看日志会丢弃未保存的草稿。"))
-      )
-        return;
-      if (disposed) return;
-      setPage("logs");
-      setDirty(false);
-      setFocusEvent({ ...p, sequence: Date.now() });
-    });
-    events.watch("login-state", (next) => {
-      receivedLoginState = true;
-      setLogin(next);
-    });
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const change = () => setSystemDark(media.matches);
     media.addEventListener("change", change);
@@ -451,7 +507,17 @@ export default function App() {
                       (accountClient === "codex" ? " active" : "")
                     }
                     aria-pressed={accountClient === "codex"}
-                    onClick={() => setAccountClient("codex")}
+                    onClick={() => {
+                      void (async () => {
+                        if (accountClient === "codex") return;
+                        if (
+                          agDirty.current &&
+                          !(await confirmAction("切换客户端会丢弃未保存的表单。"))
+                        )
+                          return;
+                        setAccountClient("codex");
+                      })();
+                    }}
                   >
                     Codex
                   </button>
@@ -504,7 +570,11 @@ export default function App() {
               )}
             </div>
             {accountClient === "antigravity" ? (
-              <AntigravityAccounts notify={notify} setError={setError} />
+              <AntigravityAccounts
+                notify={notify}
+                setError={setError}
+                onDirtyChange={agDraftChanged}
+              />
             ) : (
               <>
             {(state?.currentState === "unsaved" ||
@@ -770,7 +840,11 @@ export default function App() {
           </button>
         </div>
       )}
-      <ProviderImports notify={notify} blocked={dirty} />
+      <ProviderImports
+        notify={notify}
+        blocked={dirty}
+        onDirtyChange={providerImportDraftChanged}
+      />
       {dialog && state && (
         <AppModal
           title={
@@ -816,6 +890,7 @@ export default function App() {
             <SettingsForm
               preferences={state.preferences}
               onThemePreview={setThemePreview}
+              onDirtyChange={dialogDraftChanged}
               onDone={(s) => {
                 setState(s);
                 setThemePreview(null);
@@ -825,6 +900,7 @@ export default function App() {
           ) : (
             <AccountEdit
               dialog={dialog}
+              onDirtyChange={dialogDraftChanged}
               onDone={(s) => {
                 setState(s);
                 setDialog(null);
@@ -840,6 +916,7 @@ export default function App() {
             close={() => setExchangeMode(null)}
             update={setState}
             notify={notify}
+            onDirtyChange={exchangeDraftChanged}
           />
         </Suspense>
       )}

@@ -804,3 +804,62 @@ it("shows association errors recorded before frontend event subscriptions", asyn
     await screen.findByText("系统需要确认 CC Switch 链接关联"),
   ).toBeInTheDocument();
 });
+
+describe("window lifecycle and close draft guard", () => {
+  it("destroys clean main window immediately on main-close-requested", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "账号", level: 1 });
+    await waitFor(() =>
+      expect(mocks.command).toHaveBeenCalledWith("frontend_ready"),
+    );
+    await act(async () => {
+      await mocks.listeners.get("main-close-requested")?.({ hidden: false });
+    });
+    expect(mocks.command).toHaveBeenCalledWith("close_main");
+  });
+
+  it("restores hidden main window before confirming unsaved settings or Antigravity drafts on close", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("heading", { name: "账号", level: 1 });
+
+    // Open Settings and modify theme without saving -> dirty dialog draft
+    await user.click(screen.getByRole("button", { name: /^设置/ }));
+    await user.click(screen.getByRole("button", { name: "浅色" }));
+
+    await act(async () => {
+      void mocks.listeners.get("main-close-requested")?.({ hidden: true });
+      // Re-entrant close request while confirmation is open must be ignored
+      void mocks.listeners.get("main-close-requested")?.({ hidden: true });
+    });
+
+    const confirmDialog = await screen.findByRole("dialog", {
+      name: "确认操作",
+    });
+    expect(mocks.command).toHaveBeenCalledWith("open_main", {});
+    expect(
+      mocks.command.mock.calls.some(([name]) => name === "close_main"),
+    ).toBe(false);
+
+    // Cancel keeps draft open
+    await user.click(
+      within(confirmDialog).getByRole("button", { name: "取消" }),
+    );
+    expect(
+      mocks.command.mock.calls.some(([name]) => name === "close_main"),
+    ).toBe(false);
+
+    // Confirming close invokes close_main
+    await act(async () => {
+      void mocks.listeners.get("main-close-requested")?.({ hidden: false });
+    });
+    await user.click(
+      within(
+        await screen.findByRole("dialog", { name: "确认操作" }),
+      ).getByRole("button", { name: "放弃修改" }),
+    );
+    await waitFor(() =>
+      expect(mocks.command).toHaveBeenCalledWith("close_main"),
+    );
+  });
+});

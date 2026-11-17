@@ -168,6 +168,10 @@ impl Service {
         }
     }
 
+    pub fn clear(&self) {
+        self.pending.lock().take();
+    }
+
     pub fn load(path: &Path, platform: &str, kind: &str) -> Result<Value> {
         let bytes = storage::read_bounded(path, MAX_FILE)?
             .ok_or_else(|| invalid("请先选择完整的 Sub2API 模板"))?;

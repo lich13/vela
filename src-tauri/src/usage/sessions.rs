@@ -773,8 +773,39 @@ fn claude(v: &Value, c: &mut Cursor, at: i64) -> Option<Record> {
     let m = &v["message"];
     let mid = safe_id(m["id"].as_str()?);
     let u = m.get("usage")?;
-    let tokens = parse_tokens(u, true);
+    let mut tokens = parse_tokens(u, true);
+    let prior_entry = c.message_usage.get(&mid).cloned();
+    let (prior_thinking, prior_reasoning, prior_hash) = prior_entry
+        .as_deref()
+        .and_then(|entry| {
+            let (t_flag, rest) = entry.split_once(':')?;
+            let (pos_r, hash) = rest.split_once(':')?;
+            Some((
+                t_flag == "1",
+                pos_r.parse::<u64>().ok().filter(|n| *n > 0),
+                hash,
+            ))
+        })
+        .unwrap_or((false, None, prior_entry.as_deref().unwrap_or("")));
+    let thinking = prior_thinking || has_thinking_block(m);
+    if tokens.reasoning.is_none_or(|n| n == 0) {
+        if let Some(pos) = prior_reasoning {
+            tokens.reasoning = Some(pos);
+        } else if thinking {
+            tokens.reasoning = None;
+        }
+    }
     if tokens.total().unwrap_or(0) == 0 {
+        if thinking != prior_thinking {
+            c.message_usage.insert(
+                mid,
+                format!(
+                    "{}:{}:{prior_hash}",
+                    u8::from(thinking),
+                    prior_reasoning.unwrap_or(0)
+                ),
+            );
+        }
         return None;
     }
     let complete = m.get("stop_reason").is_some_and(|v| !v.is_null());
@@ -783,14 +814,21 @@ fn claude(v: &Value, c: &mut Cursor, at: i64) -> Option<Record> {
     if prior.as_ref().is_some_and(|(_, output, done)| {
         *done && !complete
             || *output > tokens.output
-            || *done == complete && c.message_usage.get(&mid) == Some(&usage_hash)
+            || *done == complete && prior_hash == usage_hash
     }) {
         return None;
     }
     let start = prior
         .map(|(at, _, _)| at)
         .or_else(|| parent.and_then(|id| c.chain.get(&id).map(|(_, at)| *at)));
-    c.message_usage.insert(mid.clone(), usage_hash);
+    c.message_usage.insert(
+        mid.clone(),
+        format!(
+            "{}:{}:{usage_hash}",
+            u8::from(thinking),
+            tokens.reasoning.filter(|n| *n > 0).unwrap_or(0)
+        ),
+    );
     c.messages
         .insert(mid.clone(), (start.unwrap_or(at), tokens.output, complete));
     if c.messages.len() > 128 {

@@ -233,7 +233,7 @@ pub fn receive(app: &tauri::AppHandle, urls: impl IntoIterator<Item = String>) {
             }
             Ok(false) => {}
             Err(error) => {
-                let _ = app.emit("switch-error", error);
+                crate::emit_switch_error(app, error);
                 let _ = crate::show(app, None);
             }
         }

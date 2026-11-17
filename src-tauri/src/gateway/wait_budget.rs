@@ -286,6 +286,22 @@ impl WaitBudget {
             let _ = registry.0.events.send(());
         }
     }
+    pub fn buffering(&self) {
+        let mut state = self.shared.state.lock();
+        let updated = state
+            .active
+            .as_mut()
+            .filter(|active| !active.compaction_execution && active.view.phase != "buffering")
+            .map(|active| active.view.phase = "buffering".into())
+            .is_some();
+        drop(state);
+        if updated {
+            self.shared.changes.send_replace(());
+            if let Some(registry) = &self.shared.registry {
+                let _ = registry.0.events.send(());
+            }
+        }
+    }
     pub fn deadline(&self) -> Option<Instant> {
         self.shared.state.lock().active.as_ref().map(|p| p.deadline)
     }

@@ -623,15 +623,6 @@ pub fn commit_store_for(
     }
     Ok(())
 }
-pub(super) fn claude_hint_unchanged(data: &Path, home: &Path, text: &str) -> Result<bool> {
-    if load(data)?.is_none_or(|record| record.claude_hint.is_none()) {
-        return Ok(true);
-    }
-    let raw = storage::read_user_optional(&ClientId::Claude.config(home))?;
-    let current = std::str::from_utf8(raw.as_deref().unwrap_or(b"{}"))
-        .map_err(|_| AppError::new(code::CLAUDE_CONFIG, "配置不是 UTF-8"))?;
-    Ok(super::claude_config::hint(current)? == super::claude_config::hint(text)?)
-}
 fn detach_record(data: &Path, mut record: Journal) -> Result<()> {
     let current = if record.grok.is_none() {
         let home = record

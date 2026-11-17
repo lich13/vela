@@ -815,7 +815,6 @@ function endReason(a: Attempt): string {
         upstream_disconnected: "上游提前断开",
         connect_failed: "上游连接失败",
         first_byte_timeout: "等待上游响应超时",
-        wait_budget_exhausted: "排队与重试等待预算已耗尽",
         stream_timeout: "读取上游流超时",
         parse_incomplete: "响应解析不完整",
         unsettled: "结束原因未确认",

@@ -186,6 +186,7 @@ pub enum Outcome {
     RateLimited(Option<Duration>),
     CapacityLimited(Option<Duration>),
     HardRejected(Option<Duration>),
+    Observed,
     Neutral,
 }
 pub struct Permit {
@@ -364,7 +365,7 @@ impl Permit {
             s.cause = self.failure_event.as_ref().map(Cause::from_event);
         }
         match outcome {
-            Outcome::Neutral => (),
+            Outcome::Neutral | Outcome::Observed => (),
             Outcome::RateLimited(retry) => {
                 s.rate_streak = s.rate_streak.saturating_add(1);
                 let bytes = uuid::Uuid::new_v4().into_bytes();

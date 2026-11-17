@@ -3,8 +3,10 @@ import { command } from "./bridge";
 import { confirmAction } from "./confirmation";
 import { errorOf } from "./types";
 
-let beforeLeave: (() => Promise<boolean>) | null = null;
-export const flushTestPrompt = () => beforeLeave?.() ?? Promise.resolve(true);
+let beforeLeave: ((onBeforeConfirm?: () => Promise<void>) => Promise<boolean>) | null =
+  null;
+export const flushTestPrompt = (onBeforeConfirm?: () => Promise<void>) =>
+  beforeLeave?.(onBeforeConfirm) ?? Promise.resolve(true);
 
 export function useTestPrompt(initial: string | undefined) {
   const [prompt, setPrompt] = useState<string | null>(null);
@@ -62,8 +64,9 @@ export function useTestPrompt(initial: string | undefined) {
     [flush],
   );
   useEffect(() => {
-    const leave = async () => {
+    const leave = async (onBeforeConfirm?: () => Promise<void>) => {
       if (await flush()) return true;
+      await onBeforeConfirm?.();
       if (!(await confirmAction("全局测试文案尚未保存。放弃本次输入并离开？")))
         return false;
       draft.current = saved.current;

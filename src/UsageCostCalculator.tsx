@@ -1,12 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { command } from "./bridge";
 import { Drawer } from "./UsageDrawer";
 import { errorOf, type ClientId } from "./types";
 import type {
+  CalculatorModel,
   CostCalculation,
   CostCalculatorInput,
   UsageFilter,
 } from "./usage-types";
+
+type FiveTuple = [string, string, string, string, string];
+type SubRatioKey =
+  | "outputRatio"
+  | "cacheReadRatio"
+  | "cacheWrite5mRatio"
+  | "cacheWrite1hRatio";
 
 const clients: [ClientId, string][] = [
   ["claude", "Claude Code"],
@@ -14,15 +22,89 @@ const clients: [ClientId, string][] = [
   ["grok", "Grok Build"],
   ["dsh", "DeepSeek Harness"],
 ];
-const quantities = ["输入", "输出", "缓存读取", "缓存创建"];
-const ratios: [Exclude<keyof CostCalculatorInput, "tokens">, string][] = [
+const quantities = [
+  "输入",
+  "输出",
+  "缓存读取",
+  "创建 5 分钟缓存",
+  "创建 1 小时缓存",
+] as const;
+const subRatioKeys: SubRatioKey[] = [
+  "outputRatio",
+  "cacheReadRatio",
+  "cacheWrite5mRatio",
+  "cacheWrite1hRatio",
+];
+const ratioFields: [
+  keyof Omit<CostCalculatorInput, "rates" | "tokens">,
+  string,
+][] = [
   ["basePrice", "基准价格 / 美元每百万"],
+  ["groupRatio", "分组倍率"],
   ["modelRatio", "模型倍率"],
   ["outputRatio", "输出倍率"],
-  ["groupRatio", "分组倍率"],
   ["cacheReadRatio", "缓存读取倍率"],
-  ["cacheWriteRatio", "缓存创建倍率"],
+  ["cacheWrite5mRatio", "创建 5 分钟缓存倍率"],
+  ["cacheWrite1hRatio", "创建 1 小时缓存倍率"],
 ];
+
+const SCALE8 = 100_000_000n;
+function pow10(n: number): bigint {
+  return 10n ** BigInt(n);
+}
+function parseDec(raw: string): { num: bigint; scale: number } | null {
+  const s = raw.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(s)) return null;
+  const dot = s.indexOf(".");
+  if (dot < 0) return { num: BigInt(s), scale: 0 };
+  const frac = s.slice(dot + 1);
+  return { num: BigInt(s.slice(0, dot) + frac), scale: frac.length };
+}
+function formatScaled(scaled: bigint, scale: number): string {
+  if (scaled === 0n) return "0";
+  const base = pow10(scale);
+  const whole = scaled / base;
+  const rem = scaled % base;
+  if (rem === 0n) return whole.toString();
+  const frac = rem.toString().padStart(scale, "0").replace(/0+$/, "");
+  return `${whole.toString()}.${frac}`;
+}
+function mul8(aStr: string, bStr: string): string | null {
+  const a = parseDec(aStr),
+    b = parseDec(bStr);
+  if (!a || !b) return null;
+  const prod = a.num * b.num;
+  const totalScale = a.scale + b.scale;
+  if (totalScale <= 8) {
+    return formatScaled(prod * pow10(8 - totalScale), 8);
+  }
+  const denom = pow10(totalScale - 8);
+  const rounded = (2n * prod + denom) / (2n * denom);
+  return formatScaled(rounded, 8);
+}
+function mulExact(aStr: string, bStr: string): string | null {
+  const a = parseDec(aStr),
+    b = parseDec(bStr);
+  if (!a || !b) return null;
+  return formatScaled(a.num * b.num, a.scale + b.scale);
+}
+function div8(aStr: string, bStr: string): string | null {
+  const a = parseDec(aStr),
+    b = parseDec(bStr);
+  if (!a || !b || b.num === 0n) return null;
+  const num = a.num * SCALE8 * pow10(b.scale);
+  const denom = b.num * pow10(a.scale);
+  const rounded = (2n * num + denom) / (2n * denom);
+  return formatScaled(rounded, 8);
+}
+function isPositive(raw: string): boolean {
+  const d = parseDec(raw);
+  return d !== null && d.num > 0n;
+}
+function isZero(raw: string): boolean {
+  const d = parseDec(raw);
+  return d !== null && d.num === 0n;
+}
 
 export default function UsageCostCalculator({
   filter,
@@ -40,37 +122,174 @@ export default function UsageCostCalculator({
   const [providers, setProviders] = useState<{ id: string; name: string }[]>(
     [],
   );
+  const [models, setModels] = useState<CalculatorModel[]>([]);
   const [model, setModel] = useState(filter.model ?? "");
+  const [unitPrices, setUnitPrices] = useState<FiveTuple>([
+    "2",
+    "2",
+    "2",
+    "2",
+    "2",
+  ]);
+  const [exactRates, setExactRates] = useState<FiveTuple | null>(null);
   const [values, setValues] = useState({
     basePrice: "2",
     modelRatio: "1",
     outputRatio: "1",
     cacheReadRatio: "1",
-    cacheWriteRatio: "1",
+    cacheWrite5mRatio: "1",
+    cacheWrite1hRatio: "1",
     groupRatio: "1",
   });
-  const [tokens, setTokens] = useState(["0", "0", "0", "0"]);
+  const [tokens, setTokens] = useState<FiveTuple>(["0", "0", "0", "0", "0"]);
   const [result, setResult] = useState<CostCalculation | null>(null);
   const [error, setError] = useState("");
-  const [providerError, setProviderError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [reload, setReload] = useState(0);
+  const editedRef = useRef(false);
+
+  const applyModelRates = (rates: FiveTuple) => {
+    setUnitPrices(rates);
+    setExactRates(rates);
+    setValues((prev) => {
+      const base = isPositive(prev.basePrice) ? prev.basePrice : "2";
+      const modelRatio = div8(rates[0], base) ?? prev.modelRatio;
+      const pInPos = isPositive(rates[0]);
+      const pInZero = isZero(rates[0]);
+      const sub = (idx: 1 | 2 | 3 | 4, fallback: string) =>
+        pInPos ? (div8(rates[idx], rates[0]) ?? fallback) : pInZero ? "0" : fallback;
+      return {
+        ...prev,
+        basePrice: base,
+        modelRatio,
+        outputRatio: sub(1, prev.outputRatio),
+        cacheReadRatio: sub(2, prev.cacheReadRatio),
+        cacheWrite5mRatio: sub(3, prev.cacheWrite5mRatio),
+        cacheWrite1hRatio: sub(4, prev.cacheWrite1hRatio),
+      };
+    });
+  };
+
   useEffect(() => {
     let active = true;
     setProviders([]);
-    setProviderError("");
-    void command("get_gateway", { clientId: client })
-      .then((view) => {
-        if (active)
-          setProviders(view.providers.map(({ id, name }) => ({ id, name })));
-      })
-      .catch((e) => {
-        if (active) setProviderError(errorOf(e).message);
-      });
+    setModels([]);
+    void Promise.all([
+      command("get_gateway", { clientId: client }).catch(() => null),
+      command("get_usage_calculator_models", { client }).catch(() => []),
+    ]).then(([view, usedModels]) => {
+      if (!active) return;
+      if (view) {
+        setProviders(view.providers.map(({ id, name }) => ({ id, name })));
+      }
+      setModels(usedModels);
+      if (!editedRef.current && model) {
+        const matched = usedModels.find((item) => item.model === model);
+        if (matched?.rates) applyModelRates(matched.rates);
+      }
+    });
     return () => {
       active = false;
     };
-  }, [client, reload]);
+  }, [client]);
+
+  const updateUnitPrice = (index: number, nextPrice: string) => {
+    editedRef.current = true;
+    const nextPrices = unitPrices.map((v, i) =>
+      i === index ? nextPrice : v,
+    ) as FiveTuple;
+    setUnitPrices(nextPrices);
+    setExactRates(nextPrices);
+    if (index === 0) {
+      if (!parseDec(nextPrice)) return;
+      setValues((prev) => {
+        const base =
+          !isPositive(prev.basePrice) && isPositive(nextPrice)
+            ? "2"
+            : prev.basePrice;
+        const modelRatio = isPositive(base)
+          ? (div8(nextPrice, base) ?? prev.modelRatio)
+          : "0";
+        const pInPos = isPositive(nextPrice);
+        const pInZero = isZero(nextPrice);
+        const sub = (idx: 1 | 2 | 3 | 4, fallback: string) =>
+          pInPos
+            ? (div8(nextPrices[idx], nextPrice) ?? fallback)
+            : pInZero
+              ? "0"
+              : fallback;
+        return {
+          ...prev,
+          basePrice: base,
+          modelRatio,
+          outputRatio: sub(1, prev.outputRatio),
+          cacheReadRatio: sub(2, prev.cacheReadRatio),
+          cacheWrite5mRatio: sub(3, prev.cacheWrite5mRatio),
+          cacheWrite1hRatio: sub(4, prev.cacheWrite1hRatio),
+        };
+      });
+      return;
+    }
+    if (!parseDec(nextPrice)) return;
+    const key = subRatioKeys[index - 1];
+    setValues((prev) => ({
+      ...prev,
+      [key]: isPositive(nextPrices[0])
+        ? (div8(nextPrice, nextPrices[0]) ?? prev[key])
+        : isZero(nextPrices[0])
+          ? "0"
+          : prev[key],
+    }));
+  };
+
+  const updateRatio = (
+    key: keyof typeof values,
+    nextVal: string,
+  ) => {
+    editedRef.current = true;
+    const nextValues = { ...values, [key]: nextVal };
+    setValues(nextValues);
+    if (key === "groupRatio") return;
+    if (!parseDec(nextVal)) {
+      setExactRates(null);
+      return;
+    }
+    if (key === "basePrice" || key === "modelRatio") {
+      setExactRates(null);
+      const pIn = mul8(nextValues.basePrice, nextValues.modelRatio);
+      if (pIn === null) return;
+      const pInExact =
+        mulExact(nextValues.basePrice, nextValues.modelRatio) ?? pIn;
+      setUnitPrices([
+        pIn,
+        mul8(pInExact, nextValues.outputRatio) ?? unitPrices[1],
+        mul8(pInExact, nextValues.cacheReadRatio) ?? unitPrices[2],
+        mul8(pInExact, nextValues.cacheWrite5mRatio) ?? unitPrices[3],
+        mul8(pInExact, nextValues.cacheWrite1hRatio) ?? unitPrices[4],
+      ]);
+      return;
+    }
+    const subIdx = subRatioKeys.indexOf(key as SubRatioKey);
+    if (subIdx >= 0) {
+      const priceIdx = subIdx + 1;
+      const computed = mul8(unitPrices[0], nextVal);
+      if (computed !== null) {
+        setUnitPrices(
+          unitPrices.map((v, i) => (i === priceIdx ? computed : v)) as FiveTuple,
+        );
+      }
+      if (exactRates) {
+        const exact = mulExact(exactRates[0], nextVal);
+        setExactRates(
+          exact !== null
+            ? (exactRates.map((v, i) =>
+                i === priceIdx ? exact : v,
+              ) as FiveTuple)
+            : null,
+        );
+      }
+    }
+  };
+
   const loadUsage = async () => {
     setBusy(true);
     setError("");
@@ -87,35 +306,49 @@ export default function UsageCostCalculator({
       });
       if (!totals.attempts) throw new Error("当前范围没有该供应商的网关用量");
       const t = totals.tokens;
-      setTokens(
-        [t.input, t.output, t.cacheRead, t.cacheWrite].map((value) =>
-          value == null ? "" : String(value),
-        ),
-      );
+      const aggregate = t.cacheWrite ?? 0;
+      let cw5m = t.cacheWrite5m ?? 0;
+      let cw1h = t.cacheWrite1h ?? 0;
+      const sum = cw5m + cw1h;
+      if (aggregate > 0 && sum > aggregate) {
+        cw5m = Number(
+          (BigInt(aggregate) * BigInt(cw5m) + BigInt(sum) / 2n) / BigInt(sum),
+        );
+        cw1h = aggregate - cw5m;
+      } else if (aggregate > sum) {
+        cw5m += aggregate - sum;
+      }
+      setTokens([
+        String(t.input ?? 0),
+        String(t.output ?? 0),
+        String(t.cacheRead ?? 0),
+        String(cw5m),
+        String(cw1h),
+      ]);
     } catch (e) {
       setError(errorOf(e).message);
     } finally {
       setBusy(false);
     }
   };
+
+  const selectedUsedModel = models.some((m) => m.model === model) ? model : "";
+
   return (
     <Drawer title="倍率换算" onClose={close}>
       <form
         className="usage-calculator"
+        noValidate
         onSubmit={(event) => {
           event.preventDefault();
-          const counts = tokens.map(Number);
-          if (counts.some((n) => !Number.isSafeInteger(n) || n < 0)) {
-            setError("Token 数须为有效的非负整数");
-            return;
-          }
           setBusy(true);
           setError("");
           setResult(null);
           void command("calculate_usage_cost", {
             input: {
               ...values,
-              tokens: counts as CostCalculatorInput["tokens"],
+              ...(exactRates ? { rates: exactRates } : {}),
+              tokens,
             },
           })
             .then(setResult)
@@ -158,14 +391,26 @@ export default function UsageCostCalculator({
               </select>
             </label>
           </div>
-          {providerError && (
-            <div className="form-error" role="alert">
-              {providerError}
-              <button type="button" onClick={() => setReload((n) => n + 1)}>
-                重新加载供应商
-              </button>
-            </div>
-          )}
+          <label className="usage-field">
+            已使用模型
+            <select
+              value={selectedUsedModel}
+              onChange={(e) => {
+                editedRef.current = true;
+                const chosen = e.target.value;
+                setModel(chosen);
+                const found = models.find((item) => item.model === chosen);
+                if (found?.rates) applyModelRates(found.rates);
+              }}
+            >
+              <option value="">选择已使用模型</option>
+              {models.map((item) => (
+                <option key={item.model} value={item.model}>
+                  {item.model}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="usage-calculator-source">
             <label className="usage-field">
               模型
@@ -183,8 +428,23 @@ export default function UsageCostCalculator({
               填入当前范围用量
             </button>
           </div>
+          <div className="usage-price-fields usage-calculator-section">
+            {quantities.map((label, index) => (
+              <label key={label} className="usage-field">
+                {label}单价 / 美元每百万
+                <input
+                  required
+                  min="0"
+                  step="any"
+                  type="number"
+                  value={unitPrices[index]}
+                  onChange={(e) => updateUnitPrice(index, e.target.value)}
+                />
+              </label>
+            ))}
+          </div>
           <div className="usage-price-fields usage-calculator-ratios">
-            {ratios.map(([key, label]) => (
+            {ratioFields.map(([key, label]) => (
               <label key={key} className="usage-field">
                 {label}
                 <input
@@ -193,14 +453,12 @@ export default function UsageCostCalculator({
                   step="any"
                   type="number"
                   value={values[key]}
-                  onChange={(e) =>
-                    setValues({ ...values, [key]: e.target.value })
-                  }
+                  onChange={(e) => updateRatio(key, e.target.value)}
                 />
               </label>
             ))}
           </div>
-          <div className="usage-price-fields">
+          <div className="usage-price-fields usage-calculator-section">
             {quantities.map((label, index) => (
               <label key={label} className="usage-field">
                 {label} Tokens
@@ -212,7 +470,9 @@ export default function UsageCostCalculator({
                   value={tokens[index]}
                   onChange={(e) =>
                     setTokens(
-                      tokens.map((v, i) => (i === index ? e.target.value : v)),
+                      tokens.map((v, i) =>
+                        i === index ? e.target.value : v,
+                      ) as FiveTuple,
                     )
                   }
                 />

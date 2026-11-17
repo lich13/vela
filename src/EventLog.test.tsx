@@ -512,6 +512,11 @@ it("separates origins, resets pagination, and hides policy actions for internal 
   expect(
     within(dialog).queryByRole("button", { name: "加入故障规则" }),
   ).not.toBeInTheDocument();
+  expect(
+    within(screen.getByRole("tablist", { name: "日志来源" }))
+      .getAllByRole("tab")
+      .map((t) => t.textContent),
+  ).toEqual(["上游报错", "网关内部", "Claude Code", "Antigravity app"]);
   await user.click(screen.getByRole("tab", { name: "Antigravity app" }));
   await waitFor(() =>
     expect(eventCalls().at(-1)?.[1]).toEqual({

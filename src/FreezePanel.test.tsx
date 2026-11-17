@@ -133,6 +133,7 @@ it("keeps draining controls disabled and retains failed schedule input for retry
   fireEvent.change(codex.getByLabelText("恢复时间"), {
     target: { value: "2000-01-01T00:00" },
   });
+  mock.command.mockRejectedValueOnce({ message: "恢复时间应晚于当前时间" });
   await user.click(codex.getByRole("button", { name: "保存" }));
   expect(await codex.findByRole("alert")).toHaveTextContent("晚于当前时间");
   fireEvent.change(codex.getByLabelText("恢复时间"), {

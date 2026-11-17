@@ -291,14 +291,25 @@ async function renderUsage() {
   return view;
 }
 
+const rangeLabels: Record<string, string> = {
+  today: "今日",
+  "1": "最近 24 小时",
+  "7": "7 天",
+  "14": "14 天",
+  "30": "30 天",
+  all: "全部",
+  custom: "自定义",
+};
+
 async function chooseRange(value: string) {
   await userEvent.click(screen.getByRole("button", { name: "用量时间范围" }));
   const dialog = screen.getByRole("dialog", { name: "选择时间范围" });
-  await userEvent.selectOptions(
-    within(dialog).getByRole("combobox", { name: "用量时间范围" }),
-    value,
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: rangeLabels[value] ?? value }),
   );
-  await userEvent.click(within(dialog).getByRole("button", { name: "确定" }));
+  if (value === "custom") {
+    await userEvent.click(within(dialog).getByRole("button", { name: "确定" }));
+  }
 }
 
 async function openBilling() {
@@ -497,12 +508,10 @@ describe("time ranges", () => {
     expect(dateButton).toHaveTextContent("今日");
     await user.click(dateButton);
     const dialog = screen.getByRole("dialog", { name: "选择时间范围" });
-    const selector = within(dialog).getByRole("combobox", {
-      name: "用量时间范围",
-    });
+    const menu = within(dialog).getByRole("group", { name: "时间范围选项" });
     expect(
-      within(selector)
-        .getAllByRole("option")
+      within(menu)
+        .getAllByRole("button")
         .map((option) => option.textContent),
     ).toEqual([
       "今日",
@@ -515,7 +524,7 @@ describe("time ranges", () => {
     ]);
     const overviewCalls = calls("get_usage_dashboard").length;
     const logCalls = calls("get_usage_logs").length;
-    await user.selectOptions(selector, "custom");
+    await user.click(within(menu).getByRole("button", { name: "自定义" }));
     expect(within(dialog).getByLabelText("结束时间")).toBeDisabled();
     await user.click(
       within(dialog).getByRole("checkbox", { name: "跟随当前" }),
@@ -549,22 +558,32 @@ describe("time ranges", () => {
     expect(dateButton).toHaveFocus();
   });
 
-  it("discards a date draft on cancellation and restores focus to the date button", async () => {
+  it("applies preset ranges in a single click, discards custom drafts on Escape and restores focus", async () => {
     const user = userEvent.setup();
     await renderUsage();
     const dateButton = screen.getByRole("button", { name: "用量时间范围" });
     const overviewCalls = calls("get_usage_dashboard").length;
     await user.click(dateButton);
     const dialog = screen.getByRole("dialog", { name: "选择时间范围" });
-    await user.selectOptions(
-      within(dialog).getByRole("combobox", { name: "用量时间范围" }),
-      "all",
-    );
+    await user.click(within(dialog).getByRole("button", { name: "自定义" }));
+    fireEvent.change(within(dialog).getByLabelText("开始时间"), {
+      target: { value: "2026-10-01T00:00" },
+    });
     cancelDialog(dialog);
     expect(dateButton).toHaveFocus();
     expect(dateButton).toHaveTextContent("今日");
     expect(calls("get_usage_dashboard")).toHaveLength(overviewCalls);
     expect(calls("get_usage_heatmap")).toHaveLength(0);
+
+    // Single-click preset immediately applies and closes.
+    await user.click(dateButton);
+    const menuDialog = screen.getByRole("dialog", { name: "选择时间范围" });
+    await user.click(within(menuDialog).getByRole("button", { name: "7 天" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(dateButton).toHaveTextContent("7 天");
+    await waitFor(() =>
+      expect(calls("get_usage_dashboard").length).toBeGreaterThan(overviewCalls),
+    );
   });
 
   it("does not render trend or heatmap content and never queries historical heatmaps", async () => {

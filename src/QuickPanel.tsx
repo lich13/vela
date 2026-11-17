@@ -36,6 +36,9 @@ import SortableProviders, { type ProviderCommit } from "./SortableProviders";
 import type { QuickPreferences as Preferences } from "./bridge-contracts";
 export default function QuickPanel() {
   const [clientId, select] = useClientSelection("quick");
+  useEffect(() => {
+    void command("quick_ready").catch(() => {});
+  }, []);
   return (
     <div className="quick-panel">
       <QuickFreeze />

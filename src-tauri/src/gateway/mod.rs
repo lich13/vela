@@ -36,8 +36,12 @@ mod attempt;
 #[cfg(test)]
 mod business_ua_tests;
 pub mod catalog;
-mod circuit;
+pub(crate) mod circuit;
 mod compaction;
+#[cfg(test)]
+pub(crate) use admission::CapacityRetry;
+#[cfg(test)]
+pub(crate) use compaction::HandoffWaiting;
 #[cfg(test)]
 mod config_poll_tests;
 mod connector;
@@ -67,7 +71,7 @@ mod health_settlement_tests;
 mod interruption_tests;
 pub(crate) mod metadata;
 mod model;
-mod model_health;
+pub(crate) mod model_health;
 #[cfg(test)]
 mod model_isolation_tests;
 pub(crate) mod model_list;
@@ -78,7 +82,7 @@ mod partial_response_tests;
 mod protocol;
 #[cfg(test)]
 mod protocol_tests;
-mod quota;
+pub(crate) mod quota;
 #[cfg(test)]
 mod quota_probe_routing_tests;
 #[cfg(test)]
@@ -98,7 +102,7 @@ mod token_reveal_tests;
 mod upstream_error_tests;
 #[cfg(test)]
 mod usage_stream_tests;
-mod wait_budget;
+pub(crate) mod wait_budget;
 mod websocket;
 mod wire_progress;
 pub use quota::QuotaView;
@@ -143,14 +147,14 @@ pub struct ProviderView {
     extra_base_urls: Vec<String>,
     endpoint_measurements: Vec<endpoints::Measurement>,
     preferred_base_url: String,
-    queued: bool,
-    health: Health,
-    model_health: Vec<model_health::ModelHealth>,
-    quota_version: String,
+    pub(crate) queued: bool,
+    pub(crate) health: Health,
+    pub(crate) model_health: Vec<model_health::ModelHealth>,
+    pub(crate) quota_version: String,
     has_quota_access_token: bool,
     pub(crate) quota: Option<QuotaView>,
-    quota_checking: bool,
-    quota_check: Option<crate::events::QuotaCheck>,
+    pub(crate) quota_checking: bool,
+    pub(crate) quota_check: Option<crate::events::QuotaCheck>,
     pub max_concurrency: u32,
     pub max_rpm: u32,
     pub active_requests: usize,
@@ -409,7 +413,7 @@ impl Route {
         Some(circuit)
     }
     fn endless(&self) -> bool {
-        self.client_id == ClientId::Claude && self.provider.endless_mode
+        self.provider.endless_mode
     }
     fn health_for(&self, requirement: &routing::Requirement) -> Health {
         let available = |mut health: Health| {
@@ -1210,8 +1214,6 @@ impl Gateway {
                 takeover::grok_unchanged(&self.0.data, text)?
             } else {
                 current == takeover::pair_for(self.0.client, text)?
-                    && (self.0.client != ClientId::Claude
-                        || takeover::claude_hint_unchanged(&self.0.data, home, text)?)
             };
             if !unchanged {
                 return Err(AppError::new(

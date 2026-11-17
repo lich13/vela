@@ -603,3 +603,17 @@ it("refreshes a frozen wait when the panel first observes thaw", async () => {
   expect(screen.getByText("容量等待")).toBeInTheDocument();
   expect(screen.getByText("剩余 60 秒")).toBeInTheDocument();
 });
+
+it("signals quick_ready once on top-level mount without repeating on client tab switches", async () => {
+  const user = userEvent.setup();
+  render(<QuickPanel />);
+  await screen.findByText(gatewayDemo.providers[0].name);
+  expect(
+    mock.command.mock.calls.filter(([name]) => name === "quick_ready"),
+  ).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "Claude" }));
+  await screen.findByText(claudeGatewayDemo.providers[0].name);
+  expect(
+    mock.command.mock.calls.filter(([name]) => name === "quick_ready"),
+  ).toHaveLength(1);
+});

@@ -1,6 +1,6 @@
 [package]
 name = "vela"
-version = "0.29.0"
+version = "0.30.0"
 description = "Independent Codex, Claude Code and Grok Build providers and local gateways"
 edition = "2021"
 rust-version = "1.85"
@@ -71,8 +71,6 @@ yaml-edit = "=0.3.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
 objc2 = "0.6"
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData", "CFDictionary", "CFString", "CFNumber"] }
-objc2-security = { version = "0.3", default-features = false, features = ["std", "SecBase", "SecItem", "SecKeychain"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSStatusItem", "NSStatusBarButton", "NSMenu", "NSWorkspace", "NSRunningApplication", "block2"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services", "NSBundle", "NSURL", "NSError", "NSString"] }
 block2 = "0.6"

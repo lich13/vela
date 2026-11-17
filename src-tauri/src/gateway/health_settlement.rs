@@ -64,8 +64,10 @@ pub(super) fn observe_protocol(
                 .observation
                 .retry_after
                 .map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0)));
-            details.counted_failure =
-                Some(reason == Reason::Network || reason == Reason::UpstreamService);
+            details.counted_failure = Some(
+                !route.endless()
+                    && (reason == Reason::Network || reason == Reason::UpstreamService),
+            );
             protocol.report_failure(|| {
                 permits.report(
                     g,
@@ -80,7 +82,7 @@ pub(super) fn observe_protocol(
             });
         }
     }
-    settle_protocol(protocol, permits, cfg, status);
+    settle_protocol_for(protocol, permits, cfg, status, route.endless());
 }
 pub(super) fn settle_protocol(
     protocol: &super::protocol::Protocol,
@@ -88,12 +90,34 @@ pub(super) fn settle_protocol(
     cfg: &Settings,
     status: Option<u16>,
 ) {
+    settle_protocol_for(protocol, permits, cfg, status, false);
+}
+fn settle_protocol_for(
+    protocol: &super::protocol::Protocol,
+    permits: &mut Permits,
+    cfg: &Settings,
+    status: Option<u16>,
+    endless: bool,
+) {
     use super::protocol::Terminal;
     if !matches!(
         protocol.terminal(),
         None | Some(Terminal::Success | Terminal::Limited)
     ) && protocol.observation.error.error_basis.is_some()
     {
+        if endless
+            && matches!(
+                super::failure_policy::outcome(
+                    status,
+                    &protocol.observation.error,
+                    protocol.observation.retry_after
+                ),
+                Outcome::Failure(_)
+            )
+        {
+            permits.observed(cfg);
+            return;
+        }
         permits.policy(
             cfg,
             status,
@@ -107,7 +131,11 @@ pub(super) fn settle_protocol(
         Some(Terminal::Failure)
             if protocol.transport_failure() || status.is_none_or(|value| value >= 400) =>
         {
-            permits.failure(cfg, None)
+            if endless {
+                permits.observed(cfg);
+            } else {
+                permits.failure(cfg, None);
+            }
         }
         Some(_) => permits.neutral(cfg),
         None => (),
@@ -163,9 +191,9 @@ impl Permits {
         use crate::events::{HealthScope, Phase};
         if details.error_basis.is_some() {
             let policy = super::failure_policy::decision(status, &details);
-            details.counted_failure = Some(policy.counted_failure);
+            details.counted_failure = Some(!route.endless() && policy.counted_failure);
             reason = policy.reason;
-            if !policy.hard && !policy.temporary && !policy.counted_failure {
+            if !route.endless() && !policy.hard && !policy.temporary && !policy.counted_failure {
                 details.wait_seconds = None;
             }
         }
@@ -231,19 +259,8 @@ impl Permits {
         event
     }
 
-    fn settle(&mut self, cfg: &Settings, outcome: Outcome) {
+    fn settle_raw(&mut self, cfg: &Settings, outcome: Outcome) {
         use crate::events::HealthScope;
-        let outcome = match (&self.failure, outcome) {
-            (
-                Some((status, details)),
-                Outcome::Failure(retry)
-                | Outcome::RateLimited(retry)
-                | Outcome::CapacityLimited(retry),
-            ) if details.error_basis.is_some() => {
-                super::failure_policy::outcome(*status, details, retry)
-            }
-            (_, outcome) => outcome,
-        };
         match self.scope {
             HealthScope::Provider => {
                 if let Some(p) = self.provider.take() {
@@ -263,6 +280,23 @@ impl Permits {
             }
             HealthScope::Request => self.neutral(cfg),
         }
+    }
+    fn settle(&mut self, cfg: &Settings, outcome: Outcome) {
+        let outcome = match (&self.failure, outcome) {
+            (
+                Some((status, details)),
+                Outcome::Failure(retry)
+                | Outcome::RateLimited(retry)
+                | Outcome::CapacityLimited(retry),
+            ) if details.error_basis.is_some() => {
+                super::failure_policy::outcome(*status, details, retry)
+            }
+            (_, outcome) => outcome,
+        };
+        self.settle_raw(cfg, outcome);
+    }
+    pub(super) fn observed(&mut self, cfg: &Settings) {
+        self.settle_raw(cfg, Outcome::Observed);
     }
     pub(super) fn capacity_limited(&mut self, cfg: &Settings, retry: Option<Duration>) {
         self.settle(cfg, Outcome::CapacityLimited(retry));
