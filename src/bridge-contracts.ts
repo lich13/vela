@@ -392,6 +392,7 @@ export type GatewayModels = {
     source: string | null;
     pinned: string | null;
     metadata: ModelMetadata | null;
+    custom: { context: number | null; efforts: string[] | null } | null;
     price: {
       source: string;
       inputPerM: string | null;
@@ -634,9 +635,11 @@ export type CommandMap = {
   search_models_dev: Call<{ query: string; limit?: number }, ModelSearch>;
   edit_model_list: Call<
     Client & {
-      op: "add" | "remove" | "pin" | "unpin";
+      op: "add" | "remove" | "pin" | "unpin" | "custom";
       id: string;
       source?: string | null;
+      context?: number | null;
+      efforts?: string[] | null;
     },
     GatewayModels
   >;

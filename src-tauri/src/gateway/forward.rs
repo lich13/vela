@@ -7,6 +7,7 @@ use super::{
     model::Settings,
     replay::{self, Replay, WireBody},
     routing::{self, Requirement},
+    wait_budget::Silence,
     Active, Gateway, Route,
 };
 use crate::errors::code;
@@ -520,6 +521,16 @@ async fn relay(relay: Relay) {
         // Backpressure is awaited separately. Only time spent polling the
         // upstream measures its silence; completed events do not cut off tails.
         let limit = tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds);
+        // A compaction is given its own limit until the model writes, and none after.
+        let silence = if operation != crate::usage::model::Operation::Compaction {
+            Silence::Ordinary
+        } else if protocol.observation.meter.first_token_ms.is_some()
+            || protocol.business_observed()
+        {
+            Silence::Compaction(None)
+        } else {
+            Silence::Compaction(Some(Duration::from_secs(cfg.compaction_seconds)))
+        };
         let next = tokio::select! {
             biased;
             _ = request_budget.cancelled() => {
@@ -536,7 +547,7 @@ async fn relay(relay: Relay) {
             }
             _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
             _ = sender.closed(), if !disconnected => { disconnected = true; continue; }
-            frame = request_budget.response(limit, operation == crate::usage::model::Operation::Compaction, body.frame()) => frame,
+            frame = request_budget.response(limit, silence, body.frame()) => frame,
         };
         match next {
             Ok(Some(Ok(frame))) => {
@@ -592,12 +603,17 @@ async fn relay(relay: Relay) {
                 break;
             }
             result => {
-                let category = if result.is_err() {
-                    code::STREAM_TIMEOUT
-                } else {
+                let unwritten = matches!(silence, Silence::Compaction(Some(_)));
+                let category = if result.is_ok() {
                     code::STREAM_INTERRUPTED
+                } else if unwritten {
+                    code::FIRST_BYTE_TIMEOUT
+                } else {
+                    code::STREAM_TIMEOUT
                 };
-                if result.is_err() {
+                if result.is_err() && unwritten {
+                    protocol.timeout("first_byte", cfg.compaction_seconds);
+                } else if result.is_err() {
                     protocol.timeout("stream_idle", cfg.idle_seconds);
                 }
                 protocol.finish(Some(status.as_u16()), category);
@@ -1206,6 +1222,21 @@ struct Exchange<'a> {
     claude_owner: Option<String>,
 }
 impl Exchange<'_> {
+    /// A dispatched compaction has its own limit for the wait before output.
+    fn first_byte_seconds(&self) -> u64 {
+        if self.plan.operation == crate::usage::model::Operation::Compaction {
+            self.settings.compaction_seconds
+        } else {
+            self.settings.first_byte_seconds
+        }
+    }
+    fn first_silence(&self) -> Silence {
+        if self.plan.operation == crate::usage::model::Operation::Compaction {
+            Silence::Compaction(Some(Duration::from_secs(self.settings.compaction_seconds)))
+        } else {
+            Silence::Ordinary
+        }
+    }
     async fn claude_retry(
         &mut self,
         mut attempt: Attempt,
@@ -2066,7 +2097,7 @@ impl Exchange<'_> {
         if attempt.route.endless() {
             attempt
                 .protocol
-                .timeout("response_headers", self.settings.first_byte_seconds);
+                .timeout("response_headers", self.first_byte_seconds());
             attempt.protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
             let details = attempt.protocol.observation.error.clone();
             return self
@@ -2104,7 +2135,7 @@ impl Exchange<'_> {
             if self.plan.dedicated_search {
                 30
             } else {
-                self.settings.first_byte_seconds
+                self.first_byte_seconds()
             },
         );
         protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
@@ -2578,11 +2609,7 @@ impl Exchange<'_> {
         loop {
             match self
                 .request_budget
-                .response(
-                    first_deadline,
-                    self.plan.operation == crate::usage::model::Operation::Compaction,
-                    body.frame(),
-                )
+                .response(first_deadline, self.first_silence(), body.frame())
                 .await
             {
                 Ok(Some(Ok(frame))) => {
@@ -2696,7 +2723,7 @@ impl Exchange<'_> {
                         "first_event_idle"
                     },
                     if prefix_bytes == 0 {
-                        self.settings.first_byte_seconds
+                        self.first_byte_seconds()
                     } else {
                         self.settings.idle_seconds
                     },
@@ -2731,6 +2758,8 @@ impl Exchange<'_> {
                 .saturating_sub(attempt.started.elapsed());
         let mut failure_kind = code::STREAM_INTERRUPTED;
         let mut received = false;
+        let output = std::sync::atomic::AtomicBool::new(false);
+        let first_byte_seconds = self.first_byte_seconds();
         let protocol = &mut attempt.protocol;
         let captured = {
             let failure_kind = &mut failure_kind;
@@ -2738,9 +2767,15 @@ impl Exchange<'_> {
             let request_budget = self.request_budget;
             let compaction = self.plan.operation == crate::usage::model::Operation::Compaction;
             let idle_seconds = self.settings.idle_seconds;
+            let first_silence = self.first_silence();
+            let output = &output;
             let frames = async_stream::try_stream! {
                 loop {
-                    match request_budget.response(deadline, compaction, upstream.frame()).await {
+                    let silence = match first_silence {
+                        Silence::Compaction(_) if output.load(std::sync::atomic::Ordering::Relaxed) => Silence::Compaction(None),
+                        silence => silence,
+                    };
+                    match request_budget.response(deadline, silence, upstream.frame()).await {
                         Ok(Some(Ok(frame))) => {
                             if frame.data_ref().is_some_and(|data| !data.is_empty()) {
                                 *received = true;
@@ -2751,7 +2786,8 @@ impl Exchange<'_> {
                         Ok(None) => break,
                         Ok(Some(Err(error))) => Err(std::io::Error::other(error))?,
                         Err(_) => {
-                            *failure_kind = if *received { code::STREAM_TIMEOUT } else { code::FIRST_BYTE_TIMEOUT };
+                            // Keep-alives are not a compaction's output.
+                            *failure_kind = if *received && !matches!(silence, Silence::Compaction(Some(_))) { code::STREAM_TIMEOUT } else { code::FIRST_BYTE_TIMEOUT };
                             Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "上游响应超时"))?;
                         }
                     }
@@ -2767,6 +2803,7 @@ impl Exchange<'_> {
                         || protocol.business_observed())
                 {
                     streaming = true;
+                    output.store(true, std::sync::atomic::Ordering::Relaxed);
                     self.traffic.streaming();
                     if !compaction {
                         self.request_budget.buffering();
@@ -2777,16 +2814,13 @@ impl Exchange<'_> {
             .await
         };
         if captured.is_err() && failure_kind.ends_with("TIMEOUT") {
+            let idle = failure_kind == code::STREAM_TIMEOUT;
             protocol.timeout(
-                if received {
-                    "buffer_idle"
-                } else {
-                    "first_byte"
-                },
-                if received {
+                if idle { "buffer_idle" } else { "first_byte" },
+                if idle {
                     self.settings.idle_seconds
                 } else {
-                    self.settings.first_byte_seconds
+                    first_byte_seconds
                 },
             );
         }
@@ -3681,7 +3715,7 @@ async fn forward_inner(
                 .request_budget
                 .response(
                     deadline,
-                    cx.plan.operation == crate::usage::model::Operation::Compaction,
+                    cx.first_silence(),
                     attempt.route.client.request(upstream),
                 )
                 .await;

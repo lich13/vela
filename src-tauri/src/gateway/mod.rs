@@ -2191,6 +2191,7 @@ impl Gateway {
                         .protocol;
                     let usage = self.0.usage.lock().clone();
                     let prices = usage.as_ref().and_then(|u| u.prices().ok());
+                    let (choices, _) = self.0.model_list.snapshot();
                     Some(
                         self.union_models(Some(protocol))?
                             .into_iter()
@@ -2199,6 +2200,7 @@ impl Gateway {
                                     p.models_dev
                                         .metadata_from(&model.id, model.source.as_deref())
                                 });
+                                let meta = choices.describe(&model.id, meta);
                                 grok_config::CatalogModel {
                                     name: meta.as_ref().and_then(|m| m.name.clone()),
                                     context: meta.as_ref().and_then(|m| m.context),

@@ -32,6 +32,11 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
   const [searching, setSearching] = useState(false);
   const [picker, setPicker] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [custom, setCustom] = useState<{
+    id: string;
+    context: string;
+    efforts: string;
+  } | null>(null);
   useEffect(() => {
     let gone = false;
     void command("get_gateway_models", { clientId })
@@ -84,6 +89,22 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
     id: string,
     source?: string,
   ) => run(() => command("edit_model_list", { clientId, op, id, source }));
+  const customEfforts =
+    custom?.efforts.split(/[\s,，·]+/).filter(Boolean) ?? [];
+  const customContext = custom?.context.trim() ? Number(custom.context) : null;
+  const saveCustom = (context: number | null, efforts: string[] | null) =>
+    custom &&
+    run(async () => {
+      const next = await command("edit_model_list", {
+        clientId,
+        op: "custom",
+        id: custom.id,
+        context,
+        efforts,
+      });
+      setCustom(null);
+      return next;
+    });
   return (
     <section className="gateway-models" aria-label="网关模型列表">
       <div className="model-panel-heading">
@@ -121,6 +142,7 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
               disabled={busy || !view}
               onClick={() => {
                 setAdding(!adding);
+                setCustom(null);
                 setPicker(null);
                 setSearch("");
               }}
@@ -158,11 +180,9 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
                   <th>输出 $/1M</th>
                   <th>缓存读 $/1M</th>
                   <th>价源</th>
-                  {!view.passthrough && (
-                    <th>
-                      <span className="sr-only">操作</span>
-                    </th>
-                  )}
+                  <th>
+                    <span className="sr-only">操作</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -233,38 +253,60 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
                         {model.price?.deviation && " · 偏差≥25%"}
                       </span>
                     </td>
-                    {!view.passthrough && (
-                      <td>
-                        <div className="model-row-actions">
+                    <td>
+                      <div className="model-row-actions">
+                        <button
+                          disabled={busy}
+                          title={
+                            model.custom
+                              ? "已手动设置上下文或推理档位"
+                              : undefined
+                          }
+                          onClick={() => {
+                            setCustom({
+                              id: model.id,
+                              context: String(model.metadata?.context ?? ""),
+                              efforts: Object.keys(
+                                model.metadata?.reasoningEfforts ?? {},
+                              ).join(" "),
+                            });
+                            setPicker(null);
+                            setAdding(false);
+                          }}
+                        >
+                          {model.custom ? "已改参数" : "编辑参数"}
+                        </button>
+                        {!view.passthrough && (
                           <button
                             disabled={busy}
                             onClick={() => {
                               setPicker(model.id);
                               setAdding(false);
+                              setCustom(null);
                               setSearch(model.id);
                             }}
                           >
                             指定来源
                           </button>
-                          {model.pinned && (
-                            <button
-                              disabled={busy}
-                              onClick={() => void edit("unpin", model.id)}
-                            >
-                              取消指定
-                            </button>
-                          )}
-                          {model.manual && (
-                            <button
-                              disabled={busy}
-                              onClick={() => void edit("remove", model.id)}
-                            >
-                              移除
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    )}
+                        )}
+                        {!view.passthrough && model.pinned && (
+                          <button
+                            disabled={busy}
+                            onClick={() => void edit("unpin", model.id)}
+                          >
+                            取消指定
+                          </button>
+                        )}
+                        {!view.passthrough && model.manual && (
+                          <button
+                            disabled={busy}
+                            onClick={() => void edit("remove", model.id)}
+                          >
+                            移除
+                          </button>
+                        )}
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -307,6 +349,80 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
           </div>
         </>
       )}
+      {custom && (
+        <form
+          className="model-picker"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void saveCustom(
+              customContext,
+              customEfforts.length ? customEfforts : null,
+            );
+          }}
+        >
+          <div className="model-picker-heading">
+            <strong>编辑参数 · {custom.id}</strong>
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="关闭参数编辑"
+              onClick={() => setCustom(null)}
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="model-input-row">
+            <label>
+              上下文 / Token
+              <input
+                inputMode="numeric"
+                value={custom.context}
+                onChange={(e) =>
+                  setCustom({
+                    ...custom,
+                    context: e.target.value.replace(/\D/g, ""),
+                  })
+                }
+                maxLength={10}
+                placeholder="例如 1050000"
+              />
+            </label>
+            <label>
+              推理档位
+              <input
+                value={custom.efforts}
+                onChange={(e) =>
+                  setCustom({ ...custom, efforts: e.target.value })
+                }
+                maxLength={200}
+                placeholder="空格分隔，例如 low medium high xhigh max"
+              />
+            </label>
+            <button
+              disabled={
+                busy ||
+                (customContext == null && !customEfforts.length) ||
+                customContext === 0
+              }
+            >
+              保存
+            </button>
+            <button
+              type="button"
+              disabled={
+                busy || !view?.models.find((m) => m.id === custom.id)?.custom
+              }
+              onClick={() => void saveCustom(null, null)}
+            >
+              恢复默认
+            </button>
+          </div>
+          <p className="muted">
+            留空的一项沿用自动识别的值。保存后覆盖 models.dev
+            与供应商目录；接管模型列表时随列表写入客户端。
+          </p>
+        </form>
+      )}
       {(adding || picker) && (
         <div className="model-picker">
           <div className="model-picker-heading">
@@ -335,7 +451,7 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
                 <input
                   value={manual}
                   onChange={(e) => setManual(e.target.value)}
-                maxLength={256}
+                  maxLength={256}
                   placeholder="直接输入模型 ID"
                 />
               </label>

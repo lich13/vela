@@ -80,6 +80,7 @@ export default function Advanced({
         ["maxWaiting", "最多等待请求"],
         ["connectSeconds", "连接超时 / 秒"],
         ["firstByteSeconds", "首字节 / 秒"],
+        ["compactionSeconds", "压缩首字 / 秒"],
         ["idleSeconds", "流静默 / 秒"],
         ...(clientId === "codex"
           ? [

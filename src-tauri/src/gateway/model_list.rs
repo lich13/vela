@@ -45,6 +45,30 @@ pub struct Manual {
     pub source: Option<String>,
     pub added_at: i64,
 }
+/// What the user typed over the looked-up context window and reasoning efforts.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Custom {
+    pub context: Option<u64>,
+    pub efforts: Option<Vec<String>>,
+}
+impl Custom {
+    fn valid(&self) -> bool {
+        self.context
+            .is_none_or(|context| (1..=1_000_000_000).contains(&context))
+            && self.efforts.as_ref().is_none_or(|efforts| {
+                let mut seen = BTreeSet::new();
+                (1..=12).contains(&efforts.len())
+                    && efforts.iter().all(|effort| {
+                        (1..=24).contains(&effort.len())
+                            && effort.chars().all(|c| {
+                                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'
+                            })
+                            && seen.insert(effort)
+                    })
+            })
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct File {
@@ -52,6 +76,7 @@ pub struct File {
     pub manual: Vec<Manual>,
     pub pins: BTreeMap<String, String>,
     pub backfilled: BTreeSet<String>,
+    pub custom: BTreeMap<String, Custom>,
 }
 impl Default for File {
     fn default() -> Self {
@@ -60,6 +85,7 @@ impl Default for File {
             manual: vec![],
             pins: BTreeMap::new(),
             backfilled: BTreeSet::new(),
+            custom: BTreeMap::new(),
         }
     }
 }
@@ -71,6 +97,34 @@ impl File {
                 .find(|m| m.id == id)
                 .and_then(|m| m.source.as_deref())
         })
+    }
+    /// The looked-up metadata with the user's own values laid over it.
+    pub fn describe(
+        &self,
+        id: &str,
+        metadata: Option<models_dev::Metadata>,
+    ) -> Option<models_dev::Metadata> {
+        let Some(custom) = self.custom.get(id) else {
+            return metadata;
+        };
+        let mut metadata = metadata.unwrap_or_else(|| models_dev::Metadata {
+            model: id.into(),
+            matched_by: "manual".into(),
+            ..Default::default()
+        });
+        if let Some(context) = custom.context {
+            metadata.context = Some(context);
+        }
+        if let Some(efforts) = &custom.efforts {
+            metadata.reasoning = Some(true);
+            metadata.reasoning_efforts = Some(
+                efforts
+                    .iter()
+                    .map(|effort| (effort.clone(), serde_json::Value::Null))
+                    .collect(),
+            );
+        }
+        Some(metadata)
     }
     fn validate(&self) -> Result<()> {
         let mut ids = BTreeSet::new();
@@ -86,6 +140,11 @@ impl File {
                 .pins
                 .iter()
                 .any(|(id, source)| !valid_id(id) || !valid_id(source))
+            || self.custom.len() > 4096
+            || self
+                .custom
+                .iter()
+                .any(|(id, custom)| !valid_id(id) || !custom.valid())
         {
             return Err(error("模型 ID、来源或数量无效"));
         }
@@ -161,6 +220,7 @@ pub struct Model {
     pub source: Option<String>,
     pub pinned: Option<String>,
     pub metadata: Option<models_dev::Metadata>,
+    pub custom: Option<Custom>,
     pub price: Option<crate::usage::pricing::Reference>,
 }
 #[derive(Serialize)]
@@ -191,6 +251,7 @@ pub enum Operation {
     Remove,
     Pin,
     Unpin,
+    Custom,
 }
 
 impl Gateway {
@@ -233,6 +294,7 @@ impl Gateway {
                         source: None,
                         pinned: None,
                         metadata: None,
+                        custom: None,
                         price: None,
                     });
                     models.len() - 1
@@ -256,6 +318,7 @@ impl Gateway {
                     source: None,
                     pinned: None,
                     metadata: None,
+                    custom: None,
                     price: None,
                 });
             }
@@ -263,6 +326,7 @@ impl Gateway {
         for model in &mut models {
             model.source = file.source(&model.id).map(str::to_owned);
             model.pinned = file.pins.get(&model.id).cloned();
+            model.custom = file.custom.get(&model.id).cloned();
         }
         Ok(models)
     }
@@ -270,13 +334,15 @@ impl Gateway {
         let mut models = self.union_models(None)?;
         let usage = self.0.usage.lock().clone();
         let prices = usage.as_ref().and_then(|u| u.prices().ok());
-        if let Some(prices) = prices {
-            for model in &mut models {
+        let (file, _) = self.0.model_list.snapshot();
+        for model in &mut models {
+            if let Some(prices) = &prices {
                 model.metadata = prices
                     .models_dev
                     .metadata_from(&model.id, model.source.as_deref());
                 model.price = prices.reference(&model.id, model.source.as_deref());
             }
+            model.metadata = file.describe(&model.id, model.metadata.take());
         }
         let state = self.request_state();
         let providers = state
@@ -313,8 +379,14 @@ impl Gateway {
             error: self.0.model_list.snapshot().1,
         })
     }
-    pub fn edit_model_list(&self, op: Operation, id: &str, source: Option<&str>) -> Result<View> {
-        if self.0.client == ClientId::Codex {
+    pub fn edit_model_list(
+        &self,
+        op: Operation,
+        id: &str,
+        source: Option<&str>,
+        custom: Custom,
+    ) -> Result<View> {
+        if self.0.client == ClientId::Codex && !matches!(op, Operation::Custom) {
             return Err(error("Codex 模型列表只读"));
         }
         if !valid_id(id) {
@@ -352,6 +424,15 @@ impl Gateway {
                 }
                 Operation::Unpin => {
                     file.pins.remove(id);
+                }
+                Operation::Custom => {
+                    if custom == Custom::default() {
+                        file.custom.remove(id);
+                    } else if custom.valid() {
+                        file.custom.insert(id.into(), custom);
+                    } else {
+                        return Err(error("上下文或推理档位无效"));
+                    }
                 }
             }
             Ok(())
@@ -538,6 +619,54 @@ mod tests {
         assert!(view.providers.iter().all(|p| p.checked_at.is_some()));
         g.backfill_models().await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 4);
+    }
+    #[test]
+    fn custom_values_cover_looked_up_metadata_and_reject_bad_input() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("model-list.json");
+        let service = Service::new(path.clone());
+        let custom = Custom {
+            context: Some(1_050_000),
+            efforts: Some(vec!["high".into(), "max".into()]),
+        };
+        service
+            .update(|f| {
+                f.custom.insert("fixture-model".into(), custom.clone());
+                Ok(())
+            })
+            .unwrap();
+        let file = Service::new(path).snapshot().0;
+        let described = file.describe("fixture-model", None).unwrap();
+        assert_eq!(described.context, Some(1_050_000));
+        assert_eq!(
+            described
+                .reasoning_efforts
+                .unwrap()
+                .into_keys()
+                .collect::<Vec<_>>(),
+            ["high", "max"]
+        );
+        assert!(file.describe("fixture-other", None).is_none());
+        for bad in [
+            Custom {
+                context: Some(0),
+                efforts: None,
+            },
+            Custom {
+                context: None,
+                efforts: Some(vec![]),
+            },
+            Custom {
+                context: None,
+                efforts: Some(vec!["High Effort".into()]),
+            },
+            Custom {
+                context: None,
+                efforts: Some(vec!["max".into(), "max".into()]),
+            },
+        ] {
+            assert!(!bad.valid());
+        }
     }
     #[test]
     fn choices_roundtrip_and_conflicts_preserve_disk() {

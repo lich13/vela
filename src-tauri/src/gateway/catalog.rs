@@ -327,7 +327,9 @@ fn anthropic_list(
         "first_id":page.first(), "last_id":page.last(), "has_more":if before.is_some(){start>0}else{end<models.len()}
     }))
 }
-const CODEX_EFFORTS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const CODEX_EFFORTS: [&str; 8] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
 type CodexCache = Mutex<HashMap<String, (Instant, Arc<Vec<serde_json::Value>>)>>;
 static CODEX_UPSTREAM: std::sync::LazyLock<CodexCache> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -414,12 +416,17 @@ fn codex_body(
     let usage = gateway.0.usage.lock().clone();
     let prices = usage.as_ref().and_then(|u| u.prices().ok());
     let (choices, _) = gateway.0.model_list.snapshot();
-    let value = codex_merge(models, upstream, |id| {
-        prices
-            .as_ref()?
-            .models_dev
-            .metadata_from(id, choices.source(id))
-    });
+    let value = codex_merge(
+        models,
+        upstream,
+        |id| {
+            let found = prices
+                .as_ref()
+                .and_then(|p| p.models_dev.metadata_from(id, choices.source(id)));
+            choices.describe(id, found)
+        },
+        |id| choices.custom.get(id).cloned(),
+    );
     serde_json::to_vec(&value).expect("model catalog JSON")
 }
 
@@ -517,10 +524,11 @@ fn codex_merge(
     models: &[String],
     upstream: &[serde_json::Value],
     metadata: impl Fn(&str) -> Option<crate::models_dev::Metadata>,
+    custom: impl Fn(&str) -> Option<super::model_list::Custom>,
 ) -> serde_json::Value {
     let template = upstream.first();
-    let levels = |meta: Option<&crate::models_dev::Metadata>| -> Vec<&'static str> {
-        let known: Vec<_> = CODEX_EFFORTS
+    let known = |meta: Option<&crate::models_dev::Metadata>| -> Vec<&'static str> {
+        CODEX_EFFORTS
             .into_iter()
             .filter(|effort| {
                 *effort != "none"
@@ -528,14 +536,17 @@ fn codex_merge(
                         .and_then(|m| m.reasoning_efforts.as_ref())
                         .is_some_and(|efforts| efforts.contains_key(*effort))
             })
-            .collect();
+            .collect()
+    };
+    let levels = |meta: Option<&crate::models_dev::Metadata>| -> Vec<&'static str> {
+        let known = known(meta);
         if known.is_empty() {
             vec!["low", "medium", "high"]
         } else {
             known
         }
     };
-    let set_levels = |entry: &mut serde_json::Value, efforts: Vec<&'static str>| {
+    let set_levels = |entry: &mut serde_json::Value, efforts: &[&str]| {
         let described = |effort: &str| {
             template
                 .and_then(|template| template["supported_reasoning_levels"].as_array())
@@ -545,12 +556,17 @@ fn codex_merge(
                 .and_then(|level| level["description"].as_str())
                 .map_or_else(|| format!("{effort} reasoning effort"), str::to_owned)
         };
-        entry["default_reasoning_level"] = if efforts.contains(&"medium") {
-            "medium"
-        } else {
-            efforts[0]
+        let kept = entry["default_reasoning_level"]
+            .as_str()
+            .is_some_and(|level| efforts.contains(&level));
+        if !kept {
+            entry["default_reasoning_level"] = if efforts.contains(&"medium") {
+                "medium"
+            } else {
+                efforts[0]
+            }
+            .into();
         }
-        .into();
         entry["supported_reasoning_levels"] = efforts
             .iter()
             .map(|effort| serde_json::json!({"effort": effort, "description": described(effort)}))
@@ -567,7 +583,46 @@ fn codex_merge(
                 .as_array()
                 .is_some_and(|levels| levels.iter().any(|level| level["effort"] != "none"));
             if !usable {
-                set_levels(&mut entry, levels(meta.as_ref()));
+                entry["default_reasoning_level"] = serde_json::Value::Null;
+                set_levels(&mut entry, &levels(meta.as_ref()));
+            } else {
+                // The provider's own levels, plus those the list shows beyond them.
+                let own: Vec<String> = entry["supported_reasoning_levels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|level| level["effort"].as_str().map(str::to_owned))
+                    .collect();
+                let extra: Vec<&str> = known(meta.as_ref())
+                    .into_iter()
+                    .filter(|effort| !own.iter().any(|o| o == effort))
+                    .collect();
+                if !extra.is_empty() {
+                    let mut all: Vec<&str> = own.iter().map(String::as_str).collect();
+                    all.extend(extra);
+                    all.sort_by_key(|effort| {
+                        CODEX_EFFORTS
+                            .iter()
+                            .position(|known| known == effort)
+                            .unwrap_or(CODEX_EFFORTS.len())
+                    });
+                    let described = entry["supported_reasoning_levels"].take();
+                    set_levels(&mut entry, &all);
+                    for level in entry["supported_reasoning_levels"]
+                        .as_array_mut()
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(old) = described
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|old| old["effort"] == level["effort"])
+                        {
+                            *level = old.clone();
+                        }
+                    }
+                }
             }
             if entry["display_name"] == id.as_str() {
                 if let Some(name) = name {
@@ -586,7 +641,8 @@ fn codex_merge(
                 entry["max_context_window"] = context.into();
             }
             if meta.as_ref().is_some_and(|m| m.reasoning_efforts.is_some()) {
-                set_levels(&mut entry, levels(meta.as_ref()));
+                entry["default_reasoning_level"] = serde_json::Value::Null;
+                set_levels(&mut entry, &levels(meta.as_ref()));
             }
             entry
         } else {
@@ -619,10 +675,21 @@ fn codex_merge(
                 "input_modalities": ["text", "image"],
             });
             if reasons {
-                set_levels(&mut entry, levels(meta.as_ref()));
+                set_levels(&mut entry, &levels(meta.as_ref()));
             }
             entry
         };
+        let mut entry = entry;
+        if let Some(custom) = custom(id) {
+            if let Some(context) = custom.context {
+                entry["context_window"] = context.into();
+                entry["max_context_window"] = context.into();
+            }
+            if let Some(efforts) = &custom.efforts {
+                let efforts: Vec<&str> = efforts.iter().map(String::as_str).collect();
+                set_levels(&mut entry, &efforts);
+            }
+        }
         entries.push(entry);
     }
     serde_json::json!({ "models": entries })
@@ -825,6 +892,61 @@ mod tests {
         }
     }
     #[test]
+    fn codex_catalog_adds_listed_efforts_and_puts_manual_values_first() {
+        let entries = vec![serde_json::json!({
+            "slug":"fixture-a","display_name":"Fixture A","default_reasoning_level":"high",
+            "context_window":1000,"max_context_window":1000,
+            "supported_reasoning_levels":[
+                {"effort":"low","description":"fixture low"},
+                {"effort":"high","description":"fixture high"}],
+        })];
+        let meta = |id: &str| {
+            Some(crate::models_dev::Metadata {
+                model: id.into(),
+                context: Some(5000),
+                reasoning_efforts: Some(
+                    ["high", "max", "odd"]
+                        .into_iter()
+                        .map(|k| (k.to_owned(), serde_json::Value::Null))
+                        .collect(),
+                ),
+                ..Default::default()
+            })
+        };
+        let models = vec!["fixture-a".to_owned()];
+        let efforts = |m: &serde_json::Value| -> Vec<String> {
+            m["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| l["effort"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let value = codex_merge(&models, &entries, meta, |_| None);
+        let entry = &value["models"][0];
+        assert_eq!(efforts(entry), ["low", "high", "max"]);
+        assert_eq!(
+            entry["supported_reasoning_levels"][1]["description"],
+            "fixture high"
+        );
+        assert_eq!(entry["default_reasoning_level"], "high");
+        // The provider's own context stands until the user types one.
+        assert_eq!(entry["context_window"], 1000);
+        let value = codex_merge(&models, &entries, meta, |_| {
+            Some(crate::gateway::model_list::Custom {
+                context: Some(7000),
+                efforts: Some(vec!["medium".into(), "ultra".into()]),
+            })
+        });
+        let entry = &value["models"][0];
+        assert_eq!(efforts(entry), ["medium", "ultra"]);
+        assert_eq!(entry["default_reasoning_level"], "medium");
+        assert_eq!(
+            (&entry["context_window"], &entry["max_context_window"]),
+            (&7000.into(), &7000.into())
+        );
+    }
+    #[test]
     fn codex_catalog_lists_the_union_with_upstream_entries_and_filled_gaps() {
         let upstream = serde_json::json!({"models":[
             {"slug":"fixture-a","display_name":"Fixture A","description":"fixture","priority":5,
@@ -847,7 +969,7 @@ mod tests {
                 context: (id == "fixture-new").then_some(2000),
                 output: None,
                 reasoning_efforts: (id == "fixture-new").then(|| {
-                    ["high", "max", "xhigh"]
+                    ["high", "odd", "xhigh"]
                         .into_iter()
                         .map(|k| (k.to_owned(), serde_json::Value::Null))
                         .collect()
@@ -864,7 +986,7 @@ mod tests {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        let value = codex_merge(&models, &entries, meta);
+        let value = codex_merge(&models, &entries, meta, |_| None);
         let list = value["models"].as_array().unwrap();
         let slugs: Vec<_> = list.iter().map(|m| m["slug"].as_str().unwrap()).collect();
         // The union decides membership and order; upstream extras are left out.
@@ -916,7 +1038,7 @@ mod tests {
         }
         assert!(codex_models(b"<html>").is_none());
         // Without one, every model gets Codex's unknown-model defaults.
-        let value = codex_merge(&models, &[], meta);
+        let value = codex_merge(&models, &[], meta, |_| None);
         let list = value["models"].as_array().unwrap();
         assert_eq!(list.len(), 4);
         for (index, entry) in list.iter().enumerate() {

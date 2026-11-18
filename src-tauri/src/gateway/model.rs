@@ -38,7 +38,7 @@ pub struct Provider {
     #[serde(default = "default_upstream_retry_seconds")]
     pub upstream_retry_seconds: u64,
 }
-pub(crate) const DEFAULT_UPSTREAM_RETRY_SECONDS: u64 = 5;
+pub(crate) const DEFAULT_UPSTREAM_RETRY_SECONDS: u64 = 33;
 fn default_upstream_retry_seconds() -> u64 {
     DEFAULT_UPSTREAM_RETRY_SECONDS
 }
@@ -77,6 +77,9 @@ pub struct Settings {
     #[serde(default = "default_endpoint_probe_seconds")]
     pub endpoint_probe_seconds: u64,
     pub first_byte_seconds: u64,
+    /// How long a dispatched compaction may stay without output.
+    #[serde(default = "default_compaction_seconds")]
+    pub compaction_seconds: u64,
     pub idle_seconds: u64,
     #[serde(default = "default_request_seconds")]
     pub retry_budget_seconds: u64,
@@ -99,7 +102,10 @@ fn default_transient_failure_threshold() -> u32 {
     6
 }
 fn default_rate_limit_seconds() -> u64 {
-    DEFAULT_UPSTREAM_RETRY_SECONDS
+    5
+}
+fn default_compaction_seconds() -> u64 {
+    400
 }
 fn default_capacity_retry_seconds() -> u64 {
     60
@@ -123,6 +129,7 @@ impl Default for Settings {
             websocket_retry_seconds: default_request_seconds(),
             endpoint_probe_seconds: default_endpoint_probe_seconds(),
             first_byte_seconds: DEFAULT_FIRST_BYTE_SECONDS,
+            compaction_seconds: default_compaction_seconds(),
             idle_seconds: DEFAULT_IDLE_SECONDS,
             retry_budget_seconds: DEFAULT_RETRY_BUDGET_SECONDS,
             connect_seconds: DEFAULT_CONNECT_SECONDS,
@@ -149,6 +156,7 @@ impl Settings {
                 self.capacity_retry_seconds,
                 self.websocket_retry_seconds,
                 self.first_byte_seconds,
+                self.compaction_seconds,
                 self.idle_seconds,
                 self.retry_budget_seconds,
                 self.connect_seconds,

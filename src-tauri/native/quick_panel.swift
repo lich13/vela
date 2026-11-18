@@ -1602,6 +1602,326 @@ struct QuickQuotaDetailOverlayView: View {
     }
 }
 
+// MARK: - Freeze overlay
+
+/// One corner of ice, drawn for the top-left corner in a 180-unit box.
+private struct IceGlyph: Shape {
+    let d: String
+
+    static let deep = "M0 0H176L142 11 151 28 118 24 123 49 92 38 97 71 69 60 73 96 47 85 50 126 24 110 28 149 10 136 0 176Z"
+    static let facet = "M0 0H156L121 9 131 23 99 20 104 42 76 31 82 61 58 51 61 83 39 73 41 111 19 96 23 132 8 120 0 156Z"
+    static let inner = "M0 0H112L74 12 92 27 54 23 65 48 38 36 47 66 24 55 30 90 12 74 0 112Z"
+    static let vein = "M2 2 92 90M18 18 58 16 78 8M34 34 78 32 106 19M50 50 86 55 114 47M68 68 98 73 121 66M18 18 16 58 8 82M34 34 31 79 18 105M50 50 54 88 46 115M68 68 72 99 65 123M0 10 24 10 42 0M10 0 10 24 0 42M6 48 19 34M48 6 34 19M84 82 98 73M82 84 73 98"
+    static let shardA = "M118 7 136 12 124 20ZM96 28 114 35 101 44ZM68 58 86 67 73 76ZM32 95 45 112 29 107ZM8 118 17 137 6 129Z"
+    static let shardB = "M144 4 158 8 148 14ZM111 46 125 53 113 59ZM84 80 98 89 86 95ZM52 110 62 125 50 119ZM19 140 27 155 16 148Z"
+    static let glint = "M26 14 30 10 34 14 30 18ZM58 26 62 21 66 26 62 31ZM26 58 31 54 36 58 31 62ZM74 52 77 48 80 52 77 56Z"
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let scale = rect.width / 180
+        var command: Character = "M"
+        var numbers: [CGFloat] = []
+        var token = ""
+        var point = CGPoint.zero
+        var started = false
+        func scaled(_ p: CGPoint) -> CGPoint {
+            CGPoint(x: rect.minX + p.x * scale, y: rect.minY + p.y * scale)
+        }
+        func number() {
+            if let value = Double(token) { numbers.append(CGFloat(value)) }
+            token = ""
+        }
+        func draw() {
+            if command == "H" {
+                for x in numbers {
+                    point.x = x
+                    path.addLine(to: scaled(point))
+                }
+            } else {
+                var index = 0
+                while index + 1 < numbers.count {
+                    point = CGPoint(x: numbers[index], y: numbers[index + 1])
+                    if command == "M" && index == 0 || !started {
+                        path.move(to: scaled(point))
+                        started = true
+                    } else {
+                        path.addLine(to: scaled(point))
+                    }
+                    index += 2
+                }
+            }
+            numbers = []
+        }
+        for character in d {
+            if character.isLetter {
+                number()
+                draw()
+                if character == "Z" {
+                    path.closeSubpath()
+                    started = false
+                } else {
+                    command = character
+                }
+            } else if character == " " {
+                number()
+            } else {
+                token.append(character)
+            }
+        }
+        number()
+        draw()
+        return path
+    }
+}
+
+/// Frost beads hanging from a straight edge.
+private struct IceRime: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        var x = rect.minX + 14
+        var tall = true
+        while x < rect.maxX {
+            let height: CGFloat = tall ? 10 : 7
+            path.addEllipse(in: CGRect(x: x - 8, y: rect.minY - height, width: 16, height: height * 2))
+            x += 28
+            tall.toggle()
+        }
+        return path
+    }
+}
+
+private struct IceColors {
+    let deep: Color
+    let fill: Color
+    let inner: Color
+    let line: Color
+    let bright: Color
+    let glow: Color
+    let thaw: Color
+    let violet = Color(.sRGB, red: 167 / 255, green: 139 / 255, blue: 250 / 255, opacity: 0.20)
+
+    init(isDark: Bool) {
+        func c(_ r: Double, _ g: Double, _ b: Double, _ a: Double) -> Color {
+            Color(.sRGB, red: r / 255, green: g / 255, blue: b / 255, opacity: a)
+        }
+        if isDark {
+            deep = c(37, 99, 235, 0.18)
+            fill = c(114, 209, 250, 0.20)
+            inner = c(196, 243, 255, 0.30)
+            line = c(154, 228, 255, 0.78)
+            bright = c(236, 254, 255, 0.95)
+            glow = c(56, 189, 248, 0.30)
+            thaw = c(52, 211, 153, 0.24)
+        } else {
+            deep = c(56, 189, 248, 0.14)
+            fill = c(148, 224, 252, 0.24)
+            inner = c(224, 248, 255, 0.50)
+            line = c(56, 189, 248, 0.74)
+            bright = c(240, 253, 255, 0.94)
+            glow = c(125, 211, 252, 0.32)
+            thaw = c(52, 211, 153, 0.26)
+        }
+    }
+}
+
+private struct IceCrystalView: View {
+    let colors: IceColors
+    let grown: CGFloat
+    let vein: CGFloat
+    let drift: CGFloat
+
+    var body: some View {
+        ZStack {
+            IceGlyph(d: IceGlyph.deep)
+                .fill(colors.deep)
+                .overlay(IceGlyph(d: IceGlyph.deep).stroke(colors.line.opacity(0.55), lineWidth: 0.5))
+                .scaleEffect(1 + 0.05 * drift, anchor: .topLeading)
+            IceGlyph(d: IceGlyph.facet)
+                .fill(colors.fill)
+                .overlay(IceGlyph(d: IceGlyph.facet).stroke(colors.line, lineWidth: 0.6))
+                .scaleEffect(1 + 0.03 * drift, anchor: .topLeading)
+            IceGlyph(d: IceGlyph.inner)
+                .fill(
+                    LinearGradient(
+                        colors: [colors.inner, colors.fill],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(IceGlyph(d: IceGlyph.inner).stroke(colors.bright.opacity(0.8), lineWidth: 0.5))
+            IceGlyph(d: IceGlyph.vein)
+                .trim(from: 0, to: vein)
+                .stroke(colors.line, style: StrokeStyle(lineWidth: 0.7, lineCap: .round))
+            IceGlyph(d: IceGlyph.shardA)
+                .fill(colors.inner)
+                .overlay(IceGlyph(d: IceGlyph.shardA).stroke(colors.line, lineWidth: 0.4))
+                .offset(x: 9 * drift, y: 13 * drift)
+                .opacity(Double(1 - drift))
+            IceGlyph(d: IceGlyph.shardB)
+                .fill(colors.inner)
+                .overlay(IceGlyph(d: IceGlyph.shardB).stroke(colors.line, lineWidth: 0.4))
+                .offset(x: 14 * drift, y: 8 * drift)
+                .opacity(Double(1 - drift))
+            IceGlyph(d: IceGlyph.glint)
+                .fill(colors.bright)
+                .opacity(0.72 * Double(vein))
+        }
+        .frame(width: 96, height: 96)
+        .scaleEffect(0.62 + 0.38 * grown, anchor: .topLeading)
+        .opacity(Double(grown))
+    }
+}
+
+/// Ice growing in from the corners while every client is frozen and drained.
+/// It moves only while freezing or thawing and is a still picture in between.
+struct QuickIceOverlayView: View {
+    let active: Bool
+    let isDark: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var grown: CGFloat = 0
+    @State private var vein: CGFloat = 0
+    @State private var drift: CGFloat = 0
+    @State private var sweep: CGFloat = 1
+    @State private var pulse: CGFloat = 1
+    @State private var running = false
+    @State private var run = 0
+
+    private static let corners: [(Alignment, Double)] = [
+        (.topLeading, 0), (.topTrailing, 90), (.bottomTrailing, 180), (.bottomLeading, 270),
+    ]
+
+    private func ease(_ duration: Double, _ delay: Double = 0) -> Animation {
+        (active
+            ? Animation.timingCurve(0.16, 1, 0.3, 1, duration: duration)
+            : Animation.timingCurve(0.22, 1, 0.36, 1, duration: duration * 0.62))
+            .delay(delay)
+    }
+
+    var body: some View {
+        let colors = IceColors(isDark: isDark)
+        ZStack {
+            if active || running {
+                if running {
+                    Circle()
+                        .stroke(active ? colors.glow : colors.thaw, lineWidth: 30)
+                        .blur(radius: 12)
+                        .scaleEffect(0.35 + 1.5 * pulse)
+                        .opacity(Double(1 - pulse))
+                        .animation(.easeOut(duration: active ? 1.12 : 0.76), value: pulse)
+                }
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(colors.glow, lineWidth: 7)
+                    .blur(radius: 6)
+                    .opacity(Double(grown))
+                    .animation(ease(1.42), value: grown)
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(colors.line, lineWidth: 1.5)
+                    .opacity(Double(grown))
+                    .animation(ease(1.42), value: grown)
+                ForEach(0..<2, id: \.self) { index in
+                    IceRime()
+                        .fill(colors.inner)
+                        .frame(height: 10)
+                        .padding(.horizontal, 96)
+                        .scaleEffect(x: 1, y: grown, anchor: .top)
+                        .opacity(0.82 * Double(grown))
+                        .scaleEffect(x: 1, y: index == 0 ? 1 : -1)
+                        .frame(maxHeight: .infinity, alignment: index == 0 ? .top : .bottom)
+                        .animation(ease(1.18, 0.09 + 0.04 * Double(index)), value: grown)
+                }
+                ForEach(0..<4, id: \.self) { index in
+                    let stagger = 0.045 * Double(index)
+                    IceCrystalView(colors: colors, grown: grown, vein: vein, drift: drift)
+                        .animation(ease(1.26, stagger), value: grown)
+                        .animation(ease(1.12, stagger + 0.08), value: vein)
+                        .animation(.easeOut(duration: 0.79).delay(stagger), value: drift)
+                        .rotationEffect(.degrees(Self.corners[index].1))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: Self.corners[index].0)
+                }
+                if running {
+                    GeometryReader { proxy in
+                        Rectangle()
+                            .fill(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: .clear, location: 0.34),
+                                        .init(color: colors.glow, location: 0.45),
+                                        .init(color: colors.bright.opacity(0.55), location: 0.50),
+                                        .init(color: active ? colors.violet : colors.thaw, location: 0.55),
+                                        .init(color: .clear, location: 0.66),
+                                    ],
+                                    startPoint: UnitPoint(x: 0, y: 0.3),
+                                    endPoint: UnitPoint(x: 1, y: 0.7)
+                                )
+                            )
+                            .offset(x: (sweep * 2 - 1) * proxy.size.width * 0.72)
+                            .animation(
+                                .timingCurve(0.22, 1, 0.36, 1, duration: active ? 1.32 : 0.76)
+                                    .delay(active ? 0.06 : 0),
+                                value: sweep
+                            )
+                    }
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onAppear { settle(active) }
+        .onChange(of: active) { next in
+            reduceMotion ? settle(next) : play(next)
+        }
+    }
+
+    private func still(_ change: () -> Void) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction, change)
+    }
+
+    private func settle(_ on: Bool) {
+        run += 1
+        still {
+            running = false
+            grown = on ? 1 : 0
+            vein = grown
+            drift = 0
+            sweep = 1
+            pulse = 1
+        }
+    }
+
+    private func play(_ on: Bool) {
+        run += 1
+        let current = run
+        still {
+            running = true
+            sweep = 0
+            pulse = 0
+            drift = 0
+            if on {
+                grown = 0
+                vein = 0
+            }
+        }
+        DispatchQueue.main.async {
+            guard current == run else { return }
+            grown = on ? 1 : 0
+            vein = grown
+            sweep = 1
+            pulse = 1
+            if !on { drift = 1 }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (on ? 1.6 : 0.95)) {
+            guard current == run else { return }
+            still {
+                running = false
+                drift = 0
+            }
+        }
+    }
+}
+
 // MARK: - Root SwiftUI View
 
 struct QuickPanelRootView: View {
@@ -1770,6 +2090,8 @@ struct QuickPanelRootView: View {
                 .frame(minHeight: 28)
             }
             .padding(10)
+
+            QuickIceOverlayView(active: store.model.freeze.tone == "ice", isDark: palette.isDark)
 
             if let limitDraft = store.limitPopover {
                 QuickLimitOverlayView(store: store, draft: limitDraft, palette: palette)

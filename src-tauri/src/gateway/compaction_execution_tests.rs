@@ -221,3 +221,58 @@ async fn websocket_compaction_each_round_survives_silence_but_ordinary_round_sti
     released(&g).await;
     g.stop().await.unwrap();
 }
+#[tokio::test]
+async fn compaction_without_output_ends_at_its_own_limit() {
+    for sse in [false, true] {
+        let port = server(move |_| async move {
+            if !sse {
+                std::future::pending::<()>().await;
+            }
+            let stream = async_stream::try_stream! {
+                yield Frame::data(Bytes::from_static(CREATED));
+                std::future::pending::<()>().await;
+            };
+            Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(
+                    StreamBody::new(stream)
+                        .map_err(|e: std::io::Error| -> connector::BoxError { e.into() })
+                        .boxed_unsync(),
+                )
+                .unwrap()
+        })
+        .await;
+        let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
+        let mut settings = g.view().settings;
+        settings.compaction_seconds = 2;
+        settings.max_retries = 0;
+        update(&g, &t, Edit::Settings { settings });
+        start(&g, &t).await;
+        let started = std::time::Instant::now();
+        let request_task = {
+            let g = g.clone();
+            tokio::spawn(async move {
+                let response = request(
+                    &g,
+                    "/v1/responses",
+                    COMPACT.to_vec(),
+                    vec![("content-type", "application/json")],
+                )
+                .await;
+                let status = response.status();
+                let _ = response.into_body().collect().await;
+                status
+            })
+        };
+        executing(&g).await;
+        let status = tokio::time::timeout(Duration::from_secs(8), request_task)
+            .await
+            .expect("a compaction without output must not wait forever")
+            .unwrap();
+        // The ordinary 300 second limits are not what ended it.
+        assert!(started.elapsed() >= Duration::from_secs(2), "sse {sse}");
+        assert_eq!(status == 200, sse, "sse {sse}");
+        released(&g).await;
+        g.stop().await.unwrap();
+    }
+}

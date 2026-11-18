@@ -10,6 +10,16 @@ use tokio::{
     time::Instant,
 };
 
+/// How long an upstream may stay silent before a wait gives up.
+#[derive(Clone, Copy)]
+pub enum Silence {
+    /// Until the caller's deadline.
+    Ordinary,
+    /// Compaction, once dispatched: this long from dispatch while it has
+    /// produced no output, without limit afterwards.
+    Compaction(Option<Duration>),
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingRequest {
@@ -26,6 +36,7 @@ struct Pending {
     started: Instant,
     deadline: Instant,
     compaction_execution: bool,
+    compaction_since: Instant,
     endless: bool,
     executing: bool,
     execution_elapsed: Duration,
@@ -225,6 +236,7 @@ impl WaitBudget {
             started,
             deadline: started + Duration::from_secs(self.seconds),
             compaction_execution: false,
+            compaction_since: started,
             endless: false,
             executing: false,
             execution_elapsed: Duration::ZERO,
@@ -312,6 +324,9 @@ impl WaitBudget {
             .as_mut()
             .filter(|p| Some(p.deadline) == deadline)
         {
+            if executing && !active.compaction_execution {
+                active.compaction_since = Instant::now();
+            }
             active.compaction_execution = executing;
             if executing {
                 active.view.phase = "compaction".into();
@@ -331,21 +346,33 @@ impl WaitBudget {
             .as_ref()
             .is_some_and(|p| p.compaction_execution)
     }
+    fn compaction_since(&self) -> Option<Instant> {
+        self.shared
+            .state
+            .lock()
+            .active
+            .as_ref()
+            .filter(|p| p.compaction_execution)
+            .map(|p| p.compaction_since)
+    }
     pub async fn response<T>(
         &self,
         deadline: Instant,
-        compaction: bool,
+        silence: Silence,
         future: impl std::future::Future<Output = T>,
     ) -> Result<T, tokio::time::error::Elapsed> {
-        if !compaction {
+        let Silence::Compaction(limit) = silence else {
             return tokio::time::timeout_at(deadline, future).await;
-        }
+        };
         let mut changes = self.shared.changes.subscribe();
         tokio::pin!(future);
         loop {
             changes.borrow_and_update();
-            if self.executing_compaction() {
-                return Ok(future.await);
+            if let Some(since) = self.compaction_since() {
+                return match limit {
+                    Some(limit) => tokio::time::timeout_at(since + limit, future).await,
+                    None => Ok(future.await),
+                };
             }
             tokio::select! {
                 biased;
@@ -556,12 +583,16 @@ mod tests {
         budget.begin();
         let identity = budget.deadline();
         let response = budget
-            .response(Instant::now() + Duration::from_secs(1), true, async {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                budget.compaction_execution(identity, true);
-                tokio::time::sleep(Duration::from_secs(601)).await;
-                42
-            })
+            .response(
+                Instant::now() + Duration::from_secs(1),
+                Silence::Compaction(None),
+                async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    budget.compaction_execution(identity, true);
+                    tokio::time::sleep(Duration::from_secs(601)).await;
+                    42
+                },
+            )
             .await;
         assert_eq!(response.unwrap(), 42);
         budget.complete(identity);
@@ -584,11 +615,30 @@ mod tests {
         assert!(budget
             .response(
                 Instant::now() + Duration::from_secs(1),
-                false,
+                Silence::Ordinary,
                 std::future::pending::<()>()
             )
             .await
             .is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatched_compaction_waits_its_own_limit_for_the_first_output() {
+        let budget = WaitBudget::new(300);
+        budget.begin();
+        let identity = budget.deadline();
+        let started = Instant::now();
+        let limit = Silence::Compaction(Some(Duration::from_secs(400)));
+        let response = budget
+            .response(Instant::now() + Duration::from_secs(60), limit, async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                budget.compaction_execution(identity, true);
+                std::future::pending::<()>().await
+            })
+            .await;
+        assert!(response.is_err());
+        // Counted from the dispatch, not from the ordinary deadline.
+        assert_eq!(started.elapsed(), Duration::from_secs(410));
     }
 
     #[tokio::test(start_paused = true)]

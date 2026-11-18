@@ -66,6 +66,7 @@ beforeEach(() => {
           source: args.source ?? null,
           pinned: null,
           metadata: null,
+          custom: null,
           price: null,
         });
       if (args.op === "pin")
@@ -152,4 +153,52 @@ it("keeps Codex readonly and retains visible data on a failed refresh", async ()
     expect(screen.getByRole("alert")).toHaveTextContent("刷新失败"),
   );
   expect(screen.getByText("配置已变更，需刷新")).toBeInTheDocument();
+});
+
+it("edits context and reasoning efforts by hand, also for Codex, and restores defaults", async () => {
+  const user = userEvent.setup();
+  view.passthrough = true;
+  view.clientId = "codex";
+  view.models = [
+    {
+      id: "fixture-model",
+      providers: [{ id: "fixture", name: "Fixture" }],
+      manual: false,
+      source: null,
+      pinned: null,
+      metadata: null,
+      custom: null,
+      price: null,
+    },
+  ];
+  mock.command.mockImplementation(async (name, args) => {
+    if (name === "edit_model_list")
+      view.models[0].custom =
+        args.context == null && !args.efforts
+          ? null
+          : { context: args.context, efforts: args.efforts };
+    return structuredClone(view);
+  });
+  render(<GatewayModels clientId="codex" />);
+  await user.click(await screen.findByRole("button", { name: "编辑参数" }));
+  expect(screen.queryByRole("button", { name: "指定来源" })).toBeNull();
+  await user.type(screen.getByLabelText("上下文 / Token"), "1050000");
+  await user.type(screen.getByLabelText("推理档位"), "high, xhigh max");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  expect(mock.command).toHaveBeenCalledWith("edit_model_list", {
+    clientId: "codex",
+    op: "custom",
+    id: "fixture-model",
+    context: 1050000,
+    efforts: ["high", "xhigh", "max"],
+  });
+  await user.click(await screen.findByRole("button", { name: "已改参数" }));
+  await user.click(screen.getByRole("button", { name: "恢复默认" }));
+  expect(mock.command).toHaveBeenLastCalledWith("edit_model_list", {
+    clientId: "codex",
+    op: "custom",
+    id: "fixture-model",
+    context: null,
+    efforts: null,
+  });
 });

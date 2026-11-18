@@ -68,6 +68,7 @@ export const gatewayDemo: GatewayState = {
     capacityRetrySeconds: 60,
     websocketRetrySeconds: 300,
     firstByteSeconds: 300,
+    compactionSeconds: 400,
     idleSeconds: 300,
     retryBudgetSeconds: 300,
     endpointProbeSeconds: 300,
@@ -332,6 +333,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
               context: 128000,
               output: 8192,
             },
+            custom: null,
             price: {
               source: "models.dev",
               inputPerM: "1",
@@ -356,7 +358,38 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       };
       modelViews.set(s.clientId, view);
     }
-    if (name === "edit_model_list" && !view.passthrough) {
+    if (name === "edit_model_list" && args.op === "custom") {
+      const model = view.models.find((m) => m.id === String(args.id));
+      if (model) {
+        const context = typeof args.context === "number" ? args.context : null,
+          efforts = Array.isArray(args.efforts)
+            ? args.efforts.map(String)
+            : null;
+        model.custom =
+          context == null && !efforts ? null : { context, efforts };
+        if (model.custom)
+          model.metadata = {
+            ...(model.metadata ?? {
+              sources: [],
+              model: model.id,
+              matchedBy: "manual",
+              name: null,
+              reasoning: null,
+              context: null,
+              output: null,
+              reasoningEfforts: null,
+            }),
+            ...(context == null ? {} : { context }),
+            ...(efforts
+              ? {
+                  reasoningEfforts: Object.fromEntries(
+                    efforts.map((effort) => [effort, null]),
+                  ),
+                }
+              : {}),
+          };
+      }
+    } else if (name === "edit_model_list" && !view.passthrough) {
       const id = String(args.id),
         model = view.models.find((m) => m.id === id);
       if (args.op === "add") {
@@ -369,6 +402,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
             source: typeof args.source === "string" ? args.source : null,
             pinned: null,
             metadata: null,
+            custom: null,
             price: null,
           });
       } else if (args.op === "remove") {
@@ -726,7 +760,9 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           filterCountTokens: Boolean(e.filterCountTokens),
           bufferCompleteResponse: Boolean(e.bufferCompleteResponse),
           endlessMode: Boolean(e.endlessMode),
-          upstreamRetrySeconds: Number(e.upstreamRetrySeconds ?? DEFAULT_UPSTREAM_RETRY_SECONDS),
+          upstreamRetrySeconds: Number(
+            e.upstreamRetrySeconds ?? DEFAULT_UPSTREAM_RETRY_SECONDS,
+          ),
           name: new URL(String(e.baseUrl)).hostname,
           baseUrl: String(e.baseUrl),
           preferredBaseUrl: String(e.baseUrl),

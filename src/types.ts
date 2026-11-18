@@ -72,7 +72,7 @@ export type UpdateInfo = {
   latestVersion: string | null;
 };
 /** Seconds between upstream retries when a provider has no saved value. */
-export const DEFAULT_UPSTREAM_RETRY_SECONDS = 5;
+export const DEFAULT_UPSTREAM_RETRY_SECONDS = 33;
 export const errorOf = (e: unknown): AppError =>
   typeof e === "object" && e !== null && "message" in e
     ? (e as AppError)
@@ -95,6 +95,7 @@ export type GatewaySettings = {
   websocketRetrySeconds: number;
   endpointProbeSeconds: number;
   firstByteSeconds: number;
+  compactionSeconds: number;
   idleSeconds: number;
   retryBudgetSeconds: number;
   connectSeconds: number;

@@ -1677,10 +1677,16 @@ fn edit_model_list(
     op: gateway::model_list::Operation,
     id: String,
     source: Option<String>,
+    context: Option<u64>,
+    efforts: Option<Vec<String>>,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::model_list::View> {
-    r.gateway(client_id)
-        .edit_model_list(op, &id, source.as_deref())
+    r.gateway(client_id).edit_model_list(
+        op,
+        &id,
+        source.as_deref(),
+        gateway::model_list::Custom { context, efforts },
+    )
 }
 #[tauri::command]
 async fn dsh_official_models(

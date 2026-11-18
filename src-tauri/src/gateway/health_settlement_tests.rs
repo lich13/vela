@@ -70,6 +70,7 @@ fn default_settings_match_current_serialization() {
             "websocketRetrySeconds": 300,
             "endpointProbeSeconds": 300,
             "firstByteSeconds": 300,
+            "compactionSeconds": 400,
             "idleSeconds": 300,
             "retryBudgetSeconds": 300,
             "connectSeconds": 300,

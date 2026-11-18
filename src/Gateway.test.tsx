@@ -768,7 +768,7 @@ describe("client isolation", () => {
         filterCountTokens: false,
         bufferCompleteResponse: false,
         endlessMode: false,
-        upstreamRetrySeconds: 5,
+        upstreamRetrySeconds: 33,
       },
       expectedRevision: claudeState.revision,
     });
