@@ -145,6 +145,8 @@ export const gatewayDemo: GatewayState = {
   recoveryPending: false,
   modelCatalog: false,
   modelCatalogOfficial: false,
+  modelCatalogOfficialStatus: null,
+  modelCatalogOfficialError: null,
   modelCatalogError: null,
 };
 if (densePreview) {
@@ -285,6 +287,17 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     );
     s.waitingRequests = s.pendingRequests.length;
     return found;
+  }
+  if (name === "update_codex_catalog") {
+    if (!s.modelCatalog || !s.modelCatalogOfficial)
+      throw new Error("尚未选用官方模型列表");
+    s.modelCatalogOfficialStatus = {
+      models: 14,
+      version: "1a2b3c4d",
+      updatedAt: Date.now(),
+    };
+    s.modelCatalogOfficialError = null;
+    return structuredClone(s);
   }
   if (["get_models_dev", "update_models_dev"].includes(name)) return modelIndex;
   if (name === "search_models_dev")
@@ -809,6 +822,12 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     if (e.op === "modelCatalogSource") {
       if (s.clientId !== "codex") throw new Error("官方模型列表仅适用于 Codex");
       s.modelCatalogOfficial = Boolean(e.official);
+      if (s.modelCatalogOfficial)
+        s.modelCatalogOfficialStatus ??= {
+          models: 14,
+          version: "1a2b3c4d",
+          updatedAt: Date.now(),
+        };
     }
     if (e.op === "connection") {
       if (s.clientId !== "codex" || s.running)

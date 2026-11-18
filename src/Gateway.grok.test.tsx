@@ -37,7 +37,11 @@ beforeEach(() => {
   mock.command.mockImplementation(
     async (name: string, args?: { clientId?: ClientId }) => {
       const state = args?.clientId === "grok" ? grok : codex;
-      if (name === "get_gateway" || name === "update_gateway")
+      if (
+        name === "get_gateway" ||
+        name === "update_gateway" ||
+        name === "update_codex_catalog"
+      )
         return structuredClone(state);
       throw new Error(`Unexpected fixture command: ${name}`);
     },
@@ -135,6 +139,13 @@ it("offers the model list switch to Codex and Grok and saves it as an edit", asy
   // Codex alone may list OpenAI's own catalog instead of the queue's models.
   const source = await screen.findByRole("combobox", { name: "列表来源" });
   expect(source).toHaveValue("queue");
+  codex.modelCatalogOfficial = true;
+  codex.modelCatalogOfficialStatus = {
+    models: 14,
+    version: "1a2b3c4d",
+    updatedAt: 1,
+  };
+  codex.modelCatalogOfficialError = "fixture download error";
   await user.selectOptions(source, "official");
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith(
@@ -143,6 +154,19 @@ it("offers the model list switch to Codex and Grok and saves it as an edit", asy
         clientId: "codex",
         edit: { op: "modelCatalogSource", official: true },
       }),
+    ),
+  );
+  // What is held, since when, and the last download's error; then a download by hand.
+  expect(
+    await screen.findByText(
+      /^14 个模型 · 版本 1a2b3c4d · 最近更新 .+ · fixture download error$/,
+    ),
+  ).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "立即更新" }));
+  await waitFor(() =>
+    expect(mock.command).toHaveBeenCalledWith(
+      "update_codex_catalog",
+      undefined,
     ),
   );
 

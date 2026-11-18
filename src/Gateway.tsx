@@ -688,6 +688,38 @@ function GatewayContent({
                   </select>
                 </label>
               )}
+              {clientId === "codex" &&
+                state.modelCatalog &&
+                state.modelCatalogOfficial && (
+                  <p className="model-catalog-official">
+                    <span className="muted">
+                      {state.modelCatalogOfficialStatus
+                        ? `${state.modelCatalogOfficialStatus.models} 个模型 · 版本 ${state.modelCatalogOfficialStatus.version} · 最近更新 ${new Date(state.modelCatalogOfficialStatus.updatedAt).toLocaleString()}`
+                        : "尚未下载"}
+                      {state.modelCatalogOfficialError &&
+                        ` · ${state.modelCatalogOfficialError}`}
+                    </span>
+                    <button
+                      type="button"
+                      className="secondary compact"
+                      disabled={busy}
+                      onClick={() => {
+                        const before = state.modelCatalogOfficialStatus?.version;
+                        run(async () => {
+                          const next = await command("update_codex_catalog");
+                          setState(next);
+                          notify(
+                            next.modelCatalogOfficialStatus?.version === before
+                              ? "官方列表已是最新"
+                              : "官方列表已更新，重启 Codex 后生效",
+                          );
+                        });
+                      }}
+                    >
+                      立即更新
+                    </button>
+                  </p>
+                )}
               {state.modelCatalog && state.modelCatalogError && (
                 <p className="form-error" role="alert">
                   {state.modelCatalogError}

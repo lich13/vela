@@ -1660,6 +1660,12 @@ async fn refresh_gateway_models(
         .refresh_gateway_models(provider_ids)
         .await
 }
+/// Downloads OpenAI's Codex catalog now instead of at the day's turn.
+#[tauri::command]
+async fn update_codex_catalog(r: tauri::State<'_, Arc<Runtime>>) -> Result<gateway::View> {
+    r.gateway.refresh_official_catalog(true).await?;
+    r.gateway.try_view()
+}
 #[tauri::command]
 fn search_models_dev(
     query: String,
@@ -2146,7 +2152,7 @@ pub fn run() {
                     hourly.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
                         hourly.tick().await;
-                        codex.refresh_official_catalog().await;
+                        let _ = codex.refresh_official_catalog(false).await;
                     }
                 });
             }
@@ -2701,6 +2707,7 @@ pub fn run() {
             preview_grok_import,
             get_gateway_models,
             refresh_gateway_models,
+            update_codex_catalog,
             search_models_dev,
             edit_model_list,
             dsh_official_models,

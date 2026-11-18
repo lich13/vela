@@ -209,6 +209,9 @@ pub struct View {
     pub recovery_pending: bool,
     pub model_catalog: bool,
     pub model_catalog_official: bool,
+    /// What OpenAI's catalog holds as downloaded, and how the last download went.
+    pub model_catalog_official_status: Option<codex_official::Status>,
+    pub model_catalog_official_error: Option<String>,
     pub model_catalog_error: Option<String>,
 }
 mod inner_state {
@@ -368,6 +371,8 @@ struct Shared {
     catalog_sync: tokio::sync::Mutex<()>,
     catalog_pending: std::sync::atomic::AtomicBool,
     catalog_error: Mutex<Option<String>>,
+    /// OpenAI's catalog as downloaded, and the last download's error.
+    official: Mutex<(Option<codex_official::Status>, Option<String>)>,
     #[cfg(test)]
     official_source: Mutex<Option<String>>,
     clients: Mutex<HashMap<String, HttpClient>>,
@@ -675,6 +680,7 @@ impl Gateway {
             catalog_sync: tokio::sync::Mutex::new(()),
             catalog_pending: std::sync::atomic::AtomicBool::new(false),
             catalog_error: Mutex::new(None),
+            official: Mutex::new((None, None)),
             #[cfg(test)]
             official_source: Mutex::new(None),
             clients: Mutex::new(HashMap::new()),
@@ -895,6 +901,7 @@ impl Gateway {
         let s = self.request_state();
         let (occupied, waiting) = self.0.admission.counts();
         let health = |key: &str| s.circuits.get(key).cloned().unwrap_or_default().health();
+        let official = self.0.official.lock().clone();
         let view = View {
             listener: listener.clone(),
             grok_managed: s.store.grok_api_model.is_some(),
@@ -1021,6 +1028,8 @@ impl Gateway {
             recovery_pending: s.recovery_error.is_some(),
             model_catalog: s.store.model_catalog,
             model_catalog_official: s.store.model_catalog_official,
+            model_catalog_official_status: official.0,
+            model_catalog_official_error: official.1,
             model_catalog_error: self.0.catalog_error.lock().clone(),
         };
         // Selection readers need only connection identity and provider matching data.
@@ -2169,26 +2178,54 @@ impl Gateway {
         }
         codex_official::SOURCE.into()
     }
-    /// Keeps OpenAI's catalog a day fresh while it is what Codex's picker lists.
-    pub(crate) async fn refresh_official_catalog(&self) {
+    /// Keeps OpenAI's catalog a day fresh while it is what Codex's picker
+    /// lists, or downloads it at once when asked by hand. Reports whether the
+    /// content changed.
+    pub(crate) async fn refresh_official_catalog(&self, force: bool) -> Result<bool> {
         let chosen = {
             let s = self.0.inner.lock();
             s.store.model_catalog && s.store.model_catalog_official
         };
         if self.0.client != ClientId::Codex || !chosen {
-            return;
+            return if force {
+                Err(AppError::new(code::CLIENT, "尚未选用官方模型列表"))
+            } else {
+                Ok(false)
+            };
         }
         // A failed download keeps the catalog fetched before; the next round retries.
-        if let Ok(true) = codex_official::refresh(&self.0.data, &self.official_source()).await {
+        let result = codex_official::refresh(&self.0.data, &self.official_source(), force).await;
+        self.official_observed(Some(&result));
+        if let Ok(true) = result {
             self.schedule_catalog_sync();
+        }
+        result
+    }
+    /// Notes what OpenAI's catalog holds now and, after a download, how it went.
+    fn official_observed(&self, download: Option<&Result<bool>>) {
+        let status = codex_official::status(&self.0.data);
+        let mut held = self.0.official.lock();
+        let error = match download {
+            Some(result) => result.as_ref().err().map(|e| e.message.clone()),
+            None => held.1.clone(),
+        };
+        if *held != (status.clone(), error.clone()) {
+            *held = (status, error);
+            drop(held);
+            self.0.registry.changed();
         }
     }
     /// OpenAI's catalog as last downloaded, fetched now when there is none yet.
     async fn official_catalog(&self) -> Result<Vec<u8>> {
         if let Some(catalog) = codex_official::cached(&self.0.data) {
+            if self.0.official.lock().0.is_none() {
+                self.official_observed(None);
+            }
             return Ok(catalog);
         }
-        codex_official::refresh(&self.0.data, &self.official_source()).await?;
+        let result = codex_official::refresh(&self.0.data, &self.official_source(), false).await;
+        self.official_observed(Some(&result));
+        result?;
         codex_official::cached(&self.0.data)
             .ok_or_else(|| AppError::new(code::MODELS, "官方模型列表不可用"))
     }

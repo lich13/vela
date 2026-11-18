@@ -471,18 +471,42 @@ async fn codex_picker_lists_the_official_catalog_verbatim_or_falls_back_to_the_q
     let catalog: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert_eq!(catalog["models"][0]["slug"], "fixture-model");
-    g.refresh_official_catalog().await;
+    // A download asked for by hand fails aloud; either way the reason is shown.
+    assert!(!g
+        .refresh_official_catalog(false)
+        .await
+        .is_ok_and(|changed| changed));
+    assert!(g.refresh_official_catalog(true).await.is_err());
     assert!(codex_official::cached(&g.0.data).is_none());
+    let view = g.view();
+    assert!(view.model_catalog_official_status.is_none());
+    assert!(view.model_catalog_official_error.is_some());
     // Once downloaded, the file is OpenAI's catalog byte for byte.
     let official = br#"{"models":[{"slug":"official-a","supported_reasoning_levels":[{"effort":"low"}]},{"slug":"official-b","visibility":"hide"}]}"#;
     let source = server(move |_| async move { Response::new(full(&official[..])) }).await;
     *g.0.official_source.lock() = Some(format!("http://127.0.0.1:{source}/models.json"));
-    g.refresh_official_catalog().await;
+    assert!(g.refresh_official_catalog(false).await.unwrap());
+    assert_eq!(codex_official::cached(&g.0.data).unwrap(), official);
+    let view = g.view();
+    let held = view.model_catalog_official_status.unwrap();
+    assert_eq!((held.models, held.version.len()), (2, 8));
+    assert!(view.model_catalog_official_error.is_none());
+    // The same content by hand changes nothing; a dead source keeps what is held.
+    assert!(!g.refresh_official_catalog(true).await.unwrap());
+    *g.0.official_source.lock() = Some("http://127.0.0.1:1/models.json".into());
+    assert!(g.refresh_official_catalog(true).await.is_err());
+    let view = g.view();
+    assert_eq!(
+        view.model_catalog_official_status.unwrap().version,
+        held.version
+    );
+    assert!(view.model_catalog_official_error.is_some());
     assert_eq!(codex_official::cached(&g.0.data).unwrap(), official);
     g.sync_catalog().await.unwrap();
     assert_eq!(std::fs::read(&file).unwrap(), official);
     // Back on the queue's models, and never for another client.
     update(&g, &t, Edit::ModelCatalogSource { official: false });
+    assert!(g.refresh_official_catalog(true).await.is_err());
     g.sync_catalog().await.unwrap();
     let catalog: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();

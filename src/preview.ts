@@ -385,6 +385,7 @@ export async function run(
     [
       "get_gateway_models",
       "refresh_gateway_models",
+      "update_codex_catalog",
       "search_models_dev",
       "edit_model_list",
       "get_models_dev",

@@ -119,7 +119,9 @@ fn load_or_fallback<T>(directory: &Path, parse: impl Fn(&[u8], bool) -> Result<T
         if let Ok(value) = parse(&raw, true) {
             return Ok(value);
         }
-        let _ = storage::preserve_corrupt(&cache, &raw);
+        // A damaged download, or one scored by an older algorithm, can only be
+        // fetched again: keeping it would be read and refused at every start.
+        let _ = std::fs::remove_file(&cache);
     }
     parse(BUNDLE, false)
 }
@@ -540,21 +542,31 @@ mod tests {
             assert_eq!(status(&lock(&restarted.0.data)), failed);
         }
 
-        // An invalid local bundle must not turn a matching revision into false success.
+        // An unusable local bundle is dropped without a copy, so the built-in
+        // one is what a matching revision is compared with.
         std::fs::write(dir.path().join(CACHE), b"corrupt fixture").unwrap();
         let repaired = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
         assert_eq!(
             repaired.lm_resource().unwrap().metadata["source"],
             "builtin"
         );
+        assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(CACHE)));
         mode.store(0, Ordering::SeqCst);
         lock(&requests).clear();
         let repair_same_rev = repaired
             .update_lm_bank_from(&source, &source)
             .await
             .unwrap();
-        assert_eq!(repair_same_rev["result"], "updated");
-        assert_eq!(repaired.lm_resource().unwrap().metadata["source"], "cache");
+        assert_eq!(repair_same_rev["result"], "up-to-date");
+        assert_eq!(*lock(&requests), vec!["/commits/main"]);
+        assert_eq!(
+            repaired.lm_resource().unwrap().metadata["source"],
+            "builtin"
+        );
 
         std::fs::write(dir.path().join(CACHE), b"corrupt fixture").unwrap();
         let repaired = Service::new(dir.path(), service.0.gateways.clone()).unwrap();

@@ -644,6 +644,64 @@ async fn http_new_thread_policy_excluded_backup_is_not_reported_as_a_next_provid
 }
 
 #[tokio::test]
+async fn http_failed_tls_handshake_is_retried_and_answered_like_a_connection_failure() {
+    // A peer that answers every TLS hello with plain HTTP.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut peer, _)) = listener.accept().await {
+            let _ =
+                tokio::io::AsyncWriteExt::write_all(&mut peer, b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                    .await;
+        }
+    });
+    let (dir, gateway) = fixture(vec![format!("https://127.0.0.1:{port}/v1")]).await;
+    configure_auto(&gateway, &dir, 1);
+    let primary_id = gateway.view().providers[0].id.clone();
+    update(
+        &gateway,
+        &dir,
+        Edit::TakeoverProvider {
+            id: primary_id.clone(),
+            handoff_after_compaction: None,
+            take_new_threads: Some(true),
+        },
+    );
+    let (diagnostics, mut notifications) = diagnostic_sink(&gateway, &dir);
+    start(&gateway, &dir).await;
+
+    let response = post_responses(
+        &gateway,
+        Some("fixture-v035-tls-handshake"),
+        json!([{"role":"user", "content":"fixture input"}]),
+    )
+    .await;
+    // The client is told of a failed connection, never of TLS.
+    assert_network_error_response(response).await;
+
+    let records = settle_events(&gateway, &diagnostics, &mut notifications).await;
+    let network = network_records(&records);
+    assert_eq!(
+        network
+            .iter()
+            .map(|record| record.action)
+            .collect::<Vec<_>>(),
+        [Action::RetryingSame, Action::Returned]
+    );
+    for record in network {
+        assert_eq!(record.provider_id.as_deref(), Some(primary_id.as_str()));
+        assert_eq!(record.details.phase, Some(events::Phase::Connect));
+        // The diagnostic still names the handshake.
+        assert_eq!(
+            record.details.local_code.as_deref(),
+            Some(crate::errors::code::TLS_HANDSHAKE_FAILED)
+        );
+    }
+
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn http_second_provider_success_keeps_real_trying_next_and_failover_records() {
     let primary_url = closed_loopback_url().await;
     let backup_hits = Arc::new(AtomicUsize::new(0));

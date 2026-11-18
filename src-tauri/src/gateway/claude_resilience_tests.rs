@@ -516,6 +516,48 @@ async fn endless_wait_releases_slots_and_stops_on_cancel_disconnect_or_shutdown(
 }
 
 #[tokio::test]
+async fn endless_retries_a_failed_tls_handshake_instead_of_answering_the_client() {
+    // A peer that answers every TLS hello with plain HTTP.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut peer, _)) = listener.accept().await {
+            seen.fetch_add(1, Ordering::SeqCst);
+            let _ =
+                tokio::io::AsyncWriteExt::write_all(&mut peer, b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                    .await;
+        }
+    });
+    let f = Fixture::new(ClientId::Claude, &[format!("https://127.0.0.1:{port}/v1")]).await;
+    options(&f, false, true, false);
+    f.start().await;
+    let mut response = request(&f.gateway, "/v1/messages", STREAM_REQUEST).await;
+    let ping = response.body_mut().frame().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(ping.data_ref().unwrap()).contains("event: ping"));
+    // The one-second normal interval brings the same provider round again.
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while hits.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the failed handshake was not retried");
+    let view = f.gateway.view();
+    assert_eq!(view.pending_requests.len(), 1);
+    assert!(view.providers[0].health.available);
+    assert_eq!(view.providers[0].health.failures, 0);
+    assert!(f.gateway.cancel_wait(&view.pending_requests[0].request_id));
+    assert!(String::from_utf8_lossy(&response_bytes(response).await).contains("event: error"));
+    settled(&f).await;
+    // One request with every handshake as an attempt, as for a refused connection.
+    let rows = recorded(&f.usage, 1).await;
+    assert!(rows[0].attempts.len() >= 3);
+    f.stop().await;
+}
+
+#[tokio::test]
 async fn buffer_sends_heartbeats_without_handing_partial_business_content() {
     let released = Arc::new(tokio::sync::Notify::new());
     let wait = released.clone();

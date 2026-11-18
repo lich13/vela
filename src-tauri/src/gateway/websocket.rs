@@ -1525,6 +1525,7 @@ async fn connect(
                             Some(
                                 code::CONNECTION_FAILED
                                     | code::CONNECT_TIMEOUT
+                                    | code::TLS_HANDSHAKE_FAILED
                                     | code::WS_HANDSHAKE_TIMEOUT
                             )
                         ))

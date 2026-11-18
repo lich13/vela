@@ -460,6 +460,7 @@ impl Permit {
                                 Some(
                                     code::CONNECTION_FAILED
                                         | code::CONNECT_TIMEOUT
+                                        | code::TLS_HANDSHAKE_FAILED
                                         | code::WS_HANDSHAKE_TIMEOUT
                                 )
                             ))
@@ -825,7 +826,7 @@ mod tolerance_tests {
         use crate::{errors::code, events::Phase};
         let cfg = Settings {
             failure_threshold: 1,
-            transient_failure_threshold: 6,
+            transient_failure_threshold: 7,
             ..Settings::default()
         };
         let circuit = Circuit::default();
@@ -833,6 +834,7 @@ mod tolerance_tests {
             code::CONNECTION_FAILED,
             code::CONNECT_TIMEOUT,
             code::WS_HANDSHAKE_TIMEOUT,
+            code::TLS_HANDSHAKE_FAILED,
         ]
         .into_iter()
         .enumerate()
@@ -873,7 +875,6 @@ mod tolerance_tests {
         );
 
         for (phase, local_code) in [
-            (Phase::Connect, code::TLS_HANDSHAKE_FAILED),
             (Phase::Connect, code::GATEWAY_LOOP),
             (Phase::Headers, code::FIRST_BYTE_TIMEOUT),
             (Phase::Stream, code::CONNECTION_FAILED),

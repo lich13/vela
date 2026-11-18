@@ -1966,15 +1966,16 @@ impl Exchange<'_> {
         e: &(dyn std::error::Error + Send + Sync + 'static),
     ) -> End {
         let mut attempt = attempt;
-        if attempt.route.endless()
-            && matches!(
-                connector::classify(e),
-                None | Some(
-                    connector::ConnectError::TargetConnect | connector::ConnectError::TargetTimeout
-                )
-            )
-        {
-            attempt.protocol.finish(None, code::NETWORK);
+        let category = connector::classify(e);
+        // A failed TLS handshake is a failed connection: same retries, same
+        // answer. Only its diagnostic code tells the two apart.
+        let finished = match category {
+            Some(connector::ConnectError::Tls) => code::TLS,
+            _ => code::NETWORK,
+        };
+        let connection = !matches!(category, Some(connector::ConnectError::Loop));
+        if attempt.route.endless() && connection {
+            attempt.protocol.finish(None, finished);
             let details = attempt.protocol.observation.error.clone();
             return self
                 .claude_retry(attempt, None, code::NETWORK, details, None)
@@ -1988,21 +1989,12 @@ impl Exchange<'_> {
             ..
         } = attempt;
         self.failover.failure(super::failover::Failure::Transport);
-        let category = connector::classify(e);
-        self.last_category = match category {
-            Some(connector::ConnectError::Tls) => code::TLS,
-            _ => code::NETWORK,
-        };
+        self.last_category = code::NETWORK;
         // Use the same owner and budget as 5xx for connection failures,
         // including a peer closing before response headers arrive.
         // Header timeouts still use the separate no-replay boundary.
         let retry_same = !self.plan.dedicated_search
-            && matches!(
-                category,
-                None | Some(
-                    connector::ConnectError::TargetConnect | connector::ConnectError::TargetTimeout
-                )
-            )
+            && connection
             && !self.plan.unknown_affinity
             && self.ordinary_attempts <= self.settings.max_retries
             && ((route.client_id == super::ClientId::Codex
@@ -2013,7 +2005,7 @@ impl Exchange<'_> {
                         .as_ref()
                         .is_some_and(|lease| lease.owns(&route.provider.id))))
                 || self.plan.fixed_dsh.as_deref() == Some(&route.provider.id));
-        protocol.finish(None, self.last_category);
+        protocol.finish(None, finished);
         let mut event = admission.permits.prepare_report(
             self.gateway,
             &route,

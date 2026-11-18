@@ -251,6 +251,13 @@ export type GatewayState = {
   modelCatalog: boolean;
   /** Codex only: the picker lists OpenAI's catalog instead of the queue's models. */
   modelCatalogOfficial: boolean;
+  /** OpenAI's catalog as downloaded: `version` is the content's short SHA-256. */
+  modelCatalogOfficialStatus: {
+    models: number;
+    version: string;
+    updatedAt: number;
+  } | null;
+  modelCatalogOfficialError: string | null;
   modelCatalogError: string | null;
 };
 export type StartupState = {

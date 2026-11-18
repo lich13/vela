@@ -634,6 +634,7 @@ export type CommandMap = {
     Client & { providerIds?: string[] | null },
     GatewayModels
   >;
+  update_codex_catalog: Call<None, GatewayState>;
   search_models_dev: Call<{ query: string; limit?: number }, ModelSearch>;
   edit_model_list: Call<
     Client & {

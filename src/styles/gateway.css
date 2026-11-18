@@ -545,6 +545,14 @@
   align-items: center;
   gap: 8px;
 }
+.model-catalog-official {
+  flex-basis: 100%;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
 .model-catalog-setting .form-error {
   flex-basis: 100%;
   margin: 6px 0 0;

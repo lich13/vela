@@ -1,6 +1,7 @@
 //! OpenAI's own Codex model catalog, kept beside the gateway store and
 //! fetched at most once a day while it is the chosen source of the picker.
 use crate::{errors::code, storage, AppError, Result};
+use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -24,6 +25,33 @@ pub(super) fn cached(data: &Path) -> Option<Vec<u8>> {
         .flatten()
         .filter(|bytes| super::catalog::codex_models(bytes).is_some())
 }
+/// What the downloaded catalog holds, and since when.
+#[derive(Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub models: usize,
+    /// The first eight hex digits of the content's SHA-256.
+    pub version: String,
+    /// The last successful download, in milliseconds.
+    pub updated_at: u64,
+}
+pub(super) fn status(data: &Path) -> Option<Status> {
+    let bytes = cached(data)?;
+    let updated_at = std::fs::metadata(path(data))
+        .and_then(|m| m.modified())
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    Some(Status {
+        models: super::catalog::codex_models(&bytes)?.len(),
+        version: Sha256::digest(&bytes)[..4]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        updated_at,
+    })
+}
 /// Whether a day has passed since the catalog was last downloaded.
 fn due(data: &Path) -> bool {
     cached(data).is_none()
@@ -33,10 +61,11 @@ fn due(data: &Path) -> bool {
             .and_then(|at| at.elapsed().ok())
             .is_none_or(|age| age >= FRESH)
 }
-/// Downloads the catalog when it is due and reports whether its content
-/// changed. A failure leaves the catalog downloaded before in place.
-pub(super) async fn refresh(data: &Path, source: &str) -> Result<bool> {
-    if !due(data) {
+/// Downloads the catalog when it is due, or at once when forced, and reports
+/// whether its content changed. A failure leaves the catalog downloaded before
+/// in place.
+pub(super) async fn refresh(data: &Path, source: &str, force: bool) -> Result<bool> {
+    if !force && !due(data) {
         return Ok(false);
     }
     let bytes = download(source).await?;
@@ -136,28 +165,40 @@ mod tests {
         ])
         .await;
         assert!(cached(data).is_none());
-        assert!(refresh(data, &source).await.unwrap());
+        assert!(status(data).is_none());
+        assert!(refresh(data, &source, false).await.unwrap());
         assert_eq!(cached(data).unwrap(), first);
+        let held = status(data).unwrap();
+        assert_eq!(held.models, 1);
+        assert_eq!(held.version.len(), 8);
         // Nothing is asked again within the day.
-        assert!(!refresh(data, &source).await.unwrap());
+        assert!(!refresh(data, &source, false).await.unwrap());
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         // A day later the same content only moves the mark.
         age(data);
-        assert!(!refresh(data, &source).await.unwrap());
-        assert!(!refresh(data, &source).await.unwrap());
+        assert!(status(data).unwrap().updated_at < held.updated_at);
+        assert!(!refresh(data, &source, false).await.unwrap());
+        assert!(!refresh(data, &source, false).await.unwrap());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        age(data);
-        assert!(refresh(data, &source).await.unwrap());
+        assert_eq!(status(data).unwrap().version, held.version);
+        assert!(status(data).unwrap().updated_at >= held.updated_at);
+        // Asked for by hand, it is downloaded before the day is over.
+        assert!(refresh(data, &source, true).await.unwrap());
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
         assert_eq!(cached(data).unwrap(), second);
+        let held = status(data).unwrap();
+        assert_eq!(held.models, 2);
         // A refused, foreign or oversized answer leaves the catalog and stays due.
-        for _ in 0..3 {
+        for forced in [false, true, false] {
             age(data);
-            assert!(refresh(data, &source).await.is_err());
+            assert!(refresh(data, &source, forced).await.is_err());
             assert_eq!(cached(data).unwrap(), second);
+            assert_eq!(status(data).unwrap().version, held.version);
         }
         assert_eq!(hits.load(Ordering::SeqCst), 6);
         // A damaged file is not a catalog and is replaced by the next download.
         std::fs::write(path(data), b"broken").unwrap();
         assert!(cached(data).is_none());
+        assert!(status(data).is_none());
     }
 }
