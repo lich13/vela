@@ -143,18 +143,18 @@ fn registration_path(path: &str, windows: bool) -> String {
     }
 }
 pub fn login_source(args: &[String]) -> bool {
-    if args.iter().any(|a| is_login_argument(a)) {
-        return true;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use objc2::MainThreadMarker;
-        use objc2_app_kit::NSApplication;
-        macos_login_event()
-            || MainThreadMarker::new()
-                .is_some_and(|m| NSApplication::sharedApplication(m).isHidden())
-    }
-    #[cfg(not(target_os = "macos"))]
+    args.iter().any(|a| is_login_argument(a)) || hidden_launch()
+}
+/// macOS marks a login launch on the launch event or by starting hidden.
+#[cfg(target_os = "macos")]
+fn hidden_launch() -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    macos_login_event()
+        || MainThreadMarker::new().is_some_and(|m| NSApplication::sharedApplication(m).isHidden())
+}
+#[cfg(not(target_os = "macos"))]
+fn hidden_launch() -> bool {
     false
 }
 #[cfg(target_os = "macos")]
