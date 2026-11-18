@@ -533,6 +533,14 @@
   padding: 0 14px 14px;
 }
 
+.model-catalog-setting {
+  margin: 12px 0 0;
+}
+
+.model-catalog-setting .form-error {
+  margin: 6px 0 0;
+}
+
 .model-list-details {
   margin: 12px 0;
   border: 1px solid var(--line);

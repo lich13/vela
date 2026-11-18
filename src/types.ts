@@ -243,6 +243,8 @@ export type GatewayState = {
   transientRetries: { providerId: string; retryIn: number }[];
   error: string | null;
   recoveryPending: boolean;
+  modelCatalog: boolean;
+  modelCatalogError: string | null;
 };
 export type StartupState = {
   launchOnBoot: boolean;

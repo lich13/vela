@@ -6,6 +6,7 @@ use crate::errors::code;
 mod api_login_tests;
 mod claude_config;
 mod codex_api;
+mod codex_catalog;
 pub(crate) mod current;
 pub(crate) mod dsh;
 pub(crate) mod grok_config;
@@ -204,6 +205,8 @@ pub struct View {
     pub handoff_waiting: Vec<compaction::HandoffWaiting>,
     pub error: Option<String>,
     pub recovery_pending: bool,
+    pub model_catalog: bool,
+    pub model_catalog_error: Option<String>,
 }
 mod inner_state {
     use super::{model, model_health, storage, AppError, Circuit, ClientId, Store};
@@ -281,6 +284,7 @@ mod inner_state {
                 &store.grok_connections,
                 &store.dsh_models,
                 &store.grok_api_model,
+                store.model_catalog,
                 &store.connection,
                 &store.settings,
                 &store.mode,
@@ -358,6 +362,9 @@ struct Shared {
     inner: Mutex<Inner>,
     view_config_cache: Mutex<ViewConfigCache>,
     lifecycle: tokio::sync::Mutex<()>,
+    catalog_sync: tokio::sync::Mutex<()>,
+    catalog_pending: std::sync::atomic::AtomicBool,
+    catalog_error: Mutex<Option<String>>,
     clients: Mutex<HashMap<String, HttpClient>>,
     data: PathBuf,
     spool: storage::PrivateTempDir,
@@ -660,6 +667,9 @@ impl Gateway {
             inner: Mutex::new(Inner::new(store, revision, recovery_error, error)),
             view_config_cache: Mutex::new(ViewConfigCache::default()),
             lifecycle: tokio::sync::Mutex::new(()),
+            catalog_sync: tokio::sync::Mutex::new(()),
+            catalog_pending: std::sync::atomic::AtomicBool::new(false),
+            catalog_error: Mutex::new(None),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
             endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
@@ -1000,6 +1010,8 @@ impl Gateway {
             },
             error: s.error.clone().or_else(|| self.0.compaction.error()),
             recovery_pending: s.recovery_error.is_some(),
+            model_catalog: s.store.model_catalog,
+            model_catalog_error: self.0.catalog_error.lock().clone(),
         };
         // Selection readers need only connection identity and provider matching data.
         let config = Store {
@@ -1319,6 +1331,14 @@ impl Gateway {
         {
             return Err(AppError::new(code::SETTINGS, "接管策略仅适用于 Codex"));
         }
+        if !matches!(self.0.client, ClientId::Codex | ClientId::Grok)
+            && matches!(&edit, Edit::ModelCatalog { .. })
+        {
+            return Err(AppError::new(
+                code::CLIENT,
+                "接管模型列表仅适用于 Codex 和 Grok Build",
+            ));
+        }
         if self.0.client != ClientId::Grok && matches!(&edit, Edit::SaveGrokProvider { .. }) {
             return Err(AppError::new(code::CLIENT, "此操作仅适用于 Grok Build"));
         }
@@ -1393,6 +1413,7 @@ impl Gateway {
                 &edit,
                 Edit::DshModelsProvider { .. } | Edit::Settings { .. }
             );
+        let catalog_edit = matches!(&edit, Edit::ModelCatalog { .. });
         let mut next = s.store.clone();
         if self.0.client == ClientId::Grok && matches!(&edit, Edit::ImportLink { .. }) {
             for provider in &next.providers {
@@ -1537,10 +1558,14 @@ impl Gateway {
                 .map(|p| (p.id.clone(), Self::quota_version(&s.store, p)))
                 .collect(),
         );
+        let catalog = catalog_edit || s.store.model_catalog;
         drop(s);
         self.0.registry.update_ports()?;
         self.0.clients.lock().clear();
         self.0.registry.changed();
+        if catalog {
+            self.schedule_catalog_sync();
+        }
         self.try_view()
     }
     pub async fn start(&self, expected: &str, home: &Path) -> Result<View> {
@@ -1676,6 +1701,7 @@ impl Gateway {
             )?;
         }
         self.0.registry.changed();
+        self.schedule_catalog_sync_if_enabled();
         self.try_view()
     }
     pub async fn stop_checked(&self, expected_config: Option<&str>) -> Result<View> {
@@ -1881,6 +1907,7 @@ impl Gateway {
         let stopped = self.0.registry.listener.deactivate(self.0.client).await;
         self.0.clients.lock().clear();
         self.0.registry.changed();
+        self.schedule_catalog_sync_if_enabled();
         stopped?;
         self.try_view()
     }
@@ -2073,6 +2100,9 @@ impl Gateway {
         }
         if force {
             self.0.catalog.commit(&result)?;
+            if s.store.model_catalog {
+                self.schedule_catalog_sync();
+            }
         }
         if let Some(usage) = self.0.usage.lock().as_ref() {
             if let Ok(prices) = usage.prices() {
@@ -2090,6 +2120,104 @@ impl Gateway {
             }
         }
         Ok(result)
+    }
+    pub(crate) fn schedule_catalog_sync_if_enabled(&self) {
+        if self.0.inner.lock().store.model_catalog {
+            self.schedule_catalog_sync();
+        }
+    }
+    /// Publishes the queue's models to the client's own picker, or withdraws
+    /// them. Never part of a start, stop or edit: a failure is only reported.
+    fn schedule_catalog_sync(&self) {
+        if !matches!(self.0.client, ClientId::Codex | ClientId::Grok)
+            || self.0.catalog_pending.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let gateway = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = gateway.sync_catalog().await;
+            let written = result.as_ref().is_ok_and(|written| *written);
+            let error = result.err().map(|e| e.message);
+            let reported = std::mem::replace(&mut *gateway.0.catalog_error.lock(), error.clone());
+            if written || reported != error {
+                gateway.0.registry.changed();
+            }
+        });
+    }
+    /// Returns whether a client file was rewritten.
+    async fn sync_catalog(&self) -> Result<bool> {
+        let _guard = self.0.catalog_sync.lock().await;
+        // A change from here on needs another pass.
+        self.0.catalog_pending.store(false, Ordering::Release);
+        let state = || {
+            let s = self.0.inner.lock();
+            (s.store.model_catalog, s.running, s.home.clone())
+        };
+        let (enabled, running, home) = state();
+        let Some(home) = home else {
+            return Ok(false);
+        };
+        let live = enabled && running;
+        // A state that moved on while this one was prepared has its own sync queued.
+        let current = |s: &Inner| {
+            (s.store.model_catalog, s.running, s.home.as_deref())
+                == (enabled, running, Some(&*home))
+        };
+        match self.0.client {
+            ClientId::Codex => {
+                let catalog = if live {
+                    let previous = codex_catalog::previous(&home);
+                    catalog::codex_file(self, previous.as_deref()).await
+                } else {
+                    None
+                };
+                let s = self.0.inner.lock();
+                if !current(&s) {
+                    return Ok(false);
+                }
+                match catalog {
+                    Some(catalog) => codex_catalog::apply(&home, &catalog),
+                    None => codex_catalog::clear(&home, !enabled),
+                }
+            }
+            ClientId::Grok => {
+                let path = self.0.client.config(&home);
+                let models = if !enabled {
+                    Some(vec![])
+                } else if running {
+                    let protocol = grok_config::api_profile(&grok_config::read(&home)?.1)?
+                        .connection
+                        .protocol;
+                    let usage = self.0.usage.lock().clone();
+                    let prices = usage.as_ref().and_then(|u| u.prices().ok());
+                    Some(
+                        self.union_models(Some(protocol))?
+                            .into_iter()
+                            .map(|model| {
+                                let meta = prices.as_ref().and_then(|p| {
+                                    p.models_dev
+                                        .metadata_from(&model.id, model.source.as_deref())
+                                });
+                                grok_config::CatalogModel {
+                                    name: meta.as_ref().and_then(|m| m.name.clone()),
+                                    context: meta.as_ref().and_then(|m| m.context),
+                                    id: model.id,
+                                }
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
+                let s = self.0.inner.lock();
+                if !current(&s) {
+                    return Ok(false);
+                }
+                grok_config::sync_catalog(&path, models.as_deref())
+            }
+            _ => Ok(false),
+        }
     }
     pub(crate) fn model_union(
         &self,

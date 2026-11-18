@@ -363,6 +363,7 @@ async fn codex_catalog_is_generated_from_the_union_and_cached_per_provider() {
     for _ in 0..2 {
         let response = ask("?client_version=1").await.unwrap();
         assert_eq!(response.headers()["x-models-etag"].len(), 64);
+        assert_eq!(response.headers()["etag"].len(), 66);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let models = body["models"].as_array().unwrap();
@@ -372,8 +373,75 @@ async fn codex_catalog_is_generated_from_the_union_and_cached_per_provider() {
         assert_eq!(models[1]["display_name"], "Fixture");
     }
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    // Another list format, an upstream failure and a plain list are forwarded.
-    for query in ["?client_version=2", "?client_version=3", ""] {
+    // A provider without a Codex catalog still yields one, from Codex's defaults.
+    let response = ask("?client_version=2").await.unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let models = body["models"].as_array().unwrap();
+    assert_eq!(
+        (&models[0]["slug"], &models[1]["slug"]),
+        (&"fixture-extra".into(), &"fixture-model".into())
+    );
+    assert_eq!(models[1]["display_name"], "fixture-model");
+    assert!(models[1]["base_instructions"].as_str().unwrap().len() > 1000);
+    // An upstream failure and a plain list are forwarded.
+    for query in ["?client_version=3", ""] {
         assert!(ask(query).await.is_none(), "{query}");
     }
+    // The file Codex loads at startup is the same catalog; with the provider
+    // out of reach, the entries written last stand in for its own.
+    let previous = br#"{"models":[{"slug":"fixture-model","display_name":"Kept","base_instructions":"kept","supported_reasoning_levels":[{"effort":"medium","description":"kept"}]}]}"#;
+    let written = catalog::codex_file(&g, Some(previous)).await.unwrap();
+    let written: serde_json::Value = serde_json::from_slice(&written).unwrap();
+    let models = written["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0]["slug"], "fixture-extra");
+    assert_eq!(models[0]["base_instructions"], "kept");
+    assert_eq!(models[1]["display_name"], "Kept");
+}
+
+#[tokio::test]
+async fn codex_model_catalog_switch_follows_the_gateway_into_and_out_of_config() {
+    let port =
+        server(|_| async { Response::new(full(r#"{"data":[{"id":"fixture-model"}]}"#)) }).await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}/v1")]).await;
+    let id = g.view().providers[0].id.clone();
+    g.list_models(&id, true).await.unwrap();
+    let config = t.path().join("config.toml");
+    let file = t.path().join("vela-models.json");
+    let named = || {
+        let text = std::fs::read_to_string(&config).unwrap();
+        toml::from_str::<toml::Value>(&text)
+            .unwrap()
+            .get("model_catalog_json")
+            .and_then(|v| v.as_str().map(str::to_owned))
+    };
+    let before = std::fs::read_to_string(&config).unwrap();
+    assert!(!g.view().model_catalog);
+    update(&g, &t, Edit::ModelCatalog { enabled: true });
+    assert!(g.view().model_catalog);
+    // Nothing is published for a stopped gateway.
+    g.sync_catalog().await.unwrap();
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
+    start(&g, &t).await;
+    g.sync_catalog().await.unwrap();
+    assert_eq!(named().as_deref(), file.to_str());
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(catalog["models"][0]["slug"], "fixture-model");
+    assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
+    // The key leaves with the gateway; the file waits for the next start.
+    g.stop().await.unwrap();
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
+    assert!(file.exists());
+    start(&g, &t).await;
+    g.sync_catalog().await.unwrap();
+    assert_eq!(named().as_deref(), file.to_str());
+    // Switching off while running withdraws both.
+    update(&g, &t, Edit::ModelCatalog { enabled: false });
+    g.sync_catalog().await.unwrap();
+    assert_eq!(named(), None);
+    assert!(!file.exists());
+    g.stop().await.unwrap();
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
 }

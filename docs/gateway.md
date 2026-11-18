@@ -12,7 +12,16 @@
 
 客户端认证和运行状态检查完成后，`GET /v1/models` 与 `GET /models` 可返回当前队列供应商的精确模型 ID 并集。白名单优先，未设置白名单时使用有效缓存；按完整 ID 去重并保留队列顺序。Claude 返回 Anthropic 列表并支持 `limit`、`after_id`、`before_id` 分页。Codex 的普通列表请求、非 Codex 客户端带 `client_version` 的请求、模型详情子路径和空并集继续透传；本地列表不进入业务并发、RPM 或用量。
 
-Codex 模型目录：在 `~/.codex/config.toml` 设置 `model_catalog_url = "http://127.0.0.1:43721/v1/models"` 后，Codex 带 `client_version` 读取目录。Vela 按当前队列的模型并集生成目录：队首供应商的目录里有同名条目就原样沿用（推理档位为空或只有 `none` 时补为 low／medium／high，显示名等于模型 ID 时换成 models.dev 名称）；没有的模型复制该供应商的一个条目，改写模型 ID、显示名、上下文窗口和推理档位。上游目录按供应商缓存 5 分钟。队首供应商不返回 Codex 格式目录、返回失败或 5 秒内无响应时，请求按原样透传。
+### 接管模型列表（Codex／Grok）
+
+Codex 与 Grok 的“高级设置”里各有一个“接管模型列表”开关，默认关闭。开启后，Vela 把当前队列的模型并集写进客户端自己的模型选择器，网关关闭、Vela 退出或下次启动恢复时撤回。写入失败不影响网关启停，原因显示在开关下方。
+
+- **Codex**：网关运行期间，Vela 在 Codex 目录写入 `vela-models.json`，并在 `config.toml` 顶层写入 `model_catalog_json` 指向该文件。Codex 只在启动时读取这个文件，开关切换或队列模型变化后需要重新打开 Codex（Vela 不会自动重启 Codex）；Codex app 只显示前 100 个模型。`config.toml` 顶层或当前 profile 已有其他 `model_catalog_json` 时不覆盖，并提示原因。网关关闭时只移除这一行，文件保留到下次启动；关闭开关时两者都移除。
+- **Grok**：为并集中的每个模型写一张 `[model."vela/<模型 ID>"]` 表，内容复制自 `[model.vela]`，只改 `model`、`name` 和已知的 `context_window`；只列出与当前 API 协议相同的供应商的模型。网关关闭后这些表随 `[model.vela]` 一起改回直连供应商，仍可在 Grok 中选择。关闭开关时移除全部 `vela/` 表，`[models]` 中指向它们的选择改回 `vela`。
+
+Codex 目录内容：队首供应商返回 Codex 格式目录时，同名条目原样沿用（推理档位为空或只有 `none` 时补为 low／medium／high，显示名等于模型 ID 时换成 models.dev 名称），没有的模型复制该供应商的一个条目并改写模型 ID、显示名、上下文窗口和推理档位。队首供应商没有 Codex 格式目录时，每个模型使用 Codex 对未知模型的默认参数和内置指令。写文件时供应商暂不可达，沿用上次写入的条目。
+
+`model_catalog_url`：仍可在 `[model_providers.<id>]` 表内（不是顶层）设置 `model_catalog_url = "http://127.0.0.1:43721/v1/models"`，Codex 带 `client_version` 读取同一份目录，上游目录按供应商缓存 5 分钟，3 秒内无响应或上游返回 5xx／429 时请求按原样透传。Codex 对使用 Bearer Token 的供应商是否读取这个地址由它自己的功能开关决定，Codex app 可能不读取；本机使用建议改用上面的开关。
 
 Claude Code 的模型发现需要用户手动设置 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 后重新打开模型选择。Claude Code 会自行过滤和合并选项，网关返回的每个 ID 不保证在客户端界面逐项出现。
 
@@ -48,6 +57,8 @@ Codex 底层保留两种连接方式，由已有配置和首次识别结果确�
 
 - **独立 Bearer Token**：沿用现有 `custom` 配置，只写 `base_url` 与 `experimental_bearer_token`，不修改 `auth.json`。
 - **普通 API 登录**：使用 `auth.json` 的 `OPENAI_API_KEY`，仅修改该文件和当前选中供应商的 `base_url`。保留原有 provider 名称、profile、模型、协议、WebSocket 开关及其他 TOML 字节。
+
+两种方式下，开启“接管模型列表”时另写顶层 `model_catalog_json` 一行和 `vela-models.json`。
 
 首次启动只读识别已有连接并导入供应商；已使用本应用的安装保留原连接方式。普通 API 模式要求当前供应商已启用 `requires_openai_auth`，且凭据存储采用文件；若存在 Keyring、强制 ChatGPT 登录或独立认证配置覆盖，会提示原因，不自动清除它们或改写认证配置。连接方式界面入口已移除，原配置、自动识别和已保存值保留。
 
@@ -238,7 +249,7 @@ Codex 供应商第二行可直接切换“压缩后”“新线程”。新供�
 
 搜索按来源分别显示，最多 50 条。显式来源优先，其次唯一 canonical 首方和唯一首方候选；有歧义时元数据和参考价格保持未知。参考价格按 fixed → Wei-Shaw/sub2api → models.dev，单位为美元／百万 Token，不乘倍率。来源指定按客户端隔离，仅影响列表、同步元数据与价格参考，历史费用快照不变。
 
-Codex 面板只读；Codex 带 `client_version` 的目录请求由 Vela 按队列并集生成（见上文“Codex 模型目录”），其他客户端带 `client_version` 的请求继续透传。Claude 模型发现需用户设置对应环境变量，Grok 不自动生成多张模型配置表。DSH 只在明确导入并接入或同步时写入列表，并固定使用 Chat Completions `/v1` 入口。
+Codex 面板只读；开启“接管模型列表”后 Codex 与 Grok 的选择器使用这份列表（见上文“接管模型列表”），其他客户端带 `client_version` 的请求继续透传。Claude 模型发现需用户设置对应环境变量。DSH 只在明确导入并接入或同步时写入列表，并固定使用 Chat Completions `/v1` 入口。
 
 Codex 连接失败与 5xx 共用同商短重试：连接拒绝、建连超时、响应头到达前的连接关闭／重置及 WebSocket 握手连接失败，在当前归属供应商先等待 1 秒、2 秒重试，之后按原故障转移规则处理。首次准入建立的归属也适用，连接失败共用现有 5xx 连续失败阈值，重试仍受总预算、RPM、取消和停止约束；TLS 校验失败、网关回环及首字节超时和响应开始后的重放边界保持。
 

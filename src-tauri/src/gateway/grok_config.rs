@@ -691,6 +691,148 @@ impl Snapshot {
     }
 }
 
+/// One model of the queue offered in Grok's own picker.
+pub struct CatalogModel {
+    pub id: String,
+    pub name: Option<String>,
+    pub context: Option<u64>,
+}
+const CATALOG: &str = "vela/";
+
+fn tables_end(table: &Table, last: &mut isize) {
+    *last = (*last).max(table.position().unwrap_or(*last));
+    for (_, item) in table.iter() {
+        match item {
+            Item::Table(table) => tables_end(table, last),
+            Item::ArrayOfTables(tables) => tables.iter().for_each(|t| tables_end(t, last)),
+            _ => {}
+        }
+    }
+}
+fn append(table: &mut Table, last: &mut isize) {
+    *last += 1;
+    table.set_position(*last);
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(table) => append(table, last),
+            Item::ArrayOfTables(tables) => tables.iter_mut().for_each(|t| append(t, last)),
+            _ => {}
+        }
+    }
+}
+/// `[model."vela/<id>"]` entries are copies of `[model.vela]` under another
+/// model. `Some` lists the models to offer; `None` keeps the offered ones and
+/// only copies the connection again, as after the gateway stops.
+pub(super) fn catalog(text: &str, models: Option<&[CatalogModel]>) -> Result<String> {
+    let mut doc = parse(text)?;
+    let offered: Vec<String> = doc
+        .get("model")
+        .and_then(Item::as_table_like)
+        .into_iter()
+        .flat_map(|models| models.iter())
+        .filter(|(key, _)| key.starts_with(CATALOG))
+        .map(|(key, _)| key.to_owned())
+        .collect();
+    let base = doc
+        .get("model")
+        .and_then(|models| models.get(MANAGED))
+        .and_then(|item| item.clone().into_table().ok());
+    let wanted: Vec<CatalogModel> = match (&base, models) {
+        (None, _) => vec![],
+        (Some(base), Some(models)) => {
+            let own = base.get("model").and_then(Item::as_str);
+            let mut seen = std::collections::HashSet::new();
+            models
+                .iter()
+                .filter(|m| Some(m.id.as_str()) != own && seen.insert(m.id.as_str()))
+                .map(|m| CatalogModel {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    context: m.context,
+                })
+                .collect()
+        }
+        (Some(_), None) => offered
+            .iter()
+            .filter_map(|key| {
+                let table = doc["model"].get(key)?.as_table_like()?;
+                Some(CatalogModel {
+                    id: table.get("model")?.as_str()?.to_owned(),
+                    name: table.get("name").and_then(Item::as_str).map(str::to_owned),
+                    context: table
+                        .get("context_window")
+                        .and_then(Item::as_integer)
+                        .and_then(|n| u64::try_from(n).ok()),
+                })
+            })
+            .collect(),
+    };
+    if offered.is_empty() && wanted.is_empty() {
+        return Ok(text.to_owned());
+    }
+    let models = doc["model"]
+        .as_table_like_mut()
+        .ok_or_else(|| error("Grok 模型表无效"))?;
+    for key in &offered {
+        models.remove(key);
+    }
+    let mut last = 0;
+    tables_end(doc.as_table(), &mut last);
+    for model in &wanted {
+        let mut table = base.clone().expect("copies need the managed model");
+        table.decor_mut().clear();
+        table["model"] = value(&model.id);
+        table["name"] = value(model.name.as_deref().unwrap_or(&model.id));
+        table.remove("context_window");
+        if let Some(context) = model.context.and_then(|n| i64::try_from(n).ok()) {
+            table["context_window"] = value(context);
+        }
+        append(&mut table, &mut last);
+        doc["model"][&format!("{CATALOG}{}", model.id)] = Item::Table(table);
+    }
+    // A role left pointing at a withdrawn entry falls back to the managed model.
+    let kept: std::collections::HashSet<_> = wanted
+        .iter()
+        .map(|m| format!("{CATALOG}{}", m.id))
+        .collect();
+    if let Some(roles) = doc.get_mut("models").and_then(Item::as_table_like_mut) {
+        for (_, item) in roles.iter_mut() {
+            let Some(role) = item.as_value_mut() else {
+                continue;
+            };
+            if role
+                .as_str()
+                .is_some_and(|key| key.starts_with(CATALOG) && !kept.contains(key))
+            {
+                let mut managed = toml_edit::Value::from(MANAGED);
+                *managed.decor_mut() = role.decor().clone();
+                *role = managed;
+            }
+        }
+    }
+    let output = doc.to_string();
+    let same =
+        toml::from_str::<toml::Value>(text).ok() == toml::from_str::<toml::Value>(&output).ok();
+    Ok(if same { text.to_owned() } else { output })
+}
+/// Returns whether the file was rewritten.
+pub(super) fn sync_catalog(path: &Path, models: Option<&[CatalogModel]>) -> Result<bool> {
+    let Some(raw) = storage::read_user_optional(path)? else {
+        return Ok(false);
+    };
+    let text = std::str::from_utf8(&raw).map_err(|_| error("Grok 配置不是 UTF-8"))?;
+    let output = catalog(text, models)?;
+    if output == text {
+        return Ok(false);
+    }
+    storage::atomic_write_user(
+        path,
+        output.as_bytes(),
+        Some(&storage::revision(Some(&raw))),
+    )?;
+    Ok(true)
+}
+
 #[cfg(test)]
 pub(super) mod test_support {
     use super::*;

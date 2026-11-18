@@ -300,11 +300,11 @@ impl Gateway {
             client_id: self.0.client,
             passthrough: self.0.client == ClientId::Codex,
             hint: match self.0.client {
-                ClientId::Codex => "Codex 透传上游目录，本列表不影响 Codex",
+                ClientId::Codex => "开启“接管模型列表”后，Codex 启动时读取本列表",
                 ClientId::Claude => {
                     "Claude Code 需设置 CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 才会读取本列表"
                 }
-                ClientId::Grok => "Grok 选择器使用配置中的模型表；网关按请求模型名转发",
+                ClientId::Grok => "开启“接管模型列表”后，本列表写入 Grok 配置的模型表",
                 ClientId::Dsh => "修改后请同步模型列表，将变更写入 profile",
             },
             models,
@@ -357,6 +357,7 @@ impl Gateway {
             Ok(())
         })?;
         self.changed();
+        self.schedule_catalog_sync_if_enabled();
         self.gateway_models()
     }
     async fn refresh_model_ids(&self, ids: Vec<String>) -> Result<()> {

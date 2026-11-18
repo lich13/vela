@@ -198,3 +198,13 @@ Source: https://github.com/Ikaleio/lm-detector/tree/fd9b4caf6feafbec64d45a155243
 Bundled data revision: https://github.com/Ikaleio/lm-detector/tree/f920cfe2ff0bab94989ce01ac061e21425b6e321
 
 Integration changes: local in-memory resource loading and background closed-set statistical attribution scoring; existing direct provider transport, cancellation, identity and redaction; per-client scheduling and Vela-defined strict/lenient degradation threshold rules and routing queue policies (which are independent of the upstream project and do not constitute provider authenticity certification). The SDK's network detection and mirror/cache download paths are omitted and never invoked. Public data updates are checked against the pinned algorithm and installed as one validated resource bundle.
+
+## Codex model catalog
+
+The `model_catalog_json` approach for listing gateway models in Codex, and one `[model."<prefix>/<id>"]` table per model for Grok, follow the behavior of yetone/magpie as architectural reference; the implementation is independently written in Rust and no magpie code is copied.
+
+https://github.com/yetone/magpie
+
+`src-tauri/src/gateway/codex_prompt.md` is an unmodified copy of `codex-rs/models-manager/prompt.md` from openai/codex at tag `rust-v0.169.0` (Apache-2.0, Copyright 2025 OpenAI). Catalog entries for models without an upstream Codex entry carry it as their instructions, with the defaults of `model_info_from_slug` in the same crate. The license text is in `licenses/codex-Apache-2.0.txt`.
+
+https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/models-manager/prompt.md

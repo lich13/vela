@@ -65,9 +65,9 @@
 
 | 客户端 | 快捷面板标识 | 默认本地网关入口 | 接入与认证机制 | 配置编辑支持 | 用量采集与配额透视 |
 | --- | --- | --- | --- | --- | --- |
-| **Codex** | `Codex` | `127.0.0.1:43721/v1` | Bearer 或 API Key 跨文件事务接管；ChatGPT OAuth 账号库与官方直连 | `config.toml` 语法校验、受管字段保护与备份恢复 | 网关实时计量 + 本机活跃/归档会话双向去重 |
+| **Codex** | `Codex` | `127.0.0.1:43721/v1` | Bearer 或 API Key 跨文件事务接管；ChatGPT OAuth 账号库与官方直连；可一键接管模型列表 | `config.toml` 语法校验、受管字段保护与备份恢复 | 网关实时计量 + 本机活跃/归档会话双向去重 |
 | **Claude Code** | `Claude` | `127.0.0.1:43721` | `settings.json` 环境变量接入；官方 / API 配置档隔离切换 | `settings.json` **可视化表单（5 分组）+ JSON** 双模式 | **官方 5h/7d/Sonnet 剩余配额百分比** + 主/子代理会话去重 + **账单导出** |
-| **Grok Build** | `Grok` | `127.0.0.1:43721/v1` | 独立受管 API 模型接入，保留原生官方 OAuth 模型自由切换 | `config.toml` 校验与 `endpoint.env` 导入预览 | 网关实时计量 + 原生多模型按轮次独立统计 |
+| **Grok Build** | `Grok` | `127.0.0.1:43721/v1` | 独立受管 API 模型接入，保留原生官方 OAuth 模型自由切换；可一键接管模型列表 | `config.toml` 校验与 `endpoint.env` 导入预览 | 网关实时计量 + 原生多模型按轮次独立统计 |
 | **DSH** | `DSH` | `127.0.0.1:43721/v1` | Chat Completions 协议；全 profile 事务同步与官方模型目录映射 | `desktop` / 各 profile YAML patch 编辑与恢复 | 网关实时请求与模型调用计量 |
 | **Antigravity app** | — | Vertex Key：`127.0.0.1:43721/antigravity` | OAuth / ADC 由客户端直连；Vertex API Key 经 Vela 转发至 Google | `config.json` **可视化表单（4 分组）+ JSON** 双模式 | **Gemini & Claude/GPT 双轨剩余配额百分比** + 会话增量采集 + **账单导出** |
 

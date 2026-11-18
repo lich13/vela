@@ -590,6 +590,7 @@ struct QuickToolbarView: View {
                                     Capsule()
                                         .strokeBorder(tab.selected ? palette.line : Color.clear, lineWidth: 1)
                                 )
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .disabled(busy)
@@ -607,6 +608,7 @@ struct QuickToolbarView: View {
                     .foregroundColor(pinned ? palette.accent : palette.muted)
                     .frame(width: 28, height: 28)
                     .background(Capsule().fill(pinned ? palette.accentSoft : Color.clear))
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help(pinned ? "取消固定面板" : "固定面板")
@@ -616,6 +618,7 @@ struct QuickToolbarView: View {
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundColor(palette.muted)
                     .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("关闭快捷面板")
@@ -840,6 +843,7 @@ struct QuickProviderRowView: View {
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundColor(palette.success)
                                 .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .help("保存名称")
@@ -849,6 +853,7 @@ struct QuickProviderRowView: View {
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundColor(palette.muted)
                                 .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .help("取消重命名")
@@ -892,6 +897,7 @@ struct QuickProviderRowView: View {
                             .foregroundColor(palette.quotaColor(provider.quota.tone))
                             .lineLimit(1)
                             .padding(.horizontal, 3)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help(
@@ -907,6 +913,7 @@ struct QuickProviderRowView: View {
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(provider.quota.hasError ? palette.error : palette.muted)
                             .frame(width: 20, height: 22)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(provider.quota.refreshDisabled)
@@ -1198,6 +1205,7 @@ struct QuickControlsDockView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(palette.error)
                             .frame(width: 20, height: 20)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -1400,6 +1408,7 @@ struct QuickQuotaDetailOverlayView: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(palette.muted)
                             .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -1435,6 +1444,7 @@ struct QuickQuotaDetailOverlayView: View {
                                     .font(.system(size: 11.5, weight: .medium))
                                     .foregroundColor(palette.muted)
                                     .frame(width: 22, height: 22)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .disabled(provider.quota.refreshDisabled)
@@ -1501,6 +1511,7 @@ struct QuickQuotaDetailOverlayView: View {
                                             .font(.system(size: 12, weight: .medium))
                                     }
                                     .foregroundColor(palette.muted)
+                                    .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
 
@@ -1738,6 +1749,8 @@ struct QuickPanelRootView: View {
                         .foregroundColor(palette.muted)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
+                        .frame(minHeight: 28)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
 
@@ -1749,6 +1762,8 @@ struct QuickPanelRootView: View {
                             .foregroundColor(palette.muted)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
+                            .frame(minHeight: 28)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }

@@ -65,9 +65,9 @@ Designed for developers working across **Codex**, **Claude Code**, **Grok Build*
 
 | Client | Quick Panel | Default Local Gateway | Auth & Integration | Configuration Editor | Usage & Quota Analytics |
 | --- | --- | --- | --- | --- | --- |
-| **Codex** | `Codex` | `127.0.0.1:43721/v1` | Cross-file Bearer or API Key transactions; ChatGPT OAuth vault & official direct mode | `config.toml` validation, managed field guards & backup restore | Live gateway metering + active/archived local session deduplication |
+| **Codex** | `Codex` | `127.0.0.1:43721/v1` | Cross-file Bearer or API Key transactions; ChatGPT OAuth vault & official direct mode; one-switch model list takeover | `config.toml` validation, managed field guards & backup restore | Live gateway metering + active/archived local session deduplication |
 | **Claude Code** | `Claude` | `127.0.0.1:43721` | `settings.json` env integration; isolated Official / API profile switching | `settings.json` **Visual (5 groups) + JSON** dual-mode editor | **Official 5h/7d/Sonnet remaining %** + main/subagent deduplication + **Bill export** |
-| **Grok Build** | `Grok` | `127.0.0.1:43721/v1` | Dedicated managed API model coexisting with native official OAuth models | `config.toml` validation & `endpoint.env` import preview | Live gateway metering + per-turn multi-model session stats |
+| **Grok Build** | `Grok` | `127.0.0.1:43721/v1` | Dedicated managed API model coexisting with native official OAuth models; one-switch model list takeover | `config.toml` validation & `endpoint.env` import preview | Live gateway metering + per-turn multi-model session stats |
 | **DSH** | `DSH` | `127.0.0.1:43721/v1` | Chat Completions protocol; multi-profile sync & official model catalog mapping | `desktop` / per-profile YAML patch editor & recovery | Live gateway request & model invocation metering |
 | **Antigravity app** | — | Vertex Key: `127.0.0.1:43721/antigravity` | Direct OAuth/ADC in app; Vertex API Key forwarded to Google via Vela | `config.json` **Visual (4 groups) + JSON** dual-mode editor | **Gemini & Claude/GPT dual-track remaining %** + incremental session sync + **Bill export** |
 

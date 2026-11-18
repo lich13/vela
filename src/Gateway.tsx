@@ -641,6 +641,37 @@ function GatewayContent({
             <span>{state.running ? "运行中" : "已关闭"}</span>
             <span>活动连接 {state.activeConnections}</span>
           </div>
+          {(clientId === "codex" || clientId === "grok") && (
+            <div className="model-catalog-setting">
+              <label className="check-label">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={state.modelCatalog}
+                  disabled={busy}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    run(async () => {
+                      await edit({ op: "modelCatalog", enabled });
+                      notify(
+                        !enabled
+                          ? "已停止接管模型列表"
+                          : clientId === "codex"
+                            ? "已接管模型列表，重启 Codex 后生效"
+                            : "已接管模型列表",
+                      );
+                    });
+                  }}
+                />
+                接管模型列表
+              </label>
+              {state.modelCatalog && state.modelCatalogError && (
+                <p className="form-error" role="alert">
+                  {state.modelCatalogError}
+                </p>
+              )}
+            </div>
+          )}
           {clientId !== "dsh" && (
             <details
               className="model-list-details"

@@ -109,3 +109,36 @@ it("switches to Grok and saves a provider with the selected upstream protocol", 
     ),
   );
 });
+
+it("offers the model list switch to Codex and Grok and saves it as an edit", async () => {
+  const user = userEvent.setup();
+  grok.modelCatalogError = "fixture catalog error";
+  render(<Gateway notify={() => {}} />);
+
+  await screen.findByRole("button", { name: "添加" });
+  await user.click(screen.getByText("高级设置", { selector: "summary" }));
+  const toggle = screen.getByRole("switch", { name: "接管模型列表" });
+  expect(toggle).not.toBeChecked();
+  await user.click(toggle);
+  await waitFor(() =>
+    expect(mock.command).toHaveBeenCalledWith(
+      "update_gateway",
+      expect.objectContaining({
+        clientId: "codex",
+        edit: { op: "modelCatalog", enabled: true },
+      }),
+    ),
+  );
+
+  grok.modelCatalog = true;
+  await user.click(
+    within(screen.getByRole("navigation", { name: "客户端" })).getByRole(
+      "button",
+      { name: "Grok Build" },
+    ),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("switch", { name: "接管模型列表" })).toBeChecked(),
+  );
+  expect(screen.getByText("fixture catalog error")).toBeInTheDocument();
+});

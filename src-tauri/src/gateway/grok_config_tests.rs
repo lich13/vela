@@ -545,3 +545,127 @@ fn persisted_snapshot_excludes_other_credentials_and_merges_current_config() {
     assert!(!restored.contains("fixture-local-token"));
     assert!(restored.contains("operator_setting = \"fixture-v1\""));
 }
+
+const CATALOG_CONFIG: &str = r#"# Keep this comment.
+[models]
+default = "vela"
+helper = "vela" # keep
+
+[model.vela]
+model = "fixture-a"
+name = "Fixture A"
+api_backend = "responses"
+base_url = "http://127.0.0.1:43721/v1"
+api_key = "fixture-local"
+context_window = 1000
+extra_headers = { "x-fixture" = "" }
+
+[other]
+keep = true
+"#;
+
+fn catalog_model(id: &str, context: Option<u64>) -> grok_config::CatalogModel {
+    grok_config::CatalogModel {
+        id: id.into(),
+        name: (id == "fixture-b").then(|| "Fixture B".into()),
+        context,
+    }
+}
+
+#[test]
+fn catalog_entries_copy_the_managed_model_and_follow_it() {
+    let queue = [
+        catalog_model("fixture-a", None),
+        catalog_model("fixture-b", Some(2000)),
+        catalog_model("fixture-c", None),
+        catalog_model("fixture-b", None),
+    ];
+    let offered = grok_config::catalog(CATALOG_CONFIG, Some(&queue)).unwrap();
+    assert!(offered.starts_with(CATALOG_CONFIG));
+    assert_eq!(
+        grok_config::catalog(&offered, Some(&queue)).unwrap(),
+        offered
+    );
+    let models = |text: &str| toml::from_str::<toml::Value>(text).unwrap()["model"].clone();
+    let listed = models(&offered);
+    // The managed model already offers its own id.
+    assert_eq!(
+        listed.as_table().unwrap().keys().collect::<Vec<_>>(),
+        ["vela", "vela/fixture-b", "vela/fixture-c"]
+    );
+    let b = &listed["vela/fixture-b"];
+    assert_eq!(b["model"].as_str(), Some("fixture-b"));
+    assert_eq!(b["name"].as_str(), Some("Fixture B"));
+    assert_eq!(b["context_window"].as_integer(), Some(2000));
+    assert_eq!(b["base_url"], listed["vela"]["base_url"]);
+    assert_eq!(b["api_key"], listed["vela"]["api_key"]);
+    assert_eq!(b["extra_headers"], listed["vela"]["extra_headers"]);
+    let c = &listed["vela/fixture-c"];
+    assert_eq!(c["name"].as_str(), Some("fixture-c"));
+    assert!(c.get("context_window").is_none());
+
+    // When the gateway leaves, the entries follow the managed model to the provider.
+    let direct = offered
+        .replacen(
+            "http://127.0.0.1:43721/v1",
+            "https://provider.example.invalid/v1",
+            1,
+        )
+        .replacen("fixture-local", "fixture-upstream-key", 1);
+    let followed = models(&grok_config::catalog(&direct, None).unwrap());
+    for key in ["vela/fixture-b", "vela/fixture-c"] {
+        assert_eq!(
+            followed[key]["base_url"].as_str(),
+            Some("https://provider.example.invalid/v1")
+        );
+        assert_eq!(
+            followed[key]["api_key"].as_str(),
+            Some("fixture-upstream-key")
+        );
+    }
+    assert_eq!(
+        followed["vela/fixture-b"]["model"].as_str(),
+        Some("fixture-b")
+    );
+    assert_eq!(
+        followed["vela/fixture-b"]["name"].as_str(),
+        Some("Fixture B")
+    );
+    assert_eq!(
+        followed["vela/fixture-b"]["context_window"].as_integer(),
+        Some(2000)
+    );
+    assert_eq!(
+        grok_config::catalog(&offered, None).unwrap(),
+        offered,
+        "nothing to copy again"
+    );
+
+    // A withdrawn entry takes the roles pointing at it back to the managed model.
+    let chosen = offered.replace("helper = \"vela\"", "helper = \"vela/fixture-b\"");
+    let narrowed = grok_config::catalog(&chosen, Some(&queue[2..3])).unwrap();
+    assert!(narrowed.contains("helper = \"vela\" # keep"));
+    assert_eq!(
+        models(&narrowed)
+            .as_table()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["vela", "vela/fixture-c"]
+    );
+    let kept = grok_config::catalog(&chosen, Some(&queue)).unwrap();
+    assert!(kept.contains("helper = \"vela/fixture-b\" # keep"));
+
+    // Switching off, or losing the managed model, leaves no entry behind.
+    assert_eq!(
+        grok_config::catalog(&chosen, Some(&[])).unwrap(),
+        CATALOG_CONFIG
+    );
+    assert_eq!(
+        grok_config::catalog(CATALOG_CONFIG, Some(&[])).unwrap(),
+        CATALOG_CONFIG
+    );
+    let orphaned = "[model.\"vela/fixture-b\"]\nmodel = \"fixture-b\"\n";
+    let cleared = grok_config::catalog(orphaned, None).unwrap();
+    assert!(!cleared.contains("vela/"));
+}

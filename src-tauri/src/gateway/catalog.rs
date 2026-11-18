@@ -332,77 +332,141 @@ type CodexCache = Mutex<HashMap<String, (Instant, Arc<Vec<serde_json::Value>>)>>
 static CODEX_UPSTREAM: std::sync::LazyLock<CodexCache> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Codex reads its model menu from `model_catalog_url`. The menu lists every
-/// model the queued providers offer: the current provider's own entry when it
-/// has one, otherwise a copy of one of its entries under the missing id.
-/// `None` leaves the request to be forwarded unchanged.
+/// Codex's own instructions for a model its catalog does not list
+/// (openai/codex rust-v0.169.0, models-manager/prompt.md, Apache-2.0).
+const CODEX_PROMPT: &str = include_str!("codex_prompt.md");
+const CODEX_VERSION: &str = "0.169.0";
+/// The current provider answered nothing usable; another try may.
+struct Unavailable;
+
+/// Codex's model menu lists every model the queued providers offer: the
+/// current provider's own entry when it has one, a copy of one of its entries
+/// under the missing id otherwise, and Codex's unknown-model defaults when the
+/// provider has no Codex catalog. `None` leaves the request to be forwarded.
 pub(super) async fn codex_catalog(
     gateway: &super::Gateway,
     providers: &[String],
     uri: &hyper::Uri,
     headers: &hyper::HeaderMap,
 ) -> Option<hyper::Response<replay::WireBody>> {
+    let query = uri.query().unwrap_or("");
     if gateway.client_id() != super::ClientId::Codex
         || !matches!(uri.path(), "/models" | "/v1/models")
-        || !url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
-            .any(|(key, _)| key == "client_version")
+        || !url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| key == "client_version")
     {
         return None;
     }
     let models = gateway.model_union(None).ok().filter(|m| !m.is_empty())?;
-    let (input, _) = gateway.query_snapshot(providers.first()?, false).ok()?;
-    let key = format!(
-        "{}:{}:{}",
-        input.id,
-        input.version,
-        uri.query().unwrap_or("")
-    );
-    let cached = CODEX_UPSTREAM
-        .lock()
-        .get(&key)
-        .filter(|(at, _)| at.elapsed() < Duration::from_secs(300))
-        .map(|(_, entries)| entries.clone());
-    let upstream = match cached {
-        Some(entries) => entries,
-        None => {
-            let fetched =
-                tokio::time::timeout(Duration::from_secs(5), codex_upstream(&input, uri, headers))
-                    .await
-                    .ok()
-                    .flatten()?;
-            let entries = Arc::new(fetched);
-            let mut cache = CODEX_UPSTREAM.lock();
-            cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(300));
-            cache.insert(key, (Instant::now(), entries.clone()));
-            entries
-        }
-    };
-    let usage = gateway.0.usage.lock().clone();
-    let prices = usage.as_ref().and_then(|u| u.prices().ok());
-    let (choices, _) = gateway.0.model_list.snapshot();
-    let value = codex_merge(&models, &upstream, |id| {
-        prices
-            .as_ref()?
-            .models_dev
-            .metadata_from(id, choices.source(id))
-    })?;
-    let body = serde_json::to_vec(&value).expect("model catalog JSON");
+    let upstream = codex_template(gateway, providers.first(), query, headers)
+        .await
+        .ok()?;
+    let body = codex_body(gateway, &models, &upstream);
+    let etag = storage::digest(&body);
     Some(
         hyper::Response::builder()
             .header(header::CONTENT_TYPE, "application/json")
-            .header("x-models-etag", storage::digest(&body))
+            .header(header::ETAG, format!("\"{etag}\""))
+            .header("x-models-etag", etag)
             .body(replay::full(body))
             .expect("model catalog response"),
     )
 }
 
+/// The catalog file Codex loads at startup. With the provider out of reach,
+/// the entries Vela wrote last stand in for its catalog. `None` when the
+/// queue offers no model.
+pub(super) async fn codex_file(
+    gateway: &super::Gateway,
+    previous: Option<&[u8]>,
+) -> Option<Vec<u8>> {
+    let models = gateway.model_union(None).ok().filter(|m| !m.is_empty())?;
+    // Ask as Codex would: providers answer a catalog request by client.
+    let agent = gateway.request_state().store.successful_user_agent.clone();
+    let agent = agent.and_then(|raw| header::HeaderValue::from_bytes(&raw).ok());
+    let version = agent
+        .as_ref()
+        .and_then(|agent| agent.to_str().ok()?.split_once('/'))
+        .map(|(_, rest)| {
+            rest.split(|c: char| !c.is_ascii_digit() && c != '.')
+                .next()
+                .unwrap_or_default()
+        })
+        .filter(|v| v.split('.').count() == 3 && v.split('.').all(|part| !part.is_empty()))
+        .unwrap_or(CODEX_VERSION);
+    let mut headers = hyper::HeaderMap::new();
+    if let Some(agent) = &agent {
+        headers.insert(header::USER_AGENT, agent.clone());
+    }
+    let providers = gateway.routing_ids(None);
+    let query = format!("client_version={version}");
+    let upstream = match codex_template(gateway, providers.first(), &query, &headers).await {
+        Ok(entries) => entries,
+        Err(Unavailable) => Arc::new(previous.and_then(codex_models).unwrap_or_default()),
+    };
+    Some(codex_body(gateway, &models, &upstream))
+}
+
+fn codex_body(
+    gateway: &super::Gateway,
+    models: &[String],
+    upstream: &[serde_json::Value],
+) -> Vec<u8> {
+    let usage = gateway.0.usage.lock().clone();
+    let prices = usage.as_ref().and_then(|u| u.prices().ok());
+    let (choices, _) = gateway.0.model_list.snapshot();
+    let value = codex_merge(models, upstream, |id| {
+        prices
+            .as_ref()?
+            .models_dev
+            .metadata_from(id, choices.source(id))
+    });
+    serde_json::to_vec(&value).expect("model catalog JSON")
+}
+
+/// The current provider's Codex catalog, empty when it has none.
+async fn codex_template(
+    gateway: &super::Gateway,
+    provider: Option<&String>,
+    query: &str,
+    headers: &hyper::HeaderMap,
+) -> std::result::Result<Arc<Vec<serde_json::Value>>, Unavailable> {
+    let Some((input, _)) = provider.and_then(|id| gateway.query_snapshot(id, false).ok()) else {
+        return Ok(Arc::default());
+    };
+    let key = format!("{}:{}:{query}", input.id, input.version);
+    let cached = CODEX_UPSTREAM
+        .lock()
+        .get(&key)
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(300))
+        .map(|(_, entries)| entries.clone());
+    if let Some(entries) = cached {
+        return Ok(entries);
+    }
+    // Codex gives a catalog request five seconds; answer inside them.
+    let entries = tokio::time::timeout(
+        Duration::from_secs(3),
+        codex_upstream(&input, query, headers),
+    )
+    .await
+    .map_err(|_| Unavailable)??;
+    let entries = Arc::new(entries);
+    let mut cache = CODEX_UPSTREAM.lock();
+    cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(300));
+    cache.insert(key, (Instant::now(), entries.clone()));
+    Ok(entries)
+}
+
 async fn codex_upstream(
     input: &Query,
-    uri: &hyper::Uri,
+    query: &str,
     headers: &hyper::HeaderMap,
-) -> Option<Vec<serde_json::Value>> {
-    let path = format!("/v1/models?{}", uri.query().unwrap_or(""));
-    let target = super::forward::target(&input.base, &path.parse().ok()?).ok()?;
+) -> std::result::Result<Vec<serde_json::Value>, Unavailable> {
+    let path = format!("/v1/models?{query}");
+    let target = path
+        .parse()
+        .ok()
+        .and_then(|path| super::forward::target(&input.base, &path).ok())
+        .ok_or(Unavailable)?;
     let mut builder = Request::builder()
         .method("GET")
         .uri(target)
@@ -414,24 +478,29 @@ async fn codex_upstream(
             builder = builder.header(name, value);
         }
     }
+    let request = builder.body(replay::empty()).map_err(|_| Unavailable)?;
     let mut response = input
         .client
-        .request(builder.body(replay::empty()).ok()?)
+        .request(request)
         .await
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
+        .map_err(|_| Unavailable)?;
+    let status = response.status();
+    if status.is_server_error() || status.as_u16() == 429 {
+        return Err(Unavailable);
+    }
+    if !status.is_success() {
+        return Ok(vec![]);
     }
     let mut bytes = Vec::new();
     while let Some(frame) = response.body_mut().frame().await {
-        if let Some(data) = frame.ok()?.data_ref() {
+        if let Some(data) = frame.map_err(|_| Unavailable)?.data_ref() {
             if bytes.len() + data.len() > 16_000_000 {
-                return None;
+                return Ok(vec![]);
             }
             bytes.extend_from_slice(data);
         }
     }
-    codex_models(&bytes)
+    Ok(codex_models(&bytes).unwrap_or_default())
 }
 
 /// The entries of a Codex-format catalog; `None` for any other model list.
@@ -448,8 +517,8 @@ fn codex_merge(
     models: &[String],
     upstream: &[serde_json::Value],
     metadata: impl Fn(&str) -> Option<crate::models_dev::Metadata>,
-) -> Option<serde_json::Value> {
-    let template = upstream.first()?;
+) -> serde_json::Value {
+    let template = upstream.first();
     let levels = |meta: Option<&crate::models_dev::Metadata>| -> Vec<&'static str> {
         let known: Vec<_> = CODEX_EFFORTS
             .into_iter()
@@ -468,8 +537,8 @@ fn codex_merge(
     };
     let set_levels = |entry: &mut serde_json::Value, efforts: Vec<&'static str>| {
         let described = |effort: &str| {
-            template["supported_reasoning_levels"]
-                .as_array()
+            template
+                .and_then(|template| template["supported_reasoning_levels"].as_array())
                 .into_iter()
                 .flatten()
                 .find(|level| level["effort"] == effort)
@@ -506,7 +575,7 @@ fn codex_merge(
                 }
             }
             entry
-        } else {
+        } else if let Some(template) = template {
             let mut entry = template.clone();
             entry["slug"] = id.as_str().into();
             entry["display_name"] = name.unwrap_or_else(|| id.clone()).into();
@@ -520,10 +589,43 @@ fn codex_merge(
                 set_levels(&mut entry, levels(meta.as_ref()));
             }
             entry
+        } else {
+            // What Codex assumes of a model it does not know, made listable.
+            let context = meta.as_ref().and_then(|m| m.context).unwrap_or(272_000);
+            let reasons = meta.as_ref().and_then(|m| m.reasoning) != Some(false);
+            let mut entry = serde_json::json!({
+                "slug": id,
+                "display_name": name.unwrap_or_else(|| id.clone()),
+                "description": "Vela 网关提供的模型",
+                "supported_reasoning_levels": [],
+                "shell_type": "shell_command",
+                "visibility": "list",
+                "supported_in_api": true,
+                "priority": entries.len() + 1,
+                "availability_nux": null,
+                "upgrade": null,
+                "base_instructions": CODEX_PROMPT,
+                "include_apps_usage_instructions": false,
+                "supports_reasoning_summaries": reasons,
+                "support_verbosity": false,
+                "default_verbosity": null,
+                "apply_patch_tool_type": null,
+                "truncation_policy": {"mode": "bytes", "limit": 10_000},
+                "supports_parallel_tool_calls": false,
+                "context_window": context,
+                "max_context_window": context,
+                "effective_context_window_percent": 95,
+                "experimental_supported_tools": [],
+                "input_modalities": ["text", "image"],
+            });
+            if reasons {
+                set_levels(&mut entry, levels(meta.as_ref()));
+            }
+            entry
         };
         entries.push(entry);
     }
-    Some(serde_json::json!({ "models": entries }))
+    serde_json::json!({ "models": entries })
 }
 async fn fetch(
     input: &Query,
@@ -762,7 +864,7 @@ mod tests {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        let value = codex_merge(&models, &entries, meta).unwrap();
+        let value = codex_merge(&models, &entries, meta);
         let list = value["models"].as_array().unwrap();
         let slugs: Vec<_> = list.iter().map(|m| m["slug"].as_str().unwrap()).collect();
         // The union decides membership and order; upstream extras are left out.
@@ -803,7 +905,7 @@ mod tests {
         // Without known efforts the copied entry keeps the template's levels.
         assert_eq!(efforts(&list[3]), ["low", "medium"]);
         assert_eq!(list[3]["context_window"], 1000);
-        // Other list formats and empty catalogs are not rewritten.
+        // Other list formats and empty catalogs are no Codex catalog.
         for other in [
             serde_json::json!({"object":"list","data":[{"id":"fixture-a"}]}),
             serde_json::json!({"models":[]}),
@@ -813,7 +915,44 @@ mod tests {
             assert!(codex_models(&serde_json::to_vec(&other).unwrap()).is_none());
         }
         assert!(codex_models(b"<html>").is_none());
-        assert!(codex_merge(&models, &[], meta).is_none());
+        // Without one, every model gets Codex's unknown-model defaults.
+        let value = codex_merge(&models, &[], meta);
+        let list = value["models"].as_array().unwrap();
+        assert_eq!(list.len(), 4);
+        for (index, entry) in list.iter().enumerate() {
+            for key in [
+                "slug",
+                "display_name",
+                "description",
+                "supported_reasoning_levels",
+                "shell_type",
+                "visibility",
+                "supported_in_api",
+                "priority",
+                "availability_nux",
+                "upgrade",
+                "support_verbosity",
+                "default_verbosity",
+                "apply_patch_tool_type",
+                "truncation_policy",
+                "experimental_supported_tools",
+            ] {
+                assert!(entry.get(key).is_some(), "{key}");
+            }
+            assert_eq!(entry["priority"], index + 1);
+            assert_eq!(entry["visibility"], "list");
+            assert!(entry["base_instructions"]
+                .as_str()
+                .unwrap()
+                .starts_with("You are a coding agent running in the Codex CLI"));
+        }
+        assert_eq!(list[0]["display_name"], "Named fixture-new");
+        assert_eq!(list[0]["context_window"], 2000);
+        assert_eq!(efforts(&list[0]), ["high", "xhigh"]);
+        assert_eq!(list[1]["display_name"], "fixture-a");
+        assert_eq!(list[1]["context_window"], 272_000);
+        assert_eq!(efforts(&list[1]), ["low", "medium", "high"]);
+        assert_eq!(list[1]["default_reasoning_level"], "medium");
     }
     #[tokio::test]
     async fn union_is_ordered_exact_and_client_isolated_with_paginated_anthropic_lists() {

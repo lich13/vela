@@ -189,6 +189,9 @@ pub struct Store {
     pub grok_resume: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok_api_model: Option<String>,
+    /// Vela publishes the queue's models to the client's own model picker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_catalog: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsh: Option<super::dsh::Snapshot>,
     pub settings: Settings,
@@ -228,6 +231,7 @@ impl Default for Store {
             dsh_catalog: vec![],
             grok_resume: None,
             grok_api_model: None,
+            model_catalog: false,
             dsh: None,
             settings: Settings::default(),
             mode: "manual".into(),
@@ -361,6 +365,9 @@ pub enum Edit {
     },
     Connection {
         mode: String,
+    },
+    ModelCatalog {
+        enabled: bool,
     },
     Import,
 }
@@ -925,6 +932,7 @@ impl Store {
                 }
                 self.settings = settings;
             }
+            Edit::ModelCatalog { enabled } => self.model_catalog = enabled,
             Edit::Import | Edit::Reset { .. } | Edit::Connection { .. } => {
                 unreachable!("handled by gateway")
             }

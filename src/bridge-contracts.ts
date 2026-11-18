@@ -497,6 +497,7 @@ export type GatewayEdit =
     }
   | { op: "reorder"; ids: string[] }
   | { op: "mode" | "connection"; mode: string }
+  | { op: "modelCatalog"; enabled: boolean }
   | {
       op: "upsertFailureRule";
       rule: import("./failure-policy-types").FailureRule;

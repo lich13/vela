@@ -138,6 +138,8 @@ export const gatewayDemo: GatewayState = {
   transientRetries: [],
   error: null,
   recoveryPending: false,
+  modelCatalog: false,
+  modelCatalogError: null,
 };
 if (densePreview) {
   gatewayDemo.providers[0].modelHealth = [
@@ -309,7 +311,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         passthrough: s.clientId === "codex",
         hint:
           s.clientId === "codex"
-            ? "Codex 目录透传，本列表只读"
+            ? "开启“接管模型列表”后，Codex 启动时读取本列表"
             : "DSH 接入或同步时写入模型列表",
         models: [
           {
@@ -752,6 +754,11 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           : Boolean(e.handoffAfterCompaction);
       p.takeNewThreads =
         e.takeNewThreads == null ? p.takeNewThreads : Boolean(e.takeNewThreads);
+    }
+    if (e.op === "modelCatalog") {
+      if (s.clientId !== "codex" && s.clientId !== "grok")
+        throw new Error("接管模型列表仅适用于 Codex 和 Grok Build");
+      s.modelCatalog = Boolean(e.enabled);
     }
     if (e.op === "connection") {
       if (s.clientId !== "codex" || s.running)

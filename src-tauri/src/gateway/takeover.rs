@@ -652,6 +652,17 @@ fn detach_record(data: &Path, mut record: Journal) -> Result<()> {
     } else {
         write_record(&record, &record.exit, None, Some(&allowed))?;
     }
+    // The published model list follows the gateway out. It is not part of the
+    // transaction: whatever is left is valid and the next start rewrites it.
+    match (record.client, record.path.parent()) {
+        (ClientId::Codex, Some(home)) => {
+            let _ = super::codex_catalog::clear(home, false);
+        }
+        (ClientId::Grok, _) => {
+            let _ = super::grok_config::sync_catalog(&record.path, None);
+        }
+        _ => {}
+    }
     complete_store(data, &mut record, false)?;
     fs::remove_file(data.join(FILE)).map_err(storage::io_error)
 }
