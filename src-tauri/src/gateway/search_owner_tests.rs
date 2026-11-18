@@ -1371,5 +1371,6 @@ fn search_only_edit(gateway: &Gateway, id: &str) -> Edit {
         buffer_complete_response: None,
         endless_mode: None,
         upstream_retry_seconds: None,
+        normal_retry_seconds: None,
     }
 }

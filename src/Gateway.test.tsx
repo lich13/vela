@@ -769,6 +769,7 @@ describe("client isolation", () => {
         bufferCompleteResponse: false,
         endlessMode: false,
         upstreamRetrySeconds: 33,
+        normalRetrySeconds: 3,
       },
       expectedRevision: claudeState.revision,
     });

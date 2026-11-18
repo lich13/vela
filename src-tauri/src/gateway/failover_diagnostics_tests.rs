@@ -831,6 +831,7 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
             buffer_complete_response: None,
             endless_mode: None,
             upstream_retry_seconds: None,
+            normal_retry_seconds: None,
             quota_access_token: None,
             id: Some(backup_id.clone()),
             base_url: providers[1].base_url.clone(),

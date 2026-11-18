@@ -2774,6 +2774,7 @@ mod tests {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 id: None,
                 base_url: "https://api.example.invalid/v1".into(),
                 token: "sk-test-token".into(),

@@ -96,6 +96,7 @@ async fn claude_missing_settings_are_created_without_other_fields() {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://fixture.invalid/root".into(),

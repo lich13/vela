@@ -37,6 +37,7 @@ fn provider(id: &str, queued: bool, allowed_models: Option<&str>, handoff: bool)
         buffer_complete_response: false,
         endless_mode: false,
         upstream_retry_seconds: 5,
+        normal_retry_seconds: 3,
     }
 }
 

@@ -11,7 +11,10 @@ import type {
   Provider,
   ProviderQuota,
 } from "./types";
-import { DEFAULT_UPSTREAM_RETRY_SECONDS } from "./types";
+import {
+  DEFAULT_NORMAL_RETRY_SECONDS,
+  DEFAULT_UPSTREAM_RETRY_SECONDS,
+} from "./types";
 import { densePreview } from "./preview-fixtures";
 const healthy: Health = {
   state: "closed",
@@ -37,6 +40,7 @@ const idle = {
   bufferCompleteResponse: false,
   endlessMode: false,
   upstreamRetrySeconds: DEFAULT_UPSTREAM_RETRY_SECONDS,
+  normalRetrySeconds: DEFAULT_NORMAL_RETRY_SECONDS,
 } satisfies Partial<Provider>;
 export const gatewayDemo: GatewayState = {
   clientId: "codex",
@@ -140,6 +144,7 @@ export const gatewayDemo: GatewayState = {
   error: null,
   recoveryPending: false,
   modelCatalog: false,
+  modelCatalogOfficial: false,
   modelCatalogError: null,
 };
 if (densePreview) {
@@ -750,6 +755,8 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         if (e.endlessMode !== undefined) p.endlessMode = Boolean(e.endlessMode);
         if (e.upstreamRetrySeconds !== undefined)
           p.upstreamRetrySeconds = Number(e.upstreamRetrySeconds);
+        if (e.normalRetrySeconds !== undefined)
+          p.normalRetrySeconds = Number(e.normalRetrySeconds);
         if (e.endOnMessageStop !== undefined)
           p.endOnMessageStop = Boolean(e.endOnMessageStop);
       } else
@@ -762,6 +769,9 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           endlessMode: Boolean(e.endlessMode),
           upstreamRetrySeconds: Number(
             e.upstreamRetrySeconds ?? DEFAULT_UPSTREAM_RETRY_SECONDS,
+          ),
+          normalRetrySeconds: Number(
+            e.normalRetrySeconds ?? DEFAULT_NORMAL_RETRY_SECONDS,
           ),
           name: new URL(String(e.baseUrl)).hostname,
           baseUrl: String(e.baseUrl),
@@ -795,6 +805,10 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       if (s.clientId !== "codex" && s.clientId !== "grok")
         throw new Error("接管模型列表仅适用于 Codex 和 Grok Build");
       s.modelCatalog = Boolean(e.enabled);
+    }
+    if (e.op === "modelCatalogSource") {
+      if (s.clientId !== "codex") throw new Error("官方模型列表仅适用于 Codex");
+      s.modelCatalogOfficial = Boolean(e.official);
     }
     if (e.op === "connection") {
       if (s.clientId !== "codex" || s.running)

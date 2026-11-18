@@ -48,6 +48,7 @@ fn provider(id: &str, handoff: bool, take: bool) -> Provider {
         buffer_complete_response: false,
         endless_mode: false,
         upstream_retry_seconds: 5,
+        normal_retry_seconds: 3,
     }
 }
 
@@ -176,6 +177,7 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://fixture.example.invalid/v1".into(),
@@ -472,6 +474,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url,

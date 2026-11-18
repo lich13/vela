@@ -128,6 +128,7 @@ async fn quota_cache_is_invalidated_when_provider_version_changes() {
             buffer_complete_response: None,
             endless_mode: None,
             upstream_retry_seconds: None,
+            normal_retry_seconds: None,
             quota_access_token: None,
             id: Some(id.clone()),
             base_url: format!("http://127.0.0.1:{port}/v1"),

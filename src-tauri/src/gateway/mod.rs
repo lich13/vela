@@ -7,6 +7,7 @@ mod api_login_tests;
 mod claude_config;
 mod codex_api;
 mod codex_catalog;
+mod codex_official;
 pub(crate) mod current;
 pub(crate) mod dsh;
 pub(crate) mod grok_config;
@@ -174,6 +175,7 @@ pub struct ProviderView {
     pub buffer_complete_response: bool,
     pub endless_mode: bool,
     pub upstream_retry_seconds: u64,
+    pub normal_retry_seconds: u64,
 }
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -206,6 +208,7 @@ pub struct View {
     pub error: Option<String>,
     pub recovery_pending: bool,
     pub model_catalog: bool,
+    pub model_catalog_official: bool,
     pub model_catalog_error: Option<String>,
 }
 mod inner_state {
@@ -284,7 +287,7 @@ mod inner_state {
                 &store.grok_connections,
                 &store.dsh_models,
                 &store.grok_api_model,
-                store.model_catalog,
+                (store.model_catalog, store.model_catalog_official),
                 &store.connection,
                 &store.settings,
                 &store.mode,
@@ -365,6 +368,8 @@ struct Shared {
     catalog_sync: tokio::sync::Mutex<()>,
     catalog_pending: std::sync::atomic::AtomicBool,
     catalog_error: Mutex<Option<String>>,
+    #[cfg(test)]
+    official_source: Mutex<Option<String>>,
     clients: Mutex<HashMap<String, HttpClient>>,
     data: PathBuf,
     spool: storage::PrivateTempDir,
@@ -670,6 +675,8 @@ impl Gateway {
             catalog_sync: tokio::sync::Mutex::new(()),
             catalog_pending: std::sync::atomic::AtomicBool::new(false),
             catalog_error: Mutex::new(None),
+            #[cfg(test)]
+            official_source: Mutex::new(None),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
             endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
@@ -780,6 +787,7 @@ impl Gateway {
                     buffer_complete_response: None,
                     endless_mode: None,
                     upstream_retry_seconds: None,
+                    normal_retry_seconds: None,
                     quota_access_token: None,
                     id: None,
                     base_url,
@@ -977,6 +985,7 @@ impl Gateway {
                         buffer_complete_response: p.buffer_complete_response,
                         endless_mode: p.endless_mode,
                         upstream_retry_seconds: p.upstream_retry_seconds,
+                        normal_retry_seconds: p.normal_retry_seconds,
                         active_requests: occupied.get(&p.id).copied().unwrap_or(0),
                         quota_checking,
                         quota_check,
@@ -1011,6 +1020,7 @@ impl Gateway {
             error: s.error.clone().or_else(|| self.0.compaction.error()),
             recovery_pending: s.recovery_error.is_some(),
             model_catalog: s.store.model_catalog,
+            model_catalog_official: s.store.model_catalog_official,
             model_catalog_error: self.0.catalog_error.lock().clone(),
         };
         // Selection readers need only connection identity and provider matching data.
@@ -1339,6 +1349,9 @@ impl Gateway {
                 "接管模型列表仅适用于 Codex 和 Grok Build",
             ));
         }
+        if self.0.client != ClientId::Codex && matches!(&edit, Edit::ModelCatalogSource { .. }) {
+            return Err(AppError::new(code::CLIENT, "官方模型列表仅适用于 Codex"));
+        }
         if self.0.client != ClientId::Grok && matches!(&edit, Edit::SaveGrokProvider { .. }) {
             return Err(AppError::new(code::CLIENT, "此操作仅适用于 Grok Build"));
         }
@@ -1413,7 +1426,10 @@ impl Gateway {
                 &edit,
                 Edit::DshModelsProvider { .. } | Edit::Settings { .. }
             );
-        let catalog_edit = matches!(&edit, Edit::ModelCatalog { .. });
+        let catalog_edit = matches!(
+            &edit,
+            Edit::ModelCatalog { .. } | Edit::ModelCatalogSource { .. }
+        );
         let mut next = s.store.clone();
         if self.0.client == ClientId::Grok && matches!(&edit, Edit::ImportLink { .. }) {
             for provider in &next.providers {
@@ -1463,6 +1479,7 @@ impl Gateway {
                         buffer_complete_response: None,
                         endless_mode: None,
                         upstream_retry_seconds: None,
+                        normal_retry_seconds: None,
                         quota_access_token: None,
                         id: None,
                         base_url,
@@ -2145,6 +2162,36 @@ impl Gateway {
             }
         });
     }
+    fn official_source(&self) -> String {
+        #[cfg(test)]
+        if let Some(source) = self.0.official_source.lock().clone() {
+            return source;
+        }
+        codex_official::SOURCE.into()
+    }
+    /// Keeps OpenAI's catalog a day fresh while it is what Codex's picker lists.
+    pub(crate) async fn refresh_official_catalog(&self) {
+        let chosen = {
+            let s = self.0.inner.lock();
+            s.store.model_catalog && s.store.model_catalog_official
+        };
+        if self.0.client != ClientId::Codex || !chosen {
+            return;
+        }
+        // A failed download keeps the catalog fetched before; the next round retries.
+        if let Ok(true) = codex_official::refresh(&self.0.data, &self.official_source()).await {
+            self.schedule_catalog_sync();
+        }
+    }
+    /// OpenAI's catalog as last downloaded, fetched now when there is none yet.
+    async fn official_catalog(&self) -> Result<Vec<u8>> {
+        if let Some(catalog) = codex_official::cached(&self.0.data) {
+            return Ok(catalog);
+        }
+        codex_official::refresh(&self.0.data, &self.official_source()).await?;
+        codex_official::cached(&self.0.data)
+            .ok_or_else(|| AppError::new(code::MODELS, "官方模型列表不可用"))
+    }
     /// Returns whether a client file was rewritten.
     async fn sync_catalog(&self) -> Result<bool> {
         let _guard = self.0.catalog_sync.lock().await;
@@ -2152,33 +2199,60 @@ impl Gateway {
         self.0.catalog_pending.store(false, Ordering::Release);
         let state = || {
             let s = self.0.inner.lock();
-            (s.store.model_catalog, s.running, s.home.clone())
+            (
+                s.store.model_catalog,
+                s.store.model_catalog_official,
+                s.running,
+                s.home.clone(),
+            )
         };
-        let (enabled, running, home) = state();
+        let (enabled, official, running, home) = state();
         let Some(home) = home else {
             return Ok(false);
         };
         let live = enabled && running;
         // A state that moved on while this one was prepared has its own sync queued.
         let current = |s: &Inner| {
-            (s.store.model_catalog, s.running, s.home.as_deref())
-                == (enabled, running, Some(&*home))
+            (
+                s.store.model_catalog,
+                s.store.model_catalog_official,
+                s.running,
+                s.home.as_deref(),
+            ) == (enabled, official, running, Some(&*home))
         };
         match self.0.client {
             ClientId::Codex => {
-                let catalog = if live {
+                // Without OpenAI's catalog the queue's models stand in, and the reason is reported.
+                let mut unavailable = None;
+                let catalog = if !live {
+                    None
+                } else if let Some(catalog) = match official {
+                    true => self
+                        .official_catalog()
+                        .await
+                        .map_err(|e| unavailable = Some(e))
+                        .ok(),
+                    false => None,
+                } {
+                    Some(catalog)
+                } else {
                     let previous = codex_catalog::previous(&home);
                     catalog::codex_file(self, previous.as_deref()).await
-                } else {
-                    None
                 };
                 let s = self.0.inner.lock();
                 if !current(&s) {
                     return Ok(false);
                 }
-                match catalog {
+                let written = match catalog {
                     Some(catalog) => codex_catalog::apply(&home, &catalog),
                     None => codex_catalog::clear(&home, !enabled),
+                }?;
+                match unavailable {
+                    Some(e) => Err(AppError::new(
+                        &e.code,
+                        &format!("{}，已改用队列模型", e.message),
+                    )),
+                    None => Ok(written),
                 }
             }
             ClientId::Grok => {

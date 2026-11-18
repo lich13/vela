@@ -535,9 +535,18 @@
 
 .model-catalog-setting {
   margin: 12px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
 }
-
+.model-catalog-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .model-catalog-setting .form-error {
+  flex-basis: 100%;
   margin: 6px 0 0;
 }
 
@@ -1161,9 +1170,15 @@
 }
 .provider-endless-setting {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 4px 16px;
+}
+.provider-retry-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
 }
 .provider-form label.provider-retry-setting {
   flex-direction: row;

@@ -176,6 +176,7 @@ impl Fixture {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url.clone(),
@@ -1358,6 +1359,7 @@ async fn lingering(
         buffer_complete_response: None,
         endless_mode: None,
         upstream_retry_seconds: None,
+        normal_retry_seconds: None,
     });
     fixture.start().await;
     (fixture, release, closed, sent, upstream)
@@ -1465,6 +1467,7 @@ async fn message_stop_uses_the_failover_target_provider_setting() {
             buffer_complete_response: None,
             endless_mode: None,
             upstream_retry_seconds: None,
+            normal_retry_seconds: None,
         });
         let providers = fixture.gateway.view().providers;
         let target_id = providers[0].id.clone();

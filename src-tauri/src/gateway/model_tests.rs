@@ -30,6 +30,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://api.example.invalid/deployment".into(),
@@ -50,6 +51,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://fallback.example.invalid/v1".into(),
@@ -69,6 +71,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
             buffer_complete_response: None,
             endless_mode: None,
             upstream_retry_seconds: None,
+            normal_retry_seconds: None,
             quota_access_token: None,
             id: None,
             base_url: "https://invalid.example.invalid".into(),
@@ -370,6 +373,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
             buffer_complete_response: None,
             endless_mode: None,
             upstream_retry_seconds: None,
+            normal_retry_seconds: None,
             quota_access_token: None,
             id: None,
             base_url: format!("http://127.0.0.1:{port}"),
@@ -429,6 +433,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
             buffer_complete_response: None,
             endless_mode: None,
             upstream_retry_seconds: None,
+            normal_retry_seconds: None,
             quota_access_token: None,
             id: Some(id.clone()),
             base_url: format!("http://127.0.0.1:{blocked}"),
@@ -502,6 +507,7 @@ async fn catalog_errors_and_changed_credentials_do_not_expose_raw_responses() {
             buffer_complete_response: None,
             endless_mode: None,
             upstream_retry_seconds: None,
+            normal_retry_seconds: None,
             quota_access_token: None,
             id: Some(id),
             base_url: format!("http://127.0.0.1:{port}"),
@@ -618,6 +624,7 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
                     buffer_complete_response: None,
                     endless_mode: None,
                     upstream_retry_seconds: None,
+                    normal_retry_seconds: None,
                 },
                 false,
             )
@@ -637,6 +644,7 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
                     buffer_complete_response: None,
                     endless_mode: None,
                     upstream_retry_seconds: None,
+                    normal_retry_seconds: None,
                 },
                 false,
             )
@@ -706,4 +714,85 @@ fn auxiliary_endpoint_clear_preserves_connection_and_deleted_providers_leave_no_
     assert!(loaded.grok_connections.is_empty() && loaded.dsh_models.is_empty());
     store.edit(Edit::DeleteProvider { id }, false).unwrap();
     assert!(store.grok_connections.is_empty() && store.dsh_models.is_empty());
+}
+
+#[test]
+fn endless_retry_waits_longer_for_risk_control_and_older_stores_keep_their_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gateway.json");
+    let mut value = serde_json::to_value(Store::default()).unwrap();
+    value["providers"] = json!([
+        {"id":"saved","name":"Saved","baseUrl":"https://one.example.invalid","token":"fixture","queued":true,"version":"one","upstreamRetrySeconds":5},
+        {"id":"fresh","name":"Fresh","baseUrl":"https://two.example.invalid","token":"fixture","queued":true,"version":"two"}
+    ]);
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let (mut store, _) = Store::load(&path).unwrap();
+    let seconds = |p: &Provider| (p.upstream_retry_seconds, p.normal_retry_seconds);
+    assert_eq!(seconds(&store.providers[0]), (5, 3));
+    assert_eq!(seconds(&store.providers[1]), (33, 3));
+    let save = |id: Option<&str>, risk, normal| Edit::SaveProvider {
+        id: id.map(str::to_owned),
+        name: None,
+        base_url: "https://one.example.invalid".into(),
+        token: "fixture".into(),
+        quota_access_token: None,
+        search_only: None,
+        end_on_message_stop: None,
+        filter_count_tokens: None,
+        buffer_complete_response: None,
+        endless_mode: None,
+        upstream_retry_seconds: risk,
+        normal_retry_seconds: normal,
+    };
+    store
+        .edit(save(Some("saved"), None, Some(9)), false)
+        .unwrap();
+    assert_eq!(seconds(&store.providers[0]), (5, 9));
+    store.edit(save(None, None, None), false).unwrap();
+    assert_eq!(seconds(&store.providers[2]), (33, 3));
+
+    let provider = &mut store.providers[0];
+    (
+        provider.upstream_retry_seconds,
+        provider.normal_retry_seconds,
+    ) = (40, 2);
+    let plain = crate::events::Details::default();
+    let embedded = |code: Option<&str>, kind: Option<&str>| crate::events::Details {
+        upstream_code: code.map(str::to_owned),
+        upstream_type: kind.map(str::to_owned),
+        ..Default::default()
+    };
+    for (status, details, expected) in [
+        (Some(429), &plain, 40),
+        (Some(520), &plain, 40),
+        (Some(503), &plain, 2),
+        (Some(529), &plain, 2),
+        // Connection failures and timeouts carry no status.
+        (None, &plain, 2),
+        (Some(200), &plain, 2),
+        (Some(200), &embedded(Some("429"), None), 40),
+        (Some(200), &embedded(Some("520"), None), 40),
+        (Some(200), &embedded(None, Some("rate_limit_error")), 40),
+        (Some(200), &embedded(Some("500"), Some("api_error")), 2),
+        // A real status decides; the body's wording does not override it.
+        (
+            Some(503),
+            &embedded(Some("429"), Some("rate_limit_error")),
+            2,
+        ),
+    ] {
+        assert_eq!(
+            provider.endless_retry_seconds(status, details),
+            expected,
+            "{status:?} {:?} {:?}",
+            details.upstream_code,
+            details.upstream_type
+        );
+    }
+    (
+        provider.upstream_retry_seconds,
+        provider.normal_retry_seconds,
+    ) = (0, 0);
+    assert_eq!(provider.endless_retry_seconds(Some(429), &plain), 1);
+    assert_eq!(provider.endless_retry_seconds(None, &plain), 1);
 }

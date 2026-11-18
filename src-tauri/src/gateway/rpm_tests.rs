@@ -56,6 +56,7 @@ fn provider(version: &str, queued: bool, max_rpm: u32) -> Provider {
         buffer_complete_response: false,
         endless_mode: false,
         upstream_retry_seconds: 5,
+        normal_retry_seconds: 3,
     }
 }
 
@@ -362,6 +363,7 @@ async fn started_http_gateway(
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url,
@@ -432,6 +434,7 @@ async fn started_native_gateway(upstream_port: u16, max_rpm: u32) -> (tempfile::
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url,

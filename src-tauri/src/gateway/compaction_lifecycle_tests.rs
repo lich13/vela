@@ -39,6 +39,7 @@ fn provider(id: &str, allowed_models: Option<&str>, handoff: bool) -> Provider {
         buffer_complete_response: false,
         endless_mode: false,
         upstream_retry_seconds: 5,
+        normal_retry_seconds: 3,
     }
 }
 

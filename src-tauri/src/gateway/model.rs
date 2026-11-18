@@ -35,12 +35,40 @@ pub struct Provider {
     pub buffer_complete_response: bool,
     #[serde(default)]
     pub endless_mode: bool,
+    /// Endless-mode wait after a risk-control rejection (429 or 520).
     #[serde(default = "default_upstream_retry_seconds")]
     pub upstream_retry_seconds: u64,
+    /// Endless-mode wait after any other retried failure.
+    #[serde(default = "default_normal_retry_seconds")]
+    pub normal_retry_seconds: u64,
 }
 pub(crate) const DEFAULT_UPSTREAM_RETRY_SECONDS: u64 = 33;
+pub(crate) const DEFAULT_NORMAL_RETRY_SECONDS: u64 = 3;
 fn default_upstream_retry_seconds() -> u64 {
     DEFAULT_UPSTREAM_RETRY_SECONDS
+}
+fn default_normal_retry_seconds() -> u64 {
+    DEFAULT_NORMAL_RETRY_SECONDS
+}
+impl Provider {
+    /// Endless mode's wait before the next try. A 429 or 520 is the upstream's
+    /// risk control, as is the same refusal inside a successful response;
+    /// every other retried failure waits the normal interval.
+    pub(super) fn endless_retry_seconds(
+        &self,
+        status: Option<u16>,
+        details: &crate::events::Details,
+    ) -> u64 {
+        let embedded = status.is_none_or(|status| status < 400)
+            && (matches!(details.upstream_code.as_deref(), Some("429" | "520"))
+                || details.upstream_type.as_deref() == Some("rate_limit_error"));
+        if matches!(status, Some(429 | 520)) || embedded {
+            self.upstream_retry_seconds
+        } else {
+            self.normal_retry_seconds
+        }
+        .max(1)
+    }
 }
 // Existing defaults: three retries allow four total upstream attempts.
 const DEFAULT_MAX_RETRIES: usize = 3;
@@ -200,6 +228,9 @@ pub struct Store {
     /// Vela publishes the queue's models to the client's own model picker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub model_catalog: bool,
+    /// Codex's picker lists OpenAI's own catalog instead of the queue's models.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_catalog_official: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsh: Option<super::dsh::Snapshot>,
     pub settings: Settings,
@@ -240,6 +271,7 @@ impl Default for Store {
             grok_resume: None,
             grok_api_model: None,
             model_catalog: false,
+            model_catalog_official: false,
             dsh: None,
             settings: Settings::default(),
             mode: "manual".into(),
@@ -272,6 +304,8 @@ pub enum Edit {
         endless_mode: Option<bool>,
         #[serde(default)]
         upstream_retry_seconds: Option<u64>,
+        #[serde(default)]
+        normal_retry_seconds: Option<u64>,
         id: Option<String>,
         base_url: String,
         token: String,
@@ -376,6 +410,9 @@ pub enum Edit {
     },
     ModelCatalog {
         enabled: bool,
+    },
+    ModelCatalogSource {
+        official: bool,
     },
     Import,
 }
@@ -565,6 +602,7 @@ impl Store {
                         buffer_complete_response: None,
                         endless_mode: None,
                         upstream_retry_seconds: None,
+                        normal_retry_seconds: None,
                         id,
                         base_url,
                         token,
@@ -620,6 +658,7 @@ impl Store {
                         buffer_complete_response: None,
                         endless_mode: None,
                         upstream_retry_seconds: None,
+                        normal_retry_seconds: None,
                         id: None,
                         base_url: raw.clone(),
                         token,
@@ -647,6 +686,7 @@ impl Store {
                 buffer_complete_response,
                 endless_mode,
                 upstream_retry_seconds,
+                normal_retry_seconds,
                 id,
                 base_url: raw,
                 token,
@@ -703,6 +743,9 @@ impl Store {
                     if let Some(value) = upstream_retry_seconds {
                         p.upstream_retry_seconds = value;
                     }
+                    if let Some(value) = normal_retry_seconds {
+                        p.normal_retry_seconds = value;
+                    }
                     p.base_url = base_url.to_owned();
                     if !token.is_empty() {
                         p.token = token;
@@ -737,6 +780,8 @@ impl Store {
                         endless_mode: endless_mode.unwrap_or(false),
                         upstream_retry_seconds: upstream_retry_seconds
                             .unwrap_or(DEFAULT_UPSTREAM_RETRY_SECONDS),
+                        normal_retry_seconds: normal_retry_seconds
+                            .unwrap_or(DEFAULT_NORMAL_RETRY_SECONDS),
                     });
                     if self.selected.is_none() {
                         self.selected = Some(id);
@@ -941,6 +986,7 @@ impl Store {
                 self.settings = settings;
             }
             Edit::ModelCatalog { enabled } => self.model_catalog = enabled,
+            Edit::ModelCatalogSource { official } => self.model_catalog_official = official,
             Edit::Import | Edit::Reset { .. } | Edit::Connection { .. } => {
                 unreachable!("handled by gateway")
             }

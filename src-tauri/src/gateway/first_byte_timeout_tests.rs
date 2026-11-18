@@ -66,6 +66,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url,

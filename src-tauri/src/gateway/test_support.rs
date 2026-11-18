@@ -135,6 +135,7 @@ pub(crate) fn policy_provider(id: &str, handoff: bool, take: bool) -> Provider {
         buffer_complete_response: false,
         endless_mode: false,
         upstream_retry_seconds: 5,
+        normal_retry_seconds: 3,
     }
 }
 
@@ -315,6 +316,7 @@ pub(crate) mod loopback {
                     buffer_complete_response: None,
                     endless_mode: None,
                     upstream_retry_seconds: None,
+                    normal_retry_seconds: None,
                     quota_access_token: None,
                     id: None,
                     base_url: url,

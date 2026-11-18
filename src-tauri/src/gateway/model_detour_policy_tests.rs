@@ -21,6 +21,7 @@ fn provider(id: &str, model: Option<&str>, special: bool) -> Provider {
         buffer_complete_response: false,
         endless_mode: false,
         upstream_retry_seconds: 5,
+        normal_retry_seconds: 3,
     }
 }
 fn hints(model: &str, compacted: bool) -> RequestHints {

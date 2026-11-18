@@ -6,7 +6,7 @@ import type { EditRevision } from "./gateway-edit";
 import { confirmAction } from "./confirmation";
 import { command } from "./bridge";
 import Modal from "./Modal";
-import { errorOf } from "./types";
+import { errorOf, sortEfforts } from "./types";
 import type { ClientId, ModelCatalog, Provider } from "./types";
 function StandardProviderSettings({
   provider,
@@ -217,7 +217,7 @@ function StandardProviderSettings({
                         ? `输出上限 ${meta.output.toLocaleString()}`
                         : null,
                       meta.reasoningEfforts
-                        ? `推理档位 ${Object.keys(meta.reasoningEfforts).join(" / ")}`
+                        ? `推理档位 ${sortEfforts(Object.keys(meta.reasoningEfforts)).join(" / ")}`
                         : null,
                       `models.dev · ${meta.sources.join(" / ")}`,
                     ]

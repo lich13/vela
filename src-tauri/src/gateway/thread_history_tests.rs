@@ -43,6 +43,7 @@ fn provider_with_policy(id: &str, handoff: bool, take: bool) -> Provider {
         buffer_complete_response: false,
         endless_mode: false,
         upstream_retry_seconds: 5,
+        normal_retry_seconds: 3,
     }
 }
 

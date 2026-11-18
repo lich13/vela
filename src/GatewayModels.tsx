@@ -5,7 +5,7 @@ import type {
   GatewayModels as ModelView,
   ModelSearch,
 } from "./bridge-contracts";
-import { errorOf, type ClientId } from "./types";
+import { errorOf, sortEfforts, type ClientId } from "./types";
 
 const amount = (value: number | null | undefined) =>
   value == null
@@ -17,6 +17,8 @@ const amount = (value: number | null | undefined) =>
         : String(value);
 const price = (value: string | null | undefined) =>
   value == null ? "—" : value;
+const efforts = (metadata: { reasoningEfforts: object | null } | null) =>
+  sortEfforts(Object.keys(metadata?.reasoningEfforts ?? {}));
 const priceSource = (source: string) =>
   ({ fixed: "固定价格", sub2api: "Wei-Shaw", models_dev: "models.dev" })[
     source
@@ -89,8 +91,9 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
     id: string,
     source?: string,
   ) => run(() => command("edit_model_list", { clientId, op, id, source }));
-  const customEfforts =
-    custom?.efforts.split(/[\s,，·]+/).filter(Boolean) ?? [];
+  const customEfforts = sortEfforts(
+    custom?.efforts.split(/[\s,，·]+/).filter(Boolean) ?? [],
+  );
   const customContext = custom?.context.trim() ? Number(custom.context) : null;
   const saveCustom = (context: number | null, efforts: string[] | null) =>
     custom &&
@@ -231,14 +234,8 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
                       )}
                     </td>
                     <td>{amount(model.metadata?.context)}</td>
-                    <td
-                      title={Object.keys(
-                        model.metadata?.reasoningEfforts ?? {},
-                      ).join(" · ")}
-                    >
-                      {Object.keys(model.metadata?.reasoningEfforts ?? {}).join(
-                        " · ",
-                      ) || "—"}
+                    <td title={efforts(model.metadata).join(" · ")}>
+                      {efforts(model.metadata).join(" · ") || "—"}
                     </td>
                     <td>{price(model.price?.inputPerM)}</td>
                     <td>{price(model.price?.outputPerM)}</td>
@@ -266,9 +263,7 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
                             setCustom({
                               id: model.id,
                               context: String(model.metadata?.context ?? ""),
-                              efforts: Object.keys(
-                                model.metadata?.reasoningEfforts ?? {},
-                              ).join(" "),
+                              efforts: efforts(model.metadata).join(" "),
                             });
                             setPicker(null);
                             setAdding(false);

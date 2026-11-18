@@ -85,14 +85,18 @@ describe("Claude reliability controls", () => {
       />,
     );
     expect(
-      screen.queryByRole("spinbutton", { name: "重试间隔 秒" }),
+      screen.queryByRole("spinbutton", { name: "风控重试 秒" }),
     ).toBeNull();
     for (const name of ["过滤 Token 计数请求", "完整响应后发送", "无尽模式"])
       await user.click(screen.getByRole("checkbox", { name }));
-    const interval = screen.getByRole("spinbutton", { name: "重试间隔 秒" });
+    const interval = screen.getByRole("spinbutton", { name: "风控重试 秒" });
     expect(interval).toHaveValue(5);
     await user.clear(interval);
     await user.type(interval, "7");
+    const normal = screen.getByRole("spinbutton", { name: "普通重试 秒" });
+    expect(normal).toHaveValue(3);
+    await user.clear(normal);
+    await user.type(normal, "4");
     expect(dirty).toHaveBeenLastCalledWith(true);
     await user.click(screen.getByRole("button", { name: "保存" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -106,6 +110,7 @@ describe("Claude reliability controls", () => {
         bufferCompleteResponse: true,
         endlessMode: true,
         upstreamRetrySeconds: 7,
+        normalRetrySeconds: 4,
       }),
       null,
     );

@@ -20,6 +20,7 @@ fn save_account(g: &Gateway, t: &tempfile::TempDir, token: Option<&str>, base: O
             buffer_complete_response: None,
             endless_mode: None,
             upstream_retry_seconds: None,
+            normal_retry_seconds: None,
             id: Some(p.id.clone()),
             base_url: base.unwrap_or(&p.base_url).into(),
             token: String::new(),
@@ -444,4 +445,56 @@ async fn codex_model_catalog_switch_follows_the_gateway_into_and_out_of_config()
     assert!(!file.exists());
     g.stop().await.unwrap();
     assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
+}
+
+#[tokio::test]
+async fn codex_picker_lists_the_official_catalog_verbatim_or_falls_back_to_the_queue() {
+    let port =
+        server(|_| async { Response::new(full(r#"{"data":[{"id":"fixture-model"}]}"#)) }).await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}/v1")]).await;
+    let id = g.view().providers[0].id.clone();
+    g.list_models(&id, true).await.unwrap();
+    let file = t.path().join("vela-models.json");
+    // No download is reachable yet.
+    *g.0.official_source.lock() = Some("http://127.0.0.1:1/models.json".into());
+    update(&g, &t, Edit::ModelCatalog { enabled: true });
+    update(&g, &t, Edit::ModelCatalogSource { official: true });
+    assert!(g.view().model_catalog_official);
+    start(&g, &t).await;
+    // The queue's models stand in, and the reason is reported.
+    let error = g.sync_catalog().await.unwrap_err();
+    assert!(
+        error.message.ends_with("已改用队列模型"),
+        "{}",
+        error.message
+    );
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(catalog["models"][0]["slug"], "fixture-model");
+    g.refresh_official_catalog().await;
+    assert!(codex_official::cached(&g.0.data).is_none());
+    // Once downloaded, the file is OpenAI's catalog byte for byte.
+    let official = br#"{"models":[{"slug":"official-a","supported_reasoning_levels":[{"effort":"low"}]},{"slug":"official-b","visibility":"hide"}]}"#;
+    let source = server(move |_| async move { Response::new(full(&official[..])) }).await;
+    *g.0.official_source.lock() = Some(format!("http://127.0.0.1:{source}/models.json"));
+    g.refresh_official_catalog().await;
+    assert_eq!(codex_official::cached(&g.0.data).unwrap(), official);
+    g.sync_catalog().await.unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), official);
+    // Back on the queue's models, and never for another client.
+    update(&g, &t, Edit::ModelCatalogSource { official: false });
+    g.sync_catalog().await.unwrap();
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(catalog["models"][0]["slug"], "fixture-model");
+    g.stop().await.unwrap();
+    let claude = g.companion(t.path().join("claude-data")).unwrap();
+    let revision = claude.view().revision;
+    assert!(claude
+        .edit(
+            Edit::ModelCatalogSource { official: true },
+            &revision,
+            t.path()
+        )
+        .is_err());
 }

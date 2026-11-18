@@ -454,6 +454,7 @@ export type GatewayEdit =
       bufferCompleteResponse?: boolean;
       endlessMode?: boolean;
       upstreamRetrySeconds?: number;
+      normalRetrySeconds?: number;
       id?: string | null;
       baseUrl: string;
       token: string;
@@ -499,6 +500,7 @@ export type GatewayEdit =
   | { op: "reorder"; ids: string[] }
   | { op: "mode" | "connection"; mode: string }
   | { op: "modelCatalog"; enabled: boolean }
+  | { op: "modelCatalogSource"; official: boolean }
   | {
       op: "upsertFailureRule";
       rule: import("./failure-policy-types").FailureRule;

@@ -2138,6 +2138,18 @@ pub fn run() {
                     }
                 });
             }
+            {
+                // An hourly look; the catalog is fetched once a day, and only when chosen.
+                let codex = runtime.gateway.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut hourly = tokio::time::interval(std::time::Duration::from_secs(3600));
+                    hourly.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        hourly.tick().await;
+                        codex.refresh_official_catalog().await;
+                    }
+                });
+            }
             runtime.gateway.report_diagnostics();
             runtime.grok.report_diagnostics();
             runtime.dsh.report_diagnostics();

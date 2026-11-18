@@ -40,6 +40,7 @@ fn fixture_provider(base_url: &str) -> Provider {
         buffer_complete_response: false,
         endless_mode: false,
         upstream_retry_seconds: 5,
+        normal_retry_seconds: 3,
     }
 }
 
@@ -211,6 +212,7 @@ async fn first_affinity_persist_failure_returns_before_sending_to_upstream() {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: base_url.clone(),
@@ -310,6 +312,7 @@ async fn frozen_queued_probes_preserve_complete_samples_and_manual_probes_still_
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
             },
             &gateway.view().revision,
             dir.path(),

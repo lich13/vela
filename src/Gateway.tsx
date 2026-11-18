@@ -665,6 +665,29 @@ function GatewayContent({
                 />
                 接管模型列表
               </label>
+              {clientId === "codex" && state.modelCatalog && (
+                <label className="model-catalog-source">
+                  <span>列表来源</span>
+                  <select
+                    value={state.modelCatalogOfficial ? "official" : "queue"}
+                    disabled={busy}
+                    onChange={(e) => {
+                      const official = e.target.value === "official";
+                      run(async () => {
+                        await edit({ op: "modelCatalogSource", official });
+                        notify(
+                          official
+                            ? "已改用官方最新列表，重启 Codex 后生效"
+                            : "已改用队列模型，重启 Codex 后生效",
+                        );
+                      });
+                    }}
+                  >
+                    <option value="queue">队列模型</option>
+                    <option value="official">官方最新列表</option>
+                  </select>
+                </label>
+              )}
               {state.modelCatalog && state.modelCatalogError && (
                 <p className="form-error" role="alert">
                   {state.modelCatalogError}

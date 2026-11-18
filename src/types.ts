@@ -72,7 +72,10 @@ export type UpdateInfo = {
   latestVersion: string | null;
 };
 /** Seconds between upstream retries when a provider has no saved value. */
+/** Endless mode: wait after a 429 or 520. */
 export const DEFAULT_UPSTREAM_RETRY_SECONDS = 33;
+/** Endless mode: wait after any other retried failure. */
+export const DEFAULT_NORMAL_RETRY_SECONDS = 3;
 export const errorOf = (e: unknown): AppError =>
   typeof e === "object" && e !== null && "message" in e
     ? (e as AppError)
@@ -163,6 +166,7 @@ export type Provider = {
   bufferCompleteResponse: boolean;
   endlessMode: boolean;
   upstreamRetrySeconds: number;
+  normalRetrySeconds: number;
 };
 export type GatewayListener = {
   port: number;
@@ -245,6 +249,8 @@ export type GatewayState = {
   error: string | null;
   recoveryPending: boolean;
   modelCatalog: boolean;
+  /** Codex only: the picker lists OpenAI's catalog instead of the queue's models. */
+  modelCatalogOfficial: boolean;
   modelCatalogError: string | null;
 };
 export type StartupState = {
@@ -310,4 +316,23 @@ export type ModelMetadata = {
   context: number | null;
   output: number | null;
   reasoningEfforts: Record<string, string | null> | null;
+};
+/** Reasoning efforts weakest first; matches Rust `CODEX_EFFORTS`. */
+const EFFORT_ORDER = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+];
+/** Weakest first, unknown efforts after the known in their given order. */
+export const sortEfforts = (efforts: string[]) => {
+  const rank = (effort: string) => {
+    const at = EFFORT_ORDER.indexOf(effort);
+    return at < 0 ? EFFORT_ORDER.length : at;
+  };
+  return [...efforts].sort((a, b) => rank(a) - rank(b));
 };

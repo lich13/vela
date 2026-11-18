@@ -21,6 +21,7 @@ fn options(f: &Fixture, buffer: bool, endless: bool, filter: bool) {
         buffer_complete_response: Some(buffer),
         endless_mode: Some(endless),
         upstream_retry_seconds: Some(1),
+        normal_retry_seconds: Some(1),
     });
     let mut settings = f.gateway.view().settings;
     settings.max_retries = 1;
@@ -920,6 +921,7 @@ async fn buffered_declared_length_must_finish_even_after_message_stop() {
         buffer_complete_response: None,
         endless_mode: None,
         upstream_retry_seconds: None,
+        normal_retry_seconds: None,
     });
     f.start().await;
     let body = response_bytes(request(&f.gateway, "/v1/messages", STREAM_REQUEST).await).await;

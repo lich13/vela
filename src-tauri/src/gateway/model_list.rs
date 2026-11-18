@@ -53,6 +53,12 @@ pub struct Custom {
     pub efforts: Option<Vec<String>>,
 }
 impl Custom {
+    /// Efforts weakest first, however they were typed.
+    fn sort(&mut self) {
+        if let Some(efforts) = &mut self.efforts {
+            efforts.sort_by_key(|effort| super::catalog::effort_rank(effort));
+        }
+    }
     fn valid(&self) -> bool {
         self.context
             .is_none_or(|context| (1..=1_000_000_000).contains(&context))
@@ -384,11 +390,12 @@ impl Gateway {
         op: Operation,
         id: &str,
         source: Option<&str>,
-        custom: Custom,
+        mut custom: Custom,
     ) -> Result<View> {
         if self.0.client == ClientId::Codex && !matches!(op, Operation::Custom) {
             return Err(error("Codex 模型列表只读"));
         }
+        custom.sort();
         if !valid_id(id) {
             return Err(error("模型 ID 无效"));
         }
@@ -584,6 +591,7 @@ mod tests {
                             buffer_complete_response: None,
                             endless_mode: None,
                             upstream_retry_seconds: None,
+                            normal_retry_seconds: None,
                             quota_access_token: None,
                             id: None,
                             name: Some(format!("Fixture {n}")),
@@ -647,6 +655,19 @@ mod tests {
             ["high", "max"]
         );
         assert!(file.describe("fixture-other", None).is_none());
+        let mut typed = Custom {
+            context: None,
+            efforts: Some(
+                ["high", "odd", "low", "max", "medium", "xhigh"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+        };
+        typed.sort();
+        assert_eq!(
+            typed.efforts.unwrap(),
+            ["low", "medium", "high", "xhigh", "max", "odd"]
+        );
         for bad in [
             Custom {
                 context: Some(0),

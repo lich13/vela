@@ -25,7 +25,7 @@ Vela 面向本机使用。账号、供应商地址、访问令牌和客户端配
 
 | 来源 | 目标与用途 | 触发方式 |
 | --- | --- | --- |
-| 应用直接请求 | `api.github.com`：本仓库最新 Release；`raw.githubusercontent.com`：公开价格 JSON 与 SHA-256 | 用户检查更新；现有价格自动更新或手动更新 |
+| 应用直接请求 | `api.github.com`：本仓库最新 Release；`raw.githubusercontent.com`：公开价格 JSON 与 SHA-256、openai/codex 的公开模型目录 `models.json` | 用户检查更新；现有价格自动更新或手动更新；模型目录仅在 Codex“接管模型列表”选用“官方最新列表”期间每天下载一次，不携带凭据 |
 | 用户配置的目标 | 已保存供应商主、副地址：业务转发、额度、模型列表、端点测速、连接测试、模型指纹及可选分词器探测 | 按用户启用的功能与现有刷新间隔 |
 | Antigravity Vertex Key | `aiplatform.googleapis.com` 或所选地区的 `*-aiplatform.googleapis.com`：生成、流式生成与 Token 计数 | 用户启用 Key 账号后，由 App 请求触发；仅向 Google 发送该 Key |
 | 模型检测资源 | `api.github.com` 与 `raw.githubusercontent.com`：校验并下载 ModelTrace／LM Detector 的公开指纹资源 | 仅用户点击更新指纹库；全部文件固定同一提交，无供应商凭据 |

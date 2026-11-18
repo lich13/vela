@@ -183,7 +183,7 @@ it("edits context and reasoning efforts by hand, also for Codex, and restores de
   await user.click(await screen.findByRole("button", { name: "编辑参数" }));
   expect(screen.queryByRole("button", { name: "指定来源" })).toBeNull();
   await user.type(screen.getByLabelText("上下文 / Token"), "1050000");
-  await user.type(screen.getByLabelText("推理档位"), "high, xhigh max");
+  await user.type(screen.getByLabelText("推理档位"), "max, high xhigh");
   await user.click(screen.getByRole("button", { name: "保存" }));
   expect(mock.command).toHaveBeenCalledWith("edit_model_list", {
     clientId: "codex",
@@ -201,4 +201,45 @@ it("edits context and reasoning efforts by hand, also for Codex, and restores de
     context: null,
     efforts: null,
   });
+});
+
+it("lists reasoning efforts weakest first and prefills the editor in that order", async () => {
+  const user = userEvent.setup();
+  view.models = [
+    {
+      id: "fixture-model",
+      providers: [{ id: "fixture", name: "Fixture" }],
+      manual: false,
+      source: null,
+      pinned: null,
+      metadata: {
+        sources: ["maker"],
+        model: "fixture-model",
+        matchedBy: "exact",
+        name: null,
+        reasoning: true,
+        context: null,
+        output: null,
+        // The backend map arrives alphabetical.
+        reasoningEfforts: {
+          high: null,
+          low: null,
+          max: null,
+          medium: null,
+          odd: null,
+          xhigh: null,
+        },
+      },
+      custom: null,
+      price: null,
+    },
+  ];
+  render(<GatewayModels clientId="dsh" />);
+  expect(
+    await screen.findByText("low · medium · high · xhigh · max · odd"),
+  ).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "编辑参数" }));
+  expect(screen.getByLabelText("推理档位")).toHaveValue(
+    "low medium high xhigh max odd",
+  );
 });

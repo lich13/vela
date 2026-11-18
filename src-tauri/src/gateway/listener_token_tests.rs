@@ -83,6 +83,7 @@ fn add_codex_provider(gateway: &Gateway, home: &Path) {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://provider.fixture.invalid/v1".to_owned(),

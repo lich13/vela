@@ -1568,6 +1568,7 @@ mod tests {
                     buffer_complete_response: false,
                     endless_mode: false,
                     upstream_retry_seconds: 5,
+                    normal_retry_seconds: 3,
                 })
                 .collect();
             self.prepare_inner(

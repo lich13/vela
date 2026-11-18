@@ -187,6 +187,7 @@ describe("gateway provider token visibility", () => {
                   bufferCompleteResponse: false,
                   endlessMode: false,
                   upstreamRetrySeconds: 33,
+                  normalRetrySeconds: 3,
                 }
               : {}),
             name,

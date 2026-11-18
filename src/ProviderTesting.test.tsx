@@ -991,7 +991,7 @@ it("pauses hidden reads and reloads on show without losing the detection draft",
   await waitFor(() =>
     expect(mock.command.mock.calls.length).toBeGreaterThan(reads),
   );
-  expect(field.value).toBe("17");
+  expect(field).toHaveValue(17);
 });
 
 it("switches between strict and relaxed verdict modes and persists the degraded target model", async () => {

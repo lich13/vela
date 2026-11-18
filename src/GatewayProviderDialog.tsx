@@ -3,6 +3,7 @@ import { Eye, EyeOff, LoaderCircle } from "lucide-react";
 import { subscriptions } from "./subscriptions";
 import { command } from "./bridge";
 import {
+  DEFAULT_NORMAL_RETRY_SECONDS,
   DEFAULT_UPSTREAM_RETRY_SECONDS,
   errorOf,
   type ClientId,
@@ -61,6 +62,9 @@ export default function GatewayDialog({
   );
   const [upstreamRetrySeconds, setUpstreamRetrySeconds] = useState(
     String(dialog.item?.upstreamRetrySeconds ?? DEFAULT_UPSTREAM_RETRY_SECONDS),
+  );
+  const [normalRetrySeconds, setNormalRetrySeconds] = useState(
+    String(dialog.item?.normalRetrySeconds ?? DEFAULT_NORMAL_RETRY_SECONDS),
   );
 
   const [revealed, setRevealed] = useState<{
@@ -140,6 +144,7 @@ export default function GatewayDialog({
       bufferCompleteResponse,
       endlessMode,
       upstreamRetrySeconds,
+      normalRetrySeconds,
     ]),
   );
   useEffect(() => {
@@ -156,6 +161,7 @@ export default function GatewayDialog({
         bufferCompleteResponse,
         endlessMode,
         upstreamRetrySeconds,
+        normalRetrySeconds,
       ]) !== initialDraft.current,
     );
   }, [
@@ -170,6 +176,7 @@ export default function GatewayDialog({
     bufferCompleteResponse,
     endlessMode,
     upstreamRetrySeconds,
+    normalRetrySeconds,
     onDirtyChange,
   ]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
@@ -209,6 +216,9 @@ export default function GatewayDialog({
                         upstreamRetrySeconds: endlessMode
                           ? Number(upstreamRetrySeconds)
                           : (dialog.item?.upstreamRetrySeconds ?? DEFAULT_UPSTREAM_RETRY_SECONDS),
+                        normalRetrySeconds: endlessMode
+                          ? Number(normalRetrySeconds)
+                          : (dialog.item?.normalRetrySeconds ?? DEFAULT_NORMAL_RETRY_SECONDS),
                       }
                     : {}),
                   ...(clientId === "codex" && dialog.item
@@ -407,19 +417,40 @@ export default function GatewayDialog({
                 <span>无尽模式</span>
               </label>
               {endlessMode && (
-                <label className="provider-retry-setting">
-                  <span>重试间隔</span>
-                  <input
-                    type="number"
-                    min="1"
-                    step="1"
-                    required
-                    value={upstreamRetrySeconds}
-                    disabled={busy}
-                    onChange={(e) => setUpstreamRetrySeconds(e.target.value)}
-                  />
-                  <span>秒</span>
-                </label>
+                <div className="provider-retry-settings">
+                  <label
+                    className="provider-retry-setting"
+                    title="上游返回 429 或 520 后的等待时间"
+                  >
+                    <span>风控重试</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      required
+                      value={upstreamRetrySeconds}
+                      disabled={busy}
+                      onChange={(e) => setUpstreamRetrySeconds(e.target.value)}
+                    />
+                    <span>秒</span>
+                  </label>
+                  <label
+                    className="provider-retry-setting"
+                    title="其他可重试错误后的等待时间"
+                  >
+                    <span>普通重试</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      required
+                      value={normalRetrySeconds}
+                      disabled={busy}
+                      onChange={(e) => setNormalRetrySeconds(e.target.value)}
+                    />
+                    <span>秒</span>
+                  </label>
+                </div>
               )}
             </div>
           </div>

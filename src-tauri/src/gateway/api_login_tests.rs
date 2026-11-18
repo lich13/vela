@@ -61,6 +61,7 @@ fn provider(id: &str, base: &str, token: &str) -> Provider {
         buffer_complete_response: false,
         endless_mode: false,
         upstream_retry_seconds: 5,
+        normal_retry_seconds: 3,
     }
 }
 
@@ -332,6 +333,7 @@ async fn v020_gateway_api_mode_owns_only_base_and_auth_through_select_start_swit
             buffer_complete_response: None,
             endless_mode: None,
             upstream_retry_seconds: None,
+            normal_retry_seconds: None,
             quota_access_token: None,
             id: None,
             base_url: second_base.into(),

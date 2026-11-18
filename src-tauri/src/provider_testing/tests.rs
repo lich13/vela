@@ -1469,6 +1469,7 @@ async fn search_only_connection_uses_ordinary_chat_and_streamed_text() {
                 buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
+                normal_retry_seconds: None,
             },
             &previous.revision,
             dir.path(),
@@ -2258,7 +2259,7 @@ async fn lm_single_and_three_samples_use_all_four_native_protocols_and_keep_snap
             assert!(!Arc::ptr_eq(&service.lm_resource().unwrap(), &resource));
             assert_eq!(
                 job.resource_version["revision"],
-                "f920cfe2ff0bab94989ce01ac061e21425b6e321"
+                "33fb43f26670be0ed7817ab13e5c4c4731ccb76a"
             );
             service
                 .set_platform(

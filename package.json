@@ -1,6 +1,6 @@
 {
   "name": "vela",
-  "version": "0.33.0",
+  "version": "0.34.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.18.0",
@@ -34,16 +34,16 @@
     "@tauri-apps/cli": "2.12.4",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "^16.3.3",
-    "@testing-library/user-event": "^14.6.8",
+    "@testing-library/user-event": "^14.6.9",
     "@types/node": "^24.19.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "6.1.2",
+    "@vitejs/plugin-react": "6.3.0",
     "jsdom": "^27.4.0",
     "prettier": "3.9.10",
     "sharp": "^0.35.5",
     "typescript": "7.0.2",
-    "vite": "8.3.5",
-    "vitest": "5.0.5"
+    "vite": "8.3.7",
+    "vitest": "5.1.0"
   }
 }

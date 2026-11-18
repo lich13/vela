@@ -327,9 +327,17 @@ fn anthropic_list(
         "first_id":page.first(), "last_id":page.last(), "has_more":if before.is_some(){start>0}else{end<models.len()}
     }))
 }
-const CODEX_EFFORTS: [&str; 8] = [
+/// Codex's reasoning efforts, weakest first.
+pub(super) const CODEX_EFFORTS: [&str; 8] = [
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
+/// Sort key for an effort: by strength, unknown ones after the known.
+pub(super) fn effort_rank(effort: &str) -> usize {
+    CODEX_EFFORTS
+        .iter()
+        .position(|known| *known == effort)
+        .unwrap_or(CODEX_EFFORTS.len())
+}
 type CodexCache = Mutex<HashMap<String, (Instant, Arc<Vec<serde_json::Value>>)>>;
 static CODEX_UPSTREAM: std::sync::LazyLock<CodexCache> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -511,7 +519,7 @@ async fn codex_upstream(
 }
 
 /// The entries of a Codex-format catalog; `None` for any other model list.
-fn codex_models(bytes: &[u8]) -> Option<Vec<serde_json::Value>> {
+pub(super) fn codex_models(bytes: &[u8]) -> Option<Vec<serde_json::Value>> {
     let mut value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let entries: Vec<_> = std::mem::take(value.get_mut("models")?.as_array_mut()?)
         .into_iter()
@@ -600,12 +608,7 @@ fn codex_merge(
                 if !extra.is_empty() {
                     let mut all: Vec<&str> = own.iter().map(String::as_str).collect();
                     all.extend(extra);
-                    all.sort_by_key(|effort| {
-                        CODEX_EFFORTS
-                            .iter()
-                            .position(|known| known == effort)
-                            .unwrap_or(CODEX_EFFORTS.len())
-                    });
+                    all.sort_by_key(|effort| effort_rank(effort));
                     let described = entry["supported_reasoning_levels"].take();
                     set_levels(&mut entry, &all);
                     for level in entry["supported_reasoning_levels"]
@@ -686,9 +689,17 @@ fn codex_merge(
                 entry["max_context_window"] = context.into();
             }
             if let Some(efforts) = &custom.efforts {
-                let efforts: Vec<&str> = efforts.iter().map(String::as_str).collect();
+                let mut efforts: Vec<&str> = efforts.iter().map(String::as_str).collect();
+                efforts.sort_by_key(|effort| effort_rank(effort));
                 set_levels(&mut entry, &efforts);
             }
+        }
+        // Codex shows the levels in the order given: weakest first, whatever the source's.
+        if let Some(levels) = entry
+            .get_mut("supported_reasoning_levels")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            levels.sort_by_key(|level| effort_rank(level["effort"].as_str().unwrap_or_default()));
         }
         entries.push(entry);
     }
@@ -945,6 +956,58 @@ mod tests {
             (&entry["context_window"], &entry["max_context_window"]),
             (&7000.into(), &7000.into())
         );
+        // Values saved in the list's alphabetical order still come out weakest first.
+        let value = codex_merge(&models, &entries, meta, |_| {
+            Some(crate::gateway::model_list::Custom {
+                context: None,
+                efforts: Some(vec![
+                    "high".into(),
+                    "low".into(),
+                    "max".into(),
+                    "xhigh".into(),
+                ]),
+            })
+        });
+        let entry = &value["models"][0];
+        assert_eq!(efforts(entry), ["low", "high", "xhigh", "max"]);
+        assert_eq!(entry["default_reasoning_level"], "high");
+        let value = codex_merge(
+            &models,
+            &entries,
+            |_| None,
+            |_| {
+                Some(crate::gateway::model_list::Custom {
+                    context: None,
+                    efforts: Some(vec![
+                        "xhigh".into(),
+                        "max".into(),
+                        "odd".into(),
+                        "minimal".into(),
+                    ]),
+                })
+            },
+        );
+        let entry = &value["models"][0];
+        assert_eq!(efforts(entry), ["minimal", "xhigh", "max", "odd"]);
+        assert_eq!(entry["default_reasoning_level"], "minimal");
+        // So does a provider's own entry, and a copy of it for another model.
+        let shuffled = vec![serde_json::json!({
+            "slug":"fixture-a","display_name":"Fixture A","default_reasoning_level":"medium",
+            "supported_reasoning_levels":[
+                {"effort":"high","description":"fixture high"},
+                {"effort":"low","description":"fixture low"},
+                {"effort":"medium","description":"fixture medium"}],
+        })];
+        let models = vec!["fixture-a".to_owned(), "fixture-b".to_owned()];
+        let value = codex_merge(&models, &shuffled, |_| None, |_| None);
+        for entry in value["models"].as_array().unwrap() {
+            assert_eq!(efforts(entry), ["low", "medium", "high"]);
+            assert_eq!(entry["default_reasoning_level"], "medium");
+            assert_eq!(
+                entry["supported_reasoning_levels"][0]["description"],
+                "fixture low"
+            );
+        }
     }
     #[test]
     fn codex_catalog_lists_the_union_with_upstream_entries_and_filled_gaps() {
@@ -1095,6 +1158,7 @@ mod tests {
                         buffer_complete_response: None,
                         endless_mode: None,
                         upstream_retry_seconds: None,
+                        normal_retry_seconds: None,
                         quota_access_token: None,
                         id: None,
                         base_url: format!("https://p{n}.example.invalid"),

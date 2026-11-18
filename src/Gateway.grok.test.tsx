@@ -119,6 +119,8 @@ it("offers the model list switch to Codex and Grok and saves it as an edit", asy
   await user.click(screen.getByText("高级设置", { selector: "summary" }));
   const toggle = screen.getByRole("switch", { name: "接管模型列表" });
   expect(toggle).not.toBeChecked();
+  expect(screen.queryByRole("combobox", { name: "列表来源" })).toBeNull();
+  codex.modelCatalog = true;
   await user.click(toggle);
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith(
@@ -126,6 +128,20 @@ it("offers the model list switch to Codex and Grok and saves it as an edit", asy
       expect.objectContaining({
         clientId: "codex",
         edit: { op: "modelCatalog", enabled: true },
+      }),
+    ),
+  );
+
+  // Codex alone may list OpenAI's own catalog instead of the queue's models.
+  const source = await screen.findByRole("combobox", { name: "列表来源" });
+  expect(source).toHaveValue("queue");
+  await user.selectOptions(source, "official");
+  await waitFor(() =>
+    expect(mock.command).toHaveBeenCalledWith(
+      "update_gateway",
+      expect.objectContaining({
+        clientId: "codex",
+        edit: { op: "modelCatalogSource", official: true },
       }),
     ),
   );
@@ -141,4 +157,5 @@ it("offers the model list switch to Codex and Grok and saves it as an edit", asy
     expect(screen.getByRole("switch", { name: "接管模型列表" })).toBeChecked(),
   );
   expect(screen.getByText("fixture catalog error")).toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "列表来源" })).toBeNull();
 });

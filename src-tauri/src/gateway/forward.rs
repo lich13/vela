@@ -1249,7 +1249,7 @@ impl Exchange<'_> {
         let infinite = route.endless();
         let can_retry = infinite || self.ordinary_attempts <= self.settings.max_retries;
         let delay = Duration::from_secs(if infinite {
-            route.provider.upstream_retry_seconds.max(1)
+            route.provider.endless_retry_seconds(status, &details)
         } else {
             self.settings.rate_limit_seconds
         })
