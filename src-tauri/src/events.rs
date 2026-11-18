@@ -49,10 +49,15 @@ pub enum Reason {
     ThreadHandoff,
     ThreadRouting,
     RequestInterrupted,
+    NetworkHold,
+    NetworkRestored,
 }
 impl Reason {
     pub fn notifiable(self, _action: Action) -> bool {
-        matches!(self, Self::CircuitOpen | Self::ThreadHandoff)
+        matches!(
+            self,
+            Self::CircuitOpen | Self::ThreadHandoff | Self::NetworkHold | Self::NetworkRestored
+        )
     }
     pub fn text(self) -> &'static str {
         match self {
@@ -72,6 +77,8 @@ impl Reason {
             Self::ThreadHandoff => "线程已接管",
             Self::ThreadRouting => "线程路由结果",
             Self::RequestInterrupted => "请求交付提前结束",
+            Self::NetworkHold => "网络不通，请求已暂存",
+            Self::NetworkRestored => "网络已恢复",
         }
     }
     pub fn code(self) -> ErrorCode {
@@ -92,6 +99,8 @@ impl Reason {
             Self::ThreadHandoff => ErrorCode::ThreadHandoff,
             Self::ThreadRouting => ErrorCode::ThreadRouting,
             Self::RequestInterrupted => ErrorCode::RequestInterrupted,
+            Self::NetworkHold => ErrorCode::NetworkHold,
+            Self::NetworkRestored => ErrorCode::NetworkRestored,
         }
     }
 }
@@ -173,7 +182,7 @@ impl JournalClient {
             Self::External(_) => None,
         }
     }
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Active(client) => client.name(),
             Self::External(ExternalClient::Antigravity) => "Antigravity app",
@@ -507,12 +516,18 @@ impl Record {
             action,
             level: if matches!(
                 reason,
-                Reason::Failover | Reason::ThreadHandoff | Reason::ThreadRouting
+                Reason::Failover
+                    | Reason::ThreadHandoff
+                    | Reason::ThreadRouting
+                    | Reason::NetworkRestored
             ) {
                 Level::Info
             } else if matches!(
                 reason,
-                Reason::ModelUnavailable | Reason::RateLimit | Reason::Capacity
+                Reason::ModelUnavailable
+                    | Reason::RateLimit
+                    | Reason::Capacity
+                    | Reason::NetworkHold
             ) {
                 Level::Warning
             } else {
@@ -1153,7 +1168,10 @@ fn classify(record: &Record, causes: &HashSet<&str>) -> Category {
     if record.reason == Reason::CircuitOpen || causes.contains(record.id.as_str()) {
         Category::CircuitError
     } else if (record.details.quota_check.is_some() && record.level == Level::Info)
-        || matches!(record.reason, Reason::Failover | Reason::ThreadHandoff)
+        || matches!(
+            record.reason,
+            Reason::Failover | Reason::ThreadHandoff | Reason::NetworkRestored
+        )
         || (matches!(
             record.reason,
             Reason::RequestInterrupted | Reason::ThreadRouting

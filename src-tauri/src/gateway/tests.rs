@@ -136,6 +136,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
         Edit::Settings {
             settings: Settings {
                 port,
+                network_probe: false,
                 ..Default::default()
             },
         },

@@ -10,6 +10,7 @@ const phases: Record<string, string> = {
   ws_wait: "等待重连",
   compaction: "压缩中",
   frozen: "已暂存",
+  held: "断网暂存",
 };
 export default function QuickWaits({
   gateway,

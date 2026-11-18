@@ -596,6 +596,7 @@ pub fn wait_phase_label(phase: &str) -> &str {
         "ws_wait" => "等待重连",
         "compaction" => "压缩中",
         "frozen" => "已暂存",
+        "held" => "断网暂存",
         other => other,
     }
 }

@@ -116,6 +116,19 @@ pub struct Settings {
     pub queue_seconds: u64,
     #[serde(default = "default_max_waiting")]
     pub max_waiting: usize,
+    /// After a failed connection, probe the provider's model list before the
+    /// request is sent again, and hold the request while the network is down.
+    #[serde(default = "default_network_probe")]
+    pub network_probe: bool,
+    /// Failed probes in a row that mean the network is down.
+    #[serde(default = "default_network_probe_attempts")]
+    pub network_probe_attempts: u32,
+}
+fn default_network_probe() -> bool {
+    true
+}
+fn default_network_probe_attempts() -> u32 {
+    3
 }
 fn default_endpoint_probe_seconds() -> u64 {
     300
@@ -163,6 +176,8 @@ impl Default for Settings {
             connect_seconds: DEFAULT_CONNECT_SECONDS,
             queue_seconds: default_wait_seconds(),
             max_waiting: default_max_waiting(),
+            network_probe: default_network_probe(),
+            network_probe_attempts: default_network_probe_attempts(),
         }
     }
 }
@@ -177,6 +192,7 @@ impl Settings {
             || self.max_waiting == 0
             || self.max_waiting > 10000
             || !(10..=86400).contains(&self.endpoint_probe_seconds)
+            || !(1..=20).contains(&self.network_probe_attempts)
             || [
                 self.cooldown_seconds,
                 self.rate_limit_seconds,

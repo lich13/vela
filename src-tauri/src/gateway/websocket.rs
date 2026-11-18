@@ -1520,14 +1520,8 @@ async fn connect(
                     && established_capacity_owner.as_deref() == Some(&admission.route.provider.id);
                 let retry_delay = if admission.route.client_id == super::ClientId::Codex
                     && (failure.status.is_some_and(circuit::is_server_error)
-                        || matches!(
+                        || super::connectivity::connection_failure(
                             failure.details.local_code.as_deref(),
-                            Some(
-                                code::CONNECTION_FAILED
-                                    | code::CONNECT_TIMEOUT
-                                    | code::TLS_HANDSHAKE_FAILED
-                                    | code::WS_HANDSHAKE_TIMEOUT
-                            )
                         ))
                     && !failure.model_unavailable
                     && !failure.capacity
@@ -1543,6 +1537,24 @@ async fn connect(
                 } else {
                     None
                 };
+                let fallback = retryable
+                    && super::attempt::retained_fallback(
+                        g,
+                        &admission.route.provider.id,
+                        &ids,
+                        &routes,
+                        requirement,
+                        uri.path(),
+                        ownership.as_deref(),
+                        g.client_id() == super::ClientId::Codex && !auxiliary,
+                        super::attempt::may_fail_over(
+                            manual,
+                            pinned.as_deref(),
+                            unknown_affinity,
+                            *ordinary_attempts,
+                            cfg.max_retries,
+                        ),
+                    ) == crate::events::Action::TryingNext;
                 let mut failure = failure;
                 failure.details.wait_seconds = if wait_same {
                     Some(forward::capacity_delay(cfg, failure.retry).as_secs())
@@ -1558,25 +1570,7 @@ async fn connect(
                         &failure,
                         if retry_delay.is_some() || wait_same {
                             crate::events::Action::RetryingSame
-                        } else if retryable
-                            && super::attempt::retained_fallback(
-                                g,
-                                &admission.route.provider.id,
-                                &ids,
-                                &routes,
-                                requirement,
-                                uri.path(),
-                                ownership.as_deref(),
-                                g.client_id() == super::ClientId::Codex && !auxiliary,
-                                super::attempt::may_fail_over(
-                                    manual,
-                                    pinned.as_deref(),
-                                    unknown_affinity,
-                                    *ordinary_attempts,
-                                    cfg.max_retries,
-                                ),
-                            ) == crate::events::Action::TryingNext
-                        {
+                        } else if fallback {
                             crate::events::Action::TryingNext
                         } else if failure.capacity {
                             crate::events::Action::Waiting
@@ -1612,6 +1606,35 @@ async fn connect(
                 if !retryable {
                     failover.finish(super::failover::Exit::PermanentRejection);
                     return Err((1008, "upstream rejected websocket handshake"));
+                }
+                // With nowhere else to go, a turn whose network is down is
+                // held rather than answered with the failure.
+                let mut retry_delay = retry_delay;
+                if super::connectivity::connection_failure(failure.details.local_code.as_deref())
+                    && (retry_delay.is_some() || !fallback)
+                {
+                    let route = admission.route.clone();
+                    match while_connecting(
+                        client,
+                        super::connectivity::settle(
+                            g,
+                            &route,
+                            cfg,
+                            request_budget,
+                            current_model.as_deref(),
+                            !fallback,
+                        ),
+                    )
+                    .await?
+                    {
+                        super::connectivity::Verdict::Reachable => {}
+                        super::connectivity::Verdict::Unreachable => retry_delay = None,
+                        super::connectivity::Verdict::Restored => {
+                            *ordinary_attempts = (*ordinary_attempts).saturating_sub(1);
+                            transient_retries = 0;
+                            retry_delay = Some(Duration::ZERO);
+                        }
+                    }
                 }
                 if let Some(delay) = retry_delay {
                     failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());

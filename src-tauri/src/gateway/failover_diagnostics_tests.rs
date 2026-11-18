@@ -124,6 +124,7 @@ fn configure_auto(gateway: &Gateway, dir: &tempfile::TempDir, max_retries: usize
     settings.max_retries = max_retries;
     settings.queue_seconds = 1;
     settings.websocket_retry_seconds = 1;
+    settings.network_probe = false;
     update(gateway, dir, Edit::Settings { settings });
 }
 

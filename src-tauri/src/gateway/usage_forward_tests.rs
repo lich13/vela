@@ -165,6 +165,7 @@ impl Fixture {
                 idle_seconds: 5,
                 connect_seconds: 2,
                 queue_seconds: 2,
+                network_probe: false,
                 ..Settings::default()
             },
         });
@@ -1526,3 +1527,6 @@ async fn message_stop_uses_the_failover_target_provider_setting() {
 
 #[path = "claude_resilience_tests.rs"]
 mod claude_resilience_tests;
+
+#[path = "connectivity_tests.rs"]
+mod connectivity_tests;

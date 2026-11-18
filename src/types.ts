@@ -104,6 +104,8 @@ export type GatewaySettings = {
   connectSeconds: number;
   queueSeconds: number;
   maxWaiting: number;
+  networkProbe: boolean;
+  networkProbeAttempts: number;
 };
 export type Health = {
   state: "closed" | "open" | "half_open";

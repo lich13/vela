@@ -162,6 +162,18 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
       gateway={{
         ...gatewayDemo,
         pendingRequests: [
+          { ...pending, phase: "held", remainingSeconds: null },
+        ],
+      }}
+    />,
+  );
+  expect(screen.getByText("断网暂存")).toBeInTheDocument();
+  view.rerender(
+    <QuickWaits
+      {...props}
+      gateway={{
+        ...gatewayDemo,
+        pendingRequests: [
           { ...pending, elapsedSeconds: 71, remainingSeconds: 229 },
         ],
       }}

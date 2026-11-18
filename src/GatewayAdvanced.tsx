@@ -11,7 +11,10 @@ import {
 } from "./types";
 import type { EditRevision } from "./gateway-edit";
 
-type NumberField = Exclude<keyof GatewaySettings, "customFailureRules">;
+type NumberField = Exclude<
+  keyof GatewaySettings,
+  "customFailureRules" | "networkProbe"
+>;
 
 export default function Advanced({
   clientId,
@@ -93,71 +96,95 @@ export default function Advanced({
       ],
     },
   ];
-  const fields = (items: [NumberField, string][]) => (
+  const change = () => {
+    if (!editing) baseRevision.current = revision;
+    setEditing(true);
+    onDirtyChange?.(true);
+  };
+  const field = ([key, label]: [NumberField, string]) => (
+    <label key={key} className="policy-parameter">
+      <span>{label.split(" / ")[0]}</span>
+      <input
+        aria-label={label}
+        form={formId}
+        type="number"
+        disabled={
+          busy ||
+          (key === "port" &&
+            (!!listener.runningClients.length || listener.antigravityActive))
+        }
+        required
+        min={key === "maxRetries" ? 0 : key === "endpointProbeSeconds" ? 10 : 1}
+        max={
+          key === "maxRetries"
+            ? 15
+            : key === "networkProbeAttempts"
+              ? 20
+              : key === "transientFailureThreshold"
+                ? 1000
+                : key === "maxWaiting"
+                  ? 10000
+                  : key === "port"
+                    ? 65535
+                    : key.endsWith("Seconds")
+                      ? 86400
+                      : undefined
+        }
+        step={1}
+        value={draft[key]}
+        onInvalid={(e) => {
+          let section = e.currentTarget.closest("details");
+          while (section) {
+            section.open = true;
+            section = section.parentElement?.closest("details") ?? null;
+          }
+        }}
+        onChange={(e) => {
+          change();
+          setDraft({ ...draft, [key]: Number(e.target.value) });
+        }}
+      />
+      <span className="policy-unit">
+        {label.includes(" / 秒")
+          ? "秒"
+          : key === "maxWaiting"
+            ? "个"
+            : [
+                  "maxRetries",
+                  "failureThreshold",
+                  "transientFailureThreshold",
+                  "successThreshold",
+                  "networkProbeAttempts",
+                ].includes(key)
+              ? "次"
+              : ""}
+      </span>
+    </label>
+  );
+  const fields = (items: [NumberField, string][], rest?: ReactNode) => (
     <div className="policy-parameters">
-      {items.map(([key, label]) => (
-        <label key={key} className="policy-parameter">
-          <span>{label.split(" / ")[0]}</span>
-          <input
-            aria-label={label}
-            form={formId}
-            type="number"
-            disabled={
-              busy ||
-              (key === "port" &&
-                (!!listener.runningClients.length ||
-                  listener.antigravityActive))
-            }
-            required
-            min={
-              key === "maxRetries" ? 0 : key === "endpointProbeSeconds" ? 10 : 1
-            }
-            max={
-              key === "maxRetries"
-                ? 15
-                : key === "transientFailureThreshold"
-                  ? 1000
-                  : key === "maxWaiting"
-                    ? 10000
-                    : key === "port"
-                      ? 65535
-                      : key.endsWith("Seconds")
-                        ? 86400
-                        : undefined
-            }
-            step={1}
-            value={draft[key]}
-            onInvalid={(e) => {
-              let section = e.currentTarget.closest("details");
-              while (section) {
-                section.open = true;
-                section = section.parentElement?.closest("details") ?? null;
-              }
-            }}
-            onChange={(e) => {
-              if (!editing) baseRevision.current = revision;
-              setEditing(true);
-              onDirtyChange?.(true);
-              setDraft({ ...draft, [key]: Number(e.target.value) });
-            }}
-          />
-          <span className="policy-unit">
-            {label.includes(" / 秒")
-              ? "秒"
-              : key === "maxWaiting"
-                ? "个"
-                : [
-                      "maxRetries",
-                      "failureThreshold",
-                      "transientFailureThreshold",
-                      "successThreshold",
-                    ].includes(key)
-                  ? "次"
-                  : ""}
-          </span>
-        </label>
-      ))}
+      {items.map(field)}
+      {rest}
     </div>
+  );
+  const networkProbe = (
+    <>
+      <label className="policy-parameter">
+        <span>断网探测与暂存</span>
+        <input
+          aria-label="断网探测与暂存"
+          form={formId}
+          type="checkbox"
+          disabled={busy}
+          checked={draft.networkProbe}
+          onChange={(e) => {
+            change();
+            setDraft({ ...draft, networkProbe: e.target.checked });
+          }}
+        />
+      </label>
+      {draft.networkProbe && field(["networkProbeAttempts", "探测次数"])}
+    </>
   );
   return (
     <section className="gateway-settings">
@@ -175,7 +202,10 @@ export default function Advanced({
             key={group.name}
           >
             <h3>{group.name}</h3>
-            {fields(group.fields)}
+            {fields(
+              group.fields,
+              group.tone === "service" ? networkProbe : undefined,
+            )}
           </section>
         ))}
       </details>

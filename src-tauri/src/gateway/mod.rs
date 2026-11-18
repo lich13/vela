@@ -28,6 +28,7 @@ pub(crate) mod antigravity;
 mod client;
 #[cfg(test)]
 mod client_cancel_tests;
+mod connectivity;
 pub mod freeze;
 mod listener;
 pub(crate) mod registry;
@@ -388,6 +389,7 @@ struct Shared {
     endpoints: endpoints::Service,
     admission: admission::Scheduler,
     compaction: Arc<compaction::Registry>,
+    links: connectivity::Links,
 }
 impl Drop for Shared {
     fn drop(&mut self) {
@@ -685,6 +687,7 @@ impl Gateway {
             official_source: Mutex::new(None),
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
+            links: connectivity::Links::default(),
             endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
             catalog: catalog::Service::new(data.join("provider-models.json")),
             model_list: model_list::Service::new(data.join("model-list.json")),

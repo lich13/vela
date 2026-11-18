@@ -220,6 +220,41 @@ describe("gateway advanced settings", () => {
       ),
     );
   });
+
+  it("shows the probe count only while network probing is on and saves both", async () => {
+    localStorage.setItem("vela.main.client", "claude");
+    const user = userEvent.setup();
+    render(<Gateway notify={() => {}} />);
+    await screen.findByRole("button", { name: "添加" });
+    await user.click(screen.getByText("故障策略"));
+
+    const probe = screen.getByRole("checkbox", { name: "断网探测与暂存" });
+    expect(probe).toBeChecked();
+    const attempts = screen.getByRole("spinbutton", { name: "探测次数" });
+    expect(attempts).toHaveValue(3);
+    await user.clear(attempts);
+    await user.type(attempts, "5");
+    await user.click(probe);
+    expect(
+      screen.queryByRole("spinbutton", { name: "探测次数" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "保存参数" }));
+    await waitFor(() =>
+      expect(mock.command).toHaveBeenCalledWith(
+        "update_gateway",
+        expect.objectContaining({
+          clientId: "claude",
+          edit: expect.objectContaining({
+            op: "settings",
+            settings: expect.objectContaining({
+              networkProbe: false,
+              networkProbeAttempts: 5,
+            }),
+          }),
+        }),
+      ),
+    );
+  });
 });
 
 describe("quota refresh settings", () => {

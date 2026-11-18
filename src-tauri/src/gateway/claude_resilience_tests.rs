@@ -27,6 +27,7 @@ fn options(f: &Fixture, buffer: bool, endless: bool, filter: bool) {
     settings.max_retries = 1;
     settings.rate_limit_seconds = 1;
     settings.retry_budget_seconds = 10;
+    settings.network_probe = false;
     f.edit(Edit::Settings { settings });
 }
 fn sse(bytes: impl Into<Bytes>) -> Response<WireBody> {

@@ -19,7 +19,7 @@ fn event(reason: Reason, action: Action) -> Record {
 }
 
 #[test]
-fn only_circuit_open_and_thread_handoff_reasons_are_notifiable() {
+fn only_circuit_handoff_and_network_hold_reasons_are_notifiable() {
     let reasons = [
         Reason::ModelUnavailable,
         Reason::Authentication,
@@ -35,6 +35,10 @@ fn only_circuit_open_and_thread_handoff_reasons_are_notifiable() {
         Reason::AccountSync,
         Reason::ProtocolError,
         Reason::ThreadHandoff,
+        Reason::ThreadRouting,
+        Reason::RequestInterrupted,
+        Reason::NetworkHold,
+        Reason::NetworkRestored,
     ];
     let actions = [
         Action::TryingNext,
@@ -47,7 +51,13 @@ fn only_circuit_open_and_thread_handoff_reasons_are_notifiable() {
         Action::NotRetried,
     ];
     for reason in reasons {
-        let expected = matches!(reason, Reason::CircuitOpen | Reason::ThreadHandoff);
+        let expected = matches!(
+            reason,
+            Reason::CircuitOpen
+                | Reason::ThreadHandoff
+                | Reason::NetworkHold
+                | Reason::NetworkRestored
+        );
         for action in actions {
             assert_eq!(reason.notifiable(action), expected, "{reason:?} {action:?}");
         }

@@ -1244,6 +1244,7 @@ impl Exchange<'_> {
         kind: &'static str,
         mut details: crate::events::Details,
         retry_after: Option<Duration>,
+        probe: bool,
     ) -> End {
         let route = attempt.route.clone();
         let infinite = route.endless();
@@ -1335,6 +1336,23 @@ impl Exchange<'_> {
             }
             return End::Stop;
         }
+        // A request held until the network came back is sent at once.
+        let delay = if probe
+            && super::connectivity::settle(
+                self.gateway,
+                &route,
+                self.settings,
+                self.request_budget,
+                self.plan.model.as_deref(),
+                true,
+            )
+            .await
+                == super::connectivity::Verdict::Restored
+        {
+            Duration::ZERO
+        } else {
+            delay
+        };
         self.failover
             .wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
         self.request_budget.describe(
@@ -1978,7 +1996,7 @@ impl Exchange<'_> {
             attempt.protocol.finish(None, finished);
             let details = attempt.protocol.observation.error.clone();
             return self
-                .claude_retry(attempt, None, code::NETWORK, details, None)
+                .claude_retry(attempt, None, code::NETWORK, details, None, true)
                 .await;
         }
         let Attempt {
@@ -2048,6 +2066,9 @@ impl Exchange<'_> {
             &mut self.transient_retries,
             None,
         );
+        // With nowhere else to go, a request whose network is down is held
+        // rather than answered with the failure.
+        let stranded = event.action == Action::Returned;
         if let Some(delay) = retry_delay {
             event.action = Action::RetryingSame;
             event.details.wait_seconds = Some(delay.as_secs());
@@ -2055,10 +2076,31 @@ impl Exchange<'_> {
         self.last_error = Some(self.failover.report_failure(Some(&protocol), || {
             super::health_settlement::publish(self.gateway, event)
         }));
+        let mut retry_delay = retry_delay;
+        drop(admission);
+        if connection && !self.plan.dedicated_search && (retry_delay.is_some() || stranded) {
+            match super::connectivity::settle(
+                self.gateway,
+                &route,
+                self.settings,
+                self.request_budget,
+                self.plan.model.as_deref(),
+                stranded,
+            )
+            .await
+            {
+                super::connectivity::Verdict::Reachable => {}
+                super::connectivity::Verdict::Unreachable => retry_delay = None,
+                super::connectivity::Verdict::Restored => {
+                    self.ordinary_attempts = self.ordinary_attempts.saturating_sub(1);
+                    self.transient_retries = 0;
+                    retry_delay = Some(Duration::ZERO);
+                }
+            }
+        }
         if let Some(delay) = retry_delay {
             self.failover
                 .wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
-            drop(admission);
             match transient_wait(
                 self.gateway,
                 &route,
@@ -2093,7 +2135,14 @@ impl Exchange<'_> {
             attempt.protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
             let details = attempt.protocol.observation.error.clone();
             return self
-                .claude_retry(attempt, None, code::FIRST_BYTE_TIMEOUT, details, None)
+                .claude_retry(
+                    attempt,
+                    None,
+                    code::FIRST_BYTE_TIMEOUT,
+                    details,
+                    None,
+                    false,
+                )
                 .await;
         }
         let Attempt {
@@ -2343,6 +2392,7 @@ impl Exchange<'_> {
                         code::HTTP,
                         details,
                         cooldown,
+                        false,
                     )
                     .await;
             }
@@ -2848,7 +2898,14 @@ impl Exchange<'_> {
         if attempt.route.provider.buffer_complete_response || attempt.route.endless() {
             let details = attempt.protocol.observation.error.clone();
             return self
-                .claude_retry(attempt, Some(status.as_u16()), failure_kind, details, None)
+                .claude_retry(
+                    attempt,
+                    Some(status.as_u16()),
+                    failure_kind,
+                    details,
+                    None,
+                    false,
+                )
                 .await;
         }
         let Attempt {
@@ -2986,6 +3043,7 @@ impl Exchange<'_> {
                         code::UPSTREAM_REJECTED,
                         details,
                         retry,
+                        false,
                     )
                     .await);
             }

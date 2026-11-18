@@ -42,6 +42,8 @@ export const reasons = {
   account_sync: "账号同步异常",
   protocol_error: "返回了应用错误",
   request_interrupted: "请求交付提前结束",
+  network_hold: "断网暂存",
+  network_restored: "网络已恢复",
 } as const;
 
 /** Events the summary names by what happened; their records may carry a narrower code. */
@@ -51,6 +53,8 @@ const eventCodes: Partial<Record<keyof typeof reasons, string>> = {
   circuit_open: "CIRCUIT_OPEN",
   thread_handoff: "THREAD_HANDOFF",
   thread_routing: "THREAD_ROUTING",
+  network_hold: "NETWORK_HOLD",
+  network_restored: "NETWORK_RESTORED",
 };
 
 const actions = {

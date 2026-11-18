@@ -79,6 +79,8 @@ export const gatewayDemo: GatewayState = {
     connectSeconds: 300,
     queueSeconds: 300,
     maxWaiting: 100,
+    networkProbe: true,
+    networkProbeAttempts: 3,
   },
   providers: [
     {

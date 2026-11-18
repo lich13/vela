@@ -116,7 +116,7 @@ flowchart LR
 Download the installer for your platform from [GitHub Releases](https://github.com/lich13/vela/releases):
 
 - **macOS (Apple Silicon)**: `.dmg` disk image (ad-hoc signed; if Gatekeeper prompts on first launch, confirm opening under **System Settings → Privacy & Security**).
-- **Windows (x64)**: NSIS `.exe` installer (confirm execution if prompted by SmartScreen).
+- **Windows (x64)**: NSIS `.exe` installer (confirm execution if prompted by SmartScreen). To upgrade, run the new installer directly: it installs over the existing version without uninstalling first, and your settings and data are kept.
 
 Verify the downloaded installer against the `SHA256SUMS` file attached to the same release:
 

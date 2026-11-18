@@ -116,7 +116,7 @@ flowchart LR
 请从 [GitHub Releases](https://github.com/lich13/vela/releases) 下载对应平台的安装包：
 
 - **macOS（Apple Silicon）**：`.dmg` 磁盘映像（采用 ad-hoc 签名；首次打开如遇系统拦截，请按 macOS 提示在「系统设置 → 隐私与安全性」中确认打开）。
-- **Windows（x64）**：NSIS `.exe` 安装程序（SmartScreen 提示时选择确认运行即可）。
+- **Windows（x64）**：NSIS `.exe` 安装程序（SmartScreen 提示时选择确认运行即可）。升级时直接运行新版安装程序即可覆盖安装，无需先卸载，设置与数据均会保留。
 
 下载后建议使用同一 Release 附带的 `SHA256SUMS` 文件校验安装包完整性：
 

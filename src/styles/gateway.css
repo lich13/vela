@@ -1093,6 +1093,14 @@
     box-shadow 0.15s ease;
 }
 
+.policy-parameter input[type="checkbox"] {
+  grid-column: 2 / 4;
+  justify-self: end;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
 .policy-parameter input:hover:not(:disabled) {
   border-color: var(--line-strong);
 }

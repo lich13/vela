@@ -278,7 +278,10 @@ impl WaitBudget {
     pub fn describe(&self, provider: Option<&str>, model: Option<&str>, phase: &str) {
         let mut state = self.shared.state.lock();
         if let Some(active) = &mut state.active {
-            if matches!(phase, "admission" | "capacity" | "retry" | "ws_wait") {
+            if matches!(
+                phase,
+                "admission" | "capacity" | "retry" | "ws_wait" | "held"
+            ) {
                 if let Some(traffic) = &active.traffic {
                     traffic.waiting();
                 }

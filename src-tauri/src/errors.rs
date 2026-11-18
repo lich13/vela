@@ -117,6 +117,8 @@ local_codes! {
     Name => NAME = "NAME",
     Network => NETWORK = "NETWORK",
     NetworkError = "NETWORK_ERROR",
+    NetworkHold = "NETWORK_HOLD",
+    NetworkRestored = "NETWORK_RESTORED",
     Notification => NOTIFICATION = "NOTIFICATION",
     NotificationDenied => NOTIFICATION_DENIED = "NOTIFICATION_DENIED",
     NoEligibleProvider => NO_ELIGIBLE_PROVIDER = "NO_ELIGIBLE_PROVIDER",

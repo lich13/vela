@@ -298,3 +298,87 @@ fn all_server_errors_share_six_failure_transient_threshold() {
         }
     }
 }
+
+#[tokio::test]
+async fn a_dead_network_holds_the_websocket_turn_until_the_owner_answers() {
+    let (dir, gateway, port, backup) = super::owner_connect_retry_tests::setup_with(true).await;
+    // Manual mode leaves the turn nowhere else to go.
+    update(
+        &gateway,
+        &dir,
+        Edit::Mode {
+            mode: "manual".into(),
+        },
+    );
+    let mut client = responses_client(&gateway, "fixture-owner-network").await;
+    client
+        .send(yawc::Frame::text(CREATE.to_owned()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = gateway.view().pending_requests;
+            if pending
+                .first()
+                .is_some_and(|p| p.phase == "held" && p.remaining_seconds.is_none())
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn was not held");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let restored = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        hyper_util::rt::TokioIo::new(socket),
+                        hyper::service::service_fn(|mut r: Request<Incoming>| async move {
+                            // The probe asks for the model list over plain HTTP.
+                            if !r.headers().contains_key("upgrade") {
+                                return Ok::<_, Infallible>(
+                                    Response::builder()
+                                        .status(401)
+                                        .body(replay::empty())
+                                        .unwrap(),
+                                );
+                            }
+                            let (response, upgraded) = yawc::WebSocket::upgrade_with_options(
+                                &mut r,
+                                yawc::Options::default().with_balanced_compression(),
+                            )
+                            .unwrap();
+                            tokio::spawn(async move {
+                                let mut peer = upgraded.await.unwrap();
+                                while let Some(frame) = peer.next().await {
+                                    if frame.opcode().is_control() {
+                                        continue;
+                                    }
+                                    peer.send(yawc::Frame::text(CREATED.to_owned()))
+                                        .await
+                                        .unwrap();
+                                    peer.send(yawc::Frame::text(COMPLETED.to_owned()))
+                                        .await
+                                        .unwrap();
+                                    break;
+                                }
+                            });
+                            Ok(response.map(|_| replay::empty()))
+                        }),
+                    )
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+    assert_eq!(next_frame(&mut client).await.as_str(), CREATED);
+    assert_eq!(next_frame(&mut client).await.as_str(), COMPLETED);
+    assert_eq!(backup.load(Ordering::SeqCst), 0);
+    restored.abort();
+    gateway.stop().await.unwrap();
+}

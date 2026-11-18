@@ -304,6 +304,9 @@ pub(crate) mod loopback {
         drop(listener);
         let mut settings = gateway.view().settings;
         settings.port = port;
+        // Refused loopback ports stand for failed providers here, not for a
+        // dead network; the probe tests turn this back on.
+        settings.network_probe = false;
         update(&gateway, &dir, Edit::Settings { settings });
         for url in urls {
             update(

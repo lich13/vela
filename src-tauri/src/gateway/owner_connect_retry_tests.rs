@@ -29,6 +29,10 @@ async fn serve_once(listener: tokio::net::TcpListener, status: u16) {
 }
 
 pub(super) async fn setup() -> (tempfile::TempDir, Gateway, u16, Arc<AtomicUsize>) {
+    setup_with(false).await
+}
+
+pub(super) async fn setup_with(probe: bool) -> (tempfile::TempDir, Gateway, u16, Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let first = tokio::spawn(serve_once(listener, 200));
@@ -48,6 +52,8 @@ pub(super) async fn setup() -> (tempfile::TempDir, Gateway, u16, Arc<AtomicUsize
     settings.connect_seconds = 1;
     settings.first_byte_seconds = 2;
     settings.max_retries = 3;
+    settings.network_probe = probe;
+    settings.network_probe_attempts = 1;
     update(&gateway, &dir, Edit::Settings { settings });
     for id in gateway
         .view()
@@ -134,6 +140,16 @@ async fn persistent_connection_failures_retry_twice_before_safe_failover() {
         .providers
         .iter()
         .all(|p| p.active_requests == 0));
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_probe_moves_to_the_backup_without_retrying_the_owner() {
+    let (_dir, gateway, _port, backup) = setup_with(true).await;
+    assert_eq!(followup(&gateway).await["provider"], "backup");
+    assert_eq!(gateway.view().providers[0].rpm_used, 2);
+    assert_eq!(backup.load(Ordering::SeqCst), 1);
+    assert!(gateway.view().pending_requests.is_empty());
     gateway.stop().await.unwrap();
 }
 

@@ -603,6 +603,7 @@ fn retry_settings(fixture: &Fixture, limit: usize) {
     settings.failure_threshold = 4;
     settings.transient_failure_threshold = 6;
     settings.retry_budget_seconds = 30;
+    settings.network_probe = false;
     fixture
         .gateway
         .edit(
