@@ -373,7 +373,8 @@ type CachedConfigPair = Result<(String, takeover::Pair)>;
 #[derive(Default)]
 struct ViewConfigCache {
     claude: crate::auth_cache::Cache<(CachedConfigPair, Option<String>)>,
-    codex_bearer: crate::auth_cache::Cache<CachedConfigPair>,
+    /// The pair, and whether Codex has no `custom` connection yet.
+    codex_bearer: crate::auth_cache::Cache<(CachedConfigPair, bool)>,
     codex_api_toml: (String, crate::auth_cache::Cache<codex_api::CachedToml>),
     codex_api_auth: crate::auth_cache::Cache<codex_api::CachedAuth>,
     grok: crate::auth_cache::Cache<(Option<Vec<u8>>, CachedConfigPair)>,
@@ -1117,6 +1118,7 @@ impl Gateway {
     }
     fn read_view_config(&self, view: &mut View, home: Option<&Path>, store: &Store) {
         let resolve = |name: &str| std::env::var(name).ok();
+        let mut lacks_custom = false;
         let (grok_raw, config, claude_warning) = {
             let mut cache_guard = self.0.view_config_cache.lock();
             let cache = &mut *cache_guard;
@@ -1152,12 +1154,19 @@ impl Gateway {
                             &mut cache.codex_api_auth,
                         ),
                         codex_api::Connection::Bearer => {
-                            match cache
-                                .codex_bearer
-                                .read_user(&self.0.client.config(home), |bytes| {
-                                    takeover::read_raw(ClientId::Codex, bytes.as_deref())
-                                }) {
-                                Ok(entry) => entry.as_ref().clone(),
+                            match cache.codex_bearer.read_user(
+                                &self.0.client.config(home),
+                                |bytes| {
+                                    (
+                                        takeover::read_raw(ClientId::Codex, bytes.as_deref()),
+                                        takeover::lacks_custom(bytes.as_deref()),
+                                    )
+                                },
+                            ) {
+                                Ok(entry) => {
+                                    lacks_custom = entry.1;
+                                    entry.0.clone()
+                                }
                                 Err(e) => Err(e),
                             }
                         }
@@ -1187,6 +1196,10 @@ impl Gateway {
                 }
             }
             (ClientId::Dsh, Some(home)) => dsh::status(home, store, &ports, &resolve).0,
+            // Without a `custom` connection Codex talks to its built-in provider.
+            // While the gateway runs that means its values were removed, which
+            // stays an error.
+            _ if lacks_custom && !view.running => current::Current::new(current::Kind::Official),
             _ => match &config {
                 Some(Ok((_, pair))) => current::pair(self.0.client, pair, store, &ports),
                 Some(Err(e)) => current::Current::unknown(&e.message),
@@ -1682,9 +1695,16 @@ impl Gateway {
                 .listener
                 .set_port(port, &self.try_listener_view()?.revision)?;
         }
+        // A Codex config without a `custom` connection is only written by a
+        // start: choosing a provider while stopped leaves the file alone.
+        let select_only = direct_select
+            && self.0.client == ClientId::Codex
+            && next.connection == codex_api::Connection::Bearer
+            && takeover::codex_lacks_custom(home)?;
         // DSH and Antigravity keep no connection in a client file to follow the choice.
         let revision = if !matches!(self.0.client, ClientId::Agy | ClientId::Dsh)
             && (s.running || direct_select)
+            && !select_only
         {
             let p = Self::exit_provider(&next, s.last_successful.as_deref())?;
             let target = takeover::Pair::new(&p.base_url, &p.token);

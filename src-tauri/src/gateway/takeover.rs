@@ -1,5 +1,7 @@
 //! Bearer mode owns two `custom` values; API mode owns auth.json and the active base_url.
 //! Edits use parser byte spans: unrelated TOML is never serialized again.
+//! A Codex config that chose no provider reads as an empty pair, and gets the
+//! `custom` selection and table added by the first write.
 use super::{
     codex_api::{self, Connection},
     ClientId,
@@ -97,13 +99,15 @@ fn parse(text: &str) -> Result<Document<&str>> {
     Document::parse(text)
         .map_err(|_| AppError::new(code::TOML, "配置不是有效的 TOML，请先修复配置"))
 }
-fn custom<'a>(doc: &'a Document<&str>) -> Result<&'a Item> {
-    let profile = doc.get("profile").and_then(Item::as_str);
-    let selector = profile
+/// The provider choice in effect: the active profile's, else the top-level one.
+fn selection<'a>(doc: &'a Document<&str>) -> Option<&'a Item> {
+    doc.get("profile")
+        .and_then(Item::as_str)
         .and_then(|p| doc.get("profiles")?.get(p)?.get("model_provider"))
         .or_else(|| doc.get("model_provider"))
-        .and_then(Item::as_str);
-    if selector != Some("custom") {
+}
+fn custom<'a>(doc: &'a Document<&str>) -> Result<&'a Item> {
+    if selection(doc).and_then(Item::as_str) != Some("custom") {
         return Err(AppError::new(
             code::CUSTOM,
             "当前生效的 provider 不是 custom，请在配置编辑器中处理",
@@ -118,6 +122,75 @@ fn custom<'a>(doc: &'a Document<&str>) -> Result<&'a Item> {
                 "缺少现有 model_providers.custom，请在配置编辑器中处理",
             )
         })
+}
+const SELECTION: &str = "model_provider = \"custom\"";
+const TABLE: [&str; 3] = [
+    "[model_providers.custom]",
+    "name = \"custom\"",
+    "wire_api = \"responses\"",
+];
+/// `text` with the `custom` selection and table it lacks, every existing byte
+/// kept, or `None` when it lacks neither. A choice of another provider is
+/// never overridden: whatever the additions cannot make pass `custom` fails
+/// with the error `custom` gave for `text`.
+fn complete(text: &str, doc: &Document<&str>) -> Result<Option<String>> {
+    let Err(error) = custom(doc) else {
+        return Ok(None);
+    };
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    // Root keys are only read before the first table header, and a byte order
+    // mark only at the very start.
+    let start = if text.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    };
+    let mut output = text.to_owned();
+    if selection(doc).is_none() {
+        output.insert_str(start, &format!("{SELECTION}{newline}"));
+    }
+    if doc
+        .get("model_providers")
+        .and_then(|p| p.get("custom"))
+        .is_none()
+    {
+        if output.len() > start {
+            if !output.ends_with('\n') {
+                output.push_str(newline);
+            }
+            output.push_str(newline);
+        }
+        for line in TABLE {
+            output.push_str(line);
+            output.push_str(newline);
+        }
+    }
+    if parse(&output).is_ok_and(|next| custom(&next).is_ok()) {
+        Ok(Some(output))
+    } else {
+        Err(error)
+    }
+}
+/// Whether Codex has no `custom` connection yet and the first write would add
+/// one. Codex itself then talks to its built-in provider.
+pub(super) fn lacks_custom(raw: Option<&[u8]>) -> bool {
+    std::str::from_utf8(raw.unwrap_or_default())
+        .is_ok_and(|text| parse(text).is_ok_and(|doc| matches!(complete(text, &doc), Ok(Some(_)))))
+}
+pub(super) fn codex_lacks_custom(home: &Path) -> Result<bool> {
+    Ok(lacks_custom(
+        storage::read_user_optional(&ClientId::Codex.config(home))?.as_deref(),
+    ))
+}
+fn codex_pair(text: &str) -> Result<Pair> {
+    let doc = parse(text)?;
+    if complete(text, &doc)?.is_some() {
+        return Ok(Pair {
+            base_url: None,
+            token: None,
+        });
+    }
+    pair(&doc)
 }
 fn pair(doc: &Document<&str>) -> Result<Pair> {
     let p = custom(doc)?;
@@ -208,12 +281,6 @@ pub fn read_for(client: ClientId, home: &Path) -> Result<(String, Pair)> {
     read_raw(client, raw.as_deref())
 }
 pub(super) fn read_raw(client: ClientId, raw: Option<&[u8]>) -> Result<(String, Pair)> {
-    if raw.is_none() && client == ClientId::Codex {
-        return Err(AppError::new(
-            code::CUSTOM,
-            "缺少 config.toml，请先在配置编辑器中设置 custom",
-        ));
-    }
     let text = std::str::from_utf8(raw.unwrap_or(if client == ClientId::Claude {
         b"{}"
     } else {
@@ -224,7 +291,7 @@ pub(super) fn read_raw(client: ClientId, raw: Option<&[u8]>) -> Result<(String, 
 }
 pub(super) fn pair_for(client: ClientId, text: &str) -> Result<Pair> {
     match client {
-        ClientId::Codex => pair(&parse(text)?),
+        ClientId::Codex => codex_pair(text),
         ClientId::Claude => super::claude_config::pair(text),
         ClientId::Grok => super::grok_config::pair(text),
         ClientId::Dsh => Err(AppError::new(code::CONFIG, "请使用 DSH profile 接入")),
@@ -321,9 +388,6 @@ fn write_pair(
     hint: Option<(&super::claude_config::HintSnapshot, bool)>,
 ) -> Result<()> {
     let raw = storage::read_user_optional(path)?;
-    if raw.is_none() && client == ClientId::Codex {
-        return Err(AppError::new(code::CONFLICT, "配置已被移除"));
-    }
     let revision = storage::revision(raw.as_deref());
     if expected.is_some_and(|e| e != revision) {
         return Err(AppError::new(code::CONFLICT, "配置已变化，请刷新后重试"));
@@ -344,7 +408,10 @@ fn write_pair(
     let output = match client {
         ClientId::Dsh => return Err(AppError::new(code::CONFIG, "请使用 DSH profile 接入")),
         ClientId::Agy => return Err(unmanaged()),
-        ClientId::Codex => patch(text, target)?,
+        ClientId::Codex => {
+            let completed = complete(text, &parse(text)?)?;
+            patch(completed.as_deref().unwrap_or(text), target)?
+        }
         ClientId::Claude => super::claude_config::patch(text, target)?,
         ClientId::Grok => super::grok_config::Snapshot::new(text, target)?
             .applied()
@@ -755,6 +822,222 @@ pub(super) mod tests {
             "model_provider='custom'\n[model_providers.custom]\nbase_url=42",
         ] {
             assert!(patch(text, &Pair::new("https://x.test", "k")).is_err());
+        }
+    }
+    fn completed(text: &str) -> Result<Option<String>> {
+        complete(text, &parse(text)?)
+    }
+    #[test]
+    fn missing_selection_and_table_are_added_around_untouched_bytes() {
+        const BOM: &str = "\u{feff}";
+        // (text, selection added, table added)
+        let cases = [
+            ("", true, true),
+            ("model = 'keep'\n[other]\na = 1", true, true),
+            (
+                "# top\nmodel = 'keep' # note\n\n[model_providers.other] # spare\nbase_url = 'https://other.example.invalid/v1'\n",
+                true,
+                true,
+            ),
+            (
+                "profile = 'work'\n[profiles.work]\nmodel = 'keep'\n",
+                true,
+                true,
+            ),
+            ("model_provider = 'custom'\nmodel = 'keep'\n", false, true),
+            (
+                "profile = 'work'\n[profiles.work]\nmodel_provider = 'custom'\n",
+                false,
+                true,
+            ),
+            (
+                "model = 'keep'\n[model_providers.custom]\nname = 'mine'\n",
+                true,
+                false,
+            ),
+            ("# top\r\nmodel = 'keep'\r\n[other]\r\na = 1\r\n", true, true),
+            ("\u{feff}model = 'keep'\n[other]\na = 1\n", true, true),
+            (BOM, true, true),
+        ];
+        let target = Pair::new("http://127.0.0.1:43721/v1", "a\\b\"c");
+        for (text, selection_added, table_added) in cases {
+            let output = completed(text).unwrap().unwrap();
+            let crlf = text.contains("\r\n");
+            let newline = if crlf { "\r\n" } else { "\n" };
+            let bom = if text.starts_with(BOM) { BOM } else { "" };
+            let body = &text[bom.len()..];
+            let head = if selection_added {
+                format!("{bom}{SELECTION}{newline}{body}")
+            } else {
+                text.to_owned()
+            };
+            let tail = TABLE.map(|line| format!("{line}{newline}")).concat();
+            assert!(output.starts_with(&head), "{text:?}");
+            if table_added {
+                assert!(output.ends_with(&tail), "{text:?}");
+                assert!(output[head.len()..output.len() - tail.len()]
+                    .chars()
+                    .all(|c| c == '\r' || c == '\n'));
+            } else {
+                assert_eq!(output, head);
+            }
+            assert_eq!(crlf, output.contains("\r\n"));
+            assert!(!output
+                .replace("\r\n", "")
+                .contains(if crlf { '\n' } else { '\r' }));
+            // A completed config has nothing left to add and reads as custom
+            // without its two values.
+            assert_eq!(completed(&output).unwrap(), None, "{text:?}");
+            assert!(
+                pair_for(ClientId::Codex, text).unwrap()
+                    == Pair {
+                        base_url: None,
+                        token: None
+                    }
+            );
+            assert!(lacks_custom(Some(text.as_bytes())) && !lacks_custom(Some(output.as_bytes())));
+            let patched = patch(&output, &target).unwrap();
+            assert!(pair_for(ClientId::Codex, &patched).unwrap() == target);
+            // The two values go into the table, wherever it is.
+            if table_added {
+                assert!(patched.starts_with(&head), "{text:?}");
+            } else {
+                assert!(body.lines().all(|line| patched.contains(line)));
+            }
+            let doc = parse(&patched).unwrap();
+            let table = custom(&doc).unwrap();
+            let expected_name = if table_added { "custom" } else { "mine" };
+            assert_eq!(
+                table.get("name").and_then(Item::as_str),
+                Some(expected_name)
+            );
+            if table_added {
+                assert_eq!(
+                    table.get("wire_api").and_then(Item::as_str),
+                    Some("responses")
+                );
+            }
+        }
+        assert!(lacks_custom(None));
+        assert_eq!(completed(ORIGINAL).unwrap(), None);
+        assert!(!lacks_custom(Some(ORIGINAL.as_bytes())));
+    }
+    #[test]
+    fn another_choice_or_an_unusable_shape_is_reported_and_never_written() {
+        let other = "当前生效的 provider 不是 custom，请在配置编辑器中处理";
+        let missing = "缺少现有 model_providers.custom，请在配置编辑器中处理";
+        for (text, message) in [
+            ("model_provider = 'other'\n", other),
+            (
+                "model_provider = 'other'\n[model_providers.custom]\nbase_url = 'https://x.example.invalid'\n",
+                other,
+            ),
+            (
+                "profile = 'work'\nmodel_provider = 'custom'\n[profiles.work]\nmodel_provider = 'other'\n[model_providers.custom]\nname = 'mine'\n",
+                other,
+            ),
+            ("model_provider = 42\n", other),
+            (
+                "model_providers = { other = { name = 'spare' } }\n",
+                other,
+            ),
+            (
+                "model_provider = 'custom'\nmodel_providers = { other = { name = 'spare' } }\n",
+                missing,
+            ),
+            ("model_provider = 'custom'\nmodel_providers.custom = 1\n", missing),
+        ] {
+            assert_eq!(completed(text).unwrap_err().message, message, "{text}");
+            assert_eq!(
+                pair_for(ClientId::Codex, text).err().unwrap().message,
+                message
+            );
+            assert!(!lacks_custom(Some(text.as_bytes())));
+            let t = tempfile::tempdir().unwrap();
+            let path = t.path().join("config.toml");
+            fs::write(&path, text).unwrap();
+            assert!(read(t.path()).is_err());
+            let error = write_pair(
+                ClientId::Codex,
+                &path,
+                &Pair::new("http://127.0.0.1:43721/v1", "local"),
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(error.message, message);
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        }
+        assert!(!lacks_custom(Some(b"not = [toml")));
+        assert!(!lacks_custom(Some(&[0xff])));
+    }
+    #[test]
+    fn start_without_config_creates_custom_and_stop_points_it_at_the_provider() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        let path = home.join("config.toml");
+        let (revision, before) = read(&home).unwrap();
+        assert_eq!(revision, "missing");
+        assert!(before.base_url.is_none() && before.token.is_none());
+        assert!(!path.exists());
+        let provider = Pair::new("https://a.example.invalid/v1", "fixture-a");
+        attach(t.path(), &home, 15722, "local", provider.clone(), &revision).unwrap();
+        let live = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            live,
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nbase_url = \"http://127.0.0.1:15722/v1\"\nexperimental_bearer_token = \"local\"\nname = \"custom\"\nwire_api = \"responses\"\n"
+        );
+        assert!(read(&home)
+            .unwrap()
+            .1
+            .is_gateway(ClientId::Codex, "local", &[15722]));
+        recover(t.path()).unwrap();
+        assert!(!t.path().join(FILE).exists());
+        assert!(read(&home).unwrap().1 == provider);
+        assert_eq!(masked(&fs::read_to_string(&path).unwrap()), masked(&live));
+        attach(
+            t.path(),
+            &home,
+            15722,
+            "local",
+            provider,
+            &read(&home).unwrap().0,
+        )
+        .unwrap();
+        assert!(read(&home)
+            .unwrap()
+            .1
+            .is_gateway(ClientId::Codex, "local", &[15722]));
+    }
+    #[test]
+    fn config_removed_while_running_is_a_conflict_and_is_not_recreated() {
+        for original in [None, Some(ORIGINAL), Some("model = 'keep'\n")] {
+            let t = tempfile::tempdir().unwrap();
+            let home = t.path().join("home");
+            let path = home.join("config.toml");
+            if let Some(text) = original {
+                fs::create_dir_all(&home).unwrap();
+                fs::write(&path, text).unwrap();
+            }
+            attach(
+                t.path(),
+                &home,
+                15722,
+                "local",
+                Pair::new("https://a.example.invalid/v1", "fixture-a"),
+                &read(&home).unwrap().0,
+            )
+            .unwrap();
+            let journal = fs::read(t.path().join(FILE)).unwrap();
+            fs::remove_file(&path).unwrap();
+            assert_eq!(recover(t.path()).err().unwrap().code, code::CONFLICT);
+            assert!(!path.exists());
+            assert_eq!(fs::read(t.path().join(FILE)).unwrap(), journal);
+            // The same holds for a file put back without the managed values.
+            fs::write(&path, "model = 'keep'\n").unwrap();
+            assert_eq!(recover(t.path()).err().unwrap().code, code::CONFLICT);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "model = 'keep'\n");
         }
     }
     #[test]

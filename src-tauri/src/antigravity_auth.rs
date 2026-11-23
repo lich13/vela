@@ -3,7 +3,7 @@ use crate::{
     storage::{self, AppError, Result},
     Runtime,
 };
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 use base64::engine::general_purpose::STANDARD;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use parking_lot::Mutex;
@@ -123,16 +123,18 @@ impl Paths {
     pub fn vault_file(&self) -> PathBuf {
         self.data_dir.join("antigravity-accounts.json")
     }
-    /// Antigravity keeps the OAuth login in the macOS keychain. Only the real
-    /// home directory maps to it, so fixtures never read or write that item.
-    fn keychain(&self) -> bool {
-        cfg!(target_os = "macos")
+    /// Antigravity keeps the OAuth login in the macOS keychain or the Windows
+    /// credential manager. Only the real home directory maps to them, so
+    /// fixtures never read or write that entry.
+    fn system_store(&self) -> bool {
+        cfg!(any(target_os = "macos", windows))
             && !cfg!(test)
             && dirs::home_dir().is_some_and(|home| home.join(".gemini") == self.gemini_home)
     }
-    /// The login file, where the login is not kept in the keychain.
+    /// The login file, where a login can be kept in it. The keychain holds any
+    /// login; Windows leaves one the credential manager cannot hold in the file.
     pub fn watched_files(&self) -> Vec<PathBuf> {
-        if self.keychain() {
+        if cfg!(target_os = "macos") && self.system_store() {
             Vec::new()
         } else {
             vec![self.oauth_file()]
@@ -176,7 +178,7 @@ pub(crate) fn count_running_agy_ps(ps_output: &str) -> usize {
 /// keychain, so fixtures never look at this machine's processes.
 fn cli_sessions(_paths: &Paths) -> usize {
     #[cfg(target_os = "macos")]
-    if _paths.keychain() {
+    if _paths.system_store() {
         return std::process::Command::new("ps")
             .args(["-axo", "comm="])
             .output()
@@ -281,9 +283,9 @@ fn file_mtime_ms(path: &Path) -> Option<i64> {
     Some(epoch_dur(fs::metadata(path).ok()?.modified().ok()?).as_millis() as i64)
 }
 /// When the current login took effect: the token file's modification time, or
-/// now where the login is kept in the keychain.
+/// now where the system keeps the login.
 fn observed_activation_ms(paths: &Paths) -> i64 {
-    if paths.keychain() {
+    if paths.system_store() {
         return now_ms();
     }
     file_mtime_ms(&paths.oauth_file()).unwrap_or_else(now_ms)
@@ -336,9 +338,9 @@ fn read_text_optional(path: &Path) -> Result<Option<String>> {
 }
 #[cfg(target_os = "macos")]
 const KEYCHAIN_ITEM: [&str; 4] = ["-s", "gemini", "-a", "antigravity"];
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 const KEYRING_BASE64: &str = "go-keyring-base64:";
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 const KEYRING_HEX: &str = "go-keyring-encoded:";
 /// `security -i` rejects longer command lines.
 #[cfg(any(target_os = "macos", test))]
@@ -348,9 +350,9 @@ type KeychainFingerprint = (u64, u64, u128);
 #[cfg(target_os = "macos")]
 static KEYCHAIN_CACHE: Mutex<Option<(KeychainFingerprint, Option<String>)>> = Mutex::new(None);
 
-/// The credential inside a keychain value written by Antigravity's keyring
-/// library, which prefixes the encoding it used.
-#[cfg(any(target_os = "macos", test))]
+/// The credential inside a value written by Antigravity's keyring library,
+/// which on macOS prefixes the encoding it used.
+#[cfg(any(target_os = "macos", windows, test))]
 fn decode_keyring(stored: &str) -> Option<String> {
     let stored = stored.trim();
     let bytes = if let Some(encoded) = stored.strip_prefix(KEYRING_BASE64) {
@@ -487,22 +489,201 @@ fn set_keychain_oauth(raw: Option<&str>) -> Result<()> {
     *KEYCHAIN_CACHE.lock() = None;
     verified.then_some(()).ok_or_else(fail)
 }
+/// The largest login the Windows credential manager holds
+/// (`CRED_MAX_CREDENTIAL_BLOB_SIZE`). Antigravity's keyring library refuses a
+/// longer one, and Antigravity then keeps the login in the token file.
+#[cfg(any(windows, test))]
+const CREDENTIAL_BLOB_LIMIT: usize = 2560;
+/// The Windows credential manager entry holding the login. The rules around
+/// it sit behind this seam so they are tested on every platform.
+#[cfg(any(windows, test))]
+trait CredentialStore {
+    fn read(&self) -> Result<Option<Vec<u8>>>;
+    fn write(&self, blob: &[u8]) -> Result<()>;
+    fn delete(&self) -> Result<()>;
+}
+#[cfg(any(windows, test))]
+fn credential_login(store: &impl CredentialStore) -> Result<Option<String>> {
+    Ok(store
+        .read()?
+        .and_then(|blob| decode_keyring(&String::from_utf8_lossy(&blob))))
+}
+/// Replaces the credential manager login, or removes it when `raw` is `None`.
+#[cfg(any(windows, test))]
+fn set_credential_login(store: &impl CredentialStore, raw: Option<&str>) -> Result<()> {
+    let fail = || {
+        err(
+            code::AUTH,
+            "无法写入 Windows 凭据管理器中的 Antigravity 登录凭据",
+        )
+    };
+    let Some(raw) = raw else {
+        store.delete()?;
+        let cleared = credential_login(store)?.is_none();
+        return cleared.then_some(()).ok_or_else(fail);
+    };
+    if raw.len() > CREDENTIAL_BLOB_LIMIT {
+        return Err(err(
+            code::AUTH,
+            "Antigravity 登录凭据过大，无法写入 Windows 凭据管理器",
+        ));
+    }
+    store.write(raw.as_bytes())?;
+    let verified = credential_login(store)?.as_deref().map(str::trim) == Some(raw.trim());
+    verified.then_some(()).ok_or_else(fail)
+}
+/// Antigravity asks the credential manager first and the token file after.
+#[cfg(any(windows, test))]
+fn read_windows_oauth(paths: &Paths, store: &impl CredentialStore) -> Result<Option<String>> {
+    match credential_login(store)? {
+        Some(raw) => Ok(Some(raw)),
+        None => read_text_optional(&paths.oauth_file()),
+    }
+}
+/// A login too large for the credential manager goes to the token file, and
+/// the entry that would be read ahead of it is removed.
+#[cfg(any(windows, test))]
+fn write_windows_oauth(paths: &Paths, store: &impl CredentialStore, raw: &str) -> Result<()> {
+    if raw.len() > CREDENTIAL_BLOB_LIMIT {
+        write_private_file(&paths.oauth_file(), raw.as_bytes())?;
+        return set_credential_login(store, None);
+    }
+    set_credential_login(store, Some(raw))?;
+    if paths.oauth_file().exists() {
+        write_private_file(&paths.oauth_file(), raw.as_bytes())?;
+    }
+    Ok(())
+}
+#[cfg(windows)]
+mod credential_manager {
+    use super::{err, CredentialStore, Result, CREDENTIAL_BLOB_LIMIT};
+    use crate::errors::code;
+    use windows_sys::Win32::{
+        Foundation::{GetLastError, ERROR_NOT_FOUND},
+        Security::Credentials::{
+            CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW,
+            CRED_MAX_CREDENTIAL_BLOB_SIZE, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+        },
+    };
+
+    const _: () = assert!(CREDENTIAL_BLOB_LIMIT == CRED_MAX_CREDENTIAL_BLOB_SIZE as usize);
+    /// Antigravity's keyring library names the entry `service:user`.
+    const TARGET: &str = "gemini:antigravity";
+    const USER: &str = "antigravity";
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain([0]).collect()
+    }
+
+    pub(super) struct CredentialManager;
+
+    impl CredentialStore for CredentialManager {
+        fn read(&self) -> Result<Option<Vec<u8>>> {
+            let target = wide(TARGET);
+            let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+            // SAFETY: `target` is NUL-terminated and outlives the call, and
+            // `credential` is a valid place for the returned pointer.
+            let found =
+                unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) } != 0;
+            if !found {
+                // SAFETY: only reads the calling thread's last error code.
+                return if unsafe { GetLastError() } == ERROR_NOT_FOUND {
+                    Ok(None)
+                } else {
+                    Err(err(
+                        code::AUTH,
+                        "无法读取 Windows 凭据管理器中的 Antigravity 登录凭据",
+                    ))
+                };
+            }
+            // SAFETY: CredReadW succeeded, so `credential` points to a
+            // CREDENTIALW whose blob is `CredentialBlobSize` readable bytes
+            // until the CredFree below, which runs once, after the copy.
+            let blob = unsafe {
+                let stored = &*credential;
+                let blob = if stored.CredentialBlob.is_null() {
+                    Vec::new()
+                } else {
+                    std::slice::from_raw_parts(
+                        stored.CredentialBlob,
+                        stored.CredentialBlobSize as usize,
+                    )
+                    .to_vec()
+                };
+                CredFree(credential.cast());
+                blob
+            };
+            Ok(Some(blob))
+        }
+        fn write(&self, blob: &[u8]) -> Result<()> {
+            let fail = || {
+                err(
+                    code::AUTH,
+                    "无法写入 Windows 凭据管理器中的 Antigravity 登录凭据",
+                )
+            };
+            let size = u32::try_from(blob.len()).map_err(|_| fail())?;
+            let (mut target, mut user) = (wide(TARGET), wide(USER));
+            let credential = CREDENTIALW {
+                Type: CRED_TYPE_GENERIC,
+                TargetName: target.as_mut_ptr(),
+                CredentialBlobSize: size,
+                CredentialBlob: blob.as_ptr().cast_mut(),
+                Persist: CRED_PERSIST_LOCAL_MACHINE,
+                UserName: user.as_mut_ptr(),
+                ..Default::default()
+            };
+            // SAFETY: `credential` and the buffers it points to outlive the
+            // call, both strings are NUL-terminated, `size` is the length of
+            // `blob`, and CredWriteW only reads through these pointers.
+            if unsafe { CredWriteW(&credential, 0) } == 0 {
+                return Err(fail());
+            }
+            Ok(())
+        }
+        fn delete(&self) -> Result<()> {
+            let target = wide(TARGET);
+            // SAFETY: `target` is NUL-terminated and outlives the call;
+            // GetLastError only reads the calling thread's last error code.
+            let deleted = unsafe {
+                CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) != 0
+                    || GetLastError() == ERROR_NOT_FOUND
+            };
+            deleted.then_some(()).ok_or_else(|| {
+                err(
+                    code::AUTH,
+                    "无法删除 Windows 凭据管理器中的 Antigravity 登录凭据",
+                )
+            })
+        }
+    }
+}
+#[cfg(windows)]
+use credential_manager::CredentialManager;
 /// The current login source; macOS never consults the legacy token file.
 fn read_oauth(paths: &Paths, _interactive: bool) -> Result<Option<String>> {
     #[cfg(target_os = "macos")]
-    if paths.keychain() {
+    if paths.system_store() {
         return keychain_oauth(_interactive);
+    }
+    #[cfg(windows)]
+    if paths.system_store() {
+        return read_windows_oauth(paths, &CredentialManager);
     }
     read_text_optional(&paths.oauth_file())
 }
 fn write_oauth(paths: &Paths, raw: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
-    if paths.keychain() {
+    if paths.system_store() {
         set_keychain_oauth(Some(raw))?;
         if paths.oauth_file().exists() {
             write_private_file(&paths.oauth_file(), raw.as_bytes())?;
         }
         return Ok(());
+    }
+    #[cfg(windows)]
+    if paths.system_store() {
+        return write_windows_oauth(paths, &CredentialManager, raw);
     }
     write_private_file(&paths.oauth_file(), raw.as_bytes())
 }
@@ -836,7 +1017,15 @@ fn with_lifecycle(
             .map(|f| storage::read_optional(&f).map(|b| (f, b)))
             .collect::<Result<_>>()?;
         #[cfg(target_os = "macos")]
-        let keychain = paths.keychain().then(|| keychain_oauth(true)).transpose()?;
+        let keychain = paths
+            .system_store()
+            .then(|| keychain_oauth(true))
+            .transpose()?;
+        #[cfg(windows)]
+        let credential = paths
+            .system_store()
+            .then(|| credential_login(&CredentialManager))
+            .transpose()?;
         let next = mutate().and_then(|_| state_at(paths));
         if let Err(e) = next {
             let res: Vec<_> = snapshots
@@ -855,6 +1044,18 @@ fn with_lifecycle(
                         && set_keychain_oauth(before.as_deref()).is_err()
                     {
                         res.push("钥匙串登录凭据".into());
+                    }
+                }
+                res
+            };
+            #[cfg(windows)]
+            let res = {
+                let mut res = res;
+                if let Some(before) = &credential {
+                    if credential_login(&CredentialManager).ok().as_ref() != Some(before)
+                        && set_credential_login(&CredentialManager, before.as_deref()).is_err()
+                    {
+                        res.push("凭据管理器登录凭据".into());
                     }
                 }
                 res
@@ -927,10 +1128,17 @@ pub fn delete_account_at(paths: &Paths, id: &str, rev: &str) -> Result<Antigravi
             entry_matches(&target, Some(&payload_digest(raw)), email.as_deref())
         };
         // The login left behind by an account that is not in use lives where
-        // the app reads it: the keychain on macOS, the token file elsewhere.
+        // the app reads it: the keychain on macOS, the credential manager or
+        // the token file on Windows, the token file elsewhere.
         #[cfg(target_os = "macos")]
-        if paths.keychain() && keychain_oauth(true)?.is_some_and(|raw| holds_target(&raw)) {
+        if paths.system_store() && keychain_oauth(true)?.is_some_and(|raw| holds_target(&raw)) {
             set_keychain_oauth(None)?;
+        }
+        #[cfg(windows)]
+        if paths.system_store()
+            && credential_login(&CredentialManager)?.is_some_and(|raw| holds_target(&raw))
+        {
+            set_credential_login(&CredentialManager, None)?;
         }
         for f in paths.watched_files() {
             if let Some(raw) = read_text_optional(&f)? {

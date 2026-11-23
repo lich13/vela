@@ -1083,6 +1083,101 @@ async fn custom_only_switch_while_stopped_running_and_auto_stop() {
     );
 }
 #[tokio::test]
+async fn codex_without_custom_reads_as_official_and_is_only_written_by_a_start() {
+    for original in [None, Some("# mine\nmodel = 'keep'\n[other]\na = 1\n")] {
+        let (t, g) = fixture(vec!["https://a.test/v1".into(), "https://b.test/v1".into()]).await;
+        let path = t.path().join("config.toml");
+        match original {
+            Some(text) => std::fs::write(&path, text).unwrap(),
+            None => std::fs::remove_file(&path).unwrap(),
+        }
+        let on_disk = || std::fs::read_to_string(&path).ok();
+        let view = g.view();
+        assert_eq!(view.current.state, current::Kind::Official);
+        assert_eq!((view.config_error, view.config_provider), (None, None));
+
+        let b = view.providers[1].id.clone();
+        update(&g, &t, Edit::Select { id: b.clone() });
+        let view = g.view();
+        assert_eq!(view.selected.as_deref(), Some(b.as_str()));
+        assert_eq!(view.current.state, current::Kind::Official);
+        assert_eq!(on_disk().as_deref(), original);
+        assert!(!t.path().join("gateway-recovery.json").exists());
+
+        start(&g, &t).await;
+        let view = g.view();
+        assert!(view.running);
+        assert_eq!(view.current.state, current::Kind::Gateway);
+        assert_eq!(view.config_error, None);
+        let live = on_disk().unwrap();
+        assert!(live.starts_with("model_provider = \"custom\"\n"));
+        assert!(live.contains(original.unwrap_or_default()));
+
+        g.stop().await.unwrap();
+        let view = g.view();
+        assert_eq!(view.config_provider.as_deref(), Some(b.as_str()));
+        assert_eq!(view.config_error, None);
+        assert!(on_disk().unwrap().contains("[model_providers.custom]"));
+
+        // With `custom` in place a choice made while stopped is written again.
+        let a = view.providers[0].id.clone();
+        update(&g, &t, Edit::Select { id: a.clone() });
+        assert_eq!(g.view().config_provider.as_deref(), Some(a.as_str()));
+
+        // Another provider chosen by the user is neither read as official nor replaced.
+        let other = "model_provider = 'other'\n";
+        std::fs::write(&path, other).unwrap();
+        assert!(g.view().config_error.is_some());
+        assert!(g
+            .edit(Edit::Select { id: b }, &g.view().revision, t.path())
+            .is_err());
+        assert!(g.start(&g.view().revision, t.path()).await.is_err());
+        assert_eq!(on_disk().as_deref(), Some(other));
+    }
+}
+#[tokio::test]
+async fn codex_config_removed_while_running_is_an_error_and_is_not_recreated_by_stop() {
+    let (t, g) = fixture(vec!["https://a.test/v1".into()]).await;
+    let path = t.path().join("config.toml");
+    std::fs::remove_file(&path).unwrap();
+    start(&g, &t).await;
+    assert_eq!(g.view().current.state, current::Kind::Gateway);
+    std::fs::remove_file(&path).unwrap();
+    let view = g.view();
+    assert!(matches!(view.current.state, current::Kind::Unknown { .. }));
+    assert!(view.config_error.is_some());
+    assert_eq!(g.stop().await.err().unwrap().code, "CONFLICT");
+    assert!(g.view().running);
+    assert!(!path.exists());
+    assert!(t.path().join("gateway-recovery.json").exists());
+}
+#[tokio::test]
+async fn codex_config_that_lost_custom_is_left_alone_by_resume_and_connection_choice() {
+    let (t, g) = fixture(vec!["https://a.test/v1".into()]).await;
+    let path = t.path().join("config.toml");
+    start(&g, &t).await;
+    g.stop_for_exit().await.unwrap();
+    for text in [Some("model = 'keep'\n"), None] {
+        match text {
+            Some(text) => std::fs::write(&path, text).unwrap(),
+            None => std::fs::remove_file(&path).unwrap(),
+        }
+        assert_eq!(
+            g.resume(t.path()).await.err().unwrap().code,
+            "RESUME_CONFLICT"
+        );
+        assert!(!g.view().running);
+        update(
+            &g,
+            &t,
+            Edit::Connection {
+                mode: "bearer".into(),
+            },
+        );
+        assert_eq!(std::fs::read_to_string(&path).ok().as_deref(), text);
+    }
+}
+#[tokio::test]
 async fn running_cannot_delete_final_exit_provider_and_crash_uses_updated_target() {
     let (t, g) = fixture(vec!["https://a.test/v1".into(), "https://b.test/v1".into()]).await;
     start(&g, &t).await;
