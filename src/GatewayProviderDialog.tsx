@@ -26,6 +26,45 @@ const parseRiskCodes = (text: string) => {
   return codes.length > 16 ? null : codes;
 };
 
+const VERTEX_REGIONS = [
+  "global",
+  "us-east5",
+  "us-central1",
+  "us-east1",
+  "us-west1",
+  "europe-west1",
+  "europe-west4",
+  "asia-southeast1",
+  "asia-northeast1",
+];
+const VERTEX_HOST = "aiplatform.googleapis.com";
+
+/** The Vertex AI address of a publisher; the express form when no project is given. */
+const vertexUrl = (publisher: string, region: string, project: string) => {
+  region = region.trim();
+  project = project.trim();
+  if (!project) return `https://${VERTEX_HOST}/v1/publishers/${publisher}`;
+  if (!region) return "";
+  const host = region === "global" ? VERTEX_HOST : `${region}-${VERTEX_HOST}`;
+  return `https://${host}/v1/projects/${project}/locations/${region}/publishers/${publisher}`;
+};
+
+/** The region and project of an address `vertexUrl` builds, or null for any other. */
+const parseVertexUrl = (publisher: string, url: string) => {
+  const address = url.trim().replace(/\/+$/, "");
+  if (address === vertexUrl(publisher, "global", ""))
+    return { region: "global", project: "" };
+  const match =
+    /^https:\/\/[^/]+\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/publishers\/[^/]+$/.exec(
+      address,
+    );
+  if (!match) return null;
+  const [, project, region] = match;
+  return address === vertexUrl(publisher, region, project)
+    ? { region, project }
+    : null;
+};
+
 export default function GatewayDialog({
   clientId,
   connectionMode,
@@ -49,6 +88,24 @@ export default function GatewayDialog({
   const [name, setName] = useState(dialog.item ? dialog.item.name : ""),
     [baseUrl, setBaseUrl] = useState(dialog.item?.baseUrl ?? ""),
     [token, setToken] = useState("");
+  // Claude and Antigravity providers can be reached through Vertex AI, whose
+  // address is built from a region and a project instead of typed.
+  const publisher =
+    clientId === "claude" ? "anthropic" : clientId === "agy" ? "google" : null;
+  const savedVertex = publisher
+    ? parseVertexUrl(publisher, dialog.item?.baseUrl ?? "")
+    : null;
+  const [vertex, setVertex] = useState(Boolean(savedVertex)),
+    [region, setRegion] = useState(savedVertex?.region ?? "global"),
+    [project, setProject] = useState(savedVertex?.project ?? ""),
+    [customRegion, setCustomRegion] = useState(
+      Boolean(savedVertex && !VERTEX_REGIONS.includes(savedVertex.region)),
+    );
+  const pickVertex = (nextRegion: string, nextProject: string) => {
+    setRegion(nextRegion);
+    setProject(nextProject);
+    if (publisher) setBaseUrl(vertexUrl(publisher, nextRegion, nextProject));
+  };
   const [protocol, setProtocol] = useState(
     clientId === "dsh"
       ? "chat_completions"
@@ -457,6 +514,76 @@ export default function GatewayDialog({
               </select>
             </label>
           )}
+          {publisher && (
+            <div className="segmented" role="group" aria-label="接入方式">
+              <button
+                type="button"
+                aria-pressed={!vertex}
+                disabled={busy}
+                onClick={() => setVertex(false)}
+              >
+                普通端点
+              </button>
+              <button
+                type="button"
+                aria-pressed={vertex}
+                disabled={busy}
+                onClick={() => {
+                  setVertex(true);
+                  pickVertex(region, project);
+                }}
+              >
+                Vertex AI
+              </button>
+            </div>
+          )}
+          {vertex && (
+            <>
+              <label>
+                区域
+                <select
+                  value={customRegion ? "" : region}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setCustomRegion(!e.target.value);
+                    pickVertex(e.target.value, project);
+                  }}
+                >
+                  {VERTEX_REGIONS.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                  <option value="">自定义…</option>
+                </select>
+              </label>
+              {customRegion && (
+                <label>
+                  自定义区域
+                  <input
+                    type="text"
+                    required
+                    spellCheck={false}
+                    value={region}
+                    disabled={busy}
+                    placeholder="us-east5"
+                    onChange={(e) => pickVertex(e.target.value, project)}
+                  />
+                </label>
+              )}
+              <label>
+                项目 ID
+                <input
+                  type="text"
+                  spellCheck={false}
+                  value={project}
+                  disabled={busy}
+                  placeholder="可选；留空使用不分区域的 express 端点"
+                  onChange={(e) => pickVertex(region, e.target.value)}
+                />
+              </label>
+            </>
+          )}
           <label>
             <span className="field-label-row">
               <span>
@@ -479,6 +606,7 @@ export default function GatewayDialog({
               required
               type="url"
               autoFocus
+              readOnly={vertex}
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               placeholder={
@@ -492,15 +620,10 @@ export default function GatewayDialog({
               }
             />
           </label>
-          {(clientId === "agy" || clientId === "claude") && (
-            <small className="muted">
-              {clientId === "agy"
-                ? "Gemini 原生端点；使用 Vertex AI Key 时填到 …/publishers/google 为止"
-                : "使用 Vertex AI Key 时填到 …/publishers/anthropic 为止，Token 填 Google API Key"}
-            </small>
-          )}
           <label>
-            {clientId === "claude"
+            {vertex
+              ? "Google API Key"
+              : clientId === "claude"
               ? "ANTHROPIC_AUTH_TOKEN"
               : clientId === "grok" || clientId === "dsh"
                 ? "api_key"

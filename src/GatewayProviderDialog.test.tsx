@@ -578,3 +578,73 @@ describe("request takeover", () => {
     );
   });
 });
+
+describe("Vertex AI access", () => {
+  const open = (clientId: "claude" | "agy", item?: Provider) => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    render(
+      <GatewayProviderDialog
+        clientId={clientId}
+        connectionMode="bearer"
+        dialog={{ kind: "provider", item }}
+        revision="fixture-revision"
+        close={() => {}}
+        save={save}
+      />,
+    );
+    return save;
+  };
+
+  it("builds the address from the picked region and project", async () => {
+    const user = userEvent.setup();
+    const save = open("claude");
+    await user.click(screen.getByRole("button", { name: "Vertex AI" }));
+    const address = screen.getByLabelText("ANTHROPIC_BASE_URL");
+    expect(address).toHaveAttribute("readonly");
+    expect(address).toHaveValue(
+      "https://aiplatform.googleapis.com/v1/publishers/anthropic",
+    );
+    await user.type(screen.getByLabelText("项目 ID"), "fixture-project");
+    expect(address).toHaveValue(
+      "https://aiplatform.googleapis.com/v1/projects/fixture-project/locations/global/publishers/anthropic",
+    );
+    await user.selectOptions(screen.getByLabelText("区域"), "us-east5");
+    await user.type(screen.getByLabelText("Google API Key"), "fixture-key");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl:
+          "https://us-east5-aiplatform.googleapis.com/v1/projects/fixture-project/locations/us-east5/publishers/anthropic",
+        token: "fixture-key",
+      }),
+      "fixture-revision",
+    );
+  });
+
+  it("reads a saved Vertex AI address back into its region and project", () => {
+    open("agy", {
+      ...claudeGatewayDemo.providers[0],
+      baseUrl:
+        "https://europe-west4-aiplatform.googleapis.com/v1/projects/fixture-project/locations/europe-west4/publishers/google",
+    });
+    expect(screen.getByRole("button", { name: "Vertex AI" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByLabelText("区域")).toHaveValue("europe-west4");
+    expect(screen.getByLabelText("项目 ID")).toHaveValue("fixture-project");
+  });
+
+  it("keeps any other address a plain endpoint", () => {
+    open("claude", {
+      ...claudeGatewayDemo.providers[0],
+      baseUrl:
+        "https://us-east5-aiplatform.googleapis.com/v1/projects/fixture-project/locations/global/publishers/anthropic",
+    });
+    expect(screen.getByRole("button", { name: "普通端点" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.queryByLabelText("区域")).not.toBeInTheDocument();
+  });
+});
