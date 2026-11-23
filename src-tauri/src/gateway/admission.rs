@@ -70,6 +70,9 @@ struct Wait {
     kind: WaitKind,
     /// An endless retry, whose release time follows the provider's pace.
     hit: Option<Hit>,
+    /// The reset of its provider this retry was spaced out for instead of
+    /// sent at once.
+    spaced: Option<u64>,
 }
 /// The failure an endless retry waits out.
 #[derive(Clone, Copy)]
@@ -321,18 +324,23 @@ impl Scheduler {
 
     pub fn configure(&self, providers: &[Provider], running: bool) {
         let mut s = self.0.state.lock();
-        let changed: Vec<_> =
-            s.versions
-                .iter()
-                .filter(|(id, version)| {
-                    providers.iter().find(|p| &p.id == *id).is_none_or(|p| {
-                        p.version != **version || p.queued != s.queued.contains(*id)
-                    })
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-        for id in changed {
-            *s.resets.entry(id).or_default() += 1;
+        // A provider whose connection alone changed keeps its retries spaced.
+        let changed: Vec<_> = s
+            .versions
+            .iter()
+            .filter_map(|(id, version)| {
+                let provider = providers.iter().find(|p| &p.id == id);
+                let kept = provider.is_some_and(|p| p.queued == s.queued.contains(id));
+                (!kept || provider.is_some_and(|p| p.version != *version))
+                    .then(|| (id.clone(), kept))
+            })
+            .collect();
+        let mut respaced = Vec::new();
+        for (id, kept) in changed {
+            *s.resets.entry(id.clone()).or_default() += 1;
+            if kept {
+                respaced.push(id);
+            }
         }
         s.versions = providers
             .iter()
@@ -390,6 +398,9 @@ impl Scheduler {
         let now = Instant::now();
         for id in repaced {
             Self::repace(&mut s, &id, now, true);
+        }
+        for id in respaced {
+            Self::respace(&mut s, &id, now);
         }
         drop(s);
         self.signal();
@@ -496,6 +507,33 @@ impl Scheduler {
             }
         }
     }
+    /// The provider's connection changed, so its risk-control and rate-limit
+    /// retries need not wait their failures out: they go out from `now` in
+    /// the order they were hit, each its usual gap after the one before.
+    /// Intensity 0 spaces nothing, and every retry is sent at once.
+    fn respace(s: &mut State, id: &str, now: Instant) {
+        let Some(pace) = s.paces.get(id).copied().filter(|pace| pace.intensity > 0) else {
+            return;
+        };
+        let load = Self::load(s, id);
+        let generation = s.resets.get(id).copied().unwrap_or(0);
+        let mut waits: Vec<_> = s
+            .capacity_waits
+            .iter_mut()
+            .filter(|(_, wait)| wait.provider == id && wait.paced())
+            .filter_map(|(ticket, wait)| Some((wait.hit?, *ticket, wait)))
+            .collect();
+        waits.sort_by_key(|(hit, ticket, _)| (hit.at, *ticket));
+        let mut release = now;
+        for (hit, _, wait) in waits {
+            wait.until = release;
+            wait.spaced = Some(generation);
+            release += pace
+                .paced_delay(hit.class, load)
+                .mul_f64(pace.stretch(hit.share))
+                .div_f64(load.max(1) as f64);
+        }
+    }
     /// Registers an endless retry on `source`'s provider and returns its place
     /// with the wait before it goes out. The caller still holds its slot, so
     /// the request itself counts towards the load. A retry the provider
@@ -543,6 +581,7 @@ impl Scheduler {
                 until,
                 kind: WaitKind::Transient,
                 hit: Some(hit),
+                spaced: None,
             },
         );
         let epoch = s.epoch;
@@ -712,6 +751,7 @@ impl Scheduler {
                     until,
                     kind,
                     hit: None,
+                    spaced: None,
                 },
             );
             (ticket, s.epoch)
@@ -1135,13 +1175,21 @@ impl Retry {
                 if !s.running || s.epoch != self.epoch {
                     return Err(Rejected::Stopped);
                 }
-                if Scheduler::was_reset(&s, std::slice::from_ref(&self.source)) {
+                let Some(wait) = s.capacity_waits.get(&self.place.ticket) else {
+                    return Ok(());
+                };
+                // A reset sends the retry at once, unless it was spaced out
+                // for that very reset.
+                let generation = s.resets.get(&self.source.provider_id).copied();
+                if generation.unwrap_or(0) != self.source.reset_generation
+                    && wait.spaced != generation
+                {
                     return Ok(());
                 }
-                match s.capacity_waits.get(&self.place.ticket) {
-                    Some(wait) if wait.until > Instant::now() => wait.until,
-                    _ => return Ok(()),
+                if wait.until <= Instant::now() {
+                    return Ok(());
                 }
+                wait.until
             };
             tokio::select! {
                 _ = notified => {},

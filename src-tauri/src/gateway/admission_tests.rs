@@ -378,6 +378,47 @@ async fn a_reset_sends_the_waiting_retry_and_a_stop_ends_it() {
     assert_eq!(waiting.await.unwrap().0, Err(Rejected::Stopped));
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_changed_connection_sends_the_waiting_retries_a_gap_apart() {
+    // Nine requests press on the provider: 33 s x 14/9 between attempts, and
+    // a ninth of that between two retries.
+    let retries = |scheduler: &Scheduler, crowd: &mut Vec<Admission>| {
+        (0..3)
+            .map(|_| {
+                let (retry, _) = blocked(scheduler, crowd.pop().unwrap(), RetryClass::Risk);
+                tokio::spawn(timed(retry))
+            })
+            .collect::<Vec<_>>()
+    };
+    let changed = |provider: &Provider| Provider {
+        version: "changed".into(),
+        ..provider.clone()
+    };
+    for (intensity, expected) in [(5, [50, 107, 164]), (0, [50, 50, 50])] {
+        let provider = paced(None, intensity);
+        let scheduler = scheduler(&provider);
+        let mut crowd = admitted(&scheduler, &provider, 9).await;
+        let waiting = retries(&scheduler, &mut crowd);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        scheduler.configure(&[changed(&provider)], true);
+        for (retry, expected) in waiting.into_iter().zip(expected) {
+            let (result, waited) = retry.await.unwrap();
+            assert_eq!((result, tenths(waited)), (Ok(()), expected), "{intensity}");
+        }
+    }
+    // A manual reset still sends every one of them at once.
+    let provider = paced(None, 5);
+    let scheduler = scheduler(&provider);
+    let mut crowd = admitted(&scheduler, &provider, 9).await;
+    let waiting = retries(&scheduler, &mut crowd);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    scheduler.reset_provider(PROVIDER, &[]);
+    for retry in waiting {
+        let (result, waited) = retry.await.unwrap();
+        assert_eq!((result, tenths(waited)), (Ok(()), 50));
+    }
+}
+
 /// An endless provider that rests after a rate limit. Its rate-limit retries
 /// are ten seconds apart, so a few requests' share of that ends long before
 /// the rest does.
