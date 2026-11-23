@@ -27,7 +27,12 @@ import AntigravitySettings from "./AntigravitySettings";
 import AntigravityCliSettings from "./AntigravityCliSettings";
 import ConfigTreeSettings from "./ConfigTreeSettings";
 import { changes, get } from "./claude-settings";
-import { codexFields, configClients, grokFields } from "./config-fields";
+import {
+  codexFields,
+  codexTables,
+  configClients,
+  grokFields,
+} from "./config-fields";
 import Modal from "./Modal";
 import { confirmAction } from "./confirmation";
 import { useCodeMirrorSurface } from "./codeMirrorLoader";
@@ -501,6 +506,7 @@ function EditorContent({
           text={text}
           onChange={update}
           fields={clientId === "codex" ? codexFields : grokFields}
+          tables={clientId === "codex" ? codexTables : undefined}
           guarded={doc.guarded}
         />
       )}

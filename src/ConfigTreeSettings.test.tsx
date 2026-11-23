@@ -1,8 +1,15 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { Field } from "./claude-settings";
+import { codexTables, type NamedTables } from "./config-fields";
 import type { ConfigTreeNode } from "./config-tree";
 const mock = vi.hoisted(() => ({ command: vi.fn() }));
 vi.mock("./bridge", () => ({ command: mock.command }));
@@ -48,7 +55,13 @@ beforeEach(() => {
     throw Error("unexpected fixture command");
   });
 });
-function Host({ shown = fields }: { shown?: Record<string, Field[]> }) {
+function Host({
+  shown = fields,
+  tables,
+}: {
+  shown?: Record<string, Field[]>;
+  tables?: NamedTables[];
+}) {
   const [text, setText] = useState("base");
   return (
     <>
@@ -57,6 +70,7 @@ function Host({ shown = fields }: { shown?: Record<string, Field[]> }) {
         format="toml"
         text={text}
         fields={shown}
+        tables={tables}
         onChange={(next) => {
           changed(next);
           setText(next);
@@ -134,7 +148,8 @@ it("凭据只显示已设置，特殊值和列表里的表留给原文", async (
   expect(screen.getByText("已设置")).toBeInTheDocument();
   expect(screen.queryByLabelText("api_key")).toBeNull();
   expect(screen.getByText("2026-01-01T00:00:00Z")).toBeInTheDocument();
-  expect(screen.getAllByText("在原文中编辑")).toHaveLength(2);
+  // The credential, the date and the table inside a list.
+  expect(screen.getAllByText("在原文中编辑")).toHaveLength(3);
   expect(screen.getByLabelText("hosts.0")).toHaveValue("127.0.0.1");
   await user.type(screen.getByLabelText("添加 hosts"), "example.invalid");
   await user.click(screen.getByRole("button", { name: "确认添加 hosts" }));
@@ -180,4 +195,195 @@ it("草稿解析失败时保留上一次的结构树", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent("第 1 行格式错误");
   expect(screen.getByRole("switch", { name: "enabled" })).toBeInTheDocument();
   expect(screen.getByTestId("draft")).toHaveTextContent("base+");
+});
+
+// A provider file as Rust reports it: credentials arrive hidden.
+const providers = table([
+  [
+    "model_providers",
+    table([
+      [
+        "relay",
+        table([
+          ["name", { kind: "string", value: "Relay" }],
+          ["base_url", { kind: "string", value: "https://example.invalid/v1" }],
+          ["wire_api", { kind: "string", value: "responses" }],
+          ["request_max_retries", { kind: "integer", value: 1 }],
+          ["supports_websockets", { kind: "boolean", value: false }],
+          [
+            "query_params",
+            table([["api-version", { kind: "string", value: "1" }]]),
+          ],
+          ["env_key", { kind: "secret" }],
+          ["http_headers", table([["X-Fixture", { kind: "secret" }]])],
+          ["future_flag", { kind: "boolean", value: true }],
+        ]),
+      ],
+      ["spare", table([["base_url", { kind: "string", value: "" }]])],
+    ]),
+  ],
+]);
+async function named(tab: string) {
+  trees = { base: providers };
+  const user = userEvent.setup();
+  render(<Host tables={codexTables} />);
+  await user.click(await screen.findByRole("button", { name: tab }));
+  return user;
+}
+
+it("具名子表逐个列出，模板字段带标签并按子表路径写回", async () => {
+  const user = await named("模型供应商");
+  expect(screen.getByText("relay")).toBeInTheDocument();
+  expect(screen.getByText("spare")).toBeInTheDocument();
+  await user.click(screen.getByText("relay"));
+  expect(screen.getByLabelText("relay 接口地址")).toHaveValue(
+    "https://example.invalid/v1",
+  );
+  expect(screen.getByRole("combobox", { name: "relay 接口协议" })).toHaveValue(
+    "responses",
+  );
+  // A retry count of 1 is an amount, not a switch.
+  fireEvent.change(
+    screen.getByRole("spinbutton", { name: "relay 请求重试次数" }),
+    { target: { value: "5" } },
+  );
+  await user.click(screen.getByRole("switch", { name: "relay 支持 WebSocket" }));
+  await user.click(
+    screen.getByRole("switch", { name: "relay 使用 OpenAI 登录凭据" }),
+  );
+  // Keys outside the template keep their raw name.
+  await user.click(
+    screen.getByRole("switch", { name: "model_providers.relay.future_flag" }),
+  );
+  await waitFor(() =>
+    expect(patches()).toEqual([
+      [["model_providers", "relay", "request_max_retries"], 5],
+      [["model_providers", "relay", "supports_websockets"], true],
+      [["model_providers", "relay", "requires_openai_auth"], true],
+      [["model_providers", "relay", "future_flag"], false],
+    ]),
+  );
+});
+
+it("键值表逐键打补丁", async () => {
+  const user = await named("模型供应商");
+  await user.click(screen.getByText("relay"));
+  fireEvent.change(screen.getByLabelText("relay 查询参数 api-version"), {
+    target: { value: "2" },
+  });
+  await user.type(screen.getByLabelText("relay 查询参数 新键"), "region");
+  await user.type(screen.getByLabelText("relay 查询参数 新值"), "test");
+  await user.click(
+    screen.getByRole("button", { name: "确认添加relay 查询参数" }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "删除relay 查询参数 api-version" }),
+  );
+  await waitFor(() =>
+    expect(patches()).toEqual([
+      [["model_providers", "relay", "query_params", "api-version"], "2"],
+      [["model_providers", "relay", "query_params", "region"], "test"],
+      [["model_providers", "relay", "query_params", "api-version"], null],
+    ]),
+  );
+});
+
+it("子表里的凭据键只读，并提示在原文中编辑", async () => {
+  const user = await named("模型供应商");
+  await user.click(screen.getByText("relay"));
+  const card = within(screen.getByText("relay").closest("details")!);
+  const row = card.getByText("API Key 环境变量").closest(".setting-row")!;
+  expect(row).toHaveTextContent("已设置");
+  expect(row).toHaveTextContent("在原文中编辑");
+  expect(row.querySelector("input")).toBeNull();
+  expect(
+    card.getByText("Bearer 令牌").closest(".setting-row"),
+  ).toHaveTextContent("未设置");
+  expect(screen.queryByLabelText(/X-Fixture/)).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: /http_headers 添加字段/ }),
+  ).toBeNull();
+  // A credential cannot be added as a field either.
+  await user.click(
+    screen.getByRole("button", { name: "model_providers.relay 添加字段" }),
+  );
+  await user.type(
+    screen.getByLabelText("model_providers.relay 字段名称"),
+    "api_key",
+  );
+  expect(screen.getByText("凭据在原文中编辑")).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "添加" })[0]).toBeDisabled();
+  expect(patches()).toEqual([]);
+});
+
+it("新增子表写入名称下的首个字段", async () => {
+  const user = await named("模型供应商");
+  const add = screen.getByRole("button", { name: "添加" });
+  await user.type(screen.getByLabelText("新模型供应商名称"), "relay");
+  await user.type(
+    screen.getByLabelText("新模型供应商接口地址"),
+    "https://example.invalid/v2",
+  );
+  expect(add).toBeDisabled();
+  await user.type(screen.getByLabelText("新模型供应商名称"), "-2");
+  await user.click(add);
+  await user.click(screen.getByRole("button", { name: "MCP 服务器" }));
+  expect(screen.getByText("还没有MCP 服务器")).toBeInTheDocument();
+  await user.type(screen.getByLabelText("新MCP 服务器名称"), "docs");
+  await user.selectOptions(
+    screen.getByLabelText("新MCP 服务器首个字段"),
+    "url",
+  );
+  await user.type(
+    screen.getByLabelText("新MCP 服务器服务地址"),
+    "https://example.invalid/mcp",
+  );
+  await user.click(screen.getByRole("button", { name: "添加" }));
+  await waitFor(() =>
+    expect(patches()).toEqual([
+      [
+        ["model_providers", "relay-2", "base_url"],
+        "https://example.invalid/v2",
+      ],
+      [["mcp_servers", "docs", "url"], "https://example.invalid/mcp"],
+    ]),
+  );
+});
+
+it("子表和通用树的表都能添加字段", async () => {
+  const user = await named("模型供应商");
+  await user.click(screen.getByText("spare"));
+  await user.click(
+    screen.getByRole("button", { name: "model_providers.spare 添加字段" }),
+  );
+  await user.type(
+    screen.getByLabelText("model_providers.spare 字段名称"),
+    "model_catalog_url",
+  );
+  await user.type(
+    screen.getByLabelText("model_providers.spare 字段值"),
+    "https://example.invalid/models",
+  );
+  await user.click(screen.getAllByRole("button", { name: "添加" })[0]);
+  await user.click(screen.getByRole("button", { name: "全部设置" }));
+  await user.click(screen.getByRole("button", { name: "配置 添加字段" }));
+  await user.type(screen.getByLabelText("配置 字段名称"), "max_depth");
+  await user.selectOptions(screen.getByLabelText("配置 字段类型"), "number");
+  expect(screen.getByRole("button", { name: "添加" })).toBeDisabled();
+  await user.type(screen.getByLabelText("配置 字段值"), "3");
+  await user.click(screen.getByRole("button", { name: "添加" }));
+  await user.click(screen.getByRole("button", { name: "配置 添加字段" }));
+  await user.type(screen.getByLabelText("配置 字段名称"), "verbose");
+  await user.selectOptions(screen.getByLabelText("配置 字段类型"), "boolean");
+  await user.click(screen.getByRole("button", { name: "添加" }));
+  await waitFor(() =>
+    expect(patches()).toEqual([
+      [
+        ["model_providers", "spare", "model_catalog_url"],
+        "https://example.invalid/models",
+      ],
+      [["max_depth"], 3],
+      [["verbose"], false],
+    ]),
+  );
 });

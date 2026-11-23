@@ -87,10 +87,9 @@ export function Scalar({
   // The text being typed; the file value shows again once the field loses focus.
   const [draft, setDraft] = useState<string | null>(null);
   // A 0 or 1 may be an amount after all, so the row says which and can be turned
-  // over. It is decided once, so typing "1" into a text field keeps the field.
-  const [turned, setTurned] = useState(
-    () => !!flag(value) && typeof last === "string" && !countable(last),
-  );
+  // over; the choice made there stays. Without one the row follows the value,
+  // once the field it was typed into loses focus.
+  const [turned, setTurned] = useState<boolean | null>(null);
   const state:
     | { on: boolean | undefined; write: (on: boolean) => Json }
     | undefined =
@@ -100,10 +99,14 @@ export function Scalar({
         ? flag(value)
         : field && {
             on: typeof field.initial === "boolean" ? field.initial : undefined,
-            write: (on) => on,
+            write: (on) => flag(field.on ?? true)!.write(on),
           };
   const either = !!state && !field && typeof value !== "boolean";
-  const asSwitch = !!state && (!either || turned);
+  const asSwitch =
+    !!state &&
+    (!either ||
+      (turned ??
+        (draft === null && typeof last === "string" && !countable(last))));
   const numeric = kind === "number" || typeof value === "number";
   const control =
     state && asSwitch ? (
@@ -168,19 +171,22 @@ export function Scalar({
         }}
       />
     );
-  if (!either) return control;
+  // The wrapper stays while the text comes and goes as a flag, so the field keeps focus.
+  if (field || typeof value === "boolean") return control;
   return (
     <span className="config-flag">
       {control}
-      <button
-        type="button"
-        className="icon-button"
-        aria-label={`${label} 改为${asSwitch ? "输入框" : "开关"}`}
-        title={asSwitch ? "改为输入框" : "改为开关"}
-        onClick={() => setTurned(!asSwitch)}
-      >
-        {asSwitch ? <TextCursorInput size={14} /> : <ToggleLeft size={14} />}
-      </button>
+      {either && (
+        <button
+          type="button"
+          className="icon-button"
+          aria-label={`${label} 改为${asSwitch ? "输入框" : "开关"}`}
+          title={asSwitch ? "改为输入框" : "改为开关"}
+          onClick={() => setTurned(!asSwitch)}
+        >
+          {asSwitch ? <TextCursorInput size={14} /> : <ToggleLeft size={14} />}
+        </button>
+      )}
     </span>
   );
 }
@@ -201,6 +207,10 @@ export function Setting({
   if (field.kind === "list")
     return (
       <StringList path={path} label={name} hint={field.hint} editing={editing} />
+    );
+  if (field.kind === "map")
+    return (
+      <StringMap path={path} label={name} hint={field.hint} editing={editing} />
     );
   const value = editing.get(path);
   // A table, a list, or a value the structure tree does not spell out.
@@ -357,6 +367,95 @@ export function StringList({
             className="icon-button"
             aria-label={`确认添加${label}`}
             disabled={!draft.trim()}
+          >
+            <Plus size={15} />
+          </button>
+        </form>
+      )}
+    </section>
+  );
+}
+/** A table of text values, one row per key; every change patches a single key. */
+export function StringMap({
+  path,
+  label,
+  hint,
+  editing,
+}: {
+  path: Path;
+  label: string;
+  hint?: string;
+  editing: Editing;
+}) {
+  const value = editing.get(path);
+  const [key, setKey] = useState(""),
+    [draft, setDraft] = useState("");
+  const fixed =
+    value !== undefined &&
+    (value === null || typeof value !== "object" || Array.isArray(value));
+  const rows = value && !fixed ? Object.entries(value) : [];
+  const valid = key.trim() !== "" && !rows.some(([k]) => k === key.trim());
+  return (
+    <section className="settings-list-group">
+      <h3>
+        {label}
+        {hint && <small>{hint}</small>}
+      </h3>
+      {fixed && sourceOnly}
+      {rows.map(([k, v]) => (
+        <div className="environment-row" key={k}>
+          <label title={k}>{k}</label>
+          {v !== null && typeof v === "object" ? (
+            sourceOnly
+          ) : (
+            <Scalar
+              value={v}
+              path={[...path, k]}
+              editing={editing}
+              label={`${label} ${k}`}
+              field={{ label, path, kind: "text" }}
+            />
+          )}
+          <button
+            className="icon-button"
+            aria-label={`删除${label} ${k}`}
+            onClick={() => editing.change([...path, k], undefined)}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
+      ))}
+      {!fixed && (
+        <form
+          className="settings-list-row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!valid) return;
+            editing.change([...path, key.trim()], draft);
+            setKey("");
+            setDraft("");
+          }}
+        >
+          <input
+            aria-label={`${label} 新键`}
+            placeholder="键"
+            autoComplete="off"
+            spellCheck={false}
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+          />
+          <input
+            aria-label={`${label} 新值`}
+            placeholder="值"
+            autoComplete="off"
+            spellCheck={false}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <button
+            className="icon-button"
+            aria-label={`确认添加${label}`}
+            disabled={!valid}
           >
             <Plus size={15} />
           </button>
