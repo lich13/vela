@@ -3,7 +3,8 @@
 //! The fixture starts an ordinary provider and a provider that only accepts
 //! new threads or compaction handoffs.  Search requests still carry a reliable
 //! thread id, but must use the existing owner reservation without consuming
-//! the compaction boundary or changing ownership.
+//! the compaction boundary or changing ownership. With a provider set to take
+//! web searches, a search is that queue's alone.
 use super::*;
 use crate::usage::{
     model::{Filter, Operation, Record},
@@ -961,29 +962,25 @@ async fn v02513_search_lease_is_readonly_and_rejects_changed_owner_before_send()
 }
 
 #[tokio::test]
-async fn v02523_search_only_uses_first_error_and_preserves_owner_on_every_request() {
+async fn a_search_taken_over_leaves_the_conversation_and_its_owner_alone() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let seen = owner_hits.clone();
     let owner_port = super::v022_server(move |request| {
         let seen = seen.clone();
         async move {
             seen.fetch_add(1, Ordering::SeqCst);
-            let search = request.uri().path().ends_with("/alpha/search");
+            assert!(
+                !request.uri().path().ends_with("/alpha/search"),
+                "the owner takes no searches"
+            );
             let _ = request.into_body().collect().await.unwrap();
-            if search {
-                super::v022_json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error":{"reason":"DAILY_LIMIT_EXCEEDED"}}).to_string(),
-                )
-            } else {
-                super::v022_json_response(StatusCode::OK, super::v022_seed_response())
-            }
+            super::v022_json_response(StatusCode::OK, super::v022_seed_response())
         }
     })
     .await;
-    let fallback_hits = Arc::new(AtomicUsize::new(0));
-    let seen = fallback_hits.clone();
-    let fallback_port = super::v022_server(move |request| {
+    let taker_hits = Arc::new(AtomicUsize::new(0));
+    let seen = taker_hits.clone();
+    let taker_port = super::v022_server(move |request| {
         let seen = seen.clone();
         async move {
             seen.fetch_add(1, Ordering::SeqCst);
@@ -996,58 +993,43 @@ async fn v02523_search_only_uses_first_error_and_preserves_owner_on_every_reques
     })
     .await;
     let (dir, gateway) = super::v022_fixture(vec![
-        format!("http://127.0.0.1:{fallback_port}/v1"),
         format!("http://127.0.0.1:{owner_port}/v1"),
+        format!("http://127.0.0.1:{taker_port}/v1"),
     ])
     .await;
     let ids = super::v022_ids(&gateway);
-    super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[0].clone()));
-    let mut settings = gateway.0.inner.lock().store.settings.clone();
-    settings.max_retries = 0;
-    super::v022_update(&gateway, &dir, Edit::Settings { settings });
-    configure_search_owner(&gateway, &dir, &ids[1]);
+    super::v022_update(&gateway, &dir, searching(&gateway, &ids[1], false));
+    configure_search_owner(&gateway, &dir, &ids[0]);
     let thread = "fixture-v02513-search-fallback";
-    let (usage, digest) = seed_owner(&dir, &gateway, thread, &ids[1]).await;
+    let (usage, digest) = seed_owner(&dir, &gateway, thread, &ids[0]).await;
     for _ in 0..2 {
-        let response = tokio::time::timeout(
-            Duration::from_secs(5),
-            search_request(
-                &gateway,
-                "/v1/alpha/search",
-                &[("thread-id", thread)],
-                SEARCH_REQUEST,
-            ),
+        let response = search_request(
+            &gateway,
+            "/v1/alpha/search",
+            &[("thread-id", thread)],
+            SEARCH_REQUEST,
         )
-        .await
-        .expect("explicit quota rejection must not enter capacity waiting");
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_bytes(response).await, SEARCH_RESPONSE);
     }
     let rows = wait_for_usage(&usage, 3).await;
-    let record = rows
+    let searches: Vec<_> = rows
         .iter()
-        .find(|r| {
-            r.attempts.len() == 2
-                && r.final_attempt()
-                    .is_some_and(|a| a.operation == Operation::WebSearch)
-        })
-        .unwrap();
-    assert!(rows.iter().any(|r| r.attempts.len() == 1
-        && r.final_attempt()
-            .is_some_and(|a| a.operation == Operation::WebSearch
-                && a.provider.as_deref() == Some(ids[0].as_str()))));
-    assert_eq!(record.attempts.len(), 2);
-    assert_eq!(
-        record.attempts[0].provider.as_deref(),
-        Some(ids[1].as_str())
-    );
-    assert_eq!(
-        record.attempts[1].provider.as_deref(),
-        Some(ids[0].as_str())
-    );
-    assert_eq!(owner_hits.load(Ordering::SeqCst), 2);
-    assert_eq!(fallback_hits.load(Ordering::SeqCst), 2);
-    assert_eq!(gateway.0.compaction.owner(&digest), Some(ids[1].clone()));
+        .flat_map(|row| &row.attempts)
+        .filter(|attempt| attempt.operation == Operation::WebSearch)
+        .collect();
+    assert_eq!(searches.len(), 2);
+    for attempt in searches {
+        assert_eq!(attempt.provider.as_deref(), Some(ids[1].as_str()));
+        assert_eq!(
+            attempt.routing_decision,
+            Some(crate::usage::model::RoutingDecision::WebSearchTakeover)
+        );
+    }
+    assert_eq!(owner_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(taker_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(gateway.0.compaction.owner(&digest), Some(ids[0].clone()));
     assert!(gateway.0.compaction.boundary_matches(
         &digest,
         Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
@@ -1056,7 +1038,7 @@ async fn v02523_search_only_uses_first_error_and_preserves_owner_on_every_reques
 }
 
 #[tokio::test]
-async fn search_safety_rejection_never_uses_a_backup() {
+async fn search_safety_rejection_is_not_sent_to_another_provider() {
     let owner = super::v022_server(|request| async move {
         if !request.uri().path().ends_with("/alpha/search") {
             return super::v022_json_response(StatusCode::OK, super::v022_seed_response());
@@ -1069,18 +1051,18 @@ async fn search_safety_rejection_never_uses_a_backup() {
     .await;
     let hits = Arc::new(AtomicUsize::new(0));
     let count = hits.clone();
-    let backup = super::v022_server(move |_| {
+    let other = super::v022_server(move |_| {
         count.fetch_add(1, Ordering::SeqCst);
         async { super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE)) }
     })
     .await;
+    // No provider takes searches: the search is the ordinary queue's.
     let (dir, gateway) = super::v022_fixture(vec![
         format!("http://127.0.0.1:{owner}/v1"),
-        format!("http://127.0.0.1:{backup}/v1"),
+        format!("http://127.0.0.1:{other}/v1"),
     ])
     .await;
     let ids = super::v022_ids(&gateway);
-    super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[1]));
     configure_search_owner(&gateway, &dir, &ids[0]);
     let thread = "fixture-search-safety";
     seed_owner(&dir, &gateway, thread, &ids[0]).await;
@@ -1097,7 +1079,7 @@ async fn search_safety_rejection_never_uses_a_backup() {
 }
 
 #[tokio::test]
-async fn v02523_search_visits_multiple_backups_once_and_generation_excludes_them() {
+async fn a_search_visits_its_takers_in_list_order_and_never_the_ordinary_queue() {
     for all_fail in [false, true] {
         let hits = Arc::new(Mutex::new(vec![0usize; 3]));
         let mut bases = vec![];
@@ -1110,10 +1092,10 @@ async fn v02523_search_visits_multiple_backups_once_and_generation_excludes_them
                     let search = request.uri().path().ends_with("/alpha/search");
                     let _ = request.into_body().collect().await.unwrap();
                     assert!(
-                        index == 0 || search,
-                        "search-only provider received generation"
+                        index != 0 || !search,
+                        "the ordinary queue received a search"
                     );
-                    if search && index == 2 && !all_fail {
+                    if !search || (index == 2 && !all_fail) {
                         super::v022_json_response(
                             StatusCode::OK,
                             Bytes::from_static(SEARCH_RESPONSE),
@@ -1129,8 +1111,11 @@ async fn v02523_search_visits_multiple_backups_once_and_generation_excludes_them
         let (dir, gateway) = super::v022_fixture(bases).await;
         let ids = super::v022_ids(&gateway);
         for id in &ids[1..] {
-            super::v022_update(&gateway, &dir, search_only_edit(&gateway, &id.clone()));
+            super::v022_update(&gateway, &dir, searching(&gateway, id, false));
         }
+        let mut settings = gateway.0.inner.lock().store.settings.clone();
+        settings.max_retries = 0;
+        super::v022_update(&gateway, &dir, Edit::Settings { settings });
         super::v022_start(&gateway, &dir).await;
         let response = search_request(&gateway, "/alpha/search", &[], SEARCH_REQUEST).await;
         assert_eq!(
@@ -1142,7 +1127,17 @@ async fn v02523_search_visits_multiple_backups_once_and_generation_excludes_them
             }
         );
         let _ = response_bytes(response).await;
-        assert_eq!(*hits.lock(), [1, 1, 1]);
+        assert_eq!(*hits.lock(), [0, 1, 1]);
+        // A provider that takes searches is still one of the ordinary queue:
+        // with the first provider out of it, the conversation is theirs.
+        super::v022_update(
+            &gateway,
+            &dir,
+            Edit::QueueProvider {
+                id: ids[0].clone(),
+                queued: false,
+            },
+        );
         let response = search_request(
             &gateway,
             "/v1/responses",
@@ -1150,209 +1145,61 @@ async fn v02523_search_visits_multiple_backups_once_and_generation_excludes_them
             br#"{"model":"fixture-model","input":"fixture"}"#,
         )
         .await;
+        assert_eq!(response.status(), StatusCode::OK);
         let _ = response_bytes(response).await;
-        assert_eq!(hits.lock()[1..], [1, 1]);
+        assert_eq!(*hits.lock(), [0, 2, 1]);
         gateway.stop().await.unwrap();
     }
 }
 
 #[tokio::test]
-async fn v02523_search_waits_at_most_thirty_seconds_for_content() {
-    let sent = Arc::new(tokio::sync::Notify::new());
-    let signal = sent.clone();
-    let primary = super::v022_server(move |request| {
-        let signal = signal.clone();
-        async move {
-            let _ = request.into_body().collect().await.unwrap();
-            signal.notify_one();
-            tokio::time::sleep(Duration::from_secs(300)).await;
-            super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
-        }
-    })
-    .await;
-    let fallback_hits = Arc::new(AtomicUsize::new(0));
-    let seen = fallback_hits.clone();
-    let backup = super::v022_server(move |request| {
-        let seen = seen.clone();
-        async move {
-            seen.fetch_add(1, Ordering::SeqCst);
-            let _ = request.into_body().collect().await.unwrap();
-            super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
-        }
-    })
-    .await;
-    let (dir, gateway) = super::v022_fixture(vec![
-        format!("http://127.0.0.1:{primary}/v1"),
-        format!("http://127.0.0.1:{backup}/v1"),
-    ])
-    .await;
+async fn an_endless_search_taker_retries_a_rate_limit_where_it_was() {
+    let hits = Arc::new(Mutex::new(vec![0usize; 3]));
+    let mut bases = vec![];
+    for index in 0..3 {
+        let hits = hits.clone();
+        let port = super::v022_server(move |request| {
+            let hits = hits.clone();
+            async move {
+                let n = {
+                    let mut hits = hits.lock();
+                    hits[index] += 1;
+                    hits[index]
+                };
+                let _ = request.into_body().collect().await.unwrap();
+                if index == 1 && n == 1 {
+                    super::v022_json_response(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        json!({"error":{"type":"rate_limit_error","message":"rate limit"}})
+                            .to_string(),
+                    )
+                } else {
+                    super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
+                }
+            }
+        })
+        .await;
+        bases.push(format!("http://127.0.0.1:{port}/v1"));
+    }
+    let (dir, gateway) = super::v022_fixture(bases).await;
     let ids = super::v022_ids(&gateway);
-    super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[1].clone()));
+    super::v022_update(&gateway, &dir, searching(&gateway, &ids[1], true));
+    super::v022_update(&gateway, &dir, searching(&gateway, &ids[2], false));
     super::v022_start(&gateway, &dir).await;
-    let g = gateway.clone();
-    let response =
-        tokio::spawn(async move { search_request(&g, "/alpha/search", &[], SEARCH_REQUEST).await });
-    tokio::time::timeout(Duration::from_secs(5), sent.notified())
-        .await
-        .unwrap();
-    // Advance only after real loopback I/O has reached the upstream request.
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(29)).await;
-    assert_eq!(fallback_hits.load(Ordering::SeqCst), 0);
-    tokio::time::advance(Duration::from_secs(1)).await;
-    tokio::time::resume();
-    let response = tokio::time::timeout(Duration::from_secs(5), response)
-        .await
-        .unwrap()
-        .unwrap();
+    let started = std::time::Instant::now();
+    let response = search_request(&gateway, "/alpha/search", &[], SEARCH_REQUEST).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response_bytes(response).await, SEARCH_RESPONSE);
-    assert_eq!(fallback_hits.load(Ordering::SeqCst), 1);
+    // It waited its interval at the first taker: neither the next taker nor
+    // the ordinary queue was asked.
+    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert_eq!(*hits.lock(), [0, 2, 0]);
     gateway.stop().await.unwrap();
 }
 
-#[tokio::test]
-async fn v02523_search_heartbeats_do_not_extend_timeout_and_delivered_content_is_not_replayed() {
-    for content in [false, true] {
-        let waiting = Arc::new(tokio::sync::Notify::new());
-        let signal = waiting.clone();
-        let primary=super::v022_server(move |request| {let signal=signal.clone();async move {
-            let _=request.into_body().collect().await.unwrap();
-            let stream=async_stream::try_stream! {
-                yield hyper::body::Frame::data(Bytes::from_static(if content {b"data: {\"type\":\"search.result\",\"results\":[{\"title\":\"fixture\"}]}\n\n"}else{b": heartbeat\n\ndata: {\"type\":\"search.started\"}\n\n"}));
-                signal.notify_one();tokio::time::sleep(Duration::from_secs(300)).await;
-                yield hyper::body::Frame::data(Bytes::from_static(b"data: {\"type\":\"error\",\"error\":{\"code\":\"fixture\"}}\n\n"));
-            };
-            Response::builder().header("content-type","text/event-stream").body(http_body_util::StreamBody::new(stream).boxed_unsync()).unwrap()
-        }}).await;
-        let hits = Arc::new(AtomicUsize::new(0));
-        let count = hits.clone();
-        let backup = super::v022_server(move |r| {
-            let count = count.clone();
-            async move {
-                let _ = r.into_body().collect().await;
-                count.fetch_add(1, Ordering::SeqCst);
-                super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
-            }
-        })
-        .await;
-        let (dir, gateway) = super::v022_fixture(vec![
-            format!("http://127.0.0.1:{primary}/v1"),
-            format!("http://127.0.0.1:{backup}/v1"),
-        ])
-        .await;
-        let ids = super::v022_ids(&gateway);
-        super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[1].clone()));
-        super::v022_start(&gateway, &dir).await;
-        let g = gateway.clone();
-        let request =
-            tokio::spawn(
-                async move { search_request(&g, "/alpha/search", &[], SEARCH_REQUEST).await },
-            );
-        tokio::time::timeout(Duration::from_secs(5), waiting.notified())
-            .await
-            .unwrap();
-        if content {
-            let mut response = tokio::time::timeout(Duration::from_secs(5), request)
-                .await
-                .unwrap()
-                .unwrap();
-            let first = response
-                .body_mut()
-                .frame()
-                .await
-                .unwrap()
-                .unwrap()
-                .into_data()
-                .unwrap();
-            assert!(String::from_utf8_lossy(&first).contains("search.result"));
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(31)).await;
-            tokio::time::resume();
-            drop(response);
-            assert_eq!(hits.load(Ordering::SeqCst), 0);
-        } else {
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(29)).await;
-            assert_eq!(hits.load(Ordering::SeqCst), 0);
-            tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::time::resume();
-            let response = tokio::time::timeout(Duration::from_secs(5), request)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(response_bytes(response).await, SEARCH_RESPONSE);
-            assert_eq!(hits.load(Ordering::SeqCst), 1);
-        }
-        gateway.stop().await.unwrap();
-    }
-}
-#[tokio::test]
-async fn search_upstream_timeout_is_independent_of_wait_budget_and_cancellation() {
-    for cancel in [false, true] {
-        let sent = Arc::new(tokio::sync::Notify::new());
-        let signal = sent.clone();
-        let primary = super::v022_server(move |r| {
-            let signal = signal.clone();
-            async move {
-                let _ = r.into_body().collect().await;
-                signal.notify_one();
-                tokio::time::sleep(Duration::from_secs(300)).await;
-                super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
-            }
-        })
-        .await;
-        let hits = Arc::new(AtomicUsize::new(0));
-        let count = hits.clone();
-        let backup = super::v022_server(move |r| {
-            let count = count.clone();
-            async move {
-                let _ = r.into_body().collect().await;
-                count.fetch_add(1, Ordering::SeqCst);
-                super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
-            }
-        })
-        .await;
-        let (dir, gateway) = super::v022_fixture(vec![
-            format!("http://127.0.0.1:{primary}/v1"),
-            format!("http://127.0.0.1:{backup}/v1"),
-        ])
-        .await;
-        let ids = super::v022_ids(&gateway);
-        super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[1].clone()));
-        let mut settings = gateway.0.inner.lock().store.settings.clone();
-        settings.retry_budget_seconds = 5;
-        super::v022_update(&gateway, &dir, Edit::Settings { settings });
-        super::v022_start(&gateway, &dir).await;
-        let g = gateway.clone();
-        let request =
-            tokio::spawn(
-                async move { search_request(&g, "/alpha/search", &[], SEARCH_REQUEST).await },
-            );
-        tokio::time::timeout(Duration::from_secs(5), sent.notified())
-            .await
-            .unwrap();
-        if cancel {
-            request.abort();
-            let _ = request.await;
-            gateway.stop().await.unwrap();
-        } else {
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(30)).await;
-            tokio::time::resume();
-            let response = tokio::time::timeout(Duration::from_secs(5), request)
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(response.status().is_success());
-            response_bytes(response).await;
-            gateway.stop().await.unwrap();
-        }
-        assert_eq!(hits.load(Ordering::SeqCst), usize::from(!cancel));
-    }
-}
-
-fn search_only_edit(gateway: &Gateway, id: &str) -> Edit {
+/// The edit that sets provider `id` to take web searches, in endless mode
+/// with a second between retries when `endless`.
+fn searching(gateway: &Gateway, id: &str, endless: bool) -> Edit {
     let provider = gateway
         .view()
         .providers
@@ -1360,22 +1207,24 @@ fn search_only_edit(gateway: &Gateway, id: &str) -> Edit {
         .find(|p| p.id == id)
         .unwrap();
     Edit::SaveProvider {
-        delegate: Default::default(),
+        delegate: super::super::model::DelegateEdit {
+            take_web_search: Some(true),
+            ..Default::default()
+        },
         id: Some(id.to_owned()),
         base_url: provider.base_url,
         token: String::new(),
         quota_access_token: None,
         name: None,
-        search_only: Some(true),
         end_on_message_stop: None,
         filter_count_tokens: None,
         buffer_complete_response: None,
-        endless_mode: None,
-        upstream_retry_seconds: None,
-        normal_retry_seconds: None,
+        endless_mode: Some(endless),
+        upstream_retry_seconds: Some(1),
+        normal_retry_seconds: Some(1),
         risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
+        retry_intensity: Some(0),
+        limit_retry_seconds: Some(1),
+        limit_rest_seconds: Some(0),
     }
 }

@@ -34,7 +34,6 @@ fn fixture_provider(base_url: &str) -> Provider {
         allowed_models: None,
         handoff_after_compaction: false,
         take_new_threads: false,
-        search_only: false,
         end_on_message_stop: false,
         filter_count_tokens: false,
         buffer_complete_response: false,
@@ -211,7 +210,6 @@ async fn first_affinity_persist_failure_returns_before_sending_to_upstream() {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -316,7 +314,6 @@ async fn frozen_queued_probes_preserve_complete_samples_and_manual_probes_still_
                 base_url: primary.clone(),
                 token: "fixture-token".into(),
                 quota_access_token: None,
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,

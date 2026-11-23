@@ -142,7 +142,6 @@ fn saving(f: &Fixture, index: usize, delegate: DelegateEdit) -> Edit {
         token: String::new(),
         name: None,
         quota_access_token: None,
-        search_only: None,
         end_on_message_stop: None,
         filter_count_tokens: None,
         buffer_complete_response: None,
@@ -313,7 +312,7 @@ async fn a_taker_without_a_model_runs_what_the_client_asked_for() {
 }
 
 #[tokio::test]
-async fn a_request_its_taker_does_not_serve_goes_back_to_the_queue() {
+async fn a_request_its_taker_does_not_serve_is_answered_and_stays_out_of_the_queue() {
     // A failing service, a refused request, a refused key, and no service at all.
     for failure in [Some(500), Some(400), Some(401), None] {
         let (main, main_seen) =
@@ -337,7 +336,6 @@ async fn a_request_its_taker_does_not_serve_goes_back_to_the_queue() {
                 token: FIXTURE_KEY.into(),
                 name: None,
                 quota_access_token: None,
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -357,36 +355,31 @@ async fn a_request_its_taker_does_not_serve_goes_back_to_the_queue() {
         });
         f.start().await;
 
-        let (status, body) = send(&f.gateway, "/v1/messages", &[AUXILIARY], ASKED).await;
+        let (status, _) = send(&f.gateway, "/v1/messages", &[AUXILIARY], ASKED).await;
+        // The client is answered with the taker's failure.
+        assert_eq!(status, failure.unwrap_or(502), "{failure:?}");
+        // The ordinary queue, which could serve the request, is not asked.
+        assert!(main_seen.lock().is_empty(), "{failure:?}");
         assert_eq!(
-            (status, body.as_ref()),
-            (200, message("msg_main_1").as_bytes()),
-            "{failure:?}"
-        );
-        // The queue gets the request as the client wrote it.
-        assert_eq!(main_seen.lock().as_slice(), [Bytes::from_static(ASKED)]);
-        assert_eq!(
-            side_seen.lock().len(),
-            usize::from(failure.is_some()),
+            side_seen.lock().is_empty(),
+            failure.is_none(),
             "{failure:?}"
         );
 
         let rows = recorded(&f.usage, 1).await;
         let attempts = &rows[0].attempts;
-        assert_eq!(attempts.len(), 2, "{failure:?}");
-        assert_eq!(attempts[0].provider.as_deref(), Some(ids[1].as_str()));
-        assert_eq!(attempts[0].status, failure);
-        assert_eq!(attempts[0].upstream_model.as_deref(), Some("aux-model"));
-        assert_eq!(attempts[1].provider.as_deref(), Some(ids[0].as_str()));
-        assert_eq!(attempts[1].status, Some(200));
-        assert_eq!(attempts[1].upstream_model, None);
-        assert_eq!(attempts[1].routing_decision, None);
+        assert!(!attempts.is_empty(), "{failure:?}");
+        for attempt in attempts {
+            assert_eq!(attempt.provider.as_deref(), Some(ids[1].as_str()));
+            assert_eq!(attempt.status, failure);
+            assert_eq!(attempt.upstream_model.as_deref(), Some("aux-model"));
+        }
         f.stop().await;
     }
 }
 
 #[tokio::test]
-async fn the_takers_of_a_kind_are_asked_in_list_order_before_the_ordinary_queue() {
+async fn the_takers_of_a_kind_are_asked_in_list_order_and_the_ordinary_queue_never() {
     let failing = || {
         answered(
             500,
@@ -423,14 +416,12 @@ async fn the_takers_of_a_kind_are_asked_in_list_order_before_the_ordinary_queue(
     assert_eq!(parsed(&second_seen.lock()[0]), sent);
     assert!(main_seen.lock().is_empty());
 
-    // With every taker failing it, the request is the ordinary queue's, as
-    // the client wrote it.
+    // With every taker failing it, the client is answered with the last
+    // one's failure; the request is still not the ordinary queue's.
     let (status, body) = send(&f.gateway, "/v1/messages", &[AUXILIARY], ASKED).await;
-    assert_eq!(
-        (status, body.as_ref()),
-        (200, message("msg_main_1").as_bytes())
-    );
-    assert_eq!(main_seen.lock().as_slice(), [Bytes::from_static(ASKED)]);
+    assert_eq!(status, 500);
+    assert!(String::from_utf8_lossy(&body).contains("fixture failure"));
+    assert!(main_seen.lock().is_empty());
     assert_eq!((first_seen.lock().len(), second_seen.lock().len()), (2, 2));
 
     let rows = recorded(&f.usage, 2).await;
@@ -449,17 +440,145 @@ async fn the_takers_of_a_kind_are_asked_in_list_order_before_the_ordinary_queue(
         asked(served),
         [(ids[1].clone(), taken), (ids[2].clone(), taken)]
     );
-    let returned = rows
+    let failed = rows
         .iter()
-        .find(|row| row.attempts.len() == 3)
-        .expect("the request that went back to the queue");
+        .find(|row| !std::ptr::eq(*row, served))
+        .expect("the request every taker failed");
     assert_eq!(
-        asked(returned),
-        [
-            (ids[1].clone(), taken),
-            (ids[2].clone(), taken),
-            (ids[0].clone(), None)
-        ]
+        asked(failed),
+        [(ids[1].clone(), taken), (ids[2].clone(), taken)]
+    );
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_kind_its_takers_cannot_serve_is_refused_and_not_the_ordinary_queues() {
+    let (main, main_seen) = upstream(|n| answered(200, message(&format!("msg_main_{n}")))).await;
+    let (side, side_seen) = upstream(|n| answered(200, message(&format!("msg_side_{n}")))).await;
+    let (f, ids) = pair(ClientId::Claude, &main, &side).await;
+    takes(&f, 1, None, Some(""));
+    // The only taker of errands does not serve the model the client asks for.
+    f.edit(Edit::ModelsProvider {
+        id: ids[1].clone(),
+        allowed_models: Some(vec!["other-model".into()]),
+    });
+    f.start().await;
+    let (status, _) = send(&f.gateway, "/v1/messages", &[AUXILIARY], ASKED).await;
+    assert_eq!(status, 503);
+    assert_eq!((main_seen.lock().len(), side_seen.lock().len()), (0, 0));
+    // The conversation is still the ordinary queue's.
+    let (status, _) = send(&f.gateway, "/v1/messages", &[], ASKED).await;
+    assert_eq!(status, 200);
+    assert_eq!((main_seen.lock().len(), side_seen.lock().len()), (1, 0));
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_model_a_taker_lacks_sends_the_request_to_the_next_taker_alone() {
+    let missing = || {
+        answered(
+            404,
+            r#"{"type":"error","error":{"type":"model_not_found","message":"The model claude-fixture does not exist"}}"#.into(),
+        )
+    };
+    // With the first taker in endless mode or not, and a next taker or none.
+    for (endless, next) in [(false, true), (true, true), (true, false)] {
+        let (main, main_seen) =
+            upstream(|n| answered(200, message(&format!("msg_main_{n}")))).await;
+        let (first, first_seen) = upstream(move |_| missing()).await;
+        let (second, second_seen) =
+            upstream(|n| answered(200, message(&format!("msg_second_{n}")))).await;
+        let (f, _) = listed(ClientId::Claude, &[&main, &first, &second]).await;
+        takes(&f, 1, None, Some(""));
+        if next {
+            takes(&f, 2, None, Some(""));
+        }
+        let mut edit = saving(&f, 1, Default::default());
+        if let Edit::SaveProvider {
+            endless_mode,
+            normal_retry_seconds,
+            upstream_retry_seconds,
+            ..
+        } = &mut edit
+        {
+            *endless_mode = Some(endless);
+            *normal_retry_seconds = Some(60);
+            *upstream_retry_seconds = Some(60);
+        }
+        f.edit(edit);
+        f.start().await;
+        let (status, body) = send(&f.gateway, "/v1/messages", &[AUXILIARY], ASKED).await;
+        if next {
+            assert_eq!(
+                (status, body.as_ref()),
+                (200, message("msg_second_1").as_bytes()),
+                "{endless}"
+            );
+        } else {
+            assert_eq!(status, 404);
+        }
+        assert_eq!(
+            (
+                main_seen.lock().len(),
+                first_seen.lock().len(),
+                second_seen.lock().len()
+            ),
+            (0, 1, usize::from(next)),
+            "{endless} {next}"
+        );
+        f.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn an_endless_taker_retries_a_rate_limit_where_it_was() {
+    let (main, main_seen) = upstream(|n| answered(200, message(&format!("msg_main_{n}")))).await;
+    let (first, first_seen) = upstream(|n| match n {
+        1 => answered(
+            429,
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"rate limit"}}"#.into(),
+        ),
+        _ => answered(200, message(&format!("msg_first_{n}"))),
+    })
+    .await;
+    let (second, second_seen) =
+        upstream(|n| answered(200, message(&format!("msg_second_{n}")))).await;
+    let (f, _) = listed(ClientId::Claude, &[&main, &first, &second]).await;
+    for index in [1, 2] {
+        takes(&f, index, None, Some(""));
+    }
+    let mut edit = saving(&f, 1, Default::default());
+    if let Edit::SaveProvider {
+        endless_mode,
+        limit_retry_seconds,
+        limit_rest_seconds,
+        retry_intensity,
+        ..
+    } = &mut edit
+    {
+        *endless_mode = Some(true);
+        *limit_retry_seconds = Some(1);
+        *limit_rest_seconds = Some(0);
+        *retry_intensity = Some(0);
+    }
+    f.edit(edit);
+    f.start().await;
+    let started = std::time::Instant::now();
+    let (status, body) = send(&f.gateway, "/v1/messages", &[AUXILIARY], ASKED).await;
+    assert_eq!(
+        (status, body.as_ref()),
+        (200, message("msg_first_2").as_bytes())
+    );
+    // It waited its interval there: neither the next taker nor the ordinary
+    // queue was asked.
+    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert_eq!(
+        (
+            main_seen.lock().len(),
+            first_seen.lock().len(),
+            second_seen.lock().len()
+        ),
+        (0, 2, 0)
     );
     f.stop().await;
 }
@@ -518,16 +637,14 @@ async fn a_request_waits_in_line_once_no_taker_of_its_kind_has_room() {
     );
     assert_eq!(seen(), (0, 1, 1));
 
-    // A wait that outlasts the queue's patience ends in the ordinary queue.
+    // A wait that outlasts the queue's patience is answered as a full
+    // queue is, and not by the ordinary queue.
     let first_held = occupy(&f, &ids[1]).await;
     let started = std::time::Instant::now();
-    let (status, body) = send(&f.gateway, "/v1/messages", &[AUXILIARY], ASKED).await;
-    assert_eq!(
-        (status, body.as_ref()),
-        (200, message("msg_main_1").as_bytes())
-    );
+    let (status, _) = send(&f.gateway, "/v1/messages", &[AUXILIARY], ASKED).await;
+    assert_eq!(status, 429);
     assert!(started.elapsed() >= Duration::from_millis(900));
-    assert_eq!(seen(), (1, 1, 1));
+    assert_eq!(seen(), (0, 1, 1));
     drop((first_held, second_held));
     f.stop().await;
 }
@@ -835,15 +952,12 @@ async fn a_claude_search_goes_to_the_provider_that_takes_searches() {
     assert_eq!(seen(), (1, 2, 2));
     assert_eq!(main_seen.lock()[0].as_ref(), CONVERSATION);
 
-    // A search its provider does not serve goes back to the ordinary queue
-    // as the client wrote it, not on to the providers that take errands.
-    let (status, body) = send(&f.gateway, "/v1/messages", &[AUXILIARY], SEARCH).await;
-    assert_eq!(
-        (status, body.as_ref()),
-        (200, message("msg_main_2").as_bytes())
-    );
-    assert_eq!(seen(), (2, 2, 3));
-    assert_eq!(main_seen.lock()[1].as_ref(), SEARCH);
+    // A search its provider does not serve is answered with that failure:
+    // it goes neither to the ordinary queue nor on to the providers that
+    // take errands.
+    let (status, _) = send(&f.gateway, "/v1/messages", &[AUXILIARY], SEARCH).await;
+    assert_ne!(status, 200);
+    assert_eq!(seen(), (1, 2, 3));
 
     let rows = recorded(&f.usage, 6).await;
     let taken: Vec<_> = rows
@@ -860,15 +974,11 @@ async fn a_claude_search_goes_to_the_provider_that_takes_searches() {
             Some(RoutingDecision::WebSearchTakeover)
         );
     }
-    let returned = rows
+    assert!(rows
         .iter()
-        .find(|row| row.attempts.len() == 2)
-        .expect("the search that went back to the queue");
-    assert_eq!(
-        returned.attempts[1].provider.as_deref(),
-        Some(ids[0].as_str())
-    );
-    assert_eq!(returned.attempts[1].routing_decision, None);
+        .flat_map(|row| &row.attempts)
+        .all(|attempt| attempt.routing_decision.is_some()
+            || attempt.provider.as_deref() != Some(ids[2].as_str())));
     f.stop().await;
 }
 
@@ -957,14 +1067,24 @@ async fn a_provider_takes_over_only_the_kinds_its_client_hands_over() {
         (&json!(true), &json!("search-fixture"))
     );
 
-    // Codex searches have providers of their own instead.
+    // Codex hands over all three.
     let f = Fixture::new(ClientId::Codex, &["http://127.0.0.1:9/v1".to_owned()]).await;
-    let revision = f.gateway.view().revision;
-    let search = DelegateEdit {
-        take_web_search: Some(true),
-        ..Default::default()
-    };
-    let refused = f.gateway.edit(saving(&f, 0, search), &revision, &f.home);
-    assert!(refused.is_err());
+    searches(&f, 0, Some(("search-fixture", "low")));
     takes(&f, 0, Some(""), Some(""));
+    let view = serde_json::to_value(&f.gateway.view().providers[0]).unwrap();
+    assert_eq!(
+        (
+            &view["takeWebSearch"],
+            &view["webSearchModel"],
+            &view["takeCompaction"],
+            &view["takeAuxiliary"]
+        ),
+        (
+            &json!(true),
+            &json!("search-fixture"),
+            &json!(true),
+            &json!(true)
+        )
+    );
+    assert!(view.get("searchOnly").is_none());
 }

@@ -587,7 +587,6 @@ impl Gateway {
             next.edit(
                 Edit::SaveProvider {
                     delegate: Default::default(),
-                    search_only: None,
                     end_on_message_stop: None,
                     filter_count_tokens: None,
                     buffer_complete_response: None,

@@ -434,7 +434,6 @@ export type DshBatch = {
 export type GatewayEdit =
   | {
       op: "saveProvider";
-      searchOnly?: boolean;
       takeCompaction?: boolean;
       /** "" clears the model. */
       compactionModel?: string;
@@ -445,7 +444,7 @@ export type GatewayEdit =
       auxiliaryModel?: string;
       /** "" clears the effort. */
       auxiliaryEffort?: string;
-      /** Claude only; a Grok provider's is sent with `saveGrokProvider`. */
+      /** Codex and Claude; a Grok provider's is sent with `saveGrokProvider`. */
       takeWebSearch?: boolean;
       /** "" clears the model. */
       webSearchModel?: string;

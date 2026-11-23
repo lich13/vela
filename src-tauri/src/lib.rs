@@ -1880,6 +1880,7 @@ async fn update_gateway(
     let _official_guard = r.official_tx.lock().await;
     let home = r.home(client_id)?;
     let selected = matches!(&edit, gateway::Edit::Select { .. });
+    let edit = r.gateway(client_id).with_new_provider_defaults(edit);
     let result = r
         .gateway(client_id)
         .edit_checked(

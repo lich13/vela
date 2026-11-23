@@ -173,7 +173,6 @@ impl Fixture {
         for (index, url) in urls.iter().enumerate() {
             fixture.edit(Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -1361,7 +1360,6 @@ async fn lingering(
         token: String::new(),
         name: None,
         quota_access_token: None,
-        search_only: None,
         end_on_message_stop: Some(end_on_message_stop),
         filter_count_tokens: None,
         buffer_complete_response: None,
@@ -1474,7 +1472,6 @@ async fn message_stop_uses_the_failover_target_provider_setting() {
             base_url: failed.url("/v1"),
             token: FIXTURE_KEY.into(),
             quota_access_token: None,
-            search_only: None,
             end_on_message_stop: Some(!enabled),
             filter_count_tokens: None,
             buffer_complete_response: None,

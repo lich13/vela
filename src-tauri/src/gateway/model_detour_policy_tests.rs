@@ -15,7 +15,6 @@ fn provider(id: &str, model: Option<&str>, special: bool) -> Provider {
         allowed_models: model.map(|m| vec![m.into()]),
         handoff_after_compaction: special,
         take_new_threads: special,
-        search_only: false,
         end_on_message_stop: false,
         filter_count_tokens: false,
         buffer_complete_response: false,

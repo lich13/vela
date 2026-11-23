@@ -296,12 +296,6 @@ impl Service {
     }
     pub fn state(&self, client: ClientId, provider: &str) -> Result<State> {
         self.gateway(client).test_endpoint(provider, None)?;
-        let search_only = self
-            .gateway(client)
-            .test_candidates()
-            .ok()
-            .and_then(|list| list.into_iter().find(|p| p.id == provider))
-            .is_some_and(|p| p.search_only);
         let mut data = lock(&self.0.data);
         let updating = data.bank_updating;
         let checked_at = data.saved.bank.checked_at;
@@ -323,7 +317,7 @@ impl Service {
             .cloned()
             .into_iter()
             .collect();
-        if detection_status.is_empty() && !detection.enabled && !search_only {
+        if detection_status.is_empty() && !detection.enabled {
             detection_status.push(DetectionStatus {
                 provider_id: provider.to_owned(),
                 status: "disabled".into(),
@@ -391,16 +385,13 @@ impl Service {
             output: data.outputs.get(id).cloned(),
         })
     }
-    fn validate(&self, request: &Request, target: &Target) -> Result<()> {
+    fn validate(&self, request: &Request) -> Result<()> {
         if request.model.trim().is_empty()
             || request.model.len() > 256
             || request.model.chars().any(char::is_control)
             || !(1..=3).contains(&request.concurrency)
         {
             return Err(failure("请选择有效模型和 1–3 并发"));
-        }
-        if request.kind == Kind::Fingerprint && target.search_only {
-            return Err(failure("模型指纹检测仅用于普通供应商"));
         }
         if !connection::text_model(&request.model) {
             return Err(failure("请选择普通对话模型"));
@@ -464,7 +455,7 @@ impl Service {
         if request.kind == Kind::Connection && request.model.is_empty() {
             request.model = self.default_connection_model(&target);
         }
-        self.validate(&request, &target)?;
+        self.validate(&request)?;
         if request.kind == Kind::Fingerprint {
             self.check_cached_model(&target, &request.model)?;
         }

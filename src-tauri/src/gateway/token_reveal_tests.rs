@@ -7,7 +7,6 @@ fn save_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) ->
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -177,7 +176,6 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -214,7 +212,6 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -252,7 +249,6 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,

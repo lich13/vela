@@ -107,11 +107,7 @@ impl Service {
             ));
         }
         let gateway = self.gateway(client);
-        if !gateway
-            .test_candidates()?
-            .iter()
-            .any(|p| p.id == provider && !p.search_only)
-        {
+        if !gateway.test_candidates()?.iter().any(|p| p.id == provider) {
             return Err(failure("定时检测仅用于普通供应商"));
         }
         let endpoint = gateway.test_endpoint(provider, config.endpoint.as_deref());
@@ -208,11 +204,10 @@ impl Service {
                 .gateway(client)
                 .test_endpoint(provider, Some(&context.target.base_url))
                 .is_err()
-            || !self.gateway(client).test_candidates().is_ok_and(|items| {
-                items
-                    .iter()
-                    .any(|p| p.id == *provider && p.queued && !p.search_only)
-            })
+            || !self
+                .gateway(client)
+                .test_candidates()
+                .is_ok_and(|items| items.iter().any(|p| p.id == *provider && p.queued))
         {
             return false;
         }
@@ -361,7 +356,7 @@ impl Service {
             let Ok(candidates) = self.gateway(client).test_candidates() else {
                 return false;
             };
-            for provider in candidates.into_iter().filter(|p| !p.search_only) {
+            for provider in candidates {
                 live_candidates.push((client, provider.id));
             }
         }
@@ -456,11 +451,8 @@ impl Service {
         {
             let mut data = lock(&self.0.data);
             let mut next_timing = data.saved.detection_timing.clone();
-            let live: std::collections::HashSet<_> = candidates
-                .iter()
-                .filter(|p| !p.search_only)
-                .map(|p| p.id.as_str())
-                .collect();
+            let live: std::collections::HashSet<_> =
+                candidates.iter().map(|p| p.id.as_str()).collect();
             for job in data.saved.jobs.iter().filter(|j| {
                 j.automatic
                     && j.client_id == client
@@ -481,7 +473,7 @@ impl Service {
                 .get(client_key(client))
                 .cloned()
                 .unwrap_or_else(|| PlatformSettings::for_client(client));
-            for provider in candidates.iter().filter(|p| !p.search_only) {
+            for provider in candidates.iter() {
                 let config = data
                     .saved
                     .detection
