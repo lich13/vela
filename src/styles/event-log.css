@@ -169,7 +169,8 @@
   color: var(--accent-emerald);
 }
 
-.event-table td:nth-child(2) span[data-client="agy"] {
+.event-table td:nth-child(2) span[data-client="agy"],
+.event-table td:nth-child(2) span[data-client="antigravity"] {
   color: var(--accent-violet);
 }
 
