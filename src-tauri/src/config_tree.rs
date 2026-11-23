@@ -1409,6 +1409,71 @@ mod tests {
     }
 
     #[test]
+    fn toml_named_tables_take_new_keys_and_new_siblings() {
+        let text = "model = \"m\"\n\n[model_providers.relay]\nbase_url = \"https://example.invalid/v1\"\nenv_key = \"FIXTURE\"\n\n[tui]\nx = 1\n";
+        // A key of an existing named table joins its body.
+        assert_eq!(
+            toml(
+                text,
+                &["model_providers", "relay", "request_max_retries"],
+                Some(json!(3))
+            ),
+            text.replace(
+                "env_key = \"FIXTURE\"\n",
+                "env_key = \"FIXTURE\"\nrequest_max_retries = 3\n"
+            )
+        );
+        // A new name gets its own header although `model_providers` has none.
+        assert_eq!(
+            toml(
+                text,
+                &["model_providers", "relay-2", "base_url"],
+                Some(json!("https://example.invalid/v2"))
+            ),
+            format!(
+                "{text}\n[model_providers.relay-2]\nbase_url = \"https://example.invalid/v2\"\n"
+            )
+        );
+        assert_eq!(
+            toml("", &["mcp_servers", "docs", "command"], Some(json!("run"))),
+            "[mcp_servers.docs]\ncommand = \"run\"\n"
+        );
+        // A key-value table is created, grown and shrunk one key at a time.
+        let created = toml(
+            text,
+            &["model_providers", "relay", "query_params", "api-version"],
+            Some(json!("1")),
+        );
+        assert_eq!(
+            created,
+            format!("{text}\n[model_providers.relay.query_params]\napi-version = \"1\"\n")
+        );
+        let grown = toml(
+            &created,
+            &["model_providers", "relay", "query_params", "region"],
+            Some(json!("test")),
+        );
+        assert_eq!(grown, format!("{created}region = \"test\"\n"));
+        assert_eq!(
+            toml(
+                &grown,
+                &["model_providers", "relay", "query_params", "region"],
+                None
+            ),
+            created
+        );
+        let inline = "[model_providers.relay]\nquery_params = { a = \"1\" }\n";
+        assert_eq!(
+            toml(
+                inline,
+                &["model_providers", "relay", "query_params", "b"],
+                Some(json!("2"))
+            ),
+            inline.replace("{ a = \"1\" }", "{ a = \"1\", b = \"2\" }")
+        );
+    }
+
+    #[test]
     fn toml_last_list_item_leaves_the_previous_comment() {
         // The last item shares its line with the bracket; the line above keeps comma and comment.
         assert_eq!(

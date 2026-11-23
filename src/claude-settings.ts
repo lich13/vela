@@ -18,9 +18,17 @@ export type Field = {
   path: Path;
   /**
    * `integer` keeps digits as text (environment values), `number` writes a
-   * whole number, and `list` is a list of strings.
+   * whole number, `list` is a list of strings and `map` a table of strings.
    */
-  kind: "text" | "model" | "boolean" | "select" | "integer" | "number" | "list";
+  kind:
+    | "text"
+    | "model"
+    | "boolean"
+    | "select"
+    | "integer"
+    | "number"
+    | "list"
+    | "map";
   options?: [string, string][];
   override?: string[];
   /** What the client uses while the key is absent; shown beside "默认". */

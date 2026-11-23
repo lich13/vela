@@ -208,6 +208,10 @@ export function Setting({
     return (
       <StringList path={path} label={name} hint={field.hint} editing={editing} />
     );
+  if (field.kind === "map")
+    return (
+      <StringMap path={path} label={name} hint={field.hint} editing={editing} />
+    );
   const value = editing.get(path);
   // A table, a list, or a value the structure tree does not spell out.
   const fixed = value !== null && typeof value === "object";
@@ -363,6 +367,95 @@ export function StringList({
             className="icon-button"
             aria-label={`确认添加${label}`}
             disabled={!draft.trim()}
+          >
+            <Plus size={15} />
+          </button>
+        </form>
+      )}
+    </section>
+  );
+}
+/** A table of text values, one row per key; every change patches a single key. */
+export function StringMap({
+  path,
+  label,
+  hint,
+  editing,
+}: {
+  path: Path;
+  label: string;
+  hint?: string;
+  editing: Editing;
+}) {
+  const value = editing.get(path);
+  const [key, setKey] = useState(""),
+    [draft, setDraft] = useState("");
+  const fixed =
+    value !== undefined &&
+    (value === null || typeof value !== "object" || Array.isArray(value));
+  const rows = value && !fixed ? Object.entries(value) : [];
+  const valid = key.trim() !== "" && !rows.some(([k]) => k === key.trim());
+  return (
+    <section className="settings-list-group">
+      <h3>
+        {label}
+        {hint && <small>{hint}</small>}
+      </h3>
+      {fixed && sourceOnly}
+      {rows.map(([k, v]) => (
+        <div className="environment-row" key={k}>
+          <label title={k}>{k}</label>
+          {v !== null && typeof v === "object" ? (
+            sourceOnly
+          ) : (
+            <Scalar
+              value={v}
+              path={[...path, k]}
+              editing={editing}
+              label={`${label} ${k}`}
+              field={{ label, path, kind: "text" }}
+            />
+          )}
+          <button
+            className="icon-button"
+            aria-label={`删除${label} ${k}`}
+            onClick={() => editing.change([...path, k], undefined)}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
+      ))}
+      {!fixed && (
+        <form
+          className="settings-list-row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!valid) return;
+            editing.change([...path, key.trim()], draft);
+            setKey("");
+            setDraft("");
+          }}
+        >
+          <input
+            aria-label={`${label} 新键`}
+            placeholder="键"
+            autoComplete="off"
+            spellCheck={false}
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+          />
+          <input
+            aria-label={`${label} 新值`}
+            placeholder="值"
+            autoComplete="off"
+            spellCheck={false}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <button
+            className="icon-button"
+            aria-label={`确认添加${label}`}
+            disabled={!valid}
           >
             <Plus size={15} />
           </button>
