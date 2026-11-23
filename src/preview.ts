@@ -362,6 +362,7 @@ export async function run(
     location.search = "";
     return;
   }
+  if (name === "get_provider_seen_statuses") return [];
   if (name === "list_provider_models")
     return {
       providerId: args.providerId,

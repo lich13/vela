@@ -154,6 +154,8 @@ it("旧 agy 记录与 CLI 会话记录都显示为 Antigravity，来源只在详
   const session = record();
   session.id = "fixture-cli-session";
   session.attempts[0].transport = "cli_file";
+  session.attempts[0].stream = false;
+  session.attempts[0].firstTokenMs = null;
 
   const list = render(
     <UsageLogTable
@@ -184,6 +186,10 @@ it("旧 agy 记录与 CLI 会话记录都显示为 Antigravity，来源只在详
   expect(field("客户端")).toHaveTextContent(/^Antigravity$/);
   expect(field("来源")).toHaveTextContent(/^Antigravity 会话$/);
   expect(field("传输")).toHaveTextContent(/^CLI 会话文件$/);
+  expect(field("首字")?.querySelector("span")).toHaveAttribute(
+    "title",
+    "CLI 未记录",
+  );
 });
 
 it("runs explicit app history repair through the existing synchronization command", async () => {

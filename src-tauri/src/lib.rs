@@ -1128,6 +1128,20 @@ async fn list_provider_models(
 ) -> Result<gateway::catalog::View> {
     r.gateway(client_id).list_models(&provider_id, force).await
 }
+/// The upstream error statuses met by the providers that share a host with
+/// the given provider, or with the address of one that is not saved yet.
+#[tauri::command]
+fn get_provider_seen_statuses(
+    client_id: gateway::ClientId,
+    r: tauri::State<'_, Arc<Runtime>>,
+    provider_id: Option<String>,
+    base_url: Option<String>,
+) -> Vec<events::SeenStatus> {
+    let providers = r
+        .gateway(client_id)
+        .same_host_providers(provider_id.as_deref(), base_url.as_deref());
+    r.diagnostics.seen_statuses(client_id, &providers)
+}
 #[tauri::command]
 fn get_state(r: tauri::State<'_, Arc<Runtime>>) -> Result<ViewState> {
     state_for(r.inner())
@@ -2772,6 +2786,7 @@ pub fn run() {
             stop_gateway,
             query_provider_quota,
             list_provider_models,
+            get_provider_seen_statuses,
             get_state,
             switch_account,
             use_official_account,

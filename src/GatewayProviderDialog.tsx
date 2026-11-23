@@ -17,6 +17,7 @@ import {
 import type { GatewayEdit } from "./bridge-contracts";
 import type { EditRevision } from "./gateway-edit";
 import Modal from "./Modal";
+import { limitLabel } from "./limit-labels";
 
 /** Status codes split on spaces or commas; null unless all are 400–599 and at most 16. */
 const parseRiskCodes = (text: string) => {
@@ -24,6 +25,45 @@ const parseRiskCodes = (text: string) => {
   if (parts.some((part) => !/^[45]\d\d$/.test(part))) return null;
   const codes = [...new Set(parts.map(Number))].sort((a, b) => a - b);
   return codes.length > 16 ? null : codes;
+};
+
+const VERTEX_REGIONS = [
+  "global",
+  "us-east5",
+  "us-central1",
+  "us-east1",
+  "us-west1",
+  "europe-west1",
+  "europe-west4",
+  "asia-southeast1",
+  "asia-northeast1",
+];
+const VERTEX_HOST = "aiplatform.googleapis.com";
+
+/** The Vertex AI address of a publisher; the express form when no project is given. */
+const vertexUrl = (publisher: string, region: string, project: string) => {
+  region = region.trim();
+  project = project.trim();
+  if (!project) return `https://${VERTEX_HOST}/v1/publishers/${publisher}`;
+  if (!region) return "";
+  const host = region === "global" ? VERTEX_HOST : `${region}-${VERTEX_HOST}`;
+  return `https://${host}/v1/projects/${project}/locations/${region}/publishers/${publisher}`;
+};
+
+/** The region and project of an address `vertexUrl` builds, or null for any other. */
+const parseVertexUrl = (publisher: string, url: string) => {
+  const address = url.trim().replace(/\/+$/, "");
+  if (address === vertexUrl(publisher, "global", ""))
+    return { region: "global", project: "" };
+  const match =
+    /^https:\/\/[^/]+\/v1\/projects\/([^/]+)\/locations\/([^/]+)\/publishers\/[^/]+$/.exec(
+      address,
+    );
+  if (!match) return null;
+  const [, project, region] = match;
+  return address === vertexUrl(publisher, region, project)
+    ? { region, project }
+    : null;
 };
 
 export default function GatewayDialog({
@@ -49,6 +89,24 @@ export default function GatewayDialog({
   const [name, setName] = useState(dialog.item ? dialog.item.name : ""),
     [baseUrl, setBaseUrl] = useState(dialog.item?.baseUrl ?? ""),
     [token, setToken] = useState("");
+  // Claude and Antigravity providers can be reached through Vertex AI, whose
+  // address is built from a region and a project instead of typed.
+  const publisher =
+    clientId === "claude" ? "anthropic" : clientId === "agy" ? "google" : null;
+  const savedVertex = publisher
+    ? parseVertexUrl(publisher, dialog.item?.baseUrl ?? "")
+    : null;
+  const [vertex, setVertex] = useState(Boolean(savedVertex)),
+    [region, setRegion] = useState(savedVertex?.region ?? "global"),
+    [project, setProject] = useState(savedVertex?.project ?? ""),
+    [customRegion, setCustomRegion] = useState(
+      Boolean(savedVertex && !VERTEX_REGIONS.includes(savedVertex.region)),
+    );
+  const pickVertex = (nextRegion: string, nextProject: string) => {
+    setRegion(nextRegion);
+    setProject(nextProject);
+    if (publisher) setBaseUrl(vertexUrl(publisher, nextRegion, nextProject));
+  };
   const [protocol, setProtocol] = useState(
     clientId === "dsh"
       ? "chat_completions"
@@ -98,7 +156,19 @@ export default function GatewayDialog({
   const [normalRetrySeconds, setNormalRetrySeconds] = useState(
     String(savedEndless.normalRetrySeconds),
   );
+  // The typed risk codes; the ticked ones live in `checkedCodes`.
   const [riskCodes, setRiskCodes] = useState(savedEndless.riskCodes.join(", "));
+  const [checkedCodes, setCheckedCodes] = useState<number[]>([]);
+  const riskText = useRef(riskCodes);
+  riskText.current = riskCodes;
+  // The error statuses to tick from: those the providers on this host have
+  // answered with, then the listed codes none of them has.
+  const [riskOptions, setRiskOptions] = useState<
+    { status: number; count: number; basis: string | null }[]
+  >([]);
+  const allRiskCodes = `${checkedCodes.join(" ")} ${riskCodes}`.trim();
+  // One spelling for the same list, however it is split between the two.
+  const riskDraft = parseRiskCodes(allRiskCodes)?.join(",") ?? allRiskCodes;
   const [retryIntensity, setRetryIntensity] = useState(
     String(savedEndless.retryIntensity),
   );
@@ -183,6 +253,51 @@ export default function GatewayDialog({
       gone = true;
     };
   }, [clientId, providerId, suggesting]);
+  const seenAddress = providerId ? undefined : baseUrl;
+  useEffect(() => {
+    if (!endlessMode || clientId === "grok") return;
+    if (!providerId && !seenAddress) return;
+    let gone = false;
+    void (async () => {
+      try {
+        const seen = await command(
+          "get_provider_seen_statuses",
+          providerId
+            ? { clientId, providerId }
+            : { clientId, baseUrl: seenAddress },
+        );
+        if (gone || !seen?.length) return;
+        // Typed codes that are error statuses move to the list, ticked.
+        const parts = riskText.current.split(/[\s,，]+/).filter(Boolean);
+        const moved = [
+          ...new Set(
+            parts.filter((part) => /^[45]\d\d$/.test(part)).map(Number),
+          ),
+        ];
+        setRiskOptions((old) => {
+          const known = [
+            ...seen,
+            ...old.filter((o) => !seen.some((s) => s.status === o.status)),
+          ];
+          return [
+            ...known,
+            ...moved
+              .filter((status) => !known.some((o) => o.status === status))
+              .map((status) => ({ status, count: 0, basis: null })),
+          ];
+        });
+        setCheckedCodes((old) => [...new Set([...old, ...moved])]);
+        setRiskCodes(
+          parts.filter((part) => !/^[45]\d\d$/.test(part)).join(" "),
+        );
+      } catch {
+        // The codes stay typeable without the list.
+      }
+    })();
+    return () => {
+      gone = true;
+    };
+  }, [clientId, providerId, seenAddress, endlessMode]);
 
   const [revealed, setRevealed] = useState<{
     value: string;
@@ -264,7 +379,7 @@ export default function GatewayDialog({
       limitRetrySeconds,
       limitRestSeconds,
       normalRetrySeconds,
-      riskCodes,
+      riskDraft,
       retryIntensity,
       takeCompaction,
       compactionModel,
@@ -294,7 +409,7 @@ export default function GatewayDialog({
         limitRetrySeconds,
         limitRestSeconds,
         normalRetrySeconds,
-        riskCodes,
+        riskDraft,
         retryIntensity,
         takeCompaction,
         compactionModel,
@@ -322,7 +437,7 @@ export default function GatewayDialog({
     limitRetrySeconds,
     limitRestSeconds,
     normalRetrySeconds,
-    riskCodes,
+    riskDraft,
     retryIntensity,
     takeCompaction,
     compactionModel,
@@ -344,7 +459,7 @@ export default function GatewayDialog({
         onSubmit={(e) => {
           e.preventDefault();
           const codes = endlessMode
-            ? parseRiskCodes(riskCodes)
+            ? parseRiskCodes(allRiskCodes)
             : savedEndless.riskCodes;
           if (!codes) {
             setError("风控代码应为 400–599 的状态码，最多 16 个");
@@ -457,6 +572,76 @@ export default function GatewayDialog({
               </select>
             </label>
           )}
+          {publisher && (
+            <div className="segmented" role="group" aria-label="接入方式">
+              <button
+                type="button"
+                aria-pressed={!vertex}
+                disabled={busy}
+                onClick={() => setVertex(false)}
+              >
+                普通端点
+              </button>
+              <button
+                type="button"
+                aria-pressed={vertex}
+                disabled={busy}
+                onClick={() => {
+                  setVertex(true);
+                  pickVertex(region, project);
+                }}
+              >
+                Vertex AI
+              </button>
+            </div>
+          )}
+          {vertex && (
+            <>
+              <label>
+                区域
+                <select
+                  value={customRegion ? "" : region}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setCustomRegion(!e.target.value);
+                    pickVertex(e.target.value, project);
+                  }}
+                >
+                  {VERTEX_REGIONS.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                  <option value="">自定义…</option>
+                </select>
+              </label>
+              {customRegion && (
+                <label>
+                  自定义区域
+                  <input
+                    type="text"
+                    required
+                    spellCheck={false}
+                    value={region}
+                    disabled={busy}
+                    placeholder="us-east5"
+                    onChange={(e) => pickVertex(e.target.value, project)}
+                  />
+                </label>
+              )}
+              <label>
+                项目 ID
+                <input
+                  type="text"
+                  spellCheck={false}
+                  value={project}
+                  disabled={busy}
+                  placeholder="可选；留空使用不分区域的 express 端点"
+                  onChange={(e) => pickVertex(region, e.target.value)}
+                />
+              </label>
+            </>
+          )}
           <label>
             <span className="field-label-row">
               <span>
@@ -479,6 +664,7 @@ export default function GatewayDialog({
               required
               type="url"
               autoFocus
+              readOnly={vertex}
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               placeholder={
@@ -492,15 +678,10 @@ export default function GatewayDialog({
               }
             />
           </label>
-          {(clientId === "agy" || clientId === "claude") && (
-            <small className="muted">
-              {clientId === "agy"
-                ? "Gemini 原生端点；使用 Vertex AI Key 时填到 …/publishers/google 为止"
-                : "使用 Vertex AI Key 时填到 …/publishers/anthropic 为止，Token 填 Google API Key"}
-            </small>
-          )}
           <label>
-            {clientId === "claude"
+            {vertex
+              ? "Google API Key"
+              : clientId === "claude"
               ? "ANTHROPIC_AUTH_TOKEN"
               : clientId === "grok" || clientId === "dsh"
                 ? "api_key"
@@ -834,11 +1015,44 @@ export default function GatewayDialog({
                   />
                   <span>秒</span>
                 </label>
+                {riskOptions.length > 0 && (
+                  <fieldset
+                    className="provider-risk-options"
+                    disabled={busy}
+                    title="勾选后，该状态码按风控重试处理；列出的是同域名供应商近 7 天遇到过的上游报错"
+                  >
+                    <legend>风控代码</legend>
+                    {riskOptions.map((option) => (
+                      <label key={option.status}>
+                        <input
+                          type="checkbox"
+                          checked={checkedCodes.includes(option.status)}
+                          onChange={(e) =>
+                            setCheckedCodes((old) =>
+                              e.target.checked
+                                ? [...old, option.status]
+                                : old.filter((code) => code !== option.status),
+                            )
+                          }
+                        />
+                        <span>
+                          {[
+                            option.status,
+                            option.count ? `${option.count} 次` : "未遇到",
+                            limitLabel({ errorBasis: option.basis }),
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </span>
+                      </label>
+                    ))}
+                  </fieldset>
+                )}
                 <label
                   className="provider-retry-setting provider-risk-codes"
                   title="按风控重试处理的上游状态码（400–599），以空格或逗号分隔，最多 16 个，可留空"
                 >
-                  <span>风控代码</span>
+                  <span>{riskOptions.length ? "其他代码" : "风控代码"}</span>
                   <input
                     type="text"
                     inputMode="numeric"
@@ -849,6 +1063,11 @@ export default function GatewayDialog({
                     onChange={(e) => setRiskCodes(e.target.value)}
                   />
                 </label>
+                {!riskOptions.length && (
+                  <small className="muted provider-risk-options">
+                    暂无已遇到的报错
+                  </small>
+                )}
                 <label
                   className="provider-retry-setting"
                   title="上游返回 429（余额不足等永久拒绝除外），或内容判定为限流的拒绝时的重试间隔"

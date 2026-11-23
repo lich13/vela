@@ -9,6 +9,7 @@ import {
   logSpeed,
   generationSpeed,
 } from "./usage-log-columns";
+import { modelRelation } from "./usage-format";
 import type { Attempt, UsageRecord, UsageSettings } from "./usage-types";
 import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
 const defaultSettings: UsageSettings = {
@@ -361,4 +362,74 @@ it("matches output tokens over total request time without a TTFT dependency", ()
   expect(
     logSpeed({ ...attempt, tokens: { ...tokens, imageOutput: 10 } }),
   ).toBeNull();
+});
+it("classifies mapped and mismatched models", () => {
+  const relation = (
+    requestedModel: string | null,
+    upstreamModel: string | null,
+    responseModel: string | null,
+  ) => {
+    const { mapped, mismatch } = modelRelation({
+      requestedModel,
+      upstreamModel,
+      responseModel,
+    });
+    return [mapped, mismatch];
+  };
+  expect(
+    relation(
+      "claude-fable-5-2",
+      "deepseek-v4.1-flash-1017",
+      "deepseek-v4.1-flash-1017",
+    ),
+  ).toEqual([true, false]);
+  expect(relation("fixture-a", null, "fixture-b")).toEqual([false, true]);
+  expect(relation("fixture-a", "fixture-b", "fixture-a")).toEqual([true, true]);
+  expect(relation("fixture-a", "fixture-a", "fixture-a")).toEqual([
+    false,
+    false,
+  ]);
+  expect(relation("fixture-a", null, null)).toEqual([false, false]);
+  expect(relation(null, null, "fixture-a")).toEqual([false, false]);
+  for (const [sent, received] of [
+    ["Fixture-A", "models/fixture-a"],
+    ["vendor/fixture-a", "fixture-a-20260102"],
+    ["fixture-a-latest", "fixture-a@20260102"],
+    ["fixture-a", "fixture-a-2026-01-02"],
+  ])
+    expect(relation(sent, null, received)).toEqual([false, false]);
+});
+it("shows mapping and mismatch badges in the model column", () => {
+  render(
+    <UsageLogTable
+      rows={[
+        {
+          id: "fixture-relation",
+          client: "claude",
+          source: "proxy",
+          startedAt: 1,
+          attempts: [
+            {
+              ...attempt,
+              requestedModel: "fixture-request",
+              upstreamModel: "fixture-mapped",
+              responseModel: "fixture-other",
+            },
+          ],
+        } as UsageRecord,
+      ]}
+      busy={false}
+      settings={defaultSettings}
+      name={() => "Fixture"}
+      open={() => {}}
+    />,
+  );
+  expect(
+    screen.getByText("fixture-request → fixture-mapped"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("映射")).toBeInTheDocument();
+  expect(screen.getByText("响应不一致")).toHaveAttribute(
+    "title",
+    "请求模型 fixture-request · 上游请求模型 fixture-mapped · 收到的响应模型 fixture-other",
+  );
 });

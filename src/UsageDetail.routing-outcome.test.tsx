@@ -124,3 +124,22 @@ it("keeps the initial boundary evidence beside the final routing outcome", () =>
   expect(screen.getByText("最终路由结果")).toBeInTheDocument();
   expect(screen.getByText("新压缩窗口已保存")).toBeInTheDocument();
 });
+
+it("marks a mapped model and a mismatched response model", () => {
+  render(
+    <Detail
+      record={record({
+        requestedModel: "claude-fable-5-2",
+        upstreamModel: "deepseek-v4.1-flash-1017",
+        responseModel: "other-model",
+      })}
+      name={(id) => id ?? ""}
+      onClose={vi.fn()}
+    />,
+  );
+  expect(screen.getByText("映射")).toBeInTheDocument();
+  expect(screen.getByText("响应不一致")).toHaveAttribute(
+    "title",
+    "请求模型 claude-fable-5-2 · 上游请求模型 deepseek-v4.1-flash-1017 · 收到的响应模型 other-model",
+  );
+});

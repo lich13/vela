@@ -2233,6 +2233,30 @@ impl Gateway {
             (query, connection)
         })
     }
+    /// Ids of this client's providers on the same host as the given provider,
+    /// or as the address of one that is not saved yet.
+    pub fn same_host_providers(&self, id: Option<&str>, base_url: Option<&str>) -> Vec<String> {
+        let host = |address: &str| {
+            url::Url::parse(address)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        };
+        let s = self.0.inner.lock();
+        let providers = &s.store.providers;
+        let Some(target) = id
+            .and_then(|id| providers.iter().find(|p| p.id == id))
+            .map(|p| p.base_url.as_str())
+            .or(base_url)
+            .and_then(host)
+        else {
+            return Vec::new();
+        };
+        providers
+            .iter()
+            .filter(|p| host(&p.base_url).as_ref() == Some(&target))
+            .map(|p| p.id.clone())
+            .collect()
+    }
     pub async fn list_models(&self, id: &str, force: bool) -> Result<catalog::View> {
         let (input, connection) = self.query_snapshot(id, false)?;
         let version = input.version.clone();

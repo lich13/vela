@@ -578,3 +578,154 @@ describe("request takeover", () => {
     );
   });
 });
+
+describe("risk codes met on the same host", () => {
+  afterEach(() => vi.mocked(command).mockReset());
+
+  it("ticks the met statuses and keeps the listed and typed ones", async () => {
+    const user = userEvent.setup();
+    const save = vi.fn().mockResolvedValue(undefined);
+    const dirty = vi.fn();
+    vi.mocked(command).mockImplementation((async (name: string) =>
+      name === "get_provider_seen_statuses"
+        ? [
+            { status: 429, count: 12, basis: "rpm", lastAt: 2 },
+            { status: 503, count: 3, basis: null, lastAt: 1 },
+          ]
+        : undefined) as never);
+    const item = {
+      ...claudeGatewayDemo.providers[0],
+      endlessMode: true,
+      riskCodes: [520],
+    };
+    render(
+      <GatewayProviderDialog
+        clientId="claude"
+        connectionMode="bearer"
+        dialog={{ kind: "provider", item }}
+        revision="fixture-revision"
+        close={() => {}}
+        save={save}
+        onDirtyChange={dirty}
+      />,
+    );
+    const met = await screen.findByRole("checkbox", {
+      name: "429 · 12 次 · 上游 RPM 限制",
+    });
+    expect(command).toHaveBeenCalledWith("get_provider_seen_statuses", {
+      clientId: "claude",
+      providerId: item.id,
+    });
+    expect(met).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "520 · 未遇到" })).toBeChecked();
+    const other = screen.getByRole("textbox", { name: "其他代码" });
+    expect(other).toHaveValue("");
+    // Moving the listed code into the list is not an edit.
+    expect(dirty).toHaveBeenLastCalledWith(false);
+
+    await user.click(met);
+    await user.click(screen.getByRole("checkbox", { name: "503 · 3 次" }));
+    await user.click(screen.getByRole("checkbox", { name: "503 · 3 次" }));
+    await user.type(other, "524");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ riskCodes: [429, 520, 524] }),
+      "fixture-revision",
+    );
+  });
+
+  it("leaves the typed field alone when nothing was met", async () => {
+    vi.mocked(command).mockResolvedValue([] as never);
+    render(
+      <GatewayProviderDialog
+        clientId="claude"
+        connectionMode="bearer"
+        dialog={{
+          kind: "provider",
+          item: {
+            ...claudeGatewayDemo.providers[0],
+            endlessMode: true,
+            riskCodes: [520],
+          },
+        }}
+        revision="fixture-revision"
+        close={() => {}}
+        save={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("暂无已遇到的报错")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "风控代码" })).toHaveValue(
+      "520",
+    );
+  });
+});
+
+describe("Vertex AI access", () => {
+  const open = (clientId: "claude" | "agy", item?: Provider) => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    render(
+      <GatewayProviderDialog
+        clientId={clientId}
+        connectionMode="bearer"
+        dialog={{ kind: "provider", item }}
+        revision="fixture-revision"
+        close={() => {}}
+        save={save}
+      />,
+    );
+    return save;
+  };
+
+  it("builds the address from the picked region and project", async () => {
+    const user = userEvent.setup();
+    const save = open("claude");
+    await user.click(screen.getByRole("button", { name: "Vertex AI" }));
+    const address = screen.getByLabelText("ANTHROPIC_BASE_URL");
+    expect(address).toHaveAttribute("readonly");
+    expect(address).toHaveValue(
+      "https://aiplatform.googleapis.com/v1/publishers/anthropic",
+    );
+    await user.type(screen.getByLabelText("项目 ID"), "fixture-project");
+    expect(address).toHaveValue(
+      "https://aiplatform.googleapis.com/v1/projects/fixture-project/locations/global/publishers/anthropic",
+    );
+    await user.selectOptions(screen.getByLabelText("区域"), "us-east5");
+    await user.type(screen.getByLabelText("Google API Key"), "fixture-key");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl:
+          "https://us-east5-aiplatform.googleapis.com/v1/projects/fixture-project/locations/us-east5/publishers/anthropic",
+        token: "fixture-key",
+      }),
+      "fixture-revision",
+    );
+  });
+
+  it("reads a saved Vertex AI address back into its region and project", () => {
+    open("agy", {
+      ...claudeGatewayDemo.providers[0],
+      baseUrl:
+        "https://europe-west4-aiplatform.googleapis.com/v1/projects/fixture-project/locations/europe-west4/publishers/google",
+    });
+    expect(screen.getByRole("button", { name: "Vertex AI" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByLabelText("区域")).toHaveValue("europe-west4");
+    expect(screen.getByLabelText("项目 ID")).toHaveValue("fixture-project");
+  });
+
+  it("keeps any other address a plain endpoint", () => {
+    open("claude", {
+      ...claudeGatewayDemo.providers[0],
+      baseUrl:
+        "https://us-east5-aiplatform.googleapis.com/v1/projects/fixture-project/locations/global/publishers/anthropic",
+    });
+    expect(screen.getByRole("button", { name: "普通端点" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.queryByLabelText("区域")).not.toBeInTheDocument();
+  });
+});
