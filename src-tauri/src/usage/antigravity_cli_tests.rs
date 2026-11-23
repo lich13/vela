@@ -130,7 +130,13 @@ fn save_step(db: &Connection, step: u64, response: &str, thinking: u64, generato
         proto::bytes(11, response.as_bytes()),
     ]
     .concat();
+    // Sent at 100 s, first content 2.014 s later, done at 4.032 s.
+    let at =
+        |seconds: u64, nanos: u64| [proto::number(1, seconds), proto::number(2, nanos)].concat();
     let metadata = [
+        proto::bytes(1, &at(100, 0)),
+        proto::bytes(6, &at(102, 14_000_000)),
+        proto::bytes(7, &at(104, 32_000_000)),
         proto::bytes(9, &usage),
         proto::bytes(20, &proto::number(3, generator)),
     ]
@@ -195,6 +201,12 @@ fn counts_are_stored_as_written_and_syncing_again_adds_nothing() {
     );
     assert_eq!(row.session_id, Some(safe_id("session")));
     let a = &row.attempts[0];
+    // Timed by the conversation database.
+    assert_eq!(
+        (a.stream, a.first_token_ms, a.generation_ms, a.duration_ms),
+        (true, Some(2014), Some(2018), 4032)
+    );
+    assert!(a.parse_reasons.is_empty());
     assert_eq!(
         (
             a.tokens.input,

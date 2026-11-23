@@ -27,6 +27,9 @@ struct Position {
     model: Option<String>,
     database: String,
     unread: bool,
+    /// Read since steps took their timing from the conversation database;
+    /// a file read before is read once more for it.
+    timed: bool,
 }
 
 /// Just enough of the protobuf wire format to pick fields out of a message.
@@ -90,12 +93,24 @@ mod wire {
 }
 
 /// What a step's metadata adds to its transcript line: usage message fields
-/// 4, 9 and 11, and the index of the generator that produced the step.
+/// 4, 9 and 11, the index of the generator that produced the step, and its
+/// timing. Fields 1, 6 and 7 are timestamps: the request sent, its first
+/// content shown and the model done writing.
 struct Step {
     response_id: Option<String>,
     reasoning: Option<u64>,
     cache_write: Option<u64>,
     generator: u64,
+    /// Milliseconds to the first content and to the end, when the three
+    /// stamps are in order.
+    timing: Option<(u64, u64)>,
+}
+/// A `google.protobuf.Timestamp` in milliseconds.
+fn stamp(step: &[(u64, wire::Field<'_>)], field: u64) -> Option<u64> {
+    let at = wire::fields(wire::bytes(step, field)?)?;
+    let seconds = wire::number(&at, 1).filter(|s| *s < 100_000_000_000)?;
+    let nanos = wire::number(&at, 2).unwrap_or(0).min(999_999_999);
+    Some(seconds * 1000 + nanos / 1_000_000)
 }
 impl Step {
     fn read(metadata: &[u8]) -> Option<Self> {
@@ -108,6 +123,11 @@ impl Step {
             reasoning: count(9),
             cache_write: count(4),
             generator: wire::number(&origin, 3).unwrap_or(0),
+            timing: stamp(&step, 1)
+                .zip(stamp(&step, 6))
+                .zip(stamp(&step, 7))
+                .filter(|((sent, first), done)| sent <= first && first <= done && done > sent)
+                .map(|((sent, first), done)| (first - sent, done - sent)),
         })
     }
 }
@@ -359,6 +379,17 @@ fn step_record(
         parse_reasons: vec!["attempt_time_unreported".into()],
         ..Attempt::default()
     };
+    // The conversation database times the step; the transcript does not.
+    if let Some((first, total)) = recorded.as_ref().and_then(|step| step.timing) {
+        attempt.stream = true;
+        attempt.first_token_ms = Some(first);
+        attempt.generation_ms = Some(total - first);
+        attempt.duration_ms = total;
+        attempt
+            .availability
+            .insert("duration".into(), "reported".into());
+        attempt.parse_reasons.clear();
+    }
     normalize_attempt(&mut attempt);
     if attempt.response_model.is_none() {
         if let Some(generator) = recorded.and_then(|step| conversation.generator(step.generator)) {
@@ -404,7 +435,7 @@ fn scan_session(
         let log = local_file_stamp(&db.with_extension("db-wal"));
         format!("{}+{log}", local_file_stamp(db))
     });
-    if at.unread && at.database != stamp {
+    if !at.timed || (at.unread && at.database != stamp) {
         at = Position::default();
     }
     let mut file = File::open(path).map_err(storage::io_error)?;
@@ -431,6 +462,7 @@ fn scan_session(
     if at.identity != identity || meta.len() < at.offset || tail(&mut file, at.offset)? != at.tail {
         at = Position::default();
     }
+    at.timed = true;
     at.identity = identity;
     file.seek(SeekFrom::Start(at.offset))
         .map_err(storage::io_error)?;
