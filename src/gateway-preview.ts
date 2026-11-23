@@ -48,7 +48,6 @@ const idle = {
   takeWebSearch: false,
   webSearchModel: "",
   webSearchEffort: "",
-  searchOnly: false,
   endOnMessageStop: false,
   filterCountTokens: false,
   bufferCompleteResponse: false,
@@ -807,7 +806,6 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         p.baseUrl = String(e.baseUrl);
         if (e.op === "saveGrokProvider")
           p.protocol = e.protocol as GrokProtocol;
-        if (e.searchOnly !== undefined) p.searchOnly = Boolean(e.searchOnly);
         if (e.takeCompaction !== undefined)
           p.takeCompaction = Boolean(e.takeCompaction);
         if (e.compactionModel !== undefined)

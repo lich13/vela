@@ -971,20 +971,15 @@ it("shows the provider's actual interval, start time and unavailable statistics"
   await emit();
   expect(await screen.findByText("暂不可用")).toBeInTheDocument();
 });
-it("excludes search-only providers and enables fingerprint tabs on other clients", async () => {
-  gateway.providers[0].searchOnly = true;
+it("offers fingerprint and detection tabs for every provider", async () => {
+  gateway.providers[0].takeWebSearch = true;
   const first = open();
-  expect(
-    screen.queryByRole("tab", { name: "模型指纹" }),
-  ).not.toBeInTheDocument();
-  expect(
-    screen.queryByRole("tab", { name: "定时检测" }),
-  ).not.toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "模型指纹" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "定时检测" })).toBeInTheDocument();
   first.unmount();
   gateway.clientId = "claude";
-  gateway.providers[0].searchOnly = false;
   open();
-  expect(screen.queryByRole("tab", { name: "模型指纹" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "模型指纹" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "连接测试" })).toBeInTheDocument();
 });
 it("keeps keyboard navigation inside the provider's testing tabs", async () => {
@@ -1203,4 +1198,3 @@ it("switches between strict and relaxed verdict modes and persists the degraded 
     }),
   );
 });
-

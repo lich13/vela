@@ -135,16 +135,13 @@ export default function ProviderTesting({
   const kind: ProviderTestKind =
     tab === "fingerprint" ? "fingerprint" : "connection";
   const testing = tab === "connection" || tab === "fingerprint";
-  const fingerprint = !provider.searchOnly;
   const platform = state?.platform;
   const verdictMode: VerdictMode = platform?.verdictMode ?? "strict";
   const [degradedModelDraft, setDegradedModelDraft] = useState(
     DEFAULT_DEGRADED_MODEL,
   );
   useEffect(() => {
-    setDegradedModelDraft(
-      platform?.degradedModelId ?? DEFAULT_DEGRADED_MODEL,
-    );
+    setDegradedModelDraft(platform?.degradedModelId ?? DEFAULT_DEGRADED_MODEL);
   }, [platform?.degradedModelId]);
   const sampleCount =
     platform?.engine === "lmDetector"
@@ -162,9 +159,7 @@ export default function ProviderTesting({
   const catalogEndpoint =
     tab === "detection" ? (detection?.endpoint ?? provider.baseUrl) : endpoint;
   const models = catalog?.endpoint === catalogEndpoint ? catalog.value : null;
-  const endpoints = [
-    ...new Set([provider.baseUrl, ...provider.extraBaseUrls]),
-  ];
+  const endpoints = [...new Set([provider.baseUrl, ...provider.extraBaseUrls])];
   const endpointAvailable = endpoints.includes(endpoint);
   const modelAvailable = !!models?.models.some((m) => m.id === model);
   const detectionModelAvailable = !!models?.models.some(
@@ -418,14 +413,10 @@ export default function ProviderTesting({
     });
   const tabs: [Tab, string][] = [
     ["connection", "连接测试"],
-    ...(fingerprint ? [["fingerprint", "模型指纹"] as [Tab, string]] : []),
+    ["fingerprint", "模型指纹"],
     ["history", "测试结果"],
-    ...(fingerprint
-      ? ([
-          ["detection", "定时检测"],
-          ["bank", "指纹库"],
-        ] as [Tab, string][])
-      : []),
+    ["detection", "定时检测"],
+    ["bank", "指纹库"],
   ];
   const status = state?.detectionStatus.find(
     (s) => s.providerId === provider.id,
@@ -512,9 +503,7 @@ export default function ProviderTesting({
     if (!platform || verdictMode !== "relaxed") return Promise.resolve(true);
     const next = raw.trim();
     if (!next) {
-      setDegradedModelDraft(
-        platform.degradedModelId ?? DEFAULT_DEGRADED_MODEL,
-      );
+      setDegradedModelDraft(platform.degradedModelId ?? DEFAULT_DEGRADED_MODEL);
       return Promise.resolve(true);
     }
     if (next === (platform.degradedModelId ?? DEFAULT_DEGRADED_MODEL))

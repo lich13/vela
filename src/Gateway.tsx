@@ -613,7 +613,7 @@ function GatewayContent({
 
                     <button
                       className="secondary compact"
-                      disabled={rowBusy || p.searchOnly}
+                      disabled={rowBusy}
                       onClick={() => choose(p)}
                     >
                       {selected ? (

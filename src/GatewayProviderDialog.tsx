@@ -116,9 +116,6 @@ export default function GatewayDialog({
   const [quotaAccessToken, setQuotaAccessToken] = useState<
     string | undefined
   >();
-  const [searchOnly, setSearchOnly] = useState(
-    Boolean(dialog.item?.searchOnly),
-  );
   const [endOnMessageStop, setEndOnMessageStop] = useState(
     Boolean(dialog.item?.endOnMessageStop),
   );
@@ -173,22 +170,24 @@ export default function GatewayDialog({
     String(savedEndless.retryIntensity),
   );
   // Codex and Claude providers can serve the compaction and auxiliary requests
-  // in place of the rest of the queue; a search-only provider takes neither.
-  const takeoverOffered =
-    clientId === "claude" || (clientId === "codex" && !searchOnly);
+  // in place of the rest of the queue. A new provider takes every kind its
+  // client hands over.
+  const takeoverOffered = clientId === "claude" || clientId === "codex";
   const [takeCompaction, setTakeCompaction] = useState(
-    Boolean(dialog.item?.takeCompaction),
+    dialog.item ? Boolean(dialog.item.takeCompaction) : true,
   );
   const [takeAuxiliary, setTakeAuxiliary] = useState(
-    Boolean(dialog.item?.takeAuxiliary),
+    dialog.item ? Boolean(dialog.item.takeAuxiliary) : true,
   );
-  // Claude and Grok providers can serve the web searches their client's own
-  // search tool sends. Grok's is a Responses request, which a provider on
-  // another protocol is never sent.
+  // Codex, Claude and Grok providers can serve the web searches their client
+  // sends. Grok's is a Responses request, which a provider on another
+  // protocol is never sent.
   const searchOffered =
-    clientId === "claude" || (clientId === "grok" && protocol === "responses");
+    clientId === "claude" ||
+    clientId === "codex" ||
+    (clientId === "grok" && protocol === "responses");
   const [takeWebSearch, setTakeWebSearch] = useState(
-    Boolean(dialog.item?.takeWebSearch),
+    dialog.item ? Boolean(dialog.item.takeWebSearch) : true,
   );
   // What a takeover's model and effort send while its option is switched off
   // or hidden.
@@ -370,7 +369,6 @@ export default function GatewayDialog({
       token,
       protocol,
       quotaAccessToken,
-      searchOnly,
       endOnMessageStop,
       filterCountTokens,
       bufferCompleteResponse,
@@ -400,7 +398,6 @@ export default function GatewayDialog({
         token,
         protocol,
         quotaAccessToken,
-        searchOnly,
         endOnMessageStop,
         filterCountTokens,
         bufferCompleteResponse,
@@ -428,7 +425,6 @@ export default function GatewayDialog({
     token,
     protocol,
     quotaAccessToken,
-    searchOnly,
     endOnMessageStop,
     filterCountTokens,
     bufferCompleteResponse,
@@ -526,6 +522,7 @@ export default function GatewayDialog({
                     ...draft,
                     ...endless,
                     ...takeover,
+                    ...(clientId === "codex" ? search : {}),
                     ...(clientId === "claude"
                       ? {
                           ...search,
@@ -533,9 +530,6 @@ export default function GatewayDialog({
                           filterCountTokens,
                           bufferCompleteResponse,
                         }
-                      : {}),
-                    ...(clientId === "codex" && dialog.item
-                      ? { searchOnly }
                       : {}),
                   };
           void save(payload, baseline.current)
@@ -682,14 +676,14 @@ export default function GatewayDialog({
             {vertex
               ? "Google API Key"
               : clientId === "claude"
-              ? "ANTHROPIC_AUTH_TOKEN"
-              : clientId === "grok" || clientId === "dsh"
-                ? "api_key"
-                : clientId === "agy"
-                  ? "API Key"
-                  : connectionMode === "apiKey"
-                    ? "OPENAI_API_KEY"
-                    : "experimental_bearer_token"}
+                ? "ANTHROPIC_AUTH_TOKEN"
+                : clientId === "grok" || clientId === "dsh"
+                  ? "api_key"
+                  : clientId === "agy"
+                    ? "API Key"
+                    : connectionMode === "apiKey"
+                      ? "OPENAI_API_KEY"
+                      : "experimental_bearer_token"}
             <span className="provider-token-input">
               <input
                 required={!dialog.item}
@@ -766,17 +760,6 @@ export default function GatewayDialog({
                   <option key={model} value={model} />
                 ))}
               </datalist>
-            )}
-            {clientId === "codex" && dialog.item && (
-              <label className="provider-search-setting">
-                <input
-                  type="checkbox"
-                  checked={searchOnly}
-                  disabled={busy}
-                  onChange={(e) => setSearchOnly(e.target.checked)}
-                />
-                <span>仅网络搜索</span>
-              </label>
             )}
             {clientId === "claude" && (
               <>

@@ -164,7 +164,7 @@ export default function ProviderControls({
   };
   return (
     <div className="provider-controls">
-      {clientId === "codex" && !provider.searchOnly && (
+      {clientId === "codex" && (
         <>
           <button
             type="button"
