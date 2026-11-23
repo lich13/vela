@@ -173,9 +173,9 @@ describe("Codex API login gateway controls", () => {
       await screen.findByRole("button", { name: "添加" });
 
       const addDialog = await openProviderEditor(user, "add");
-      expect(
-        within(addDialog).queryByLabelText("接管网络搜索请求"),
-      ).not.toBeInTheDocument();
+      // A new provider takes every kind over; a saved one keeps its own.
+      for (const name of ["接管压缩请求", "接管辅助请求", "接管网络搜索请求"])
+        expect(within(addDialog).getByRole("checkbox", { name })).toBeChecked();
       expect(within(addDialog).getByLabelText(label)).toHaveAttribute(
         "type",
         "password",
@@ -190,6 +190,10 @@ describe("Codex API login gateway controls", () => {
       await user.click(within(addDialog).getByRole("button", { name: "取消" }));
 
       const editDialog = await openProviderEditor(user, "edit");
+      for (const name of ["接管压缩请求", "接管辅助请求", "接管网络搜索请求"])
+        expect(
+          within(editDialog).getByRole("checkbox", { name }),
+        ).not.toBeChecked();
       expect(within(editDialog).getByLabelText(label)).toHaveAttribute(
         "type",
         "password",
@@ -260,12 +264,15 @@ describe("Codex API login gateway controls", () => {
         normalRetrySeconds: 3,
         riskCodes: [],
         retryIntensity: 5,
-        takeCompaction: false,
+        takeCompaction: true,
         compactionModel: "",
         compactionEffort: "",
-        takeAuxiliary: false,
+        takeAuxiliary: true,
         auxiliaryModel: "",
         auxiliaryEffort: "",
+        takeWebSearch: true,
+        webSearchModel: "",
+        webSearchEffort: "",
       },
       expectedRevision: original.revision,
     });

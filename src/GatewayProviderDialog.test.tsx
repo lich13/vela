@@ -273,20 +273,16 @@ describe("request takeover", () => {
   };
 
   it.each(["codex", "claude"] as const)(
-    "lets a new %s provider take both kinds over and trims the model",
+    "has a new %s provider take every kind over and trims the model",
     async (clientId) => {
       const user = userEvent.setup();
       const save = open(clientId);
-      for (const name of takeovers)
-        expect(screen.getByRole("checkbox", { name })).not.toBeChecked();
-      // Codex searches go to its search-only providers instead.
-      expect(screen.queryAllByRole("checkbox", { name: search })).toHaveLength(
-        clientId === "claude" ? 1 : 0,
-      );
-      expect(screen.queryByLabelText("压缩模型")).toBeNull();
-      expect(screen.queryByLabelText("辅助模型")).toBeNull();
+      // A new provider starts with every takeover on.
+      for (const name of [...takeovers, search])
+        expect(screen.getByRole("checkbox", { name })).toBeChecked();
+      expect(screen.queryByRole("checkbox", { name: "仅网络搜索" })).toBeNull();
+      expect(screen.getByRole("textbox", { name: "搜索模型" })).toHaveValue("");
 
-      await user.click(screen.getByRole("checkbox", { name: "接管压缩请求" }));
       const model = screen.getByRole("textbox", { name: "压缩模型" });
       expect(model).toHaveAttribute("placeholder", "留空则沿用客户端模型");
       expect(model).toHaveAttribute("maxlength", "256");
@@ -315,7 +311,6 @@ describe("request takeover", () => {
             ],
       );
       await user.selectOptions(effort, "low");
-      await user.click(screen.getByRole("checkbox", { name: "接管辅助请求" }));
       expect(screen.getByRole("textbox", { name: "辅助模型" })).toHaveValue("");
       expect(
         screen.getByRole("combobox", { name: "辅助思考强度" }),
@@ -348,12 +343,13 @@ describe("request takeover", () => {
           takeAuxiliary: true,
           auxiliaryModel: "",
           auxiliaryEffort: "",
+          takeWebSearch: true,
+          webSearchModel: "",
+          webSearchEffort: "",
         }),
         "fixture-revision",
       );
-      if (clientId === "codex")
-        for (const field of searchFields)
-          expect(save.mock.calls[0][0]).not.toHaveProperty(field);
+      expect(save.mock.calls[0][0]).not.toHaveProperty("searchOnly");
     },
   );
 
@@ -412,32 +408,50 @@ describe("request takeover", () => {
     );
   });
 
-  it("hides both takeovers on a search-only Codex provider and saves them off", async () => {
+  it("offers a saved Codex provider the web searches without switching anything on", async () => {
     const user = userEvent.setup();
     vi.mocked(command).mockRejectedValue(new Error("fixture list failed"));
     const save = open("codex", {
       takeCompaction: true,
       compactionModel: "fixture-compact",
-      takeAuxiliary: true,
     });
     await waitFor(() => expect(command).toHaveBeenCalled());
-    await user.click(screen.getByRole("checkbox", { name: "仅网络搜索" }));
     // A model list that cannot be read is not reported.
     expect(screen.queryByRole("alert")).toBeNull();
-    for (const name of takeovers)
-      expect(screen.queryByRole("checkbox", { name })).toBeNull();
-    expect(screen.queryByLabelText("压缩模型")).toBeNull();
-    expect(screen.queryByLabelText("辅助模型")).toBeNull();
+    // Search-only providers are gone; the searches are a takeover like the
+    // other two.
+    expect(screen.queryByRole("checkbox", { name: "仅网络搜索" })).toBeNull();
+    // A saved provider keeps what it has: only a new one starts all on.
+    expect(
+      screen.getByRole("checkbox", { name: "接管压缩请求" }),
+    ).toBeChecked();
+    for (const name of ["接管辅助请求", search])
+      expect(screen.getByRole("checkbox", { name })).not.toBeChecked();
+    expect(screen.queryByLabelText("搜索模型")).toBeNull();
 
+    await user.click(screen.getByRole("checkbox", { name: search }));
+    await user.type(
+      screen.getByRole("textbox", { name: "搜索模型" }),
+      "  fixture-search  ",
+    );
+    // The efforts are those of the Responses API.
+    const effort = screen.getByRole("combobox", { name: "搜索思考强度" });
+    expect(within(effort).getAllByRole("option")).toHaveLength(9);
+    await user.selectOptions(effort, "low");
     await user.click(screen.getByRole("button", { name: "保存" }));
     expect(save).toHaveBeenCalledWith(
       expect.objectContaining({
-        searchOnly: true,
-        takeCompaction: false,
+        op: "saveProvider",
+        takeCompaction: true,
+        compactionModel: "fixture-compact",
         takeAuxiliary: false,
+        takeWebSearch: true,
+        webSearchModel: "fixture-search",
+        webSearchEffort: "low",
       }),
       "fixture-revision",
     );
+    expect(save.mock.calls[0][0]).not.toHaveProperty("searchOnly");
   });
 
   it.each(["grok", "dsh"] as const)(
@@ -447,10 +461,15 @@ describe("request takeover", () => {
       const save = open(clientId, {});
       for (const name of takeovers)
         expect(screen.queryByRole("checkbox", { name })).toBeNull();
-      // Of the two, Grok Build alone has web searches to hand over.
+      // Of the two, Grok Build alone has web searches to hand over, and a
+      // saved provider's stay as they are.
       expect(screen.queryAllByRole("checkbox", { name: search })).toHaveLength(
         clientId === "grok" ? 1 : 0,
       );
+      if (clientId === "grok")
+        expect(
+          screen.getByRole("checkbox", { name: search }),
+        ).not.toBeChecked();
       await user.click(screen.getByRole("button", { name: "保存" }));
       expect(save).toHaveBeenCalledTimes(1);
       for (const field of clientId === "grok"
@@ -510,11 +529,11 @@ describe("request takeover", () => {
     const user = userEvent.setup();
     const save = open("grok");
     expect(screen.getByLabelText("API 协议")).toHaveValue("responses");
-    expect(screen.getByRole("checkbox", { name: search })).not.toBeChecked();
+    // A new provider starts with the takeover on.
+    expect(screen.getByRole("checkbox", { name: search })).toBeChecked();
     for (const name of [...takeovers, "无尽模式"])
       expect(screen.queryByRole("checkbox", { name })).toBeNull();
 
-    await user.click(screen.getByRole("checkbox", { name: search }));
     await user.type(
       screen.getByRole("textbox", { name: "搜索模型" }),
       "fixture-search",
@@ -617,7 +636,9 @@ describe("risk codes met on the same host", () => {
       providerId: item.id,
     });
     expect(met).not.toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "520 · 未遇到" })).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "520 · 未遇到" }),
+    ).toBeChecked();
     const other = screen.getByRole("textbox", { name: "其他代码" });
     expect(other).toHaveValue("");
     // Moving the listed code into the list is not an edit.
