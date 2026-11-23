@@ -18,7 +18,7 @@ import {
 import type { GatewayEdit } from "./bridge-contracts";
 import type { EditRevision } from "./gateway-edit";
 import Modal from "./Modal";
-import { confirmAction } from "./confirmation";
+import { confirmAction, confirmSave } from "./confirmation";
 import ProviderSettings from "./ProviderSettings";
 import ClaudeModelMapping from "./ClaudeModelMapping";
 import ProviderEndpoints from "./ProviderEndpoints";
@@ -1223,21 +1223,63 @@ export default function GatewayDialog({
     },
     [onDirtyChange],
   );
-  const discard = async () =>
-    !dirty.current || (await confirmAction("放弃未保存的修改？"));
   const leave = async () => {
-    if (!busy && (await discard())) close();
+    if (
+      !busy &&
+      (!dirty.current || (await confirmAction("放弃未保存的修改？")))
+    )
+      close();
   };
-  const pick = async (next: ProviderTab) => {
-    if (next === tab || busy || !(await discard())) return;
+  const nav = useRef<HTMLElement>(null);
+  // The tab a save started from the tab bar goes on to; a form's own save
+  // closes the dialog.
+  const onward = useRef<ProviderTab | null>(null);
+  const started = useRef(false);
+  const [arrival, setArrival] = useState<ProviderTab | null>(null);
+  // An effect, so the tab opens on the provider as that save left it.
+  useEffect(() => {
+    if (arrival === null) return;
     setItem(runtime);
-    setTab(next);
+    setTab(arrival);
+    setArrival(null);
+  }, [arrival]);
+  const pick = async (next: ProviderTab) => {
+    if (next === tab || busy) return;
+    const choice = dirty.current
+      ? await confirmSave("有未保存的修改，切换前要保存吗？")
+      : "discard";
+    if (choice === "cancel") return;
+    if (choice === "discard") {
+      setItem(runtime);
+      setTab(next);
+      return;
+    }
+    onward.current = next;
+    started.current = false;
+    // The form's own button, so its validation and disabled state apply.
+    nav.current
+      ?.closest("dialog")
+      ?.querySelector<HTMLButtonElement>("form button.primary")
+      ?.click();
+    if (!started.current) onward.current = null;
   };
-  const saved =
-    (message: string) => async (p: GatewayEdit, r: EditRevision) => {
-      await save(p, r);
-      notify(message);
+  // Forms call `save` synchronously on submit and `finish` once it succeeded.
+  const saving =
+    (message?: string) => async (p: GatewayEdit, r: EditRevision) => {
+      started.current = true;
+      try {
+        await save(p, r);
+      } catch (e) {
+        onward.current = null;
+        throw e;
+      }
+      if (message) notify(message);
     };
+  const finish = () => {
+    if (onward.current === null) return close();
+    setArrival(onward.current);
+    onward.current = null;
+  };
   return (
     <Modal
       title={item ? `编辑供应商 · ${item.name}` : "添加供应商"}
@@ -1246,7 +1288,7 @@ export default function GatewayDialog({
       className="provider-dialog"
     >
       {tabs.length > 1 && (
-        <nav className="settings-tabs" aria-label="供应商设置">
+        <nav ref={nav} className="settings-tabs" aria-label="供应商设置">
           {tabs.map(([id, name]) => (
             <button
               key={id}
@@ -1266,9 +1308,9 @@ export default function GatewayDialog({
           connectionMode={connectionMode}
           dialog={{ kind: "provider", item }}
           revision={revision}
-          close={close}
+          close={finish}
           cancel={() => void leave()}
-          save={save}
+          save={saving()}
           onDirtyChange={mark}
           onBusyChange={setBusy}
         />
@@ -1283,8 +1325,10 @@ export default function GatewayDialog({
             clientId={clientId}
             revision={revision}
             disabled={disabled}
-            close={close}
-            save={saved(clientId === "dsh" ? "模型映射已保存" : "白名单已保存")}
+            close={finish}
+            save={saving(
+              clientId === "dsh" ? "模型映射已保存" : "白名单已保存",
+            )}
             onDirtyChange={mark}
             onBusyChange={setBusy}
           />
@@ -1294,8 +1338,8 @@ export default function GatewayDialog({
           embedded
           provider={item}
           revision={revision}
-          close={close}
-          save={saved("模型映射已保存")}
+          close={finish}
+          save={saving("模型映射已保存")}
           onDirtyChange={mark}
           onBusyChange={setBusy}
         />
@@ -1307,8 +1351,8 @@ export default function GatewayDialog({
           runtime={runtime}
           clientId={clientId}
           revision={revision}
-          close={close}
-          save={save}
+          close={finish}
+          save={saving()}
           update={update}
           onDirtyChange={mark}
           onBusyChange={setBusy}

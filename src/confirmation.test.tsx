@@ -7,7 +7,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
-import { confirmAction } from "./confirmation";
+import { confirmAction, confirmSave } from "./confirmation";
 
 it("requires an explicit choice and rejects concurrent navigation without native confirm", async () => {
   const native = vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -50,4 +50,24 @@ it("Escape cancels and returns keyboard focus to the invoking control", async ()
   expect(await decision).toBe(false);
   await waitFor(() => expect(button).toHaveFocus());
   button.remove();
+});
+
+it("offers saving as the primary choice beside discarding and cancelling", async () => {
+  for (const [label, choice] of [
+    ["取消", "cancel"],
+    ["放弃修改", "discard"],
+    ["保存", "save"],
+  ]) {
+    let decision!: Promise<string>;
+    act(() => {
+      decision = confirmSave("有未保存的修改");
+    });
+    const dialog = await screen.findByRole("dialog", { name: "确认操作" });
+    expect(await confirmSave("竞争的导航")).toBe("cancel");
+    expect(within(dialog).getByRole("button", { name: "保存" })).toHaveClass(
+      "primary",
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: label }));
+    expect(await decision).toBe(choice);
+  }
 });
