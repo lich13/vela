@@ -170,32 +170,45 @@ describe("gateway controls", () => {
       ),
     );
   });
-  it("resets a provider from the row and edits its name by double click", async () => {
+  it("resets a provider from the row and renames it in the API tab", async () => {
     const user = userEvent.setup();
     render(<Gateway notify={() => {}} />);
-    const provider = await screen.findByRole("button", {
-      name: `${state.providers[0].name} 名称`,
+    const { id, name } = state.providers[0];
+    const title = await screen.findByText(name, {
+      selector: ".provider-title",
     });
     expect(screen.queryByLabelText("网关操作")).not.toBeInTheDocument();
     expect(screen.queryByText("刷新全部额度")).not.toBeInTheDocument();
-    await user.dblClick(provider);
-    const input = screen.getByRole("textbox", {
-      name: `${state.providers[0].name} 名称`,
-    });
+    // The name is no longer edited in place.
+    await user.dblClick(title);
+    expect(
+      screen.queryByRole("textbox", { name: `${name} 名称` }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: `${name} 编辑 API` }));
+    const dialog = within(
+      await screen.findByRole("dialog", { name: `编辑供应商 · ${name}` }),
+    );
+    const input = dialog.getByRole("textbox", { name: "名称" });
+    expect(input).toHaveValue(name);
     await user.clear(input);
     await user.type(input, "新的供应商");
-    await user.keyboard("{Enter}");
+    await user.click(dialog.getByRole("button", { name: "保存" }));
     await waitFor(() =>
-      expect(mock.command).toHaveBeenCalledWith("update_gateway", {
-        clientId: "codex",
-        edit: {
-          op: "renameProvider",
-          id: state.providers[0].id,
-          name: "新的供应商",
-        },
-        expectedRevision: state.revision,
-      }),
+      expect(
+        screen.queryByRole("dialog", { name: /^编辑供应商/ }),
+      ).not.toBeInTheDocument(),
     );
+    const edits = mock.command.mock.calls
+      .filter(([command]) => command === "update_gateway")
+      .map(([, args]) => args);
+    expect(edits).toHaveLength(2);
+    expect(edits[0]).toEqual({
+      clientId: "codex",
+      edit: { op: "renameProvider", id, name: "新的供应商" },
+      expectedRevision: state.revision,
+    });
+    expect(edits[1].edit).toMatchObject({ op: "saveProvider", id });
+    expect(edits[1].edit).not.toHaveProperty("name");
     await user.click(
       screen.getByRole("button", {
         name: `${state.providers[0].name} 重置熔断`,
@@ -248,8 +261,8 @@ describe("gateway controls", () => {
       totalUsage: null,
     } as ProviderQuota;
     render(<Gateway notify={() => {}} />);
-    const name = await screen.findByRole("button", {
-      name: `${p.name} 名称`,
+    const name = await screen.findByText(p.name, {
+      selector: ".provider-title",
     });
     const row = name.closest("[data-provider-id]");
     expect(row).not.toBeNull();
@@ -272,9 +285,16 @@ describe("gateway controls", () => {
     );
     expect(
       await screen.findByRole("dialog", {
-        name: `${state.providers[0].name} · 白名单`,
+        name: `编辑供应商 · ${state.providers[0].name}`,
       }),
     ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("navigation", { name: "供应商设置" })).getByRole(
+        "button",
+        { name: "白名单" },
+      ),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("group", { name: "模型规则" })).toBeInTheDocument();
     expect(
       screen.queryByRole("checkbox", { name: "原生 WebSocket" }),
     ).not.toBeInTheDocument();
@@ -288,7 +308,7 @@ describe("gateway controls", () => {
     );
     expect(
       screen.getByRole("dialog", {
-        name: `${state.providers[0].name} · 白名单`,
+        name: `编辑供应商 · ${state.providers[0].name}`,
       }),
     ).toBeInTheDocument();
     expect(
@@ -307,7 +327,7 @@ describe("gateway controls", () => {
     );
     expect(
       await screen.findByRole("dialog", {
-        name: `${state.providers[0].name} · 白名单`,
+        name: `编辑供应商 · ${state.providers[0].name}`,
       }),
     ).toBeInTheDocument();
     expect(
@@ -322,7 +342,7 @@ describe("gateway controls", () => {
     );
     expect(
       await screen.findByRole("dialog", {
-        name: `${state.providers[0].name} · 白名单`,
+        name: `编辑供应商 · ${state.providers[0].name}`,
       }),
     ).toBeInTheDocument();
     expect(
@@ -338,8 +358,8 @@ describe("gateway controls", () => {
     const { rerender } = render(
       <Gateway notify={() => {}} onFocusHandled={handled} />,
     );
-    await screen.findByRole("button", {
-      name: `${state.providers[0].name} 名称`,
+    await screen.findByText(state.providers[0].name, {
+      selector: ".provider-title",
     });
     const target = claudeState.providers[0];
     rerender(
@@ -475,7 +495,13 @@ it("keeps model choices and manual entries when discovery fails and events refre
   await user.click(
     within(await screen.findByLabelText("api.example.com 操作")).getByRole(
       "button",
-      { name: "api.example.com 白名单" },
+      { name: "api.example.com 编辑 API" },
+    ),
+  );
+  await user.click(
+    within(screen.getByRole("navigation", { name: "供应商设置" })).getByRole(
+      "button",
+      { name: "白名单" },
     ),
   );
   await user.click(await screen.findByRole("checkbox", { name: "gpt-A" }));
@@ -496,7 +522,7 @@ it("keeps model choices and manual entries when discovery fails and events refre
   discoveryFailed = true;
   await user.click(screen.getByRole("button", { name: "刷新模型列表" }));
   const dialog = screen.getByRole("dialog", {
-    name: `${state.providers[0].name} · 白名单`,
+    name: `编辑供应商 · ${state.providers[0].name}`,
   });
   expect(await within(dialog).findByRole("status")).toHaveTextContent(
     "模型列表读取失败",
@@ -820,18 +846,26 @@ it("keeps one icon-bearing testing entry per provider and removes global testing
 });
 
 it.each([
-  ["codex", ["白名单"]],
-  ["claude", ["白名单", "模型映射"]],
-  ["grok", ["白名单"]],
-  ["dsh", ["模型映射"]],
+  ["codex", ["API", "白名单", "端点"]],
+  ["claude", ["API", "白名单", "模型映射", "端点"]],
+  ["grok", ["API", "白名单", "端点"]],
+  ["dsh", ["API", "模型映射", "端点"]],
+  ["agy", ["API", "白名单", "端点"]],
 ] as const)(
-  "%s lays every provider operation out on the row",
-  async (clientId, models) => {
+  "%s keeps five operations on the row and the rest in the edit dialog's tabs",
+  async (clientId, tabs) => {
     localStorage.setItem("vela.main.client", clientId);
     state.clientId = clientId;
     mock.command.mockImplementation(async (name) =>
-      name === "get_gateway" ? structuredClone(state) : null,
+      name === "get_gateway"
+        ? structuredClone(state)
+        : name === "list_provider_models"
+          ? { models: [], error: null, stale: false }
+          : name === "get_gateway_models"
+            ? { models: [] }
+            : null,
     );
+    const user = userEvent.setup();
     render(<Gateway notify={() => {}} quotaRefreshSeconds={0} />);
     const name = state.providers[0].name;
     const group = await screen.findByRole("group", { name: `${name} 操作` });
@@ -839,10 +873,7 @@ it.each([
     expect(buttons.map((button) => button.getAttribute("title"))).toEqual([
       "重置熔断",
       "连接测试",
-      ...models,
-      "端点",
       "编辑 API",
-      "重命名",
       "创建副本",
       "删除",
     ]);
@@ -851,8 +882,118 @@ it.each([
       expect(button.querySelector("svg")).not.toBeNull();
     }
     expect(document.querySelector(".row-menu")).toBeNull();
+
+    await user.click(
+      within(group).getByRole("button", { name: `${name} 编辑 API` }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: `编辑供应商 · ${name}`,
+    });
+    const nav = within(
+      within(dialog).getByRole("navigation", { name: "供应商设置" }),
+    );
+    expect(
+      nav.getAllByRole("button").map((button) => button.textContent),
+    ).toEqual(tabs);
+    expect(nav.getByRole("button", { name: "API" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    // Every tab opens inside the same dialog.
+    for (const tab of tabs) {
+      await user.click(nav.getByRole("button", { name: tab }));
+      expect(nav.getByRole("button", { name: tab })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    }
+    expect(
+      within(dialog).getByRole("button", { name: "测速" }),
+    ).toBeInTheDocument();
   },
 );
+
+it("offers a provider that is not saved yet the API form alone", async () => {
+  const user = userEvent.setup();
+  render(<Gateway notify={() => {}} />);
+  await user.click(await screen.findByRole("button", { name: "添加" }));
+  const dialog = await screen.findByRole("dialog", { name: "添加供应商" });
+  expect(within(dialog).queryByRole("navigation")).not.toBeInTheDocument();
+  expect(within(dialog).getByLabelText("base_url")).toBeInTheDocument();
+});
+
+it("asks before a tab switch drops an unsaved draft", async () => {
+  const user = userEvent.setup();
+  render(<Gateway notify={() => {}} />);
+  const name = state.providers[0].name;
+  await user.click(
+    await screen.findByRole("button", { name: `${name} 编辑 API` }),
+  );
+  const dialog = within(
+    await screen.findByRole("dialog", { name: `编辑供应商 · ${name}` }),
+  );
+  const tab = (label: string) =>
+    within(dialog.getByRole("navigation", { name: "供应商设置" })).getByRole(
+      "button",
+      { name: label },
+    );
+  await user.type(dialog.getByRole("textbox", { name: "名称" }), "草稿");
+  await user.click(tab("端点"));
+  await user.click(
+    within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+      "button",
+      { name: "取消" },
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "确认操作" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(tab("API")).toHaveAttribute("aria-pressed", "true");
+  expect(dialog.getByRole("textbox", { name: "名称" })).toHaveValue(
+    `${name}草稿`,
+  );
+  await user.click(tab("端点"));
+  await user.click(
+    within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+      "button",
+      { name: "放弃修改" },
+    ),
+  );
+  await waitFor(() =>
+    expect(tab("端点")).toHaveAttribute("aria-pressed", "true"),
+  );
+  expect(
+    mock.command.mock.calls.some(([command]) => command === "update_gateway"),
+  ).toBe(false);
+});
+
+it("opens the model mapping tab for DSH model rules on request", async () => {
+  localStorage.setItem("vela.main.client", "dsh");
+  state.clientId = "dsh";
+  mock.command.mockImplementation(async (name) =>
+    name === "get_gateway"
+      ? structuredClone(state)
+      : name === "list_provider_models"
+        ? { models: [], error: null, stale: false }
+        : null,
+  );
+  const { id, name } = state.providers[0];
+  render(
+    <Gateway
+      notify={() => {}}
+      focusProvider={{ id, clientId: "dsh", action: "settings", sequence: 1 }}
+    />,
+  );
+  const dialog = await screen.findByRole("dialog", {
+    name: `编辑供应商 · ${name}`,
+  });
+  expect(
+    within(dialog).getByRole("button", { name: "模型映射" }),
+  ).toHaveAttribute("aria-pressed", "true");
+});
 
 it("copies a provider from its row and asks before deleting one", async () => {
   const user = userEvent.setup();
@@ -895,7 +1036,7 @@ it("copies a provider from its row and asks before deleting one", async () => {
   expect(sent()[0][1].edit).toEqual({ op: "deleteProvider", id });
 });
 
-it("maps a Claude provider's models from its row", async () => {
+it("maps a Claude provider's models in the edit dialog", async () => {
   localStorage.setItem("vela.main.client", "claude");
   const user = userEvent.setup();
   const notify = vi.fn();
@@ -912,12 +1053,13 @@ it("maps a Claude provider's models from its row", async () => {
   render(<Gateway notify={notify} />);
   await user.click(
     within(await screen.findByLabelText(`${name} 操作`)).getByRole("button", {
-      name: `${name} 模型映射`,
+      name: `${name} 编辑 API`,
     }),
   );
   const dialog = within(
-    await screen.findByRole("dialog", { name: `${name} 模型映射` }),
+    await screen.findByRole("dialog", { name: `编辑供应商 · ${name}` }),
   );
+  await user.click(dialog.getByRole("button", { name: "模型映射" }));
   await user.click(dialog.getByRole("button", { name: "添加映射" }));
   await user.type(
     dialog.getByRole("combobox", { name: "映射 1 请求模型" }),
@@ -942,7 +1084,7 @@ it("maps a Claude provider's models from its row", async () => {
     expectedRevision: claudeState.revision,
   });
   expect(
-    screen.queryByRole("dialog", { name: `${name} 模型映射` }),
+    screen.queryByRole("dialog", { name: `编辑供应商 · ${name}` }),
   ).not.toBeInTheDocument();
 });
 
@@ -959,11 +1101,17 @@ it("opens the API editor on request and starts it afresh for each request", asyn
   );
   const { rerender } = render(focus(1));
   const address = () =>
-    within(screen.getByRole("dialog", { name: "编辑供应商" })).getByRole(
+    within(screen.getByRole("dialog", { name: /^编辑供应商/ })).getByRole(
       "textbox",
       { name: "base_url" },
     );
-  await screen.findByRole("dialog", { name: "编辑供应商" });
+  await screen.findByRole("dialog", { name: /^编辑供应商/ });
+  expect(
+    within(screen.getByRole("navigation", { name: "供应商设置" })).getByRole(
+      "button",
+      { name: "API" },
+    ),
+  ).toHaveAttribute("aria-pressed", "true");
   expect(address()).toHaveValue(baseUrl);
   expect(handled).toHaveBeenCalledTimes(1);
   await user.clear(address());
@@ -1064,4 +1212,35 @@ it("refreshes on show and keeps a newer gateway event over the resumed read", as
   );
   await act(async () => resolve({ ...state, running: false }));
   expect(screen.getByRole("button", { name: "停用" })).toBeInTheDocument();
+});
+
+it("shows the API tab the address an endpoint swap made primary", async () => {
+  const user = userEvent.setup();
+  const backup = "https://backup.example.invalid/v1";
+  const { name, baseUrl } = state.providers[0];
+  state.providers[0].extraBaseUrls = [backup];
+  mock.command.mockImplementation(async (command: string) => {
+    if (command === "update_gateway") {
+      state.providers[0].baseUrl = backup;
+      state.providers[0].extraBaseUrls = [baseUrl];
+      state.revision = "swapped";
+    }
+    return command === "get_gateway" || command === "update_gateway"
+      ? structuredClone(state)
+      : undefined;
+  });
+  render(<Gateway notify={() => {}} />);
+  await user.click(
+    await screen.findByRole("button", { name: `${name} 编辑 API` }),
+  );
+  const dialog = within(
+    await screen.findByRole("dialog", { name: `编辑供应商 · ${name}` }),
+  );
+  await user.click(dialog.getByRole("button", { name: "端点" }));
+  await user.click(
+    dialog.getByRole("button", { name: "辅助端点 1 设为主端点" }),
+  );
+  expect(await dialog.findByText("主副端点已互换")).toBeInTheDocument();
+  await user.click(dialog.getByRole("button", { name: "API" }));
+  expect(dialog.getByRole("textbox", { name: "base_url" })).toHaveValue(backup);
 });

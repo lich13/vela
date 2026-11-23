@@ -27,6 +27,8 @@ describe("Claude provider message_stop setting", () => {
             };
       render(
         <GatewayProviderDialog
+          update={() => {}}
+          notify={() => {}}
           clientId="claude"
           connectionMode="bearer"
           dialog={{ kind: "provider", item: provider }}
@@ -77,6 +79,8 @@ describe("Claude reliability controls", () => {
     const item = { ...claudeGatewayDemo.providers[0], upstreamRetrySeconds: 5 };
     render(
       <GatewayProviderDialog
+        update={() => {}}
+        notify={() => {}}
         clientId="claude"
         connectionMode="bearer"
         dialog={{ kind: "provider", item }}
@@ -126,6 +130,8 @@ describe("endless mode retry settings", () => {
   ) => {
     render(
       <GatewayProviderDialog
+        update={() => {}}
+        notify={() => {}}
         clientId={clientId}
         connectionMode="bearer"
         dialog={{
@@ -258,6 +264,8 @@ describe("request takeover", () => {
     const save = vi.fn().mockResolvedValue(undefined);
     render(
       <GatewayProviderDialog
+        update={() => {}}
+        notify={() => {}}
         clientId={clientId}
         connectionMode="bearer"
         dialog={{
@@ -619,6 +627,8 @@ describe("risk codes met on the same host", () => {
     };
     render(
       <GatewayProviderDialog
+        update={() => {}}
+        notify={() => {}}
         clientId="claude"
         connectionMode="bearer"
         dialog={{ kind: "provider", item }}
@@ -659,6 +669,8 @@ describe("risk codes met on the same host", () => {
     vi.mocked(command).mockResolvedValue([] as never);
     render(
       <GatewayProviderDialog
+        update={() => {}}
+        notify={() => {}}
         clientId="claude"
         connectionMode="bearer"
         dialog={{
@@ -686,6 +698,8 @@ describe("Vertex AI access", () => {
     const save = vi.fn().mockResolvedValue(undefined);
     render(
       <GatewayProviderDialog
+        update={() => {}}
+        notify={() => {}}
         clientId={clientId}
         connectionMode="bearer"
         dialog={{ kind: "provider", item }}

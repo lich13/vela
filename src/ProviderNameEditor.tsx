@@ -10,22 +10,22 @@ export default function ProviderNameEditor({
   commit,
   report,
   className = "provider-title",
-  request,
 }: {
   provider: Provider;
   revision: string;
   disabled: boolean;
-  commit: (edit: { op: "renameProvider"; id: string; name: string }, revision: EditRevision) => Promise<void>;
+  commit: (
+    edit: { op: "renameProvider"; id: string; name: string },
+    revision: EditRevision,
+  ) => Promise<void>;
   report: (message: string) => void;
   className?: string;
-  request?: number;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(provider.name);
   const [saving, setSaving] = useState(false);
   const baseline = useRef<EditRevision>(revision);
   const input = useRef<HTMLInputElement>(null);
-  const lastRequest = useRef<number | undefined>(undefined);
 
   const begin = () => {
     if (disabled || saving) return;
@@ -33,12 +33,6 @@ export default function ProviderNameEditor({
     baseline.current = revision;
     setEditing(true);
   };
-  useEffect(() => {
-    if (request !== undefined && request !== lastRequest.current) {
-      lastRequest.current = request;
-      begin();
-    }
-  }, [request]);
   useEffect(() => {
     if (editing) {
       input.current?.focus();
@@ -59,7 +53,10 @@ export default function ProviderNameEditor({
     }
     setSaving(true);
     try {
-      await commit({ op: "renameProvider", id: provider.id, name }, baseline.current);
+      await commit(
+        { op: "renameProvider", id: provider.id, name },
+        baseline.current,
+      );
       setEditing(false);
     } catch (error) {
       baseline.current = null;
@@ -83,16 +80,29 @@ export default function ProviderNameEditor({
             if (event.key === "Enter" && !event.nativeEvent.isComposing) {
               event.preventDefault();
               void save();
-            } else if (event.key === "Escape" && !event.nativeEvent.isComposing) {
+            } else if (
+              event.key === "Escape" &&
+              !event.nativeEvent.isComposing
+            ) {
               event.preventDefault();
               cancel();
             }
           }}
         />
-        <button type="button" aria-label="保存名称" disabled={saving} onClick={() => void save()}>
+        <button
+          type="button"
+          aria-label="保存名称"
+          disabled={saving}
+          onClick={() => void save()}
+        >
           <Check size={13} />
         </button>
-        <button type="button" aria-label="取消重命名" disabled={saving} onClick={cancel}>
+        <button
+          type="button"
+          aria-label="取消重命名"
+          disabled={saving}
+          onClick={cancel}
+        >
           <X size={13} />
         </button>
       </span>
@@ -107,7 +117,10 @@ export default function ProviderNameEditor({
       aria-label={`${provider.name} 名称`}
       onDoubleClick={begin}
       onKeyDown={(event) => {
-        if ((event.key === "Enter" || event.key === "F2") && !event.nativeEvent.isComposing) {
+        if (
+          (event.key === "Enter" || event.key === "F2") &&
+          !event.nativeEvent.isComposing
+        ) {
           event.preventDefault();
           begin();
         }

@@ -88,7 +88,7 @@ async function openProviderEditor(
       name: `${provider.name} 编辑 API`,
     }),
   );
-  return screen.getByRole("dialog", { name: "编辑供应商" });
+  return screen.getByRole("dialog", { name: /^编辑供应商/ });
 }
 
 describe("Codex API login gateway controls", () => {
@@ -325,6 +325,15 @@ it("edits search policy only inside the API form and discards a cancelled draft"
     mock.command.mock.calls.some(([name]) => name === "update_gateway"),
   ).toBe(false);
   await user.click(within(dialog).getByRole("button", { name: "取消" }));
+  await user.click(
+    within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+      "button",
+      { name: "放弃修改" },
+    ),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
   dialog = await openProviderEditor(user, "edit");
   expect(
     within(dialog).getByRole("checkbox", { name: "接管网络搜索请求" }),

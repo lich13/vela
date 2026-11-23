@@ -65,8 +65,7 @@ function problem(families: [string, string][], pairs: [string, string][]) {
       return `${row} 请输入完整模型 ID，不支持通配符`;
     if (from === to) return `${row} 的请求模型与上游模型相同，无需映射`;
     const first = pairs.findIndex(([other]) => other === from);
-    if (first !== index)
-      return `${row} 与映射 ${first + 1} 的请求模型重复`;
+    if (first !== index) return `${row} 与映射 ${first + 1} 的请求模型重复`;
   }
   return "";
 }
@@ -79,12 +78,17 @@ export default function ClaudeModelMapping({
   save,
   close,
   onDirtyChange,
+  embedded = false,
+  onBusyChange,
 }: {
   provider: Provider;
   revision: string;
   save: (edit: GatewayEdit, revision: EditRevision) => Promise<void>;
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  /** Renders the form alone, for a dialog that hosts it as one of its tabs. */
+  embedded?: boolean;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [families, setFamilies] = useState(
     () =>
@@ -173,6 +177,9 @@ export default function ClaudeModelMapping({
     onDirtyChange?.(dirty);
     return () => onDirtyChange?.(false);
   }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    onBusyChange?.(busy);
+  }, [busy, onBusyChange]);
   const leave = async () => {
     if (!dirty || (await confirmAction("放弃未保存的模型映射？"))) close();
   };
@@ -188,259 +195,258 @@ export default function ClaudeModelMapping({
         {model}
       </option>
     ));
-  return (
-    <Modal
-      title={`${provider.name} 模型映射`}
-      close={() => void leave()}
-      busy={busy}
-      className="model-mapping-modal"
+  const form = (
+    <form
+      className="gateway-form model-mapping"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const chosen = FAMILIES.map(
+          ([family, label]) =>
+            [family, label, families[family].to.trim()] as const,
+        ).filter(([, , to]) => to);
+        const pairs = rows.map(
+          (row) => [row.from.trim(), row.to.trim()] as [string, string],
+        );
+        const issue = problem(
+          chosen.map(([, label, to]) => [label, to]),
+          pairs,
+        );
+        if (issue) {
+          setError(issue);
+          return;
+        }
+        setBusy(true);
+        setError("");
+        void save(
+          {
+            op: "modelMapProvider",
+            id: provider.id,
+            mapping: Object.fromEntries([
+              ...chosen.map(([family, , to]) => [familyKey(family), to]),
+              ...pairs,
+            ]),
+          },
+          baseline.current,
+        )
+          .then(close)
+          .catch((e) => {
+            baseline.current = null;
+            setError(errorOf(e).message);
+          })
+          .finally(() => setBusy(false));
+      }}
     >
-      <form
-        className="gateway-form model-mapping"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const chosen = FAMILIES.map(
-            ([family, label]) =>
-              [family, label, families[family].to.trim()] as const,
-          ).filter(([, , to]) => to);
-          const pairs = rows.map(
-            (row) => [row.from.trim(), row.to.trim()] as [string, string],
+      <div className="model-mapping-families">
+        {FAMILIES.map(([family, label]) => {
+          const target = families[family];
+          const asked = requested?.filter(
+            (entry) => modelFamily(entry.model) === family,
           );
-          const issue = problem(
-            chosen.map(([, label, to]) => [label, to]),
-            pairs,
-          );
-          if (issue) {
-            setError(issue);
-            return;
-          }
-          setBusy(true);
-          setError("");
-          void save(
-            {
-              op: "modelMapProvider",
-              id: provider.id,
-              mapping: Object.fromEntries([
-                ...chosen.map(([family, , to]) => [familyKey(family), to]),
-                ...pairs,
-              ]),
-            },
-            baseline.current,
-          )
-            .then(close)
-            .catch((e) => {
-              baseline.current = null;
-              setError(errorOf(e).message);
-            })
-            .finally(() => setBusy(false));
-        }}
-      >
-        <div className="model-mapping-families">
-          {FAMILIES.map(([family, label]) => {
-            const target = families[family];
-            const asked = requested?.filter(
-              (entry) => modelFamily(entry.model) === family,
-            );
-            return (
-              <div className="model-mapping-family" key={family}>
-                <span className="model-mapping-family-name">{label}</span>
-                <ArrowRight size={14} aria-hidden="true" />
-                <select
-                  aria-label={`${label} 上游模型`}
+          return (
+            <div className="model-mapping-family" key={family}>
+              <span className="model-mapping-family-name">{label}</span>
+              <ArrowRight size={14} aria-hidden="true" />
+              <select
+                aria-label={`${label} 上游模型`}
+                disabled={busy}
+                value={target.manual ? MANUAL : target.to}
+                onChange={(e) =>
+                  changeFamily(
+                    family,
+                    e.target.value === MANUAL
+                      ? { manual: true }
+                      : { manual: false, to: e.target.value },
+                  )
+                }
+              >
+                <option value="">不映射</option>
+                {options(target.to)}
+                <option value={MANUAL}>手动填写…</option>
+              </select>
+              {target.manual && (
+                <input
+                  className="model-mapping-custom"
+                  aria-label={`${label} 自定义模型 ID`}
+                  value={target.to}
+                  maxLength={256}
+                  spellCheck={false}
                   disabled={busy}
-                  value={target.manual ? MANUAL : target.to}
-                  onChange={(e) =>
-                    changeFamily(
-                      family,
-                      e.target.value === MANUAL
-                        ? { manual: true }
-                        : { manual: false, to: e.target.value },
-                    )
-                  }
+                  placeholder="完整模型 ID，留空则不映射"
+                  onChange={(e) => changeFamily(family, { to: e.target.value })}
+                />
+              )}
+              {asked && (
+                <p
+                  className="muted model-mapping-asked"
+                  data-testid={`asked-${family}`}
                 >
-                  <option value="">不映射</option>
-                  {options(target.to)}
-                  <option value={MANUAL}>手动填写…</option>
-                </select>
-                {target.manual && (
+                  {asked.length
+                    ? `Claude Code 近期实际请求：${asked
+                        .map((entry) => `${entry.model} ×${entry.count}`)
+                        .join("、")}`
+                    : "近 7 天未请求"}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <button
+        type="button"
+        className="text-button model-mapping-toggle"
+        aria-expanded={exactOpen}
+        aria-controls={exactPanel}
+        onClick={() => setExactOpen((open) => !open)}
+      >
+        {exactOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        按模型 ID 单独指定
+        {rows.length > 0 && `（${rows.length}）`}
+      </button>
+      {exactOpen && (
+        <div className="model-mapping-exact" id={exactPanel}>
+          <p className="muted model-mapping-note">
+            单独指定的模型优先于所属系列的映射
+          </p>
+          {rows.length > 0 && (
+            <div className="model-mapping-list">
+              <div className="model-mapping-row model-mapping-head">
+                <span>请求模型</span>
+                <span />
+                <span>上游模型</span>
+              </div>
+              {rows.map((row, index) => (
+                <div className="model-mapping-row" key={row.key}>
                   <input
-                    className="model-mapping-custom"
-                    aria-label={`${label} 自定义模型 ID`}
-                    value={target.to}
+                    aria-label={`映射 ${index + 1} 请求模型`}
+                    list={suggestions}
+                    value={row.from}
                     maxLength={256}
                     spellCheck={false}
                     disabled={busy}
-                    placeholder="完整模型 ID，留空则不映射"
-                    onChange={(e) =>
-                      changeFamily(family, { to: e.target.value })
-                    }
+                    placeholder="完整模型 ID"
+                    onChange={(e) => change(row.key, { from: e.target.value })}
                   />
-                )}
-                {asked && (
-                  <p
-                    className="muted model-mapping-asked"
-                    data-testid={`asked-${family}`}
+                  <ArrowRight size={14} aria-hidden="true" />
+                  <select
+                    aria-label={`映射 ${index + 1} 上游模型`}
+                    disabled={busy}
+                    value={row.manual ? MANUAL : row.to}
+                    onChange={(e) =>
+                      change(
+                        row.key,
+                        e.target.value === MANUAL
+                          ? { manual: true }
+                          : { manual: false, to: e.target.value },
+                      )
+                    }
                   >
-                    {asked.length
-                      ? `Claude Code 近期实际请求：${asked
-                          .map((entry) => `${entry.model} ×${entry.count}`)
-                          .join("、")}`
-                      : "近 7 天未请求"}
-                  </p>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        <button
-          type="button"
-          className="text-button model-mapping-toggle"
-          aria-expanded={exactOpen}
-          aria-controls={exactPanel}
-          onClick={() => setExactOpen((open) => !open)}
-        >
-          {exactOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          按模型 ID 单独指定
-          {rows.length > 0 && `（${rows.length}）`}
-        </button>
-        {exactOpen && (
-          <div className="model-mapping-exact" id={exactPanel}>
-            <p className="muted model-mapping-note">
-              单独指定的模型优先于所属系列的映射
-            </p>
-            {rows.length > 0 && (
-              <div className="model-mapping-list">
-                <div className="model-mapping-row model-mapping-head">
-                  <span>请求模型</span>
-                  <span />
-                  <span>上游模型</span>
-                </div>
-                {rows.map((row, index) => (
-                  <div className="model-mapping-row" key={row.key}>
+                    <option value="">选择上游模型</option>
+                    {options(row.to)}
+                    <option value={MANUAL}>手动填写…</option>
+                  </select>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={`删除映射 ${index + 1}`}
+                    title="删除"
+                    disabled={busy}
+                    onClick={() =>
+                      setRows((old) => old.filter((r) => r.key !== row.key))
+                    }
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                  {row.manual && (
                     <input
-                      aria-label={`映射 ${index + 1} 请求模型`}
-                      list={suggestions}
-                      value={row.from}
+                      className="model-mapping-custom"
+                      aria-label={`映射 ${index + 1} 自定义模型 ID`}
+                      value={row.to}
                       maxLength={256}
                       spellCheck={false}
                       disabled={busy}
                       placeholder="完整模型 ID"
-                      onChange={(e) =>
-                        change(row.key, { from: e.target.value })
-                      }
+                      onChange={(e) => change(row.key, { to: e.target.value })}
                     />
-                    <ArrowRight size={14} aria-hidden="true" />
-                    <select
-                      aria-label={`映射 ${index + 1} 上游模型`}
-                      disabled={busy}
-                      value={row.manual ? MANUAL : row.to}
-                      onChange={(e) =>
-                        change(
-                          row.key,
-                          e.target.value === MANUAL
-                            ? { manual: true }
-                            : { manual: false, to: e.target.value },
-                        )
-                      }
-                    >
-                      <option value="">选择上游模型</option>
-                      {options(row.to)}
-                      <option value={MANUAL}>手动填写…</option>
-                    </select>
-                    <button
-                      type="button"
-                      className="icon-button"
-                      aria-label={`删除映射 ${index + 1}`}
-                      title="删除"
-                      disabled={busy}
-                      onClick={() =>
-                        setRows((old) => old.filter((r) => r.key !== row.key))
-                      }
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                    {row.manual && (
-                      <input
-                        className="model-mapping-custom"
-                        aria-label={`映射 ${index + 1} 自定义模型 ID`}
-                        value={row.to}
-                        maxLength={256}
-                        spellCheck={false}
-                        disabled={busy}
-                        placeholder="完整模型 ID"
-                        onChange={(e) =>
-                          change(row.key, { to: e.target.value })
-                        }
-                      />
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-            <datalist id={suggestions}>
-              {[
-                ...new Set([
-                  ...(requested ?? []).map((entry) => entry.model),
-                  ...known,
-                  ...models,
-                ]),
-              ].map((model) => (
-                <option key={model} value={model} />
+                  )}
+                </div>
               ))}
-            </datalist>
-          </div>
-        )}
-        <p className="muted model-mapping-note">未映射的模型按原名转发</p>
-        <div className="model-mapping-actions">
-          <button
-            type="button"
-            className="text-button"
-            disabled={busy}
-            onClick={() => {
-              setExactOpen(true);
-              setRows((old) => [
-                ...old,
-                { key: nextKey.current++, from: "", to: "", manual: false },
-              ]);
-            }}
-          >
-            <Plus size={14} />
-            添加映射
-          </button>
-          <button
-            type="button"
-            className="text-button"
-            disabled={loading || busy}
-            onClick={() => void load(true)}
-          >
-            <RefreshCw size={14} className={loading ? "spin" : ""} />
-            刷新模型列表
-          </button>
+            </div>
+          )}
+          <datalist id={suggestions}>
+            {[
+              ...new Set([
+                ...(requested ?? []).map((entry) => entry.model),
+                ...known,
+                ...models,
+              ]),
+            ].map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
         </div>
-        {catalogError && (
-          <p className="form-error" role="status">
-            {catalogError}
-          </p>
-        )}
-        {error && (
-          <p className="form-error" role="alert">
-            {error}
-          </p>
-        )}
-        <footer className="modal-actions">
-          <button
-            type="button"
-            className="secondary"
-            disabled={busy}
-            onClick={() => void leave()}
-          >
-            取消
-          </button>
-          <button className="primary" disabled={busy || !dirty}>
-            保存
-          </button>
-        </footer>
-      </form>
+      )}
+      <p className="muted model-mapping-note">未映射的模型按原名转发</p>
+      <div className="model-mapping-actions">
+        <button
+          type="button"
+          className="text-button"
+          disabled={busy}
+          onClick={() => {
+            setExactOpen(true);
+            setRows((old) => [
+              ...old,
+              { key: nextKey.current++, from: "", to: "", manual: false },
+            ]);
+          }}
+        >
+          <Plus size={14} />
+          添加映射
+        </button>
+        <button
+          type="button"
+          className="text-button"
+          disabled={loading || busy}
+          onClick={() => void load(true)}
+        >
+          <RefreshCw size={14} className={loading ? "spin" : ""} />
+          刷新模型列表
+        </button>
+      </div>
+      {catalogError && (
+        <p className="form-error" role="status">
+          {catalogError}
+        </p>
+      )}
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      <footer className="modal-actions">
+        <button
+          type="button"
+          className="secondary"
+          disabled={busy}
+          onClick={() => void leave()}
+        >
+          取消
+        </button>
+        <button className="primary" disabled={busy || !dirty}>
+          保存
+        </button>
+      </footer>
+    </form>
+  );
+  return embedded ? (
+    form
+  ) : (
+    <Modal
+      title={`${provider.name} 模型映射`}
+      close={() => void leave()}
+      busy={busy}
+      className="provider-dialog"
+    >
+      {form}
     </Modal>
   );
 }

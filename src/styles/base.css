@@ -988,10 +988,8 @@ kbd {
   white-space: nowrap;
   font-size: 14px;
   font-weight: 600;
-  cursor: text;
 }
 
-.provider-title:focus-visible,
 .quick-name:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -1004,8 +1002,6 @@ kbd {
   transition: opacity 140ms ease;
 }
 
-.provider-title:hover .provider-name-hint,
-.provider-title:focus-visible .provider-name-hint,
 .quick-name:hover .provider-name-hint,
 .quick-name:focus-visible .provider-name-hint {
   opacity: 1;

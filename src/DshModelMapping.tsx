@@ -14,12 +14,17 @@ export default function DshModelMapping({
   save,
   close,
   onDirtyChange,
+  embedded = false,
+  onBusyChange,
 }: {
   provider: Provider;
   revision: string;
   save: (edit: GatewayEdit, revision: EditRevision) => Promise<void>;
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  /** Renders the form alone, for a dialog that hosts it as one of its tabs. */
+  embedded?: boolean;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const catalog = useDshCatalog();
   const [mapping, setMapping] = useState<Record<string, string | null>>({
@@ -63,6 +68,9 @@ export default function DshModelMapping({
     onDirtyChange?.(dirty);
     return () => onDirtyChange?.(false);
   }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    onBusyChange?.(busy);
+  }, [busy, onBusyChange]);
   const leave = async () => {
     if (!dirty || (await confirmAction("放弃未保存的模型映射？"))) close();
   };
@@ -71,117 +79,122 @@ export default function DshModelMapping({
     if (!rows.some((m) => m.id === id)) rows.push({ id, name: id });
   const update = (id: string, value: string) =>
     setMapping((old) => ({ ...old, [id]: value || null }));
-  return (
+  const form = (
+    <form
+      className="gateway-form dsh-model-mapping"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setBusy(true);
+        setError("");
+        const next = Object.fromEntries(
+          Object.entries(mapping).map(([id, value]) => [
+            id,
+            value?.trim() || null,
+          ]),
+        );
+        void save(
+          { op: "dshModelsProvider", id: provider.id, mapping: next },
+          baseline.current,
+        )
+          .then(close)
+          .catch((e) => {
+            baseline.current = null;
+            setError(errorOf(e).message);
+          })
+          .finally(() => setBusy(false));
+      }}
+    >
+      {rows.map(({ id, name }) => {
+        const value = mapping[id] ?? "";
+        const options = [...new Set([value, ...models])].filter(Boolean);
+        return (
+          <div className="dsh-mapping-row" key={id}>
+            <label title={id}>
+              <span>{name || id}</span>
+              {name !== id && <small className="muted">{id}</small>}
+              <select
+                aria-label={`${name || id} 上游模型`}
+                disabled={busy}
+                value={manual.has(id) ? MANUAL : value}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setManual((old) => {
+                    const next = new Set(old);
+                    if (value === MANUAL) next.add(id);
+                    else next.delete(id);
+                    return next;
+                  });
+                  if (value !== MANUAL) update(id, value);
+                }}
+              >
+                <option value="">不承接</option>
+                {options.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+                <option value={MANUAL}>手动填写…</option>
+              </select>
+            </label>
+            {manual.has(id) && (
+              <input
+                aria-label={`${name || id} 自定义模型 ID`}
+                value={value}
+                maxLength={256}
+                disabled={busy}
+                placeholder="完整模型 ID"
+                onChange={(e) => update(id, e.target.value)}
+              />
+            )}
+          </div>
+        );
+      })}
+      {!rows.length && (
+        <p className="muted">
+          {catalog.loading ? "正在读取模型…" : "没有可用模型"}
+        </p>
+      )}
+      <div className="dsh-model-actions">
+        <button
+          type="button"
+          disabled={catalog.loading || busy}
+          onClick={() => void catalog.refresh()}
+        >
+          刷新官方模型
+        </button>
+        <button
+          type="button"
+          disabled={loading || busy}
+          onClick={() => void load(true)}
+        >
+          刷新供应商模型
+        </button>
+      </div>
+      {(catalog.error || error) && (
+        <p className="form-error" role="alert">
+          {[catalog.error, error].filter(Boolean).join("；")}
+        </p>
+      )}
+      <footer className="modal-actions">
+        <button type="button" disabled={busy} onClick={() => void leave()}>
+          取消
+        </button>
+        <button className="primary" disabled={busy || !dirty}>
+          保存
+        </button>
+      </footer>
+    </form>
+  );
+  return embedded ? (
+    form
+  ) : (
     <Modal
       title={`${provider.name} 模型映射`}
       close={() => void leave()}
       busy={busy}
       compact
     >
-      <form
-        className="gateway-form dsh-model-mapping"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setBusy(true);
-          setError("");
-          const next = Object.fromEntries(
-            Object.entries(mapping).map(([id, value]) => [
-              id,
-              value?.trim() || null,
-            ]),
-          );
-          void save(
-            { op: "dshModelsProvider", id: provider.id, mapping: next },
-            baseline.current,
-          )
-            .then(close)
-            .catch((e) => {
-              baseline.current = null;
-              setError(errorOf(e).message);
-            })
-            .finally(() => setBusy(false));
-        }}
-      >
-        {rows.map(({ id, name }) => {
-          const value = mapping[id] ?? "";
-          const options = [...new Set([value, ...models])].filter(Boolean);
-          return (
-            <div className="dsh-mapping-row" key={id}>
-              <label title={id}>
-                <span>{name || id}</span>
-                {name !== id && <small className="muted">{id}</small>}
-                <select
-                  aria-label={`${name || id} 上游模型`}
-                  disabled={busy}
-                  value={manual.has(id) ? MANUAL : value}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    setManual((old) => {
-                      const next = new Set(old);
-                      if (value === MANUAL) next.add(id);
-                      else next.delete(id);
-                      return next;
-                    });
-                    if (value !== MANUAL) update(id, value);
-                  }}
-                >
-                  <option value="">不承接</option>
-                  {options.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                  <option value={MANUAL}>手动填写…</option>
-                </select>
-              </label>
-              {manual.has(id) && (
-                <input
-                  aria-label={`${name || id} 自定义模型 ID`}
-                  value={value}
-                  maxLength={256}
-                  disabled={busy}
-                  placeholder="完整模型 ID"
-                  onChange={(e) => update(id, e.target.value)}
-                />
-              )}
-            </div>
-          );
-        })}
-        {!rows.length && (
-          <p className="muted">
-            {catalog.loading ? "正在读取模型…" : "没有可用模型"}
-          </p>
-        )}
-        <div className="dsh-model-actions">
-          <button
-            type="button"
-            disabled={catalog.loading || busy}
-            onClick={() => void catalog.refresh()}
-          >
-            刷新官方模型
-          </button>
-          <button
-            type="button"
-            disabled={loading || busy}
-            onClick={() => void load(true)}
-          >
-            刷新供应商模型
-          </button>
-        </div>
-        {(catalog.error || error) && (
-          <p className="form-error" role="alert">
-            {[catalog.error, error].filter(Boolean).join("；")}
-          </p>
-        )}
-        <footer className="modal-actions">
-          <button type="button" disabled={busy} onClick={() => void leave()}>
-            取消
-          </button>
-          <button className="primary" disabled={busy || !dirty}>
-            保存
-          </button>
-        </footer>
-      </form>
+      {form}
     </Modal>
   );
 }

@@ -598,6 +598,12 @@ describe("user workflows", () => {
     ).not.toBeInTheDocument();
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     await u.click(screen.getByRole("button", { name: "取消" }));
+    await u.click(
+      within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+        "button",
+        { name: "放弃修改" },
+      ),
+    );
     expect(
       await screen.findByRole("heading", { name: "导入供应商" }),
     ).toBeInTheDocument();
@@ -862,9 +868,10 @@ describe("window lifecycle and close draft guard", () => {
       void mocks.listeners.get("main-close-requested")?.({ hidden: false });
     });
     await user.click(
-      within(
-        await screen.findByRole("dialog", { name: "确认操作" }),
-      ).getByRole("button", { name: "放弃修改" }),
+      within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+        "button",
+        { name: "放弃修改" },
+      ),
     );
     await waitFor(() =>
       expect(mocks.command).toHaveBeenCalledWith("close_main"),

@@ -1235,8 +1235,18 @@
   margin-bottom: 4px;
 }
 
-.model-mapping-modal {
+/* The provider dialog: wide enough for the model mapping rows, with its tabs
+   flush against the heading. */
+.provider-dialog {
   width: 580px;
+}
+.provider-dialog .settings-tabs {
+  margin: -20px -22px 18px;
+  overflow-x: auto;
+}
+.provider-dialog .settings-tabs button {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .gateway-form.model-mapping {
   gap: 12px;

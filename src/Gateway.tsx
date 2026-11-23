@@ -4,7 +4,7 @@ import DshProfile, { connectDsh } from "./DshProfile";
 import { preferredDshProfile } from "./dsh-profile";
 import GatewayModels from "./GatewayModels";
 import GrokImport from "./GrokImport";
-import GatewayDialog from "./GatewayProviderDialog";
+import GatewayDialog, { type ProviderTab } from "./GatewayProviderDialog";
 import { subscriptions } from "./subscriptions";
 import type { GatewayEdit, ProviderAction } from "./bridge-contracts";
 import QuotaRefreshSettings from "./QuotaRefreshSettings";
@@ -16,11 +16,7 @@ import ClientSelection, {
 import type { ClientId } from "./types";
 import { saveGatewayEdit, type EditRevision } from "./gateway-edit";
 import { confirmAction } from "./confirmation";
-import ProviderSettings from "./ProviderSettings";
-import ClaudeModelMapping from "./ClaudeModelMapping";
-import ProviderEndpoints from "./ProviderEndpoints";
 import ProviderControls from "./ProviderControls";
-import ProviderNameEditor from "./ProviderNameEditor";
 import SortableProviders, { type ProviderCommit } from "./SortableProviders";
 import Modal from "./Modal";
 import {
@@ -45,10 +41,7 @@ import {
   Network,
   Check,
   RotateCcw,
-  ListChecks,
-  ArrowLeftRight,
   SquarePen,
-  PencilLine,
   Copy,
 } from "lucide-react";
 import { command } from "./bridge";
@@ -64,10 +57,7 @@ type Dialog =
     }
   | { kind: "grokImport" }
   | { kind: "dsh" }
-  | { kind: "provider"; item?: Provider }
-  | { kind: "settings"; item: Provider }
-  | { kind: "modelMap"; item: Provider }
-  | { kind: "endpoints"; item: Provider }
+  | { kind: "provider"; item?: Provider; tab?: ProviderTab }
   | { kind: "quota"; item: Provider }
   | null;
 type GatewayProps = {
@@ -162,10 +152,6 @@ function GatewayContent({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
-  const [renameRequest, setRenameRequest] = useState<{
-    id: string;
-    sequence: number;
-  } | null>(null);
   const quota = useProviderQuota(
     state?.providers ?? [],
     true,
@@ -216,10 +202,21 @@ function GatewayContent({
       focusHandled.current = focusProvider.sequence;
       if (p) {
         setDialogVersion(focusProvider.sequence);
+        // The model rules live in the edit dialog: the whitelist tab, or the
+        // model mapping for DSH, which has no whitelist.
         setDialog(
-          focusProvider.action === "edit"
-            ? { kind: "provider", item: p }
-            : { kind: focusProvider.action ?? "settings", item: p },
+          focusProvider.action === "testing"
+            ? { kind: "testing", item: p }
+            : {
+                kind: "provider",
+                item: p,
+                tab:
+                  focusProvider.action === "edit"
+                    ? "api"
+                    : clientId === "dsh"
+                      ? "modelMap"
+                      : "whitelist",
+              },
         );
       } else {
         setError("该供应商已不存在，请刷新后重试");
@@ -359,10 +356,6 @@ function GatewayContent({
     if (await confirmAction(`删除供应商“${p.name}”？`, "删除"))
       run(() => edit({ op: "deleteProvider", id: p.id }));
   };
-  const renameProvider = (
-    payload: { op: "renameProvider"; id: string; name: string },
-    revision: EditRevision,
-  ) => edit(payload, revision);
   return (
     <section className="gateway-page">
       <div className="gateway-navigation">
@@ -490,14 +483,6 @@ function GatewayContent({
               const selected =
                 state.mode === "manual" && state.selected === p.id;
               const status = providerRuntimeStatus(p, state);
-              const open = (
-                kind:
-                  | "testing"
-                  | "settings"
-                  | "modelMap"
-                  | "endpoints"
-                  | "provider",
-              ) => setDialog({ kind, item: p });
               // Left to right in the row's second line.
               const actions: {
                 name: string;
@@ -514,43 +499,13 @@ function GatewayContent({
                 {
                   name: "连接测试",
                   icon: <ConnectionTestIcon />,
-                  run: () => open("testing"),
+                  run: () => setDialog({ kind: "testing", item: p }),
                 },
-                // DSH maps its fixed model slots in place of a whitelist.
-                ...(clientId === "dsh"
-                  ? []
-                  : [
-                      {
-                        name: "白名单",
-                        icon: <ListChecks size={14} />,
-                        run: () => open("settings"),
-                      },
-                    ]),
-                ...(clientId === "dsh" || clientId === "claude"
-                  ? [
-                      {
-                        name: "模型映射",
-                        icon: <ArrowLeftRight size={14} />,
-                        run: () =>
-                          open(clientId === "dsh" ? "settings" : "modelMap"),
-                      },
-                    ]
-                  : []),
-                {
-                  name: "端点",
-                  icon: <Network size={14} />,
-                  run: () => open("endpoints"),
-                },
+                // Name, whitelist, model mapping and endpoints are its tabs.
                 {
                   name: "编辑 API",
                   icon: <SquarePen size={14} />,
-                  run: () => open("provider"),
-                },
-                {
-                  name: "重命名",
-                  icon: <PencilLine size={14} />,
-                  run: () =>
-                    setRenameRequest({ id: p.id, sequence: Date.now() }),
+                  run: () => setDialog({ kind: "provider", item: p }),
                 },
                 {
                   name: "创建副本",
@@ -569,18 +524,9 @@ function GatewayContent({
                   <div className="provider-main">
                     {handle}
                     {priority && <span className="priority">P{priority}</span>}
-                    <ProviderNameEditor
-                      provider={p}
-                      revision={state.revision}
-                      disabled={rowBusy}
-                      commit={renameProvider}
-                      report={setError}
-                      request={
-                        renameRequest?.id === p.id
-                          ? renameRequest.sequence
-                          : undefined
-                      }
-                    />
+                    <span className="provider-title" title={p.name}>
+                      {p.name}
+                    </span>
                     <QuotaInfo
                       compact
                       clientId={clientId}
@@ -806,24 +752,6 @@ function GatewayContent({
           notify={notify}
         />
       )}
-      {dialog?.kind === "settings" && (
-        <ProviderSettings
-          key={`${dialog.item.id}:${dialogVersion}`}
-          provider={dialog.item}
-          onDirtyChange={markDialog}
-          clientId={clientId}
-          revision={state.revision}
-          disabled={busy}
-          runtime={
-            state.providers.find((p) => p.id === dialog.item.id) ?? dialog.item
-          }
-          close={() => setDialog(null)}
-          save={async (payload, revision) => {
-            await edit(payload, revision);
-            notify(clientId === "dsh" ? "模型映射已保存" : "白名单已保存");
-          }}
-        />
-      )}
       {dialog?.kind === "testing" && (
         <Suspense fallback={null}>
           <ProviderTesting
@@ -854,45 +782,24 @@ function GatewayContent({
           />
         </Modal>
       )}
-      {dialog?.kind === "endpoints" && (
-        <ProviderEndpoints
-          provider={dialog.item}
-          runtime={
-            state.providers.find((p) => p.id === dialog.item.id) ?? dialog.item
-          }
-          clientId={clientId}
-          revision={state.revision}
-          onDirtyChange={markDialog}
-          update={setState}
-          save={edit}
-          close={() => setDialog(null)}
-        />
-      )}
-      {dialog?.kind === "modelMap" && (
-        <ClaudeModelMapping
-          provider={dialog.item}
-          revision={state.revision}
-          onDirtyChange={markDialog}
-          close={() => setDialog(null)}
-          save={async (payload, revision) => {
-            await edit(payload, revision);
-            notify("模型映射已保存");
-          }}
-        />
-      )}
       {dialog?.kind === "provider" && (
         <GatewayDialog
           key={`${clientId}:${dialog.item?.id ?? "new"}:${dialogVersion}`}
           clientId={clientId}
           connectionMode={state.connectionMode}
           dialog={dialog}
+          runtime={
+            dialog.item &&
+            (state.providers.find((p) => p.id === dialog.item?.id) ??
+              dialog.item)
+          }
           revision={state.revision}
+          disabled={busy}
           onDirtyChange={markDialog}
           close={() => setDialog(null)}
-          save={async (payload, revision) => {
-            await edit(payload, revision);
-            setDialog(null);
-          }}
+          save={edit}
+          update={setState}
+          notify={notify}
         />
       )}
     </section>

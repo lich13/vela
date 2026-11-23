@@ -17,6 +17,8 @@ function StandardProviderSettings({
   save,
   close,
   onDirtyChange,
+  embedded = false,
+  onBusyChange,
 }: {
   provider: Provider;
   runtime: Provider;
@@ -26,6 +28,9 @@ function StandardProviderSettings({
   save: (edit: GatewayEdit, revision: EditRevision) => Promise<void>;
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  /** Renders the form alone, for a dialog that hosts it as one of its tabs. */
+  embedded?: boolean;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [limited, setLimited] = useState(provider.allowedModels != null);
   const [selected, setSelected] = useState(provider.allowedModels ?? []);
@@ -53,6 +58,9 @@ function StandardProviderSettings({
     onDirtyChange?.(dirty);
   }, [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+  useEffect(() => {
+    onBusyChange?.(saving);
+  }, [saving, onBusyChange]);
   const load = async (force: boolean) => {
     const current = ++generation.current;
     setLoading(true);
@@ -106,179 +114,184 @@ function StandardProviderSettings({
   const models = [...new Set([...selected, ...(catalog?.models ?? [])])].filter(
     (v) => v.toLowerCase().includes(query.toLowerCase()),
   );
-  return (
+  const form = (
+    <form
+      className="gateway-form provider-settings"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (custom.trim()) {
+          setError("请先添加手填模型，或清空输入");
+          return;
+        }
+        if (limited && !selected.length) {
+          setError("白名单至少选择一个模型");
+          return;
+        }
+        setSaving(true);
+        setError("");
+        void save(
+          {
+            op: "policyProvider",
+            id: provider.id,
+            allowedModels: limited ? selected : null,
+          },
+          baseline.current,
+        )
+          .then(() => {
+            setSaved(snapshot(limited ? selected : null));
+            close();
+          })
+          .catch((e) => {
+            baseline.current = null;
+            setError(errorOf(e).message);
+          })
+          .finally(() => setSaving(false));
+      }}
+    >
+      <div className="segmented" role="group" aria-label="模型规则">
+        <button
+          type="button"
+          aria-pressed={!limited}
+          className={!limited ? "active" : ""}
+          disabled={saving}
+          onClick={() => setLimited(false)}
+        >
+          不限模型
+        </button>
+        <button
+          type="button"
+          aria-pressed={limited}
+          className={limited ? "active" : ""}
+          disabled={saving}
+          onClick={() => setLimited(true)}
+        >
+          白名单
+        </button>
+      </div>
+      <div className="model-search">
+        <Search size={15} />
+        <input
+          aria-label="搜索模型"
+          placeholder="搜索模型 ID"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="刷新模型列表"
+          disabled={
+            loading ||
+            !!(catalog?.retryAt && catalog.retryAt > Date.now() / 1000)
+          }
+          onClick={() => void load(true)}
+        >
+          <RefreshCw size={15} className={loading ? "spin" : ""} />
+        </button>
+      </div>
+      {(catalogError || catalog?.error) && (
+        <div className="form-error" role="status">
+          {catalogError || catalog?.error}
+        </div>
+      )}
+      {catalog?.stale && (
+        <p className="muted">
+          配置已变化，旧模型列表仅供参考；手动刷新后才用于本地模型并集。
+        </p>
+      )}
+      <div className="model-options" aria-label="可选模型">
+        {!models.length && (
+          <div className="model-empty">
+            {loading ? "正在读取模型…" : "没有匹配模型"}
+          </div>
+        )}
+        {models.map((model) => (
+          <label
+            key={model}
+            title={(() => {
+              const meta = catalog?.metadata?.[model];
+              return meta
+                ? [
+                    meta.name,
+                    meta.context
+                      ? `上下文 ${meta.context.toLocaleString()}`
+                      : null,
+                    meta.output
+                      ? `输出上限 ${meta.output.toLocaleString()}`
+                      : null,
+                    meta.reasoningEfforts
+                      ? `推理档位 ${sortEfforts(Object.keys(meta.reasoningEfforts)).join(" / ")}`
+                      : null,
+                    `models.dev · ${meta.sources.join(" / ")}`,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                : model;
+            })()}
+          >
+            <input
+              type="checkbox"
+              disabled={saving}
+              checked={selected.includes(model)}
+              onChange={(e) => {
+                setLimited(true);
+                setSelected(
+                  e.target.checked
+                    ? [...selected, model]
+                    : selected.filter((v) => v !== model),
+                );
+              }}
+            />
+            <span title={model}>{model}</span>
+          </label>
+        ))}
+      </div>
+      <label className="model-manual">
+        手动添加模型 ID
+        <textarea
+          rows={2}
+          value={custom}
+          disabled={saving}
+          onChange={(e) => setCustom(e.target.value)}
+        />
+      </label>
+      <button
+        type="button"
+        className="text-button"
+        disabled={saving || !custom.trim()}
+        onClick={add}
+      >
+        添加到白名单
+      </button>
+      {error && (
+        <div className="form-error" role="alert">
+          {error}
+        </div>
+      )}
+      <div className="dialog-actions">
+        <button
+          type="button"
+          className="secondary"
+          disabled={saving}
+          onClick={() => void leave()}
+        >
+          取消
+        </button>
+        <button className="primary" disabled={disabled || saving}>
+          {saving ? "保存中…" : baseline.current === null ? "重试" : "保存"}
+        </button>
+      </div>
+    </form>
+  );
+  return embedded ? (
+    form
+  ) : (
     <Modal
       title={`${provider.name} · 白名单`}
       close={() => void leave()}
       busy={saving}
     >
-      <form
-        className="gateway-form provider-settings"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (custom.trim()) {
-            setError("请先添加手填模型，或清空输入");
-            return;
-          }
-          if (limited && !selected.length) {
-            setError("白名单至少选择一个模型");
-            return;
-          }
-          setSaving(true);
-          setError("");
-          void save(
-            {
-              op: "policyProvider",
-              id: provider.id,
-              allowedModels: limited ? selected : null,
-            },
-            baseline.current,
-          )
-            .then(() => {
-              setSaved(snapshot(limited ? selected : null));
-              close();
-            })
-            .catch((e) => {
-              baseline.current = null;
-              setError(errorOf(e).message);
-            })
-            .finally(() => setSaving(false));
-        }}
-      >
-        <div className="segmented" role="group" aria-label="模型规则">
-          <button
-            type="button"
-            aria-pressed={!limited}
-            className={!limited ? "active" : ""}
-            disabled={saving}
-            onClick={() => setLimited(false)}
-          >
-            不限模型
-          </button>
-          <button
-            type="button"
-            aria-pressed={limited}
-            className={limited ? "active" : ""}
-            disabled={saving}
-            onClick={() => setLimited(true)}
-          >
-            白名单
-          </button>
-        </div>
-        <div className="model-search">
-          <Search size={15} />
-          <input
-            aria-label="搜索模型"
-            placeholder="搜索模型 ID"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="刷新模型列表"
-            disabled={
-              loading ||
-              !!(catalog?.retryAt && catalog.retryAt > Date.now() / 1000)
-            }
-            onClick={() => void load(true)}
-          >
-            <RefreshCw size={15} className={loading ? "spin" : ""} />
-          </button>
-        </div>
-        {(catalogError || catalog?.error) && (
-          <div className="form-error" role="status">
-            {catalogError || catalog?.error}
-          </div>
-        )}
-        {catalog?.stale && (
-          <p className="muted">
-            配置已变化，旧模型列表仅供参考；手动刷新后才用于本地模型并集。
-          </p>
-        )}
-        <div className="model-options" aria-label="可选模型">
-          {!models.length && (
-            <div className="model-empty">
-              {loading ? "正在读取模型…" : "没有匹配模型"}
-            </div>
-          )}
-          {models.map((model) => (
-            <label
-              key={model}
-              title={(() => {
-                const meta = catalog?.metadata?.[model];
-                return meta
-                  ? [
-                      meta.name,
-                      meta.context
-                        ? `上下文 ${meta.context.toLocaleString()}`
-                        : null,
-                      meta.output
-                        ? `输出上限 ${meta.output.toLocaleString()}`
-                        : null,
-                      meta.reasoningEfforts
-                        ? `推理档位 ${sortEfforts(Object.keys(meta.reasoningEfforts)).join(" / ")}`
-                        : null,
-                      `models.dev · ${meta.sources.join(" / ")}`,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")
-                  : model;
-              })()}
-            >
-              <input
-                type="checkbox"
-                disabled={saving}
-                checked={selected.includes(model)}
-                onChange={(e) => {
-                  setLimited(true);
-                  setSelected(
-                    e.target.checked
-                      ? [...selected, model]
-                      : selected.filter((v) => v !== model),
-                  );
-                }}
-              />
-              <span title={model}>{model}</span>
-            </label>
-          ))}
-        </div>
-        <label className="model-manual">
-          手动添加模型 ID
-          <textarea
-            rows={2}
-            value={custom}
-            disabled={saving}
-            onChange={(e) => setCustom(e.target.value)}
-          />
-        </label>
-        <button
-          type="button"
-          className="text-button"
-          disabled={saving || !custom.trim()}
-          onClick={add}
-        >
-          添加到白名单
-        </button>
-        {error && (
-          <div className="form-error" role="alert">
-            {error}
-          </div>
-        )}
-        <div className="dialog-actions">
-          <button
-            type="button"
-            className="secondary"
-            disabled={saving}
-            onClick={() => void leave()}
-          >
-            取消
-          </button>
-          <button className="primary" disabled={disabled || saving}>
-            {saving ? "保存中…" : baseline.current === null ? "重试" : "保存"}
-          </button>
-        </div>
-      </form>
+      {form}
     </Modal>
   );
 }

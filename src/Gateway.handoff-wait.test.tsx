@@ -70,7 +70,7 @@ it("renders handoff waiting as neutral, non-clickable provider state", async () 
   ];
   const user = userEvent.setup();
   render(<Gateway notify={() => {}} />);
-  await screen.findByRole("button", { name: `${first.name} 名称` });
+  await screen.findByText(first.name, { selector: ".provider-title" });
 
   const cases = [
     [first, "待压缩后接管"],
@@ -79,7 +79,7 @@ it("renders handoff waiting as neutral, non-clickable provider state", async () 
   ] as const;
   for (const [provider, label] of cases) {
     const row = screen
-      .getByRole("button", { name: `${provider.name} 名称` })
+      .getByText(provider.name, { selector: ".provider-title" })
       .closest("[data-provider-id]");
     expect(row).not.toBeNull();
     const item = row as HTMLElement;

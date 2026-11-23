@@ -77,7 +77,7 @@ async function openProviderEditor(
       name: `${provider.name} 编辑 API`,
     }),
   );
-  await screen.findByRole("dialog", { name: "编辑供应商" });
+  await screen.findByRole("dialog", { name: /^编辑供应商/ });
   return provider;
 }
 
@@ -285,7 +285,7 @@ describe("gateway provider token visibility", () => {
     await user.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() =>
       expect(
-        screen.queryByRole("dialog", { name: "编辑供应商" }),
+        screen.queryByRole("dialog", { name: /^编辑供应商/ }),
       ).not.toBeInTheDocument(),
     );
 
@@ -410,7 +410,7 @@ describe("gateway provider token visibility", () => {
         await user.click(screen.getByRole("button", { name: "关闭" }));
         await waitFor(() =>
           expect(
-            screen.queryByRole("dialog", { name: "编辑供应商" }),
+            screen.queryByRole("dialog", { name: /^编辑供应商/ }),
           ).not.toBeInTheDocument(),
         );
       } else {
