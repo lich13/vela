@@ -1285,6 +1285,47 @@
   background: var(--error-soft);
   color: var(--error);
 }
+.model-mapping-families,
+.model-mapping-exact {
+  display: grid;
+  gap: 10px;
+}
+.model-mapping-family {
+  display: grid;
+  grid-template-columns: 64px 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 8px;
+}
+.model-mapping-family > svg {
+  color: var(--muted);
+}
+.model-mapping-family-name {
+  font-weight: 600;
+}
+.model-mapping .model-mapping-family input,
+.model-mapping .model-mapping-family select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+.model-mapping .model-mapping-family select {
+  background: var(--canvas);
+  text-overflow: ellipsis;
+}
+.model-mapping-family .model-mapping-custom,
+.model-mapping-asked {
+  grid-column: 3;
+}
+.model-mapping-asked {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.model-mapping-toggle {
+  justify-self: start;
+}
 .model-mapping-note {
   margin: 0;
   font-size: 12px;
