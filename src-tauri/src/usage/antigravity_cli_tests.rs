@@ -388,6 +388,7 @@ fn a_row_belongs_to_the_account_signed_in_at_its_time() {
 }
 
 // 回溯后同一步骤序号再次执行并各自计费：两次执行都计入，首次执行沿用原有记录标识；
+// 回溯之后才第一次执行的步骤同样沿用原有记录标识，升级前已入库的行不会多出一份；
 // 被回溯覆盖的步骤不取会话库里同序号（已是重跑后）的元数据；整份读取与分两次增量读取结果相同。
 #[test]
 fn steps_run_again_after_a_rewind_are_counted_beside_the_first_run() {
@@ -413,7 +414,9 @@ fn steps_run_again_after_a_rewind_are_counted_beside_the_first_run() {
             f.row("session", 1),
             f.row("session", 3),
             f.rewound("session", 3, 1),
-            f.rewound("session", 5, 1),
+            // Run for the first time after the rewind: the id it was stored
+            // under before rewinds were told apart, so no second row appears.
+            f.row("session", 5),
         ]
         .map(|row| {
             (
@@ -609,7 +612,7 @@ fn a_step_at_the_end_of_the_file_is_timed_once_its_follower_is_written() {
     let rows = |f: &Fixture| {
         [
             f.row("session", 5),
-            f.rewound("session", 3, 1),
+            f.row("session", 3),
             f.rewound("session", 5, 1),
         ]
         .map(|row| row.attempts[0].estimated_duration_ms)
@@ -622,10 +625,7 @@ fn a_step_at_the_end_of_the_file_is_timed_once_its_follower_is_written() {
     let mut f = Fixture::new();
     f.write("session", &parts[0]);
     assert_eq!(f.sync().imported, 2);
-    assert_eq!(
-        f.rewound("session", 3, 1).attempts[0].estimated_duration_ms,
-        None
-    );
+    assert_eq!(f.row("session", 3).attempts[0].estimated_duration_ms, None);
     // Nothing new: the waiting line is left alone.
     assert_eq!(f.sync().imported, 0);
     // A follower still being written times nothing yet.

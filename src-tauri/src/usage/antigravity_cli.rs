@@ -56,11 +56,14 @@ struct Open {
 struct Walk {
     model: Option<String>,
     /// Times the session went back to an earlier step. The steps run again
-    /// reuse their indexes and are billed again, so the count is part of a
-    /// row's identity.
+    /// reuse their indexes and are billed again.
     rewinds: u64,
     /// The step index of the last line that had one.
     step: Option<u64>,
+    /// Each step with a usage line, by the rewind count of its first run.
+    /// That run has the step's plain id, as every row stored before rewinds
+    /// were told apart does; a later run adds its rewind count to it.
+    first: BTreeMap<u64, u64>,
 }
 
 /// A usage line as its row, before the conversation database adds to it.
@@ -404,9 +407,11 @@ impl Pass<'_> {
                 model: self.walk.model.clone(),
                 rewinds: before.0,
                 step: before.1,
+                first: self.walk.first.clone(),
             },
         };
         self.open = Some((key, waiting));
+        self.walk.first.entry(step).or_insert(key.0);
         let draft = Draft {
             rewinds: key.0,
             step,
@@ -444,9 +449,10 @@ impl Pass<'_> {
             cache_read: number(&v["cache_read_tokens"]),
             ..Tokens::default()
         };
-        // Rows stored before rewinds were told apart keep their ids.
         let id = safe_id(&match walk.rewinds {
-            0 => format!("antigravity:cli:{cascade}:step:{step}"),
+            rewinds if walk.first.get(&step) == Some(&rewinds) => {
+                format!("antigravity:cli:{cascade}:step:{step}")
+            }
             rewinds => format!("antigravity:cli:{cascade}:step:{step}:rewind:{rewinds}"),
         });
         let is_failed = failed(v);

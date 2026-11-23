@@ -554,9 +554,6 @@
   color: var(--muted);
   font-size: 12px;
 }
-.usage-model-lines small.mismatch {
-  color: var(--warning);
-}
 .usage-badges {
   display: flex;
   justify-content: center;

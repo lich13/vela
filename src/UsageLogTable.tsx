@@ -389,7 +389,7 @@ export default function UsageLogTable({
                         </small>
                       )}
                       {relation?.mismatch && (
-                        <small className="mismatch" title={relation.title}>
+                        <small title={relation.title}>
                           ↳ 返回 {a.responseModel}
                         </small>
                       )}

@@ -604,7 +604,6 @@ it("stacks the mapped and returned models under the model name", () => {
     "title",
     title,
   );
-  expect(screen.getByText("↳ 返回 fixture-other")).toHaveClass("mismatch");
   expect(screen.queryByText("映射")).toBeNull();
   expect(screen.queryByText("响应不一致")).toBeNull();
 });
