@@ -563,7 +563,10 @@ export type CommandMap = {
   read_previous_antigravity_config: Call<None, string>;
   validate_antigravity_config: Call<{ text: string }, void>;
   /** `missing` means the CLI has not created the file yet; Vela never creates it. */
-  read_antigravity_cli_config: Call<None, ConfigDocument & { missing: boolean }>;
+  read_antigravity_cli_config: Call<
+    None,
+    ConfigDocument & { missing: boolean }
+  >;
   save_antigravity_cli_config: Call<
     { text: string } & Revision,
     ConfigDocument & { missing: boolean }
@@ -647,7 +650,10 @@ export type CommandMap = {
   >;
   quick_ready: Call<None, void>;
   hide_quick: Call<None, void>;
-  cancel_gateway_wait: Call<Client & { requestId: string }, boolean>;
+  cancel_gateway_wait: Call<
+    Client & { requestId: string },
+    "resent" | "ended" | "gone"
+  >;
   get_gateway: Call<Client, GatewayState>;
   get_gateway_freeze: Call<None, GatewayFreeze>;
   set_gateway_frozen: Call<

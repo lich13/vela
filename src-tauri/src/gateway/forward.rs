@@ -3991,6 +3991,7 @@ impl Exchange<'_> {
     }
     /// Starts the relay task for an accepted response and returns its head.
     fn hand_over(mut self, mut attempt: Attempt, opening: Opening) -> Response<WireBody> {
+        self.request_budget.delivering();
         if attempt.route.provider.buffer_complete_response
             && is_messages_path(self.parts.uri.path())
         {

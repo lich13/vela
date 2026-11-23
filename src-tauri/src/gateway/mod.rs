@@ -508,6 +508,15 @@ impl Gateway {
     pub fn cancel_wait(&self, request_id: &str) -> bool {
         self.0.pending_requests.cancel(request_id)
     }
+    /// `cancel_wait`, telling a request sent again (`resent`) from one whose
+    /// response had begun and was ended (`ended`) and one already over (`gone`).
+    pub fn interrupt_wait(&self, request_id: &str) -> &'static str {
+        match self.0.pending_requests.interrupt(request_id) {
+            Some(true) => "resent",
+            Some(false) => "ended",
+            None => "gone",
+        }
+    }
 
     fn claude_official(&self) -> bool {
         self.0.client == ClientId::Claude

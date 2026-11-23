@@ -1656,8 +1656,8 @@ fn cancel_gateway_wait(
     client_id: gateway::ClientId,
     request_id: String,
     r: tauri::State<'_, Arc<Runtime>>,
-) -> bool {
-    r.gateway(client_id).cancel_wait(&request_id)
+) -> &'static str {
+    r.gateway(client_id).interrupt_wait(&request_id)
 }
 #[tauri::command]
 fn get_gateway_models(

@@ -135,6 +135,9 @@ impl Pending {
 struct State {
     active: Option<Pending>,
     cancelled: Option<Instant>,
+    /// The response is with the client: a cancel can no longer send the
+    /// request again, only end it.
+    delivering: bool,
     /// Kept here rather than with `active`, which the first output removes
     /// while the response is still being relayed.
     outage: Option<Outage>,
@@ -211,10 +214,16 @@ impl Registry {
         result
     }
     pub fn cancel(&self, id: &str) -> bool {
-        let shared = self.0.requests.lock().get(id).and_then(Weak::upgrade);
-        let Some(shared) = shared else {
-            return false;
-        };
+        self.interrupt(id).is_some()
+    }
+    /// Cancels the wait `id` names. `Some(true)` when the request is sent
+    /// again, `Some(false)` when its response was already with the client
+    /// and is ended instead, `None` when there was nothing left to cancel.
+    pub fn interrupt(&self, id: &str) -> Option<bool> {
+        self.cancel_shared(id).map(|delivering| !delivering)
+    }
+    fn cancel_shared(&self, id: &str) -> Option<bool> {
+        let shared = self.0.requests.lock().get(id).and_then(Weak::upgrade)?;
         let mut state = shared.state.lock();
         if !state.active.as_ref().is_some_and(|p| {
             p.view.request_id == id
@@ -224,13 +233,14 @@ impl Registry {
                     || p.paused()
                     || p.expires_at() > Instant::now())
         }) {
-            return false;
+            return None;
         }
         state.cancelled = state.active.take().map(|p| p.deadline);
+        let delivering = state.delivering;
         drop(state);
         self.remove(id);
         shared.changes.send_replace(());
-        true
+        Some(delivering)
     }
 }
 impl Drop for Shared {
@@ -417,6 +427,10 @@ impl WaitBudget {
     pub fn watch_endpoint(&self, endpoint: Option<(Links, String, Duration)>) {
         self.shared.state.lock().outage =
             endpoint.map(|(links, key, limit)| Outage { links, key, limit });
+    }
+    /// Marks the response as handed to the client.
+    pub fn delivering(&self) {
+        self.shared.state.lock().delivering = true;
     }
     pub fn buffering(&self) {
         let mut state = self.shared.state.lock();
@@ -1070,6 +1084,20 @@ mod cancellation_tests {
         let id = a.view()[0].request_id.clone();
         tokio::time::advance(Duration::from_secs(300)).await;
         assert!(!a.cancel(&id));
+    }
+    #[test]
+    fn a_cancel_tells_a_resend_from_an_ended_delivery() {
+        let registry = Registry::new(broadcast::channel(16).0);
+        let waiting = WaitBudget::tracked(300, &registry);
+        waiting.begin();
+        let id = registry.view()[0].request_id.clone();
+        assert_eq!(registry.interrupt(&id), Some(true));
+        assert_eq!(registry.interrupt(&id), None);
+        let delivering = WaitBudget::tracked(300, &registry);
+        delivering.begin();
+        delivering.delivering();
+        let id = registry.view()[0].request_id.clone();
+        assert_eq!(registry.interrupt(&id), Some(false));
     }
     #[test]
     fn output_and_cancel_have_one_atomic_winner() {

@@ -319,7 +319,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       (r) => r.requestId !== args.requestId,
     );
     s.waitingRequests = s.pendingRequests.length;
-    return found;
+    return found ? "resent" : "gone";
   }
   if (name === "update_codex_catalog") {
     if (!s.modelCatalog || !s.modelCatalogOfficial)

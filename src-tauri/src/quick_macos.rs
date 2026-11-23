@@ -1905,13 +1905,16 @@ impl Host {
                     .cancelling_waits
                     .insert(request_id.clone());
                 self.render_if_visible();
-                let cancelled = r.gateway(cid).cancel_wait(&request_id);
+                let outcome = r.gateway(cid).interrupt_wait(&request_id);
                 self.state.lock().cancelling_waits.remove(&request_id);
-                self.set_notice(if cancelled {
-                    "已打断并重发".into()
-                } else {
-                    "等待已结束".into()
-                });
+                self.set_notice(
+                    match outcome {
+                        "resent" => "已打断并重发",
+                        "ended" => "回应已开始交付，已中止，需由客户端重试",
+                        _ => "等待已结束",
+                    }
+                    .into(),
+                );
             }
             QuickAction::ReorderProviders {
                 ids,
