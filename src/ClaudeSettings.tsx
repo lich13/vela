@@ -87,10 +87,9 @@ export function Scalar({
   // The text being typed; the file value shows again once the field loses focus.
   const [draft, setDraft] = useState<string | null>(null);
   // A 0 or 1 may be an amount after all, so the row says which and can be turned
-  // over. It is decided once, so typing "1" into a text field keeps the field.
-  const [turned, setTurned] = useState(
-    () => !!flag(value) && typeof last === "string" && !countable(last),
-  );
+  // over; the choice made there stays. Without one the row follows the value,
+  // once the field it was typed into loses focus.
+  const [turned, setTurned] = useState<boolean | null>(null);
   const state:
     | { on: boolean | undefined; write: (on: boolean) => Json }
     | undefined =
@@ -100,10 +99,14 @@ export function Scalar({
         ? flag(value)
         : field && {
             on: typeof field.initial === "boolean" ? field.initial : undefined,
-            write: (on) => on,
+            write: (on) => flag(field.on ?? true)!.write(on),
           };
   const either = !!state && !field && typeof value !== "boolean";
-  const asSwitch = !!state && (!either || turned);
+  const asSwitch =
+    !!state &&
+    (!either ||
+      (turned ??
+        (draft === null && typeof last === "string" && !countable(last))));
   const numeric = kind === "number" || typeof value === "number";
   const control =
     state && asSwitch ? (
@@ -168,19 +171,22 @@ export function Scalar({
         }}
       />
     );
-  if (!either) return control;
+  // The wrapper stays while the text comes and goes as a flag, so the field keeps focus.
+  if (field || typeof value === "boolean") return control;
   return (
     <span className="config-flag">
       {control}
-      <button
-        type="button"
-        className="icon-button"
-        aria-label={`${label} 改为${asSwitch ? "输入框" : "开关"}`}
-        title={asSwitch ? "改为输入框" : "改为开关"}
-        onClick={() => setTurned(!asSwitch)}
-      >
-        {asSwitch ? <TextCursorInput size={14} /> : <ToggleLeft size={14} />}
-      </button>
+      {either && (
+        <button
+          type="button"
+          className="icon-button"
+          aria-label={`${label} 改为${asSwitch ? "输入框" : "开关"}`}
+          title={asSwitch ? "改为输入框" : "改为开关"}
+          onClick={() => setTurned(!asSwitch)}
+        >
+          {asSwitch ? <TextCursorInput size={14} /> : <ToggleLeft size={14} />}
+        </button>
+      )}
     </span>
   );
 }
