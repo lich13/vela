@@ -65,6 +65,14 @@ export function missingReason(
   field: string,
   source: string,
 ): string {
+  // An Antigravity CLI session file holds no first-token time.
+  if (
+    field === "first_token" &&
+    source === "antigravity" &&
+    a.transport === "cli_file" &&
+    (a.operation ?? "model") === "model"
+  )
+    return "CLI 未记录";
   if (
     field === "first_token" &&
     (!["proxy", "antigravity"].includes(source) ||

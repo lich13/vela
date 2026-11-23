@@ -191,6 +191,52 @@ fn meter_recognizes_nonempty_text_reasoning_and_tool_arguments_for_each_protocol
 }
 
 #[test]
+fn meter_times_a_gemini_stream_at_its_first_chunk_with_text() {
+    let chunk = |part: serde_json::Value| {
+        json!({
+            "candidates": [{"content": {"role": "model", "parts": [part]}}],
+            "modelVersion": "fixture-model",
+            "responseId": "fixture-response"
+        })
+    };
+    // A signature alone, an empty text and a chunk without parts are no output.
+    let silent = [
+        chunk(json!({"thoughtSignature": "fixture-signature"})),
+        chunk(json!({"text": "", "thoughtSignature": "fixture-signature"})),
+        json!({"candidates": [{"content": {"role": "model"}}], "modelVersion": "fixture-model"}),
+        json!({"usageMetadata": {"promptTokenCount": 3}, "modelVersion": "fixture-model"}),
+    ];
+    let mut meter = Meter::default();
+    for (index, event) in silent.iter().enumerate() {
+        meter.observe(event, 10 + index as u64);
+        assert_eq!(meter.first_token_ms, None, "{event}");
+    }
+    meter.observe(&chunk(json!({"text": "fixture"})), 40);
+    meter.observe(&chunk(json!({"text": " more"})), 90);
+    meter.observe(
+        &json!({
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "."}]}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 4, "totalTokenCount": 7},
+            "modelVersion": "fixture-model"
+        }),
+        120,
+    );
+    assert_eq!(meter.first_token_ms, Some(40));
+
+    // Thought text and a function call count.
+    for event in [
+        chunk(json!({"text": "fixture", "thought": true})),
+        chunk(json!({"functionCall": {"name": "fixture", "args": {}}})),
+    ] {
+        let mut meter = Meter::default();
+        meter.observe(&chunk(json!({"thoughtSignature": "fixture-signature"})), 5);
+        meter.observe(&event, 37);
+        meter.observe(&event, 91);
+        assert_eq!(meter.first_token_ms, Some(37), "{event}");
+    }
+}
+
+#[test]
 fn zero_millisecond_first_delta_is_a_sample_and_is_not_replaced_by_replays() {
     let mut meter = Meter::default();
     let event = json!({"type": "response.function_call_arguments.delta", "delta": "{"});
