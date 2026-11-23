@@ -225,9 +225,8 @@
 
 .provider-secondary {
   display: flex;
-  gap: 8px 12px;
+  gap: 12px;
   align-items: center;
-  flex-wrap: wrap;
   margin-top: 8px;
   min-width: 0;
 }
@@ -237,7 +236,7 @@
 }
 
 .provider-domain {
-  flex: 1 1 120px;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -246,7 +245,8 @@
   font-size: 12px;
 }
 
-/* Wraps as a whole to its own right-aligned line before the domain narrows. */
+/* Keeps its width and its place on the right: the domain gives way first, then
+   the capsules wrap inside their own block. */
 .provider-actions {
   display: flex;
   align-items: center;
@@ -1143,7 +1143,7 @@
   }
 
   .provider-secondary {
-    gap: 8px 10px;
+    gap: 10px;
   }
 
   .provider-binding:not(.provider-handoff) {

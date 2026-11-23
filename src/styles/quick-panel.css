@@ -622,6 +622,11 @@
   font-size: 11.5px;
 }
 
+/* Last in its line here, so its width moves nothing; the panel has no room to spare. */
+.quick-provider-secondary .provider-queue {
+  min-width: 0;
+}
+
 .quick-panel .auth-sync {
   margin: 0;
   padding: 8px 12px;
