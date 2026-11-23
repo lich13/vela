@@ -1083,16 +1083,13 @@ async fn custom_only_switch_while_stopped_running_and_auto_stop() {
     );
 }
 #[tokio::test]
-async fn running_cannot_delete_final_exit_provider_and_crash_uses_updated_target() {
+async fn crash_while_running_writes_the_provider_selected_last() {
     let (t, g) = fixture(vec!["https://a.test/v1".into(), "https://b.test/v1".into()]).await;
     start(&g, &t).await;
     let a = g.view().providers[0].id.clone();
     let b = g.view().providers[1].id.clone();
     update(&g, &t, Edit::Select { id: b.clone() });
     update(&g, &t, Edit::DeleteProvider { id: a });
-    assert!(g
-        .edit(Edit::DeleteProvider { id: b }, &g.view().revision, t.path())
-        .is_err());
     takeover::recover(t.path()).unwrap();
     assert_eq!(
         takeover::tests::read(t.path())
@@ -1401,6 +1398,8 @@ mod claude_gateway_tests;
 mod capacity;
 #[path = "claude_tests.rs"]
 mod claude_tests;
+#[path = "providerless_tests.rs"]
+mod providerless;
 
 #[path = "model_error_tests.rs"]
 mod model_errors;

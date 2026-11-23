@@ -1340,8 +1340,11 @@ impl Gateway {
         self.changed();
         Ok(result)
     }
-    fn exit_provider<'a>(store: &'a Store, last: Option<&str>) -> Result<&'a Provider> {
-        let p = if store.mode == "manual" {
+    /// The provider stopping writes back to the client: the selected one, or
+    /// in auto mode the last to answer and otherwise the head of the queue.
+    /// There may be none; stopping then puts back what the takeover replaced.
+    fn exit_provider<'a>(store: &'a Store, last: Option<&str>) -> Option<&'a Provider> {
+        if store.mode == "manual" {
             store
                 .providers
                 .iter()
@@ -1349,13 +1352,7 @@ impl Gateway {
         } else {
             last.and_then(|id| store.providers.iter().find(|p| p.id == id))
                 .or_else(|| store.providers.iter().find(|p| p.queued))
-        };
-        p.ok_or_else(|| {
-            AppError::new(
-                code::PROVIDER,
-                "没有关闭网关时可用的供应商，请选择供应商或加入故障转移队列",
-            )
-        })
+        }
     }
     pub fn guarded_home(&self) -> bool {
         self.try_view().is_err()
@@ -1593,6 +1590,12 @@ impl Gateway {
             &edit,
             Edit::ModelCatalog { .. } | Edit::ModelCatalogSource { .. }
         );
+        // Selecting a provider or editing one's connection picks a protocol on
+        // purpose; any other edit may leave Grok on a provider of another one.
+        let protocol_choice = matches!(
+            &edit,
+            Edit::Select { .. } | Edit::SaveGrokProvider { id: Some(_), .. }
+        );
         let mut next = s.store.clone();
         if self.0.client == ClientId::Grok && matches!(&edit, Edit::ImportLink { .. }) {
             for provider in &next.providers {
@@ -1658,7 +1661,7 @@ impl Gateway {
             }
             edit => next.edit(edit, s.running)?,
         }
-        if self.0.client == ClientId::Grok && s.running {
+        if self.0.client == ClientId::Grok && s.running && protocol_choice {
             let active_protocol = grok_config::api_profile(&grok_config::read(home)?.1)?
                 .connection
                 .protocol;
@@ -1668,8 +1671,8 @@ impl Gateway {
                         .get(&p.id)
                         .map(|c| c.protocol)
                         .unwrap_or_default()
-                })?;
-            if selected_protocol != active_protocol {
+                });
+            if selected_protocol.is_some_and(|protocol| protocol != active_protocol) {
                 return Err(AppError::new(
                     code::GROK_PROTOCOL,
                     "请先停用 Grok 网关，再切换 API 协议",
@@ -1686,8 +1689,10 @@ impl Gateway {
         let revision = if !matches!(self.0.client, ClientId::Agy | ClientId::Dsh)
             && (s.running || direct_select)
         {
-            let p = Self::exit_provider(&next, s.last_successful.as_deref())?;
-            let target = takeover::Pair::new(&p.base_url, &p.token);
+            let target = match Self::exit_provider(&next, s.last_successful.as_deref()) {
+                Some(p) => takeover::Pair::new(&p.base_url, &p.token),
+                None => takeover::unprovided_exit(&self.0.data)?,
+            };
             let resume_target = if self.0.client == ClientId::Grok && s.running {
                 takeover::exit_pair(&self.0.data)?
                     .ok_or_else(|| AppError::new(code::RECOVERY, "缺少 Grok 恢复目标"))?
@@ -1796,9 +1801,6 @@ impl Gateway {
             if let Some(error) = &s.recovery_error {
                 return Err(error.clone());
             }
-            if s.store.providers.is_empty() {
-                return Err(AppError::new(code::PROVIDER, "请先添加供应商"));
-            }
             s.store.local_token.clone()
         };
         let listener = self.0.registry.listener.prepare().await?;
@@ -1820,10 +1822,17 @@ impl Gateway {
             if self.view_revision_with_listener(&s, &listener.revision) != expected {
                 return Err(AppError::new(code::CONFLICT, "设置已变化，请重试"));
             }
-            let p = Self::exit_provider(&s.store, None)?;
-            let exit = takeover::Pair::new(&p.base_url, &p.token);
             let (current, original_pair) =
                 takeover::read_connection(self.0.client, home, &s.store.connection)?;
+            let exit = match Self::exit_provider(&s.store, None) {
+                Some(p) => takeover::Pair::new(&p.base_url, &p.token),
+                None => takeover::unprovided(
+                    self.0.client,
+                    &s.store.connection,
+                    &original_pair,
+                    &takeover::Pair::new(&self.0.client.address(listener.port), &token),
+                ),
+            };
             let grok_text = if self.0.client == ClientId::Grok {
                 Some(grok_config::read(home)?.1)
             } else {

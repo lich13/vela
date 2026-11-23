@@ -882,3 +882,103 @@ async fn clearing_endpoints_of_running_messages_provider_keeps_imported_auth_and
         .grok_connections
         .is_empty());
 }
+
+async fn unanswerable(gateway: &Gateway) {
+    let response = gateway_request(gateway, "/v1/responses", RESPONSES_REQUEST).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(String::from_utf8_lossy(&response_bytes(response).await).contains("没有可用供应商"));
+}
+
+#[tokio::test]
+async fn grok_without_a_provider_starts_answers_and_puts_its_config_back() {
+    let fixture = Fixture::build(
+        native_config("https://fixture-native.example.invalid/v1"),
+        false,
+    )
+    .await;
+    let config_path = fixture.config_path();
+    let original = std::fs::read_to_string(&config_path).unwrap();
+    for mode in ["manual", "auto"] {
+        fixture.edit(Edit::Mode { mode: mode.into() });
+        fixture.start().await;
+        assert!(fixture.gateway.view().running);
+        assert_ne!(std::fs::read_to_string(&config_path).unwrap(), original);
+        unanswerable(&fixture.gateway).await;
+        fixture.stop().await;
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+        assert!(!fixture
+            .gateway
+            .0
+            .data
+            .join("gateway-recovery.json")
+            .exists());
+    }
+    fixture.start().await;
+    fixture.gateway.stop_for_exit().await.unwrap();
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+    fixture.gateway.resume(&fixture.home).await.unwrap();
+    assert!(fixture.gateway.view().running);
+    fixture.stop().await;
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn the_last_grok_provider_goes_while_running_whatever_protocol_is_left() {
+    let fixture = Fixture::new_manual_provider("https://fixture-first.example.invalid/v1").await;
+    add_provider(
+        &fixture,
+        "https://fixture-chat.example.invalid/v1".into(),
+        CHAT_TOKEN,
+        Protocol::ChatCompletions,
+    );
+    let config_path = fixture.config_path();
+    let ids: Vec<_> = fixture
+        .gateway
+        .view()
+        .providers
+        .iter()
+        .map(|p| p.id.clone())
+        .collect();
+    fixture.edit(Edit::Select { id: ids[0].clone() });
+    let direct = std::fs::read_to_string(&config_path).unwrap();
+    fixture.start().await;
+    let live = std::fs::read_to_string(&config_path).unwrap();
+
+    // Choosing the other protocol on purpose still asks for a stop first.
+    let revision = fixture.gateway.view().revision;
+    let refused = fixture
+        .gateway
+        .edit(
+            Edit::Select { id: ids[1].clone() },
+            &revision,
+            &fixture.home,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(refused.code, crate::errors::code::GROK_PROTOCOL);
+    // Being left with it is not a choice: the provider in use can go.
+    let view = fixture.edit(Edit::DeleteProvider { id: ids[0].clone() });
+    assert_eq!(view.selected.as_deref(), Some(ids[1].as_str()));
+    unanswerable(&fixture.gateway).await;
+    for mode in ["auto", "manual"] {
+        fixture.edit(Edit::Mode { mode: mode.into() });
+    }
+    fixture.edit(Edit::QueueProvider {
+        id: ids[1].clone(),
+        queued: false,
+    });
+    let view = fixture.edit(Edit::DeleteProvider { id: ids[1].clone() });
+    assert!(view.running && view.providers.is_empty());
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), live);
+    unanswerable(&fixture.gateway).await;
+    fixture.stop().await;
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), direct);
+    assert!(!fixture
+        .gateway
+        .0
+        .data
+        .join("gateway-recovery.json")
+        .exists());
+    fixture.start().await;
+    fixture.stop().await;
+}

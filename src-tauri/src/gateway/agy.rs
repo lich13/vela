@@ -66,9 +66,6 @@ impl Gateway {
             if let Some(error) = &s.recovery_error {
                 return Err(error.clone());
             }
-            if s.store.providers.is_empty() {
-                return Err(AppError::new(code::PROVIDER, "请先添加供应商"));
-            }
             s.store.local_token.clone()
         };
         let listener = self.0.registry.listener.prepare().await?;

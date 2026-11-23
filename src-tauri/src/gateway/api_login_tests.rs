@@ -465,3 +465,97 @@ fn v020_api_external_auth_edit_conflict_does_not_overwrite_external_bytes() {
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), config_before);
     drop(t);
 }
+
+#[tokio::test]
+async fn api_mode_with_no_provider_left_puts_back_the_key_and_address_it_replaced() {
+    let base = "https://api.first.example.invalid/v1";
+    let config = config_for(base, true, "", "");
+    let auth = auth_for("first-key", "providerless");
+    let (t, home) = home_with(&config, &auth);
+    let data = t.path().join("gateway-data");
+    let gateway = Gateway::new(data.clone()).unwrap();
+    gateway.import_initial(&home).unwrap();
+    let id = gateway.view().providers[0].id.clone();
+    let mut settings = gateway.view().settings;
+    settings.port = free_port();
+    edit(&gateway, &home, Edit::Settings { settings });
+
+    gateway
+        .start(&gateway.view().revision, &home)
+        .await
+        .unwrap();
+    let running = edit(&gateway, &home, Edit::DeleteProvider { id });
+    assert!(running.running && running.providers.is_empty());
+    assert!(takeover::manages_auth(&data, &home));
+    gateway.stop().await.unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join("config.toml")).unwrap(),
+        config
+    );
+    assert_eq!(
+        auth_value(&home.join("auth.json")),
+        serde_json::from_slice::<Value>(&auth).unwrap()
+    );
+    assert!(!data.join("gateway-recovery.json").exists());
+
+    // With nothing to route to it starts again, and a quit comes back.
+    gateway
+        .start(&gateway.view().revision, &home)
+        .await
+        .unwrap();
+    gateway.stop_for_exit().await.unwrap();
+    assert_eq!(
+        auth_value(&home.join("auth.json"))["OPENAI_API_KEY"],
+        "first-key"
+    );
+    gateway.resume(&home).await.unwrap();
+    assert!(gateway.view().running);
+    gateway.stop().await.unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join("config.toml")).unwrap(),
+        config
+    );
+}
+
+#[tokio::test]
+async fn api_mode_with_no_key_to_put_back_never_leaves_the_local_one() {
+    let base = "https://api.first.example.invalid/v1";
+    let config = config_for(base, true, "", "");
+    let auth = serde_json::to_vec_pretty(&json!({"unknown": {"keep": true}})).unwrap();
+    let (t, home) = home_with(&config, &auth);
+    let data = t.path().join("gateway-data");
+    let gateway = Gateway::new(data.clone()).unwrap();
+    // No API login to recognize: nothing is imported.
+    gateway.import_initial(&home).unwrap();
+    assert!(gateway.view().providers.is_empty());
+    edit(
+        &gateway,
+        &home,
+        Edit::Connection {
+            mode: "apiKey".into(),
+        },
+    );
+    let mut settings = gateway.view().settings;
+    settings.port = free_port();
+    edit(&gateway, &home, Edit::Settings { settings });
+
+    for _ in 0..2 {
+        gateway
+            .start(&gateway.view().revision, &home)
+            .await
+            .unwrap();
+        let live = auth_value(&home.join("auth.json"));
+        assert!(live["OPENAI_API_KEY"].as_str().unwrap().starts_with("gs_"));
+        gateway.stop().await.unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            config
+        );
+        assert_eq!(
+            auth_value(&home.join("auth.json")),
+            json!({"unknown": {"keep": true}})
+        );
+        assert!(!data.join("gateway-recovery.json").exists());
+        assert!(!takeover::manages_auth(&data, &home));
+    }
+}

@@ -556,6 +556,46 @@ async fn the_catalog_follows_page_tokens_and_keeps_chat_models_only() {
 }
 
 #[tokio::test]
+async fn it_runs_with_no_provider_and_answers_that_there_is_none() {
+    let f = fixture().await;
+    assert!(f.agy.view().providers.is_empty());
+    for _ in 0..2 {
+        let view = f.start().await;
+        assert!(view.running && f.environment().exists());
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            f.request(
+                reqwest::Method::POST,
+                "/v1beta/models/gemini-fixture:streamGenerateContent?alt=sse",
+            )
+            .header("content-type", "application/json")
+            .body(r#"{"contents":[{"role":"user","parts":[{"text":"fixture"}]}]}"#)
+            .send(),
+        )
+        .await
+        .expect("a request no provider can take is answered at once")
+        .unwrap();
+        assert_eq!(response.status(), 503);
+        assert!(response.text().await.unwrap().contains("没有可用供应商"));
+        f.agy.stop_for_exit().await.unwrap();
+        assert!(!f.environment().exists());
+        f.agy.resume(&f.home).await.unwrap();
+        assert!(f.agy.view().running);
+        f.agy.stop().await.unwrap();
+        assert!(!f.environment().exists() && f.agy.view().error.is_none());
+    }
+    // The last provider goes while it runs, in either mode.
+    let id = f.save("https://example.invalid/api");
+    f.start().await;
+    f.edit(Edit::Select { id: id.clone() });
+    assert!(f.edit(Edit::DeleteProvider { id }).running);
+    f.edit(Edit::Mode {
+        mode: "auto".into(),
+    });
+    f.agy.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn providers_come_as_gemini_addresses_and_from_nowhere_else() {
     let f = fixture().await;
     let link = |protocol| Edit::ImportLink {
