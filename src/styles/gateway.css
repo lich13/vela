@@ -1206,6 +1206,26 @@
 .provider-form .provider-takeover-model select {
   grid-column: 2 / -1;
 }
+.provider-retry-settings > .provider-risk-options {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.provider-form .provider-risk-options legend {
+  padding: 0;
+  margin-bottom: 4px;
+}
+.provider-form .provider-risk-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
 /* A takeover's model and effort each fill the block its option opens. */
 .provider-retry-settings > .provider-takeover-model {
   grid-column: 1 / -1;

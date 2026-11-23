@@ -714,6 +714,16 @@ export type CommandMap = {
   >;
   query_provider_quota: Call<Provider & { force: boolean }, ProviderQuota>;
   list_provider_models: Call<Provider & { force: boolean }, ModelCatalog>;
+  /** Upstream error statuses met by the providers sharing the host, most frequent first. */
+  get_provider_seen_statuses: Call<
+    { clientId: ClientId; providerId?: string; baseUrl?: string },
+    {
+      status: number;
+      count: number;
+      basis: string | null;
+      lastAt: number;
+    }[]
+  >;
   get_clamshell_state: Call<None, PowerState>;
   set_clamshell_awake: Call<{ enabled: boolean } & Revision, PowerState>;
   install_power_helper: Call<None, PowerState>;

@@ -17,6 +17,7 @@ import {
 import type { GatewayEdit } from "./bridge-contracts";
 import type { EditRevision } from "./gateway-edit";
 import Modal from "./Modal";
+import { limitLabel } from "./limit-labels";
 
 /** Status codes split on spaces or commas; null unless all are 400–599 and at most 16. */
 const parseRiskCodes = (text: string) => {
@@ -155,7 +156,19 @@ export default function GatewayDialog({
   const [normalRetrySeconds, setNormalRetrySeconds] = useState(
     String(savedEndless.normalRetrySeconds),
   );
+  // The typed risk codes; the ticked ones live in `checkedCodes`.
   const [riskCodes, setRiskCodes] = useState(savedEndless.riskCodes.join(", "));
+  const [checkedCodes, setCheckedCodes] = useState<number[]>([]);
+  const riskText = useRef(riskCodes);
+  riskText.current = riskCodes;
+  // The error statuses to tick from: those the providers on this host have
+  // answered with, then the listed codes none of them has.
+  const [riskOptions, setRiskOptions] = useState<
+    { status: number; count: number; basis: string | null }[]
+  >([]);
+  const allRiskCodes = `${checkedCodes.join(" ")} ${riskCodes}`.trim();
+  // One spelling for the same list, however it is split between the two.
+  const riskDraft = parseRiskCodes(allRiskCodes)?.join(",") ?? allRiskCodes;
   const [retryIntensity, setRetryIntensity] = useState(
     String(savedEndless.retryIntensity),
   );
@@ -240,6 +253,51 @@ export default function GatewayDialog({
       gone = true;
     };
   }, [clientId, providerId, suggesting]);
+  const seenAddress = providerId ? undefined : baseUrl;
+  useEffect(() => {
+    if (!endlessMode || clientId === "grok") return;
+    if (!providerId && !seenAddress) return;
+    let gone = false;
+    void (async () => {
+      try {
+        const seen = await command(
+          "get_provider_seen_statuses",
+          providerId
+            ? { clientId, providerId }
+            : { clientId, baseUrl: seenAddress },
+        );
+        if (gone || !seen?.length) return;
+        // Typed codes that are error statuses move to the list, ticked.
+        const parts = riskText.current.split(/[\s,，]+/).filter(Boolean);
+        const moved = [
+          ...new Set(
+            parts.filter((part) => /^[45]\d\d$/.test(part)).map(Number),
+          ),
+        ];
+        setRiskOptions((old) => {
+          const known = [
+            ...seen,
+            ...old.filter((o) => !seen.some((s) => s.status === o.status)),
+          ];
+          return [
+            ...known,
+            ...moved
+              .filter((status) => !known.some((o) => o.status === status))
+              .map((status) => ({ status, count: 0, basis: null })),
+          ];
+        });
+        setCheckedCodes((old) => [...new Set([...old, ...moved])]);
+        setRiskCodes(
+          parts.filter((part) => !/^[45]\d\d$/.test(part)).join(" "),
+        );
+      } catch {
+        // The codes stay typeable without the list.
+      }
+    })();
+    return () => {
+      gone = true;
+    };
+  }, [clientId, providerId, seenAddress, endlessMode]);
 
   const [revealed, setRevealed] = useState<{
     value: string;
@@ -321,7 +379,7 @@ export default function GatewayDialog({
       limitRetrySeconds,
       limitRestSeconds,
       normalRetrySeconds,
-      riskCodes,
+      riskDraft,
       retryIntensity,
       takeCompaction,
       compactionModel,
@@ -351,7 +409,7 @@ export default function GatewayDialog({
         limitRetrySeconds,
         limitRestSeconds,
         normalRetrySeconds,
-        riskCodes,
+        riskDraft,
         retryIntensity,
         takeCompaction,
         compactionModel,
@@ -379,7 +437,7 @@ export default function GatewayDialog({
     limitRetrySeconds,
     limitRestSeconds,
     normalRetrySeconds,
-    riskCodes,
+    riskDraft,
     retryIntensity,
     takeCompaction,
     compactionModel,
@@ -401,7 +459,7 @@ export default function GatewayDialog({
         onSubmit={(e) => {
           e.preventDefault();
           const codes = endlessMode
-            ? parseRiskCodes(riskCodes)
+            ? parseRiskCodes(allRiskCodes)
             : savedEndless.riskCodes;
           if (!codes) {
             setError("风控代码应为 400–599 的状态码，最多 16 个");
@@ -957,11 +1015,44 @@ export default function GatewayDialog({
                   />
                   <span>秒</span>
                 </label>
+                {riskOptions.length > 0 && (
+                  <fieldset
+                    className="provider-risk-options"
+                    disabled={busy}
+                    title="勾选后，该状态码按风控重试处理；列出的是同域名供应商近 7 天遇到过的上游报错"
+                  >
+                    <legend>风控代码</legend>
+                    {riskOptions.map((option) => (
+                      <label key={option.status}>
+                        <input
+                          type="checkbox"
+                          checked={checkedCodes.includes(option.status)}
+                          onChange={(e) =>
+                            setCheckedCodes((old) =>
+                              e.target.checked
+                                ? [...old, option.status]
+                                : old.filter((code) => code !== option.status),
+                            )
+                          }
+                        />
+                        <span>
+                          {[
+                            option.status,
+                            option.count ? `${option.count} 次` : "未遇到",
+                            limitLabel({ errorBasis: option.basis }),
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </span>
+                      </label>
+                    ))}
+                  </fieldset>
+                )}
                 <label
                   className="provider-retry-setting provider-risk-codes"
                   title="按风控重试处理的上游状态码（400–599），以空格或逗号分隔，最多 16 个，可留空"
                 >
-                  <span>风控代码</span>
+                  <span>{riskOptions.length ? "其他代码" : "风控代码"}</span>
                   <input
                     type="text"
                     inputMode="numeric"
@@ -972,6 +1063,11 @@ export default function GatewayDialog({
                     onChange={(e) => setRiskCodes(e.target.value)}
                   />
                 </label>
+                {!riskOptions.length && (
+                  <small className="muted provider-risk-options">
+                    暂无已遇到的报错
+                  </small>
+                )}
                 <label
                   className="provider-retry-setting"
                   title="上游返回 429（余额不足等永久拒绝除外），或内容判定为限流的拒绝时的重试间隔"
