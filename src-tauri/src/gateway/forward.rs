@@ -756,7 +756,7 @@ async fn upstream_request(
         .dsh_models
         .as_ref()
         .and_then(|mapping| model.and_then(|m| mapping.resolve(m)))
-        .or_else(|| model.and_then(|m| route.model_map.get(m).map(String::as_str)))
+        .or_else(|| model.and_then(|m| super::model::mapped_model(&route.model_map, m)))
         .or(model.filter(|_| model != client_model))
         .map(str::to_owned);
     let sent_model = upstream_model
