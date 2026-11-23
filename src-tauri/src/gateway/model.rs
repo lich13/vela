@@ -315,9 +315,51 @@ fn model_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control) && !id.contains('*')
 }
 const MAX_MODEL_MAPPINGS: usize = 512;
-/// A provider's model mapping with its IDs trimmed: complete model IDs on
-/// both sides, each requested model once, none mapped to itself.
-fn model_map(mapping: BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
+/// The Claude model families a mapping can name as `family:<name>` instead of
+/// a complete model ID.
+pub const MODEL_FAMILIES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
+const FAMILY_PREFIX: &str = "family:";
+/// The family of a model a Claude client asks for: an alias (`opus`,
+/// `opusplan`), or a Claude model ID carrying the family word in either naming
+/// (`claude-opus-4-1-20250805`, `claude-3-5-sonnet-20241022`), with or without
+/// a vendor prefix or a `[1m]` suffix. Anything else has none.
+pub fn model_family(model: &str) -> Option<&'static str> {
+    let lower = model.trim().to_ascii_lowercase();
+    let id = match lower.find('[') {
+        Some(at) if lower.ends_with(']') => &lower[..at],
+        _ => lower.as_str(),
+    };
+    if id == "opusplan" {
+        return Some("opus");
+    }
+    if let Some(family) = MODEL_FAMILIES.into_iter().find(|family| *family == id) {
+        return Some(family);
+    }
+    let at = id.match_indices("claude-").map(|(at, _)| at).find(|at| {
+        id[..*at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_ascii_alphanumeric())
+    })?;
+    id[at..]
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find_map(|word| MODEL_FAMILIES.into_iter().find(|family| *family == word))
+}
+/// The upstream model a mapping sends in place of the requested one: the
+/// model's own entry first, then its family's.
+pub fn mapped_model<'a>(mapping: &'a BTreeMap<String, String>, model: &str) -> Option<&'a str> {
+    if mapping.is_empty() {
+        return None;
+    }
+    mapping
+        .get(model)
+        .or_else(|| mapping.get(&format!("{FAMILY_PREFIX}{}", model_family(model)?)))
+        .map(String::as_str)
+}
+/// A provider's model mapping with its IDs trimmed: a complete model ID or a
+/// `family:<name>` key on the requested side, a complete model ID upstream,
+/// each requested model once, none mapped to itself.
+pub(super) fn model_map(mapping: BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
     let invalid = || {
         AppError::new(
             code::MODELS,
@@ -332,6 +374,9 @@ fn model_map(mapping: BTreeMap<String, String>) -> Result<BTreeMap<String, Strin
         let (from, to) = (from.trim(), to.trim());
         if !model_id(from)
             || !model_id(to)
+            || from
+                .strip_prefix(FAMILY_PREFIX)
+                .is_some_and(|family| !MODEL_FAMILIES.contains(&family))
             || from == to
             || result.insert(from.to_owned(), to.to_owned()).is_some()
         {

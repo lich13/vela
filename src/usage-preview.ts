@@ -369,6 +369,7 @@ export const usageCommands = [
   "get_pricing",
   "calculate_usage_cost",
   "get_usage_calculator_models",
+  "get_claude_requested_models",
   "get_usage_calculator_totals",
   "search_pricing",
   "configure_pricing",
@@ -447,6 +448,18 @@ export function usagePreview(
       ...total(matches),
       attempts: matches.reduce((n, row) => n + row.attempts.length, 0),
     };
+  }
+  if (name === "get_claude_requested_models") {
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      const model = row.attempts.at(-1)?.requestedModel;
+      if (row.client === "claude" && row.source === "proxy" && model)
+        counts.set(model, (counts.get(model) ?? 0) + 1);
+    }
+    return [...counts]
+      .map(([model, count]) => ({ model, count }))
+      .sort((a, b) => b.count - a.count || a.model.localeCompare(b.model))
+      .slice(0, 50);
   }
   if (name === "get_usage_calculator_models") {
     const client = String(args.client ?? "");

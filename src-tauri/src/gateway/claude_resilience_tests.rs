@@ -1329,6 +1329,81 @@ async fn a_codex_stream_is_not_held_to_the_stall_limit() {
 }
 
 #[tokio::test]
+async fn a_family_mapping_rewrites_its_claude_models_unless_one_is_mapped_itself() {
+    let body = |model: &str| {
+        String::from_utf8_lossy(JSON_REQUEST)
+            .replace("claude-fixture", model)
+            .into_bytes()
+    };
+    let message =
+        |n: usize| String::from_utf8_lossy(MESSAGE).replace("msg_fixture", &format!("msg_{n}"));
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let models = seen.clone();
+    let upstream = server(move |request, _| {
+        let models = models.clone();
+        async move {
+            let body = request.into_body().collect().await.unwrap().to_bytes();
+            let sent: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let mut models = models.lock();
+            models.push(sent["model"].as_str().unwrap().to_owned());
+            json(message(models.len()))
+        }
+    })
+    .await;
+    let f = Fixture::new(ClientId::Claude, &[upstream.url("")]).await;
+    let id = f.gateway.view().providers[0].id.clone();
+    f.edit(Edit::ModelMapProvider {
+        id,
+        mapping: [
+            ("family:opus".into(), "fixture-upstream".into()),
+            ("claude-opus-4-8".into(), "fixture-exact".into()),
+        ]
+        .into(),
+    });
+    f.start().await;
+    let asked = [
+        "claude-opus-4-1-20250805",
+        "claude-opus-4-8",
+        "claude-opus-4-8[1m]",
+        "claude-sonnet-4-5",
+    ];
+    for model in asked {
+        let response = request(&f.gateway, "/v1/messages", &body(model)).await;
+        assert_eq!(response.status(), 200);
+        response_bytes(response).await;
+    }
+    assert_eq!(
+        *seen.lock(),
+        [
+            "fixture-upstream",
+            "fixture-exact",
+            "fixture-upstream",
+            "claude-sonnet-4-5"
+        ]
+    );
+    // The record keeps what was asked for beside what was sent.
+    let rows = recorded(&f.usage, asked.len()).await;
+    let upstream_model = |model: &str| {
+        rows.iter()
+            .flat_map(|row| &row.attempts)
+            .find(|attempt| attempt.requested_model.as_deref() == Some(model))
+            .unwrap()
+            .upstream_model
+            .clone()
+    };
+    assert_eq!(
+        upstream_model("claude-opus-4-1-20250805").as_deref(),
+        Some("fixture-upstream")
+    );
+    assert_eq!(
+        upstream_model("claude-opus-4-8").as_deref(),
+        Some("fixture-exact")
+    );
+    assert_eq!(upstream_model("claude-sonnet-4-5"), None);
+    f.stop().await;
+}
+
+#[tokio::test]
 async fn a_mapped_model_is_rewritten_for_its_provider_and_others_pass_untouched() {
     const OTHER: &[u8] = br#" { "model" : "claude-other", "stream": false,
   "max_tokens": 32, "messages":[{"role":"user","content":"fixture"}], "unknown":9007199254740993 } "#;

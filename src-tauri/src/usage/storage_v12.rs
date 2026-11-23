@@ -648,6 +648,39 @@ fn shared_value(bytes: &[u8]) -> Option<Value> {
     }
     wire::decode(&bytes[32..])
 }
+/// The models a client asked the gateway for since `since`, with how many
+/// requests named each, most requested first. The indexed model column holds
+/// the pricing model, which a model mapping changes; the requested one is kept
+/// in the attempt's shape, so this reads the final attempt of each request.
+pub(super) fn requested_models(
+    c: &Connection,
+    client: &str,
+    since: i64,
+    limit: usize,
+) -> Result<Vec<(String, u64)>> {
+    let mut stmt = db(c.prepare(
+        "SELECT d.value,count(*) FROM v12_records r
+         JOIN v12_attempt_rows a ON a.owner=r.rid AND a.ordinal=r.last
+         JOIN v12_dictionary d ON d.id=a.shape
+         WHERE r.time>?2 AND r.client=usage_label(?1) AND r.source=0 AND r.effective=1
+         GROUP BY a.shape",
+    ))?;
+    let rows = db(stmt.query_map(params![client, since], |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, u64>(1)?))
+    }))?;
+    let mut counts = std::collections::BTreeMap::<String, u64>::new();
+    for row in rows {
+        let (shape, count) = db(row)?;
+        let shape = shared_value(&shape).ok_or_else(|| failure("用量记录无法读取"))?;
+        if let Some(model) = shape["requestedModel"].as_str().filter(|m| !m.is_empty()) {
+            *counts.entry(model.to_owned()).or_default() += count;
+        }
+    }
+    let mut models: Vec<_> = counts.into_iter().collect();
+    models.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    models.truncate(limit);
+    Ok(models)
+}
 fn intern_text(c: &Connection, v: Option<&str>) -> Result<Option<i64>> {
     v.map(|v| intern(c, &json!(v))).transpose()
 }

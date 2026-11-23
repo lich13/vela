@@ -1786,3 +1786,51 @@ fn migration_preserves_links_to_already_archived_records() {
     );
     assert_eq!(snapshot(&resumed), before);
 }
+
+#[test]
+fn requested_models_count_what_gateway_clients_asked_for_not_what_was_priced() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let row = |id: &str, client: &str, source: &str, at: i64, asked: &[&str]| Record {
+        id: id.into(),
+        client: client.into(),
+        source: source.into(),
+        started_at: at,
+        completed: true,
+        attempts: asked
+            .iter()
+            .enumerate()
+            .map(|(n, model)| Attempt {
+                requested_model: Some((*model).into()),
+                upstream_model: Some("fixture-upstream".into()),
+                ..attempt(&format!("{id}-{n}"), source, at, None, 5, 3)
+            })
+            .collect(),
+        ..Default::default()
+    };
+    store
+        .write_batch(
+            &[
+                // A retried request counts once, under its final attempt.
+                row("a", "claude", "proxy", BASE + 1, &["claude-opus-4-8"; 2]),
+                row("b", "claude", "proxy", BASE + 2, &["claude-opus-4-8"]),
+                row("c", "claude", "proxy", BASE + 3, &["claude-haiku-4-5"]),
+                row("d", "claude", "proxy", BASE - DAY, &["claude-old"]),
+                row("e", "codex", "proxy", BASE + 4, &["gpt-fixture"]),
+                row("f", "claude", "claude", BASE + 5, &["claude-session"]),
+            ],
+            None,
+        )
+        .unwrap();
+    let models = |limit| {
+        super::storage_v12::requested_models(&store.connection, "claude", BASE, limit).unwrap()
+    };
+    assert_eq!(
+        models(50),
+        [
+            ("claude-opus-4-8".to_owned(), 2),
+            ("claude-haiku-4-5".to_owned(), 1)
+        ]
+    );
+    assert_eq!(models(1).len(), 1);
+}
