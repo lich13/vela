@@ -123,7 +123,6 @@ struct GatewayCardModel: Codable, Equatable {
     let statusLabel: String
     let mode: String
     let modeLabel: String
-    let powerDisabled: Bool
     let powerLabel: String
     let waitingBadge: String?
     let longWaits: [LongWaitModel]
@@ -693,8 +692,8 @@ struct QuickGatewayBarView: View {
                     .overlay(Capsule().strokeBorder(palette.line, lineWidth: 1))
             }
             .buttonStyle(.plain)
-            .disabled(busy || gateway.powerDisabled)
-            .opacity(busy || gateway.powerDisabled ? 0.45 : 1.0)
+            .disabled(busy)
+            .opacity(busy ? 0.45 : 1.0)
             .help(gateway.powerLabel)
         }
         .padding(.horizontal, 11)

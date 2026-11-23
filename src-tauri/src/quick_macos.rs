@@ -201,7 +201,6 @@ pub struct GatewayCardModel {
     pub status_label: String,
     pub mode: String,
     pub mode_label: String,
-    pub power_disabled: bool,
     pub power_label: String,
     pub waiting_badge: Option<String>,
     pub long_waits: Vec<LongWaitModel>,
@@ -1341,7 +1340,6 @@ pub fn derive_gateway_card(
             "手动"
         }
         .into(),
-        power_disabled: !view.running && !view.recovery_pending && view.providers.is_empty(),
         power_label: if view.running {
             "停用网关"
         } else {
@@ -3140,7 +3138,7 @@ mod tests {
         assert_eq!(quota_tone(Some(&failed), 1000), "critical");
         assert_eq!(quota_tone(None, 1000), "neutral");
 
-        // The switch is off only for a stopped gateway with nothing to start.
+        // A gateway with no provider still has its switch labelled either way.
         let dir = tempfile::tempdir().unwrap();
         let gw = gateway::Gateway::new(dir.path().to_path_buf()).unwrap();
         let mut view = gw.try_view().unwrap();
@@ -3150,16 +3148,9 @@ mod tests {
         view.running = false;
         view.recovery_pending = false;
         view.providers.clear();
-        assert!(card(&view).power_disabled);
-        view.recovery_pending = true;
-        assert!(!card(&view).power_disabled);
-        view.recovery_pending = false;
-        view.providers = vec![sample_provider("p1", "Primary")];
-        assert!(!card(&view).power_disabled);
-        view.providers.clear();
+        assert_eq!(card(&view).power_label, "启用网关");
         view.running = true;
         let running = card(&view);
-        assert!(!running.power_disabled);
         assert_eq!(
             (running.status_label.as_str(), running.power_label.as_str()),
             ("运行中", "停用网关")
