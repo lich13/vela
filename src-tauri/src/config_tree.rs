@@ -473,12 +473,29 @@ fn own_line(text: &str, span: &Range<usize>) -> Option<Range<usize>> {
         .then_some(start..end)
 }
 /// Remove one comma-separated entry together with exactly one separator.
-fn remove_listed(out: &mut String, entries: &[Range<usize>], index: usize) -> Result<()> {
+fn remove_listed(
+    out: &mut String,
+    text: &str,
+    entries: &[Range<usize>],
+    index: usize,
+) -> Result<()> {
     let entry = entries.get(index).ok_or_else(unsupported)?;
     if let Some(next) = entries.get(index + 1) {
         out.replace_range(entry.start..next.start, "");
     } else if index > 0 {
-        out.replace_range(entries[index - 1].end..entry.end, "");
+        let previous = entries[index - 1].end;
+        if text[previous..entry.start].contains('\n') {
+            // The previous line keeps its comma and comment; only this entry's part of its own
+            // line goes, with the trailing comma that would otherwise follow the kept one.
+            let blank = |rest: &str| rest.len() - rest.trim_start_matches([' ', '\t']).len();
+            let mut end = entry.end + blank(&text[entry.end..]);
+            if text[end..].starts_with(',') {
+                end += 1 + blank(&text[end + 1..]);
+            }
+            out.replace_range(line_start(text, entry.start)..end, "");
+        } else {
+            out.replace_range(previous..entry.end, "");
+        }
     } else {
         out.replace_range(entry.clone(), "");
     }
@@ -648,7 +665,7 @@ fn toml_patch(text: &str, path: &[Seg], value: Option<Node>) -> Result<(String, 
                     if entries.len() != table.len() {
                         return Err(unsupported());
                     }
-                    remove_listed(&mut out, &entries, index)?;
+                    remove_listed(&mut out, text, &entries, index)?;
                 }
                 (At::Array(array), Seg::Index(index)) => {
                     let entries: Vec<_> = array.iter().filter_map(|v| v.span()).collect();
@@ -657,7 +674,7 @@ fn toml_patch(text: &str, path: &[Seg], value: Option<Node>) -> Result<(String, 
                     }
                     match own_line(text, &entries[*index]) {
                         Some(line) => out.replace_range(line, ""),
-                        None => remove_listed(&mut out, &entries, *index)?,
+                        None => remove_listed(&mut out, text, &entries, *index)?,
                     }
                 }
                 _ => return Err(unsupported()),
@@ -1392,6 +1409,28 @@ mod tests {
     }
 
     #[test]
+    fn toml_last_list_item_leaves_the_previous_comment() {
+        // The last item shares its line with the bracket; the line above keeps comma and comment.
+        assert_eq!(
+            toml("a = [\n  1, # one\n  2 ]\n", &["a", "1"], None),
+            "a = [\n  1, # one\n]\n"
+        );
+        assert_eq!(
+            toml("a = [\n  1, # one\n  2, ]\n", &["a", "1"], None),
+            "a = [\n  1, # one\n]\n"
+        );
+        assert_eq!(
+            toml("a = [\n  1, # one\n  2,\n]\n", &["a", "1"], None),
+            "a = [\n  1, # one\n]\n"
+        );
+        assert_eq!(toml("a = [1, 2,]\n", &["a", "1"], None), "a = [1,]\n");
+        assert_eq!(
+            toml("a = [\n  1 # one\n  , 2 ]\n", &["a", "1"], None),
+            "a = [\n  1 # one\n]\n"
+        );
+    }
+
+    #[test]
     fn toml_keeps_crlf_line_endings() {
         let text = "model = \"a\"\r\n\r\n[tui]\r\nanimations = false\r\n";
         assert_eq!(
@@ -1604,6 +1643,15 @@ mod tests {
         assert_eq!(
             yaml(YAML, &["1", "config", "flow", "1"], None),
             YAML.replace("[1, \"2\"]", "[1]")
+        );
+        // A multi-line flow list keeps the comment of the line above the removed last item.
+        assert_eq!(
+            yaml("a: [\n  1, # one\n  2 ]\n", &["a", "1"], None),
+            "a: [\n  1, # one\n]\n"
+        );
+        assert_eq!(
+            yaml("a: [\n  1, # one\n  2, ]\n", &["a", "1"], None),
+            "a: [\n  1, # one\n]\n"
         );
         // The last key of a mapping leaves an explicit empty mapping, not a null.
         let single = "- id: ui\n  config:\n    enabled: true\n  name: x\n";
