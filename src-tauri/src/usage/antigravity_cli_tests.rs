@@ -1,4 +1,4 @@
-// 覆盖 Antigravity CLI 会话用量导入：计量口径、增量与幂等、账号归属、回溯重跑、模型回退与计价、路径归属、只读，以及与网关记录的去重。
+// 覆盖 Antigravity CLI 会话用量导入：计量口径、增量与幂等、账号归属、回溯重跑、估算耗时、模型回退与计价、路径归属、只读，以及与网关记录的去重。
 use super::super::super::store::Store;
 use super::*;
 
@@ -541,6 +541,105 @@ fn a_position_saved_by_an_older_reading_starts_over() {
     );
     assert_eq!(f.requests(), 2);
     assert_eq!(f.sync().imported, 0);
+}
+
+// 会话库没有计时的步骤，以其后第一个其他步骤的行估算耗时：该行是工具结果时取两行创建时间之差，
+// 是用户输入、系统消息或尚无后续行时不估算；会话库已有计时的步骤不估算。估算值不进入耗时与统计。
+#[test]
+fn a_step_the_database_does_not_time_is_timed_by_the_tool_result_after_it() {
+    let mut f = Fixture::new();
+    let model = Some("gemini-3.1-pro");
+    let usage = [100, 0, 10];
+    f.write(
+        "session",
+        &[
+            planner_at(1, 1, model, usage),
+            other(2, "GENERIC", 4),
+            planner_at(3, 5, model, usage),
+            other(4, "USER_INPUT", 9),
+            planner_at(5, 10, model, usage),
+            other(6, "SYSTEM_MESSAGE", 12),
+            planner_at(7, 13, model, usage),
+            other(8, "GENERIC", 20),
+            // Written again as it finishes; a result in the same second times nothing.
+            planner_at(9, 21, model, usage),
+            planner_at(9, 21, model, usage),
+            other(10, "GENERIC", 21),
+            planner_at(11, 30, model, usage),
+            planner_at(11, 31, model, usage),
+            other(12, "GENERIC", 33),
+            planner_at(13, 40, model, usage),
+        ]
+        .concat(),
+    );
+    save_step(&f.database("session"), 7, "response-7", 1, 0);
+    assert_eq!(f.sync().errors, 0);
+    let estimate = |step| f.row("session", step).attempts[0].estimated_duration_ms;
+    assert_eq!(
+        [1, 3, 5, 7, 9, 11, 13].map(estimate),
+        [Some(3000), None, None, None, None, Some(2000), None]
+    );
+    let estimated = f.row("session", 1);
+    let a = &estimated.attempts[0];
+    assert_eq!((a.duration_ms, a.measured_duration_ms()), (0, None));
+    assert_eq!(a.parse_reasons, ["attempt_time_unreported"]);
+    // As on a row with no estimate.
+    assert_eq!(a.availability, f.row("session", 3).attempts[0].availability);
+    assert_eq!(f.row("session", 7).attempts[0].duration_ms, 4032);
+    let totals = f.store.dashboard(&Filter::default()).unwrap().totals;
+    assert_eq!((totals.requests, totals.duration_ms), (7, 4032));
+}
+
+// 末尾的模型步骤还没有后续行时不估算；文件变长后从该行重读并补上估算，结果与整份读取相同，
+// 回溯计数与重读起点一致，未变化的记录不重复写入。
+#[test]
+fn a_step_at_the_end_of_the_file_is_timed_once_its_follower_is_written() {
+    let model = Some("gemini-3.1-pro");
+    let usage = [100, 0, 10];
+    let parts = [
+        [
+            planner_at(5, 1, model, usage),
+            other(2, "USER_INPUT", 2),
+            planner_at(3, 3, model, usage),
+        ]
+        .concat(),
+        [other(4, "GENERIC", 6), planner_at(5, 7, model, usage)].concat(),
+        other(6, "USER_INPUT", 9),
+    ];
+    let rows = |f: &Fixture| {
+        [
+            f.row("session", 5),
+            f.rewound("session", 3, 1),
+            f.rewound("session", 5, 1),
+        ]
+        .map(|row| row.attempts[0].estimated_duration_ms)
+    };
+    let mut whole = Fixture::new();
+    whole.write("session", &parts.concat());
+    assert_eq!(whole.sync().imported, 3);
+    assert_eq!(rows(&whole), [None, Some(3000), None]);
+
+    let mut f = Fixture::new();
+    f.write("session", &parts[0]);
+    assert_eq!(f.sync().imported, 2);
+    assert_eq!(
+        f.rewound("session", 3, 1).attempts[0].estimated_duration_ms,
+        None
+    );
+    // Nothing new: the waiting line is left alone.
+    assert_eq!(f.sync().imported, 0);
+    // A follower still being written times nothing yet.
+    let (head, rest) = parts[1].split_at(20);
+    f.append("session", head);
+    assert_eq!(f.sync().imported, 0);
+    f.append("session", rest);
+    let report = f.sync();
+    assert_eq!((report.errors, report.imported), (0, 2));
+    f.append("session", &parts[2]);
+    assert_eq!(f.sync().imported, 0);
+    assert_eq!(rows(&f), rows(&whole));
+    assert_eq!(f.requests(), 3);
+    assert_eq!(whole.requests(), 3);
 }
 
 // 进行中的步骤和非模型步骤不计入；缺少步骤序号的用量行报告为未同步，其后的步骤照常导入且不重复。

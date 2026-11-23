@@ -1331,6 +1331,27 @@ fn v12_diagnostic_block_compaction_preserves_detail_fields() {
 }
 
 #[test]
+fn v12_estimated_duration_survives_storage_and_compaction_and_enters_no_total() {
+    let (_dir, mut store) = migrated_empty();
+    let mut estimated = record("fixture-estimated", "antigravity", BASE, None, 100, 20);
+    estimated.attempts[0].duration_ms = 0;
+    estimated.attempts[0].parse_reasons = vec!["attempt_time_unreported".into()];
+    estimated.attempts[0].estimated_duration_ms = Some(24_000);
+    let plain = record("fixture-plain", "antigravity", BASE + 1, None, 100, 20);
+    store.write_batch(&[estimated, plain], None).unwrap();
+    for _ in 0..2 {
+        let estimate = |id| store.detail(id).unwrap().attempts[0].estimated_duration_ms;
+        assert_eq!(estimate("fixture-estimated"), Some(24_000));
+        assert_eq!(estimate("fixture-plain"), None);
+        assert_eq!(
+            store.dashboard(&all_time()).unwrap().totals.duration_ms,
+            100
+        );
+        compact_diagnostics_until_done(&mut store);
+    }
+}
+
+#[test]
 fn v12_antigravity_reasoning_survives_compaction_and_old_snapshots() {
     let (dir, mut writer) = migrated_empty();
     let mut row = record("fixture-ag-reasoning", "antigravity", BASE, None, 100, 20);

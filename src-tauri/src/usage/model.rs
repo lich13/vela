@@ -953,6 +953,9 @@ pub struct Attempt {
     pub api_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_ms: Option<u64>,
+    /// A duration inferred where none was reported; it enters no total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     pub pricing_model: Option<String>,
@@ -1161,6 +1164,7 @@ impl Default for Attempt {
             reasoning_effort: None,
             api_provider: None,
             generation_ms: None,
+            estimated_duration_ms: None,
             error_code: None,
             pricing_model: None,
             response_id: None,

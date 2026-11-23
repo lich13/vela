@@ -6,12 +6,13 @@ import {
   interruption,
   logMoney,
   logNumber,
-  logSpeed,
+  logTiming,
   generationSpeed,
 } from "./usage-log-columns";
 import { modelRelation } from "./usage-format";
 import type { Attempt, UsageRecord, UsageSettings } from "./usage-types";
 import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
+import Detail from "./UsageDetail";
 const defaultSettings: UsageSettings = {
   recording: true,
   autoSync: false,
@@ -39,16 +40,177 @@ const attempt = {
   status: 200,
   parseReasons: [],
 } as unknown as Attempt;
+const logSpeed = (a: Attempt, source = "proxy") => logTiming(a, source).speed;
 describe("request log columns", () => {
   it("keeps total TPS independent of near-zero generation timing", () => {
-    for (const generationMs of [0, 50, null, undefined]) {
+    for (const generationMs of [0, 50, 99, null, undefined]) {
       expect(generationSpeed({ ...attempt, generationMs })).toBeNull();
     }
-    expect(generationSpeed({ ...attempt, generationMs: 51 })).toBeCloseTo(
-      60000 / 51,
-    );
     expect(logSpeed({ ...attempt, firstTokenMs: 2499, generationMs: 1 })).toBe(
       24,
+    );
+  });
+  it("takes generation speed from the output left after thinking", () => {
+    const speed = (
+      generationMs: number,
+      firstTokenMs: number | null = 500,
+      extra: Partial<Attempt["tokens"]> = {},
+    ) =>
+      generationSpeed({
+        ...attempt,
+        generationMs,
+        firstTokenMs,
+        tokens: { ...tokens, ...extra },
+      });
+    // 60 output tokens, 20 of them thinking.
+    expect(speed(2000)).toBe(20);
+    expect(speed(2000, 500, { reasoning: null })).toBe(30);
+    // A window under a second counts only when the wait before it is at
+    // most four times as long.
+    expect(speed(500, 2000)).toBe(80);
+    expect(speed(500, 2001)).toBeNull();
+    expect(speed(500, null)).toBeNull();
+    expect(speed(100, 400)).toBe(400);
+    expect(speed(1000, 60_000)).toBe(40);
+    // Nothing but thinking, or a speed no model reaches.
+    expect(speed(2000, 500, { reasoning: 60 })).toBeNull();
+    expect(speed(2000, 500, { reasoning: 80 })).toBeNull();
+    expect(speed(100, 0, { output: 1020 })).toBe(10_000);
+    expect(speed(100, 0, { output: 1021 })).toBeNull();
+  });
+  it("rates an Antigravity row only above 200 tokens and one second", () => {
+    const row = (output: number, durationMs: number) => ({
+      ...attempt,
+      durationMs,
+      tokens: { ...tokens, output },
+    });
+    expect(logTiming(row(200, 1000), "antigravity")).toEqual({
+      duration: 1000,
+      estimated: false,
+      speed: 200,
+      speedNote: null,
+    });
+    for (const small of [row(199, 1000), row(200, 999)]) {
+      expect(logTiming(small, "antigravity")).toMatchObject({
+        speed: null,
+        speedNote: "输出不足 200 Token 或耗时不足 1 秒，不计算速度",
+      });
+      // Other sources are rated as before.
+      for (const source of ["proxy", "session", "claude"])
+        expect(logTiming(small, source)).toMatchObject({
+          speed: (small.tokens.output! * 1000) / small.durationMs,
+          speedNote: null,
+        });
+    }
+    // Without a time there is nothing to explain.
+    expect(
+      logTiming(
+        { ...row(60, 0), parseReasons: ["attempt_time_unreported"] },
+        "antigravity",
+      ),
+    ).toEqual({
+      duration: null,
+      estimated: false,
+      speed: null,
+      speedNote: null,
+    });
+  });
+  it("falls back to an estimated duration only where none was reported", () => {
+    const unreported = {
+      ...attempt,
+      durationMs: 0,
+      parseReasons: ["attempt_time_unreported"],
+      tokens: { ...tokens, output: 1097 },
+    };
+    const estimated = logTiming(
+      { ...unreported, estimatedDurationMs: 24_000 },
+      "antigravity",
+    );
+    expect(estimated).toMatchObject({ duration: 24_000, estimated: true });
+    expect(estimated.speed).toBeCloseTo(45.7, 1);
+    for (const estimatedDurationMs of [null, undefined, 0])
+      expect(
+        logTiming({ ...unreported, estimatedDurationMs }, "antigravity"),
+      ).toMatchObject({ duration: null, estimated: false, speed: null });
+    expect(
+      logTiming({ ...attempt, estimatedDurationMs: 24_000 }, "antigravity"),
+    ).toMatchObject({ duration: 2500, estimated: false });
+  });
+  it("marks estimated time and speed in the list and the details", () => {
+    const record = (id: string, source: string, a: Partial<Attempt>) =>
+      ({
+        id,
+        client: source === "proxy" ? "claude" : "antigravity",
+        source,
+        startedAt: 1,
+        attempts: [{ ...attempt, id, transport: "cli_file", ...a }],
+      }) as UsageRecord;
+    const estimated = record("fixture-estimated", "antigravity", {
+      durationMs: 0,
+      firstTokenMs: null,
+      stream: false,
+      parseReasons: ["attempt_time_unreported"],
+      estimatedDurationMs: 24_000,
+      tokens: { ...tokens, output: 1097 },
+    });
+    const small = record("fixture-small", "antigravity", { durationMs: 1500 });
+    const gateway = record("fixture-gateway", "proxy", { durationMs: 1500 });
+    const list = render(
+      <UsageLogTable
+        rows={[estimated, small, gateway]}
+        busy={false}
+        settings={defaultSettings}
+        name={() => "Fixture"}
+        open={() => {}}
+      />,
+    );
+    const cell = (row: number, label: string) =>
+      within(screen.getAllByRole("row")[row + 1]).getByLabelText(label)
+        .lastElementChild!;
+    expect(cell(0, "总耗时")).toHaveTextContent(/^≈24\.00s$/);
+    expect(cell(0, "总耗时")).toHaveAttribute(
+      "title",
+      "≈24000 ms · 按下一步开始时间估算",
+    );
+    expect(cell(0, "输出 TPS")).toHaveTextContent(/^≈45\.7$/);
+    expect(cell(0, "输出 TPS").getAttribute("title")).toMatch(
+      /^≈45\.7\d* tok\/s · 按下一步开始时间估算$/,
+    );
+    expect(cell(1, "总耗时")).toHaveTextContent(/^1\.50s$/);
+    expect(cell(1, "输出 TPS")).toHaveTextContent(/^—$/);
+    expect(cell(1, "输出 TPS")).toHaveAttribute(
+      "title",
+      "输出不足 200 Token 或耗时不足 1 秒，不计算速度",
+    );
+    expect(cell(2, "输出 TPS")).toHaveTextContent(/^40\.0$/);
+    expect(cell(2, "输出 TPS")).toHaveAttribute("title", "40 tok/s");
+    list.unmount();
+
+    const field = (label: string) =>
+      screen.getByText(label, { selector: "dt" }).nextElementSibling!;
+    const detail = render(
+      <Detail record={estimated} name={() => "Fixture"} onClose={() => {}} />,
+    );
+    expect(field("总耗时")).toHaveTextContent(/^≈24\.000s$/);
+    expect(field("总耗时").firstElementChild).toHaveAttribute(
+      "title",
+      "按下一步开始时间估算",
+    );
+    expect(field("输出 TPS")).toHaveTextContent(/^≈45\.7 tok\/s$/);
+    expect(field("输出 TPS").firstElementChild).toHaveAttribute(
+      "title",
+      "按下一步开始时间估算",
+    );
+    expect(screen.getByText("生成 TPS", { selector: "dt" })).toHaveAttribute(
+      "title",
+      "（输出 − 思考）÷ 生成耗时",
+    );
+    detail.unmount();
+    render(<Detail record={small} name={() => "Fixture"} onClose={() => {}} />);
+    expect(field("总耗时")).toHaveTextContent(/^1\.500s$/);
+    expect(field("输出 TPS").firstElementChild).toHaveAttribute(
+      "title",
+      "输出不足 200 Token 或耗时不足 1 秒，不计算速度",
     );
   });
   it("distinguishes unknown, zero, compact boundaries and exact costs", () => {

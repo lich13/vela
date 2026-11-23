@@ -870,6 +870,7 @@ fn save_attempt(
         "responseId",
         "inclusiveInputTokens",
         "generationMs",
+        "estimatedDurationMs",
     ] {
         if let Some(value) = fields.remove(field) {
             diagnostic.insert(field.into(), value);
