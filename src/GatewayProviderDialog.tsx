@@ -830,7 +830,7 @@ function ProviderApiForm({
             <>
               <label
                 className="provider-search-setting"
-                title="开启后，本供应商加入压缩队列：压缩请求按列表顺序交给队列里的供应商，都未能完成时回到普通队列"
+                title="开启后，本供应商加入压缩队列：压缩请求按列表顺序交给队列里的供应商，都未能完成时返回错误，不回到普通队列"
               >
                 <input
                   type="checkbox"
@@ -881,7 +881,7 @@ function ProviderApiForm({
               )}
               <label
                 className="provider-search-setting"
-                title="开启后，本供应商加入辅助队列：自动审批、标题、摘要、记忆等非主对话请求按列表顺序交给队列里的供应商，都未能完成时回到普通队列"
+                title="开启后，本供应商加入辅助队列：自动审批、标题、摘要、记忆等非主对话请求按列表顺序交给队列里的供应商，都未能完成时返回错误，不回到普通队列"
               >
                 <input
                   type="checkbox"
@@ -936,7 +936,7 @@ function ProviderApiForm({
             <>
               <label
                 className="provider-search-setting"
-                title="开启后，本供应商加入搜索队列：客户端搜索工具发出的网络搜索请求按列表顺序交给队列里的供应商，都未能完成时回到普通队列。请只在供应商支持网络搜索时开启"
+                title="开启后，本供应商加入搜索队列：客户端搜索工具发出的网络搜索请求按列表顺序交给队列里的供应商，都未能完成时返回错误，不回到普通队列。请只在供应商支持网络搜索时开启"
               >
                 <input
                   type="checkbox"
