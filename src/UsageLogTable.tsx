@@ -28,8 +28,8 @@ import {
   logColumns,
   logMoney,
   logNumber,
-  logSpeed,
-  logDuration,
+  logTiming,
+  estimatedTimeNote,
   measuredFirstToken,
   unpricedReason,
   type LogColumn,
@@ -264,8 +264,11 @@ export default function UsageLogTable({
                 t = native ? promptTokens(r.attempts) : a.tokens,
                 state = native ? "" : interruptionLabel(a),
                 rate = cacheHitRate(t),
-                speed = native ? null : logSpeed(a),
-                elapsed = native ? null : logDuration(a),
+                timing = native ? null : logTiming(a, r.source),
+                speed = timing?.speed ?? null,
+                elapsed = timing?.duration ?? null,
+                approx = timing?.estimated ? "≈" : "",
+                estimated = approx && ` · ${estimatedTimeNote}`,
                 first = measuredFirstToken(a, r.source),
                 model =
                   native && r.attempts.length > 1
@@ -376,25 +379,22 @@ export default function UsageLogTable({
                       ].join(" → ") || model
                     }
                   >
-                    <strong>
-                      {relation?.mapped
-                        ? `${a.requestedModel} → ${a.upstreamModel}`
-                        : model}
-                    </strong>
-                    <span className="usage-badges">
+                    <span className="usage-model-lines">
+                      <strong>
+                        {relation?.mapped ? a.requestedModel : model}
+                      </strong>
                       {relation?.mapped && (
-                        <span className="usage-badge" title={relation.title}>
-                          映射
-                        </span>
+                        <small title={relation.title}>
+                          ↳ 映射 {a.upstreamModel}
+                        </small>
                       )}
                       {relation?.mismatch && (
-                        <span
-                          className="usage-badge mismatch"
-                          title={relation.title}
-                        >
-                          响应不一致
-                        </span>
+                        <small className="mismatch" title={relation.title}>
+                          ↳ 返回 {a.responseModel}
+                        </small>
                       )}
+                    </span>
+                    <span className="usage-badges">
                       {a.reasoningEffort && (
                         <span className="usage-badge">
                           思考{" "}
@@ -499,10 +499,12 @@ export default function UsageLogTable({
                         ? "无可靠轮次耗时"
                         : elapsed == null
                           ? missingReason(a, "duration", r.source)
-                          : `${elapsed} ms`)
+                          : `${approx}${elapsed} ms${estimated}`)
                     }
                   >
-                    {elapsed == null ? "—" : `${(elapsed / 1000).toFixed(2)}s`}
+                    {elapsed == null
+                      ? "—"
+                      : `${approx}${(elapsed / 1000).toFixed(2)}s`}
                     {state && <span className="usage-interruption"> ⚠</span>}
                   </span>
                 ),
@@ -512,11 +514,12 @@ export default function UsageLogTable({
                     tabIndex={0}
                     title={
                       speed == null
-                        ? "需要有效的输出 Token 和请求总耗时"
-                        : `${speed} tok/s`
+                        ? (timing?.speedNote ??
+                          "需要有效的输出 Token 和请求总耗时")
+                        : `${approx}${speed} tok/s${estimated}`
                     }
                   >
-                    {speed == null ? "—" : speed.toFixed(1)}
+                    {speed == null ? "—" : `${approx}${speed.toFixed(1)}`}
                   </span>
                 ),
                 status: native ? "—" : (a.status ?? "—"),

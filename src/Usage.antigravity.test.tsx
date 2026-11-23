@@ -87,9 +87,11 @@ function record(): UsageRecord {
 }
 
 it("shows the display model and measured app performance without a fabricated HTTP status", () => {
+  const r = record();
+  r.attempts[0].tokens.output = 400;
   render(
     <UsageLogTable
-      rows={[record()]}
+      rows={[r]}
       settings={settings}
       name={() => "本机会话"}
       open={vi.fn()}
@@ -101,7 +103,7 @@ it("shows the display model and measured app performance without a fabricated HT
   expect(within(table).getByText("思考 High")).toBeInTheDocument();
   expect(within(table).getByText("0.25s")).toBeInTheDocument();
   expect(within(table).getByText("2.00s")).toBeInTheDocument();
-  expect(within(table).getByText("10.0")).toBeInTheDocument();
+  expect(within(table).getByText("200.0")).toBeInTheDocument();
   expect(within(table).getByText("未定价")).toBeInTheDocument();
   expect(within(table).queryByText("HTTP 200")).not.toBeInTheDocument();
 });
@@ -130,6 +132,7 @@ it("leaves missing time and speed empty even in legacy app rows", () => {
 it("shows real response identity, service, request outcome and separate generation speed in details", () => {
   const r = record();
   r.attempts[0].outcome = "failed";
+  r.attempts[0].tokens.output = 400;
   r.completed = false;
   render(<Detail record={r} name={() => "本机会话"} onClose={vi.fn()} />);
   expect(screen.getByText("请求失败")).toBeInTheDocument();
@@ -137,8 +140,9 @@ it("shows real response identity, service, request outcome and separate generati
   expect(screen.getByText("0.250s")).toBeInTheDocument();
   expect(screen.getByText("2.000s")).toBeInTheDocument();
   expect(screen.getByText("1.750s")).toBeInTheDocument();
-  expect(screen.getByText("10.0 tok/s")).toBeInTheDocument();
-  expect(screen.getByText("11.4 tok/s")).toBeInTheDocument();
+  // 400 output tokens over 2 s; the 388 left after thinking over 1.75 s.
+  expect(screen.getByText("200.0 tok/s")).toBeInTheDocument();
+  expect(screen.getByText("221.7 tok/s")).toBeInTheDocument();
 });
 
 it("旧 agy 记录与 CLI 会话记录都显示为 Antigravity，来源只在详情里区分", () => {

@@ -16,7 +16,11 @@ fn response(r: &Record) -> Option<&str> {
     r.final_attempt().and_then(|a| a.response_id.as_deref())
 }
 fn provider(r: &Record) -> Option<&str> {
-    r.final_attempt().and_then(|a| a.provider.as_deref())
+    // A CLI session row names the account that was signed in, which says
+    // nothing of the gateway provider that may have served the request.
+    r.final_attempt()
+        .filter(|a| a.transport != "cli_file")
+        .and_then(|a| a.provider.as_deref())
 }
 fn compatible(a: &Record, b: &Record) -> bool {
     a.source != "grok"

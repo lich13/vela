@@ -134,6 +134,8 @@ export type Attempt = {
   reasoningEffort?: string | null;
   apiProvider?: string | null;
   generationMs?: number | null;
+  // Inferred where no duration was reported.
+  estimatedDurationMs?: number | null;
   errorCode?: string | null;
   pricingModel: string | null;
   responseId: string | null;

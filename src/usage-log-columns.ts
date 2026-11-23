@@ -85,7 +85,7 @@ export function cacheHitRate(t: Tokens) {
     ? (t.cacheRead / full) * 100
     : null;
 }
-export function logDuration(a: Attempt): number | null {
+function logDuration(a: Attempt): number | null {
   const known = a.availability?.duration
     ? a.availability.duration === "reported"
     : !a.parseReasons?.includes("attempt_time_unreported");
@@ -100,29 +100,64 @@ export function measuredFirstToken(a: Attempt, source: string): number | null {
     ? a.firstTokenMs
     : null;
 }
-export function generationSpeed(a: Attempt): number | null {
-  return a.generationMs != null && a.generationMs > 50
-    ? logSpeed({
-        ...a,
-        durationMs: a.generationMs,
-        availability: { ...a.availability, duration: "reported" },
-      })
-    : null;
-}
-export function logSpeed(a: Attempt) {
+// The output a speed can be taken from: reported text tokens.
+function speedOutput(a: Attempt): number | null {
   const output = a.tokens.output;
-  if (
-    output == null ||
+  return output == null ||
     !Number.isFinite(output) ||
     output <= 0 ||
-    logDuration(a) == null ||
-    a.durationMs <= 0 ||
     (a.tokens.imageOutput ?? 0) > 0 ||
     a.price?.basis?.unit === "image" ||
     a.outputReported === false
-  )
+    ? null
+    : output;
+}
+export const generationSpeedBasis = "（输出 − 思考）÷ 生成耗时";
+// Antigravity counts thinking in its output; set against the time after the
+// first content that gives speeds no model reaches, so only the rest is. A
+// window too short to measure, or one the wait before it dwarfs, gives none.
+export function generationSpeed(a: Attempt): number | null {
+  const ms = a.generationMs;
+  const output = speedOutput(a);
+  if (ms == null || ms < 100 || output == null) return null;
+  if (ms < 1000 && !(a.firstTokenMs != null && a.firstTokenMs <= 4 * ms))
     return null;
-  return (output * 1000) / a.durationMs;
+  const speed = ((output - (a.tokens.reasoning ?? 0)) * 1000) / ms;
+  return speed > 0 && speed <= 10_000 ? speed : null;
+}
+export const estimatedTimeNote = "按下一步开始时间估算";
+const speedFloorNote = "输出不足 200 Token 或耗时不足 1 秒，不计算速度";
+export type LogTiming = {
+  duration: number | null;
+  // No duration was reported; this one is inferred.
+  estimated: boolean;
+  speed: number | null;
+  // Why a known duration and output give no speed.
+  speedNote: string | null;
+};
+export function logTiming(a: Attempt, source: string): LogTiming {
+  const reported = logDuration(a);
+  const estimate =
+    reported == null && (a.estimatedDurationMs ?? 0) > 0
+      ? a.estimatedDurationMs!
+      : null;
+  const duration = reported ?? estimate;
+  const output = speedOutput(a);
+  const speed =
+    output != null && duration != null && duration > 0
+      ? (output * 1000) / duration
+      : null;
+  // Antigravity reports many short steps, whose speed says little.
+  const small =
+    source === "antigravity" &&
+    speed != null &&
+    (output! < 200 || duration! < 1000);
+  return {
+    duration,
+    estimated: estimate != null,
+    speed: small ? null : speed,
+    speedNote: small ? speedFloorNote : null,
+  };
 }
 
 export const unpricedReason = (a: Attempt) =>

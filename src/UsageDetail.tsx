@@ -16,10 +16,11 @@ import {
 import {
   interruption,
   interruptionLabel,
-  logSpeed,
-  logDuration,
+  logTiming,
+  estimatedTimeNote,
   measuredFirstToken,
   generationSpeed,
+  generationSpeedBasis,
   unpricedReason,
 } from "./usage-log-columns";
 import {
@@ -307,12 +308,17 @@ function TokenField({
     </span>
   );
 }
-function DetailFields({ items }: { items: [string, React.ReactNode][] }) {
+function DetailFields({
+  items,
+}: {
+  // A third entry is a hint shown on the label.
+  items: [string, React.ReactNode, string?][];
+}) {
   return (
     <dl className="usage-detail-grid">
-      {items.map(([label, value]) => (
+      {items.map(([label, value, hint]) => (
         <div key={label} className="usage-detail-pair">
-          <dt>{label}</dt>
+          <dt title={hint}>{label}</dt>
           <dd>{value ?? "—"}</dd>
         </div>
       ))}
@@ -330,9 +336,11 @@ function AttemptDetails({
   source: string;
   metadata?: [string, React.ReactNode][];
 }) {
-  const tps = ["proxy", "antigravity"].includes(source) ? logSpeed(a) : null;
+  const timing = logTiming(a, source);
+  const rated = ["proxy", "antigravity"].includes(source);
+  const tps = rated ? timing.speed : null;
   const first = measuredFirstToken(a, source);
-  const elapsed = logDuration(a);
+  const elapsed = timing.duration;
   const generatedSpeed = generationSpeed(a);
   const relation = modelRelation(a);
   return (
@@ -769,12 +777,16 @@ function AttemptDetails({
         items={[
           [
             "总耗时",
-            elapsed != null ? (
-              `${(elapsed / 1000).toFixed(3)}s`
-            ) : (
+            elapsed == null ? (
               <span tabIndex={0} title={missingReason(a, "duration", source)}>
                 —
               </span>
+            ) : timing.estimated ? (
+              <span tabIndex={0} title={estimatedTimeNote}>
+                ≈{(elapsed / 1000).toFixed(3)}s
+              </span>
+            ) : (
+              `${(elapsed / 1000).toFixed(3)}s`
             ),
           ],
           [
@@ -790,7 +802,24 @@ function AttemptDetails({
               </span>
             ),
           ],
-          ["输出 TPS", tps == null ? "—" : `${tps.toFixed(1)} tok/s`],
+          [
+            "输出 TPS",
+            tps == null ? (
+              rated && timing.speedNote ? (
+                <span tabIndex={0} title={timing.speedNote}>
+                  —
+                </span>
+              ) : (
+                "—"
+              )
+            ) : timing.estimated ? (
+              <span tabIndex={0} title={estimatedTimeNote}>
+                ≈{tps.toFixed(1)} tok/s
+              </span>
+            ) : (
+              `${tps.toFixed(1)} tok/s`
+            ),
+          ],
           ...(source === "antigravity"
             ? ([
                 [
@@ -804,8 +833,9 @@ function AttemptDetails({
                   generatedSpeed == null
                     ? "—"
                     : `${generatedSpeed.toFixed(1)} tok/s`,
+                  generationSpeedBasis,
                 ],
-              ] as [string, React.ReactNode][])
+              ] as [string, React.ReactNode, string?][])
             : []),
           [
             "传输",

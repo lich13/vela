@@ -1,4 +1,4 @@
-// 覆盖 Antigravity CLI 会话用量导入：计量口径、增量与幂等、模型回退与计价、路径归属、只读，以及与网关记录的去重。
+// 覆盖 Antigravity CLI 会话用量导入：计量口径、增量与幂等、账号归属、回溯重跑、估算耗时、模型回退与计价、路径归属、只读，以及与网关记录的去重。
 use super::super::super::store::Store;
 use super::*;
 
@@ -94,6 +94,34 @@ impl Fixture {
             .detail(&safe_id(&format!("antigravity:cli:{session}:step:{step}")))
             .unwrap()
     }
+    /// The row of a step run after `rewinds` rewinds.
+    fn rewound(&self, session: &str, step: u64, rewinds: u64) -> Record {
+        let id = format!("antigravity:cli:{session}:step:{step}:rewind:{rewinds}");
+        self.store.detail(&safe_id(&id)).unwrap()
+    }
+    /// An account vault with the time each account was signed in.
+    fn accounts(&self, activations: &[(&str, i64)]) {
+        let entries: Vec<_> = activations
+            .iter()
+            .map(|(id, _)| json!({"id": id, "name": id, "kind": "oauth", "sourceType": "fixture", "payload": "{}", "updatedAt": 0}))
+            .collect();
+        let activations: Vec<_> = activations
+            .iter()
+            .map(|(id, since)| json!({"accountId": id, "sinceMs": since}))
+            .collect();
+        std::fs::write(
+            self.store
+                .data_dir()
+                .unwrap()
+                .join("antigravity-accounts.json"),
+            json!({"schema": 1, "entries": entries, "activations": activations}).to_string(),
+        )
+        .unwrap();
+    }
+    fn cursor_key(&self, session: &str) -> String {
+        let path = self.transcript(session).canonicalize().unwrap();
+        safe_id(&format!("antigravity:cli:file:{}", path.to_string_lossy()))
+    }
     fn requests(&self) -> u64 {
         self.store
             .dashboard(&Filter::default())
@@ -103,16 +131,38 @@ impl Fixture {
     }
 }
 
-/// One finished model step as agy writes it.
-fn planner(step: u64, model: Option<&str>, [input, cached, output]: [u64; 3]) -> String {
+/// The time of a line written `second` seconds into the fixture session.
+fn at(second: u64) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(&format!("2026-01-01T00:00:{second:02}Z"))
+        .unwrap()
+        .timestamp_millis()
+}
+/// One finished model step as agy writes it, `step` seconds into the session.
+fn planner(step: u64, model: Option<&str>, usage: [u64; 3]) -> String {
+    planner_at(step, step, model, usage)
+}
+fn planner_at(
+    step: u64,
+    second: u64,
+    model: Option<&str>,
+    [input, cached, output]: [u64; 3],
+) -> String {
     let mut line = json!({
         "step_index": step, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
-        "created_at": format!("2026-01-01T00:00:{step:02}Z"),
+        "created_at": format!("2026-01-01T00:00:{second:02}Z"),
         "input_tokens": input, "cache_read_tokens": cached, "output_tokens": output,
     });
     if let Some(model) = model {
         line["model"] = json!(model);
     }
+    format!("{line}\n")
+}
+/// A line without usage: the user's turn or a tool's result.
+fn other(step: u64, kind: &str, second: u64) -> String {
+    let line = json!({
+        "step_index": step, "source": "SYSTEM", "type": kind, "status": "DONE",
+        "created_at": format!("2026-01-01T00:00:{second:02}Z"),
+    });
     format!("{line}\n")
 }
 fn selection(step: u64, change: &str) -> String {
@@ -221,7 +271,7 @@ fn counts_are_stored_as_written_and_syncing_again_adds_nothing() {
     assert_eq!(a.input_basis.as_deref(), Some("exclusive"));
     assert_eq!(a.transport, "cli_file");
     assert_eq!(a.response_id, Some(safe_id("response-fixture")));
-    // The CLI's own login is not the app's account.
+    // No account is known to have been signed in.
     assert_eq!(a.provider, None);
     assert_eq!(model(&row).0, Some("gemini-3.1-pro"));
     assert!(a.price.is_some());
@@ -278,26 +328,318 @@ fn an_unfinished_tail_is_read_again_and_the_last_line_of_a_step_wins() {
     assert_eq!(f.requests(), 2);
     assert_eq!(f.row("session", 2).attempts[0].tokens.output, Some(7));
 
-    // A finished step written again updates its row instead of adding one.
-    f.append(
-        "session",
-        &planner(1, Some("gemini-3.1-pro"), [100, 20, 15]),
-    );
-    f.sync();
-    assert_eq!(f.requests(), 2);
-    assert_eq!(f.row("session", 1).attempts[0].tokens.output, Some(15));
+    // A finished step written again updates its row instead of adding one,
+    // with a smaller count too: every line read is a finished one.
+    for output in [15, 9] {
+        f.append(
+            "session",
+            &planner(2, Some("gemini-3.1-pro"), [50, 0, output]),
+        );
+        f.sync();
+        assert_eq!(f.requests(), 2);
+        assert_eq!(f.row("session", 2).attempts[0].tokens.output, Some(output));
+    }
 
     // Once its detail is archived the summary stands.
-    let archived = f.row("session", 1).id;
+    let archived = f.row("session", 2).id;
     f.store.archive_batch(&[archived]).unwrap();
-    f.append(
-        "session",
-        &planner(1, Some("gemini-3.1-pro"), [100, 20, 99]),
-    );
+    f.append("session", &planner(2, Some("gemini-3.1-pro"), [50, 0, 99]));
     assert_eq!(f.sync().errors, 0);
     let totals = f.store.dashboard(&Filter::default()).unwrap().totals;
-    assert_eq!((totals.requests, totals.tokens.output), (2, Some(22)));
+    assert_eq!((totals.requests, totals.tokens.output), (2, Some(14)));
     assert_eq!(f.store.logs(&Filter::default()).unwrap().total, 1);
+}
+
+// agy 与 App 共用登录：记录归到请求时登录的账号并计入该账号的额度窗口，登录之前的请求不归属。
+#[test]
+fn a_row_belongs_to_the_account_signed_in_at_its_time() {
+    let mut f = Fixture::new();
+    f.accounts(&[("account-a", at(2)), ("account-b", at(4))]);
+    let model = Some("gemini-3.1-pro");
+    let lines: Vec<String> = (1..=5)
+        .map(|step| planner(step, model, [100, 0, 10]))
+        .collect();
+    f.write("session", &lines.concat());
+    assert_eq!(f.sync().errors, 0);
+    let account = |step| f.row("session", step).attempts[0].provider.clone();
+    assert_eq!(account(1), None);
+    for (step, id) in [(2, "account-a"), (3, "account-a"), (4, "account-b")] {
+        assert_eq!(account(step).as_deref(), Some(id), "{step}");
+    }
+
+    let periods = quota::parse(&json!({"response": {"groups": [{"buckets": [
+        {"bucketId": "gemini-5h", "window": "5h", "resetTime": "2026-01-01T05:00:00Z", "remainingFraction": 0.5},
+    ]}]}}));
+    f.store
+        .save_antigravity_quota("account-a", &periods)
+        .unwrap();
+    let stats = f
+        .store
+        .antigravity_stats(&Filter::default(), at(30))
+        .unwrap();
+    let a = stats.accounts.iter().find(|a| a.id == "account-a").unwrap();
+    assert_eq!(
+        (a.tracks[0].burst_5h.requests, a.tracks[0].burst_5h.tokens),
+        (2, 220)
+    );
+    let mut groups: Vec<&str> = stats.providers.iter().map(|p| p.id.as_str()).collect();
+    groups.sort_unstable();
+    assert_eq!(groups, ["account-a", "account-b", "session"]);
+}
+
+// 回溯后同一步骤序号再次执行并各自计费：两次执行都计入，首次执行沿用原有记录标识；
+// 被回溯覆盖的步骤不取会话库里同序号（已是重跑后）的元数据；整份读取与分两次增量读取结果相同。
+#[test]
+fn steps_run_again_after_a_rewind_are_counted_beside_the_first_run() {
+    let model = Some("gemini-3.1-pro");
+    let first = [
+        other(0, "USER_INPUT", 0),
+        planner(1, model, [100, 0, 10]),
+        other(2, "GENERIC", 2),
+        planner(3, model, [100, 0, 20]),
+    ]
+    .concat();
+    // The user goes back to step 2; step 3 runs again and is written twice.
+    let again = [
+        other(2, "USER_INPUT", 12),
+        planner_at(3, 13, model, [100, 0, 30]),
+        planner_at(3, 13, model, [100, 0, 31]),
+        other(4, "GENERIC", 14),
+        planner_at(5, 15, model, [100, 0, 40]),
+    ]
+    .concat();
+    let rows = |f: &Fixture| {
+        [
+            f.row("session", 1),
+            f.row("session", 3),
+            f.rewound("session", 3, 1),
+            f.rewound("session", 5, 1),
+        ]
+        .map(|row| {
+            (
+                row.id.clone(),
+                row.attempts[0].tokens.output,
+                row.duplicate_of.clone(),
+            )
+        })
+    };
+    let outputs = |f: &Fixture| {
+        let totals = f.store.dashboard(&Filter::default()).unwrap().totals;
+        (totals.requests, totals.tokens.output)
+    };
+
+    let mut whole = Fixture::new();
+    whole.write("session", &[first.as_str(), &again].concat());
+    let db = whole.database("session");
+    save_step(&db, 1, "response-1", 1, 0);
+    save_step(&db, 3, "response-again", 1, 0);
+    save_step(&db, 5, "response-5", 1, 0);
+    let report = whole.sync();
+    assert_eq!((report.errors, report.imported), (0, 4));
+    assert_eq!(
+        rows(&whole).map(|(_, output, duplicate)| (output, duplicate)),
+        [10, 20, 31, 40].map(|output| (Some(output), None))
+    );
+    assert_eq!(outputs(&whole), (4, Some(101)));
+    // Step 3 of the database is the second run.
+    let first_run = whole.row("session", 3);
+    assert_eq!(first_run.attempts[0].response_id, None);
+    assert_eq!(first_run.attempts[0].tokens.reasoning, None);
+    assert_eq!(first_run.attempts[0].first_token_ms, None);
+    assert_eq!(
+        whole.rewound("session", 3, 1).attempts[0].response_id,
+        Some(safe_id("response-again"))
+    );
+    assert_eq!(
+        whole.row("session", 1).attempts[0].response_id,
+        Some(safe_id("response-1"))
+    );
+
+    let mut steps = Fixture::new();
+    steps.write("session", &first);
+    let db = steps.database("session");
+    save_step(&db, 1, "response-1", 1, 0);
+    save_step(&db, 3, "response-first", 1, 0);
+    assert_eq!(steps.sync().imported, 2);
+    save_step(&db, 3, "response-again", 1, 0);
+    save_step(&db, 5, "response-5", 1, 0);
+    steps.append("session", &again);
+    let report = steps.sync();
+    assert_eq!((report.errors, report.imported), (0, 2));
+    assert_eq!(rows(&steps), rows(&whole));
+    assert_eq!(outputs(&steps), (4, Some(101)));
+    // Read whole again, the same rows stand.
+    let (home, mut report) = (steps.home(), Report::default());
+    scan(
+        &mut steps.store,
+        &home,
+        &steps.pricing,
+        &Settings::default(),
+        &mut report,
+        true,
+    );
+    assert_eq!(report.errors, 0);
+    assert_eq!(rows(&steps), rows(&whole));
+    assert_eq!(outputs(&steps), (4, Some(101)));
+}
+
+// 旧版本保存的同步位置在升级后首次同步时作废：会话整份重读，已有记录补上账号，
+// 曾被重跑覆盖的记录恢复为首次执行的数值，重跑另记一条；之后的同步不再重读。
+#[test]
+fn a_position_saved_by_an_older_reading_starts_over() {
+    let mut f = Fixture::new();
+    let model = Some("gemini-3.1-pro");
+    // What the older reading stored for step 3: its second run.
+    f.write("session", &planner_at(3, 13, model, [100, 0, 31]));
+    assert_eq!(f.sync().imported, 1);
+    f.write(
+        "session",
+        &[
+            planner(3, model, [100, 0, 20]),
+            other(2, "USER_INPUT", 12),
+            planner_at(3, 13, model, [100, 0, 31]),
+        ]
+        .concat(),
+    );
+    f.accounts(&[("account-a", 0)]);
+    let bytes = std::fs::read(f.transcript("session")).unwrap();
+    let meta = std::fs::metadata(f.transcript("session")).unwrap();
+    let read = Position {
+        offset: bytes.len() as u64,
+        tail: storage::digest(&bytes[bytes.len().saturating_sub(4096)..]),
+        identity: file_identity(&meta),
+        modified: file_modified(&meta).unwrap(),
+        complete: true,
+        reading: READING,
+        ..Position::default()
+    };
+    let key = f.cursor_key("session");
+    let save = |f: &mut Fixture, position: &Value| {
+        f.store
+            .write_batch(&[], Some((&key, &position.to_string())))
+            .unwrap();
+    };
+    // Read to its end by this reading, the file is left alone.
+    let mut position = serde_json::to_value(&read).unwrap();
+    save(&mut f, &position);
+    assert_eq!(f.sync().imported, 0);
+    assert_eq!(f.row("session", 3).attempts[0].tokens.output, Some(31));
+
+    let fields = position.as_object_mut().unwrap();
+    fields.remove("reading");
+    fields.remove("walk");
+    fields.insert("timed".into(), json!(true));
+    save(&mut f, &position);
+    let report = f.sync();
+    assert_eq!((report.errors, report.imported), (0, 2));
+    let first = f.row("session", 3);
+    assert_eq!(first.attempts[0].tokens.output, Some(20));
+    assert_eq!(first.attempts[0].provider.as_deref(), Some("account-a"));
+    assert_eq!(
+        f.rewound("session", 3, 1).attempts[0].tokens.output,
+        Some(31)
+    );
+    assert_eq!(f.requests(), 2);
+    assert_eq!(f.sync().imported, 0);
+}
+
+// 会话库没有计时的步骤，以其后第一个其他步骤的行估算耗时：该行是工具结果时取两行创建时间之差，
+// 是用户输入、系统消息或尚无后续行时不估算；会话库已有计时的步骤不估算。估算值不进入耗时与统计。
+#[test]
+fn a_step_the_database_does_not_time_is_timed_by_the_tool_result_after_it() {
+    let mut f = Fixture::new();
+    let model = Some("gemini-3.1-pro");
+    let usage = [100, 0, 10];
+    f.write(
+        "session",
+        &[
+            planner_at(1, 1, model, usage),
+            other(2, "GENERIC", 4),
+            planner_at(3, 5, model, usage),
+            other(4, "USER_INPUT", 9),
+            planner_at(5, 10, model, usage),
+            other(6, "SYSTEM_MESSAGE", 12),
+            planner_at(7, 13, model, usage),
+            other(8, "GENERIC", 20),
+            // Written again as it finishes; a result in the same second times nothing.
+            planner_at(9, 21, model, usage),
+            planner_at(9, 21, model, usage),
+            other(10, "GENERIC", 21),
+            planner_at(11, 30, model, usage),
+            planner_at(11, 31, model, usage),
+            other(12, "GENERIC", 33),
+            planner_at(13, 40, model, usage),
+        ]
+        .concat(),
+    );
+    save_step(&f.database("session"), 7, "response-7", 1, 0);
+    assert_eq!(f.sync().errors, 0);
+    let estimate = |step| f.row("session", step).attempts[0].estimated_duration_ms;
+    assert_eq!(
+        [1, 3, 5, 7, 9, 11, 13].map(estimate),
+        [Some(3000), None, None, None, None, Some(2000), None]
+    );
+    let estimated = f.row("session", 1);
+    let a = &estimated.attempts[0];
+    assert_eq!((a.duration_ms, a.measured_duration_ms()), (0, None));
+    assert_eq!(a.parse_reasons, ["attempt_time_unreported"]);
+    // As on a row with no estimate.
+    assert_eq!(a.availability, f.row("session", 3).attempts[0].availability);
+    assert_eq!(f.row("session", 7).attempts[0].duration_ms, 4032);
+    let totals = f.store.dashboard(&Filter::default()).unwrap().totals;
+    assert_eq!((totals.requests, totals.duration_ms), (7, 4032));
+}
+
+// 末尾的模型步骤还没有后续行时不估算；文件变长后从该行重读并补上估算，结果与整份读取相同，
+// 回溯计数与重读起点一致，未变化的记录不重复写入。
+#[test]
+fn a_step_at_the_end_of_the_file_is_timed_once_its_follower_is_written() {
+    let model = Some("gemini-3.1-pro");
+    let usage = [100, 0, 10];
+    let parts = [
+        [
+            planner_at(5, 1, model, usage),
+            other(2, "USER_INPUT", 2),
+            planner_at(3, 3, model, usage),
+        ]
+        .concat(),
+        [other(4, "GENERIC", 6), planner_at(5, 7, model, usage)].concat(),
+        other(6, "USER_INPUT", 9),
+    ];
+    let rows = |f: &Fixture| {
+        [
+            f.row("session", 5),
+            f.rewound("session", 3, 1),
+            f.rewound("session", 5, 1),
+        ]
+        .map(|row| row.attempts[0].estimated_duration_ms)
+    };
+    let mut whole = Fixture::new();
+    whole.write("session", &parts.concat());
+    assert_eq!(whole.sync().imported, 3);
+    assert_eq!(rows(&whole), [None, Some(3000), None]);
+
+    let mut f = Fixture::new();
+    f.write("session", &parts[0]);
+    assert_eq!(f.sync().imported, 2);
+    assert_eq!(
+        f.rewound("session", 3, 1).attempts[0].estimated_duration_ms,
+        None
+    );
+    // Nothing new: the waiting line is left alone.
+    assert_eq!(f.sync().imported, 0);
+    // A follower still being written times nothing yet.
+    let (head, rest) = parts[1].split_at(20);
+    f.append("session", head);
+    assert_eq!(f.sync().imported, 0);
+    f.append("session", rest);
+    let report = f.sync();
+    assert_eq!((report.errors, report.imported), (0, 2));
+    f.append("session", &parts[2]);
+    assert_eq!(f.sync().imported, 0);
+    assert_eq!(rows(&f), rows(&whole));
+    assert_eq!(f.requests(), 3);
+    assert_eq!(whole.requests(), 3);
 }
 
 // 进行中的步骤和非模型步骤不计入；缺少步骤序号的用量行报告为未同步，其后的步骤照常导入且不重复。
@@ -595,16 +937,14 @@ fn gateway(id: &str, response: &str, model: &str, at: i64) -> Record {
     }
 }
 
-// 经网关的 agy 请求同时留下网关记录与本机会话：按响应标识只计一次，以网关记录为准；
+// 经网关的 agy 请求同时留下网关记录与本机会话：按响应标识只计一次，以网关记录为准，会话记录归属的账号不影响配对；
 // 没有响应标识时沿用既有的唯一指纹规则；会话库晚于转录写入时补上标识后同样合并。
 #[test]
 fn a_request_the_gateway_recorded_is_counted_once() {
     let mut f = Fixture::new();
-    let at = |step: u64| {
-        chrono::DateTime::parse_from_rfc3339(&format!("2026-01-01T00:00:{step:02}Z"))
-            .unwrap()
-            .timestamp_millis()
-    };
+    // The account signed in is not the gateway's provider, and still the two
+    // rows of one request are paired.
+    f.accounts(&[("account-a", 0)]);
     // The same counts the gateway derives from `usageMetadata`.
     let usage = [1000, 200, 80];
     f.write(
@@ -633,6 +973,7 @@ fn a_request_the_gateway_recorded_is_counted_once() {
         (Some("gateway-first"), "response_id")
     );
     assert_eq!(session.attempts[0].tokens, first.attempts[0].tokens);
+    assert_eq!(session.attempts[0].provider.as_deref(), Some("account-a"));
     assert_eq!(f.requests(), 2);
     // The gateway row arrives after the session was read.
     let second = gateway(
