@@ -944,9 +944,14 @@ pub(super) fn preserve_record(incoming: &Record, existing: Option<Record>) -> Re
             return Ok(old);
         }
         if r.source != "proxy" {
+            // Every line taken from a CLI session file is final, so a smaller
+            // count there is a correction: a row that held the second run of a
+            // rewound step returns to its first.
+            let finished = r.attempts.iter().all(|a| a.transport == "cli_file");
             if (r.source != "antigravity" && old.completed && !r.completed)
-                || old.final_attempt().and_then(|a| a.tokens.output)
-                    > r.final_attempt().and_then(|a| a.tokens.output)
+                || (!finished
+                    && old.final_attempt().and_then(|a| a.tokens.output)
+                        > r.final_attempt().and_then(|a| a.tokens.output))
             {
                 return Ok(old);
             }

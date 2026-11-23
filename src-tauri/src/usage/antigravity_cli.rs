@@ -3,6 +3,7 @@
 //! response metadata in `antigravity-cli/conversations/<id>.db`. Only counts, model
 //! names, times and hashed identifiers are stored; no message text is.
 use super::*;
+use crate::antigravity::auth::ProviderTimeline;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 #[cfg(test)]
@@ -14,6 +15,10 @@ const TRANSCRIPT: &str = ".system_generated/logs/transcript_full.jsonl";
 /// `local_api` and `history_file`.
 const TRANSPORT: &str = "cli_file";
 
+/// The reading a saved position stands for. A position an older reading wrote
+/// starts over, so the rows stored then take what this one adds.
+const READING: u32 = 1;
+
 /// How far one transcript was read. `database` and `unread` let a conversation
 /// database written after its transcript complete the rows it could not serve.
 #[derive(Default, Serialize, Deserialize)]
@@ -24,12 +29,31 @@ struct Position {
     identity: String,
     modified: String,
     complete: bool,
-    model: Option<String>,
     database: String,
     unread: bool,
-    /// Read since steps took their timing from the conversation database;
-    /// a file read before is read once more for it.
-    timed: bool,
+    reading: u32,
+    /// What the lines before `offset` left.
+    walk: Walk,
+}
+
+/// What the lines read so far mean for the next one.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Walk {
+    model: Option<String>,
+    /// Times the session went back to an earlier step. The steps run again
+    /// reuse their indexes and are billed again, so the count is part of a
+    /// row's identity.
+    rewinds: u64,
+    /// The step index of the last line that had one.
+    step: Option<u64>,
+}
+
+/// A usage line as its row, before the conversation database adds to it.
+struct Draft {
+    rewinds: u64,
+    step: u64,
+    record: Record,
 }
 
 /// Just enough of the protobuf wire format to pick fields out of a message.
@@ -282,24 +306,31 @@ fn place(attempt: &mut Attempt, generator: &Generator, learned: &Learned) {
     normalize_attempt(attempt);
 }
 
-/// The usage row of one transcript line, with its step index.
-fn step_record(
+/// The usage row of one transcript line, from what the line itself says.
+fn usage_line(
     line: &[u8],
     cascade: &str,
-    at: &mut Position,
-    conversation: &mut Conversation<'_>,
-    pricing: &Pricing,
-    settings: &Settings,
+    walk: &mut Walk,
+    rewound: &mut Vec<(u64, u64)>,
+    timeline: &ProviderTimeline,
     learned: &Learned,
-) -> Result<Option<(u64, Record)>> {
+) -> Result<Option<Draft>> {
     let v: Value = serde_json::from_slice(line)
         .map_err(|_| failure("Antigravity CLI 会话文件存在无效完整行"))?;
+    let index = number(&v["step_index"]);
+    if let Some(index) = index {
+        if walk.step.is_some_and(|last| index < last) {
+            walk.rewinds += 1;
+            rewound.push((walk.rewinds, index));
+        }
+        walk.step = Some(index);
+    }
     if v["type"].as_str() == Some("USER_INPUT") {
         if let Some(content) = v["content"].as_str() {
             if let Some(model) = extract_settings_model(content) {
-                at.model = Some(model);
+                walk.model = Some(model);
             } else if content.contains("<USER_SETTINGS_CHANGE>") {
-                at.model = None;
+                walk.model = None;
             }
         }
         return Ok(None);
@@ -318,7 +349,7 @@ fn step_record(
     {
         return Ok(None);
     }
-    let (Some(step), Some(started)) = (number(&v["step_index"]), time(&v["created_at"])) else {
+    let (Some(step), Some(started)) = (index, time(&v["created_at"])) else {
         return Err(failure("Antigravity CLI 用量缺少步骤序号或时间，未计入"));
     };
     let explicit = text(&v, &["model"]);
@@ -335,7 +366,6 @@ fn step_record(
         (None, name) => (name, None),
     };
     let model = actual_model(named);
-    let recorded = conversation.step(step);
     // agy writes input without cached tokens and output with thinking tokens,
     // the split the app's local API reports (its usage message holds
     // output = thinking + response), so the counts are stored as written.
@@ -343,27 +373,25 @@ fn step_record(
         input: number(&v["input_tokens"]),
         output: number(&v["output_tokens"]),
         cache_read: number(&v["cache_read_tokens"]),
-        cache_write: recorded.as_ref().and_then(|step| step.cache_write),
-        reasoning: recorded.as_ref().and_then(|step| step.reasoning),
         ..Tokens::default()
     };
-    let id = safe_id(&format!("antigravity:cli:{cascade}:step:{step}"));
+    // Rows stored before rewinds were told apart keep their ids.
+    let id = safe_id(&match walk.rewinds {
+        0 => format!("antigravity:cli:{cascade}:step:{step}"),
+        rewinds => format!("antigravity:cli:{cascade}:step:{step}:rewind:{rewinds}"),
+    });
     let is_failed = failed(&v);
-    let mut attempt = Attempt {
+    let attempt = Attempt {
         id: safe_id(&format!("{id}:final")),
-        // The CLI keeps its own login, so the app's account timeline does not apply.
-        provider: None,
-        response_id: recorded
-            .as_ref()
-            .and_then(|step| step.response_id.as_deref())
-            .map(safe_id),
+        // agy runs on the login it shares with the app.
+        provider: timeline.provider_at(started).map(str::to_owned),
         requested_model: model.clone(),
         response_model: model,
         model_display_name: listed
             .as_ref()
             .map(|(_, shown)| (*shown).to_owned())
             .or_else(|| alias.map(|a| a.display_name.to_owned()))
-            .or_else(|| at.model.clone()),
+            .or_else(|| walk.model.clone()),
         reasoning_effort: alias
             .and_then(|a| a.effort)
             .or(suffix_effort)
@@ -379,38 +407,67 @@ fn step_record(
         parse_reasons: vec!["attempt_time_unreported".into()],
         ..Attempt::default()
     };
-    // The conversation database times the step; the transcript does not.
-    if let Some((first, total)) = recorded.as_ref().and_then(|step| step.timing) {
-        attempt.stream = true;
-        attempt.first_token_ms = Some(first);
-        attempt.generation_ms = Some(total - first);
-        attempt.duration_ms = total;
-        attempt
-            .availability
-            .insert("duration".into(), "reported".into());
-        attempt.parse_reasons.clear();
-    }
-    normalize_attempt(&mut attempt);
-    if attempt.response_model.is_none() {
-        if let Some(generator) = recorded.and_then(|step| conversation.generator(step.generator)) {
-            place(&mut attempt, &generator, learned);
+    Ok(Some(Draft {
+        rewinds: walk.rewinds,
+        step,
+        record: Record {
+            id,
+            client: "antigravity".into(),
+            source: "antigravity".into(),
+            session_id: Some(safe_id(cascade)),
+            started_at: started,
+            finished_at: Some(started),
+            // As with the app's history file, a usage line reports consumption,
+            // not the request's outcome.
+            completed: false,
+            attempts: vec![attempt],
+            ..Record::default()
+        },
+    }))
+}
+
+/// Finishes a row with its step's metadata and prices it. `replaced` marks a
+/// step a rewind ran again: the database then holds the later run under the
+/// same index, and its response id on both rows would merge them into one.
+fn complete(
+    draft: Draft,
+    replaced: bool,
+    conversation: &mut Conversation<'_>,
+    pricing: &Pricing,
+    settings: &Settings,
+    learned: &Learned,
+) -> Record {
+    let mut record = draft.record;
+    let recorded = if replaced {
+        None
+    } else {
+        conversation.step(draft.step)
+    };
+    let attempt = &mut record.attempts[0];
+    if let Some(step) = &recorded {
+        attempt.tokens.cache_write = step.cache_write;
+        attempt.tokens.reasoning = step.reasoning;
+        attempt.response_id = step.response_id.as_deref().map(safe_id);
+        // The conversation database times the step; the transcript does not.
+        if let Some((first, total)) = step.timing {
+            attempt.stream = true;
+            attempt.first_token_ms = Some(first);
+            attempt.generation_ms = Some(total - first);
+            attempt.duration_ms = total;
+            attempt
+                .availability
+                .insert("duration".into(), "reported".into());
+            attempt.parse_reasons.clear();
         }
     }
-    let mut record = Record {
-        id,
-        client: "antigravity".into(),
-        source: "antigravity".into(),
-        session_id: Some(safe_id(cascade)),
-        started_at: started,
-        finished_at: Some(started),
-        // As with the app's history file, a usage line reports consumption,
-        // not the request's outcome.
-        completed: false,
-        attempts: vec![attempt],
-        ..Record::default()
-    };
+    normalize_attempt(attempt);
+    if attempt.response_model.is_none() {
+        if let Some(generator) = recorded.and_then(|step| conversation.generator(step.generator)) {
+            place(attempt, &generator, learned);
+        }
+    }
     price(&mut record, pricing, settings);
-    Ok(Some((step, record)))
+    record
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -423,6 +480,7 @@ fn scan_session(
     settings: &Settings,
     report: &mut Report,
     repair: bool,
+    timeline: &ProviderTimeline,
     learned: &Learned,
 ) -> Result<()> {
     let key = safe_id(&format!("antigravity:cli:file:{}", path.to_string_lossy()));
@@ -435,7 +493,7 @@ fn scan_session(
         let log = local_file_stamp(&db.with_extension("db-wal"));
         format!("{}+{log}", local_file_stamp(db))
     });
-    if !at.timed || (at.unread && at.database != stamp) {
+    if at.reading != READING || (at.unread && at.database != stamp) {
         at = Position::default();
     }
     let mut file = File::open(path).map_err(storage::io_error)?;
@@ -462,18 +520,16 @@ fn scan_session(
     if at.identity != identity || meta.len() < at.offset || tail(&mut file, at.offset)? != at.tail {
         at = Position::default();
     }
-    at.timed = true;
+    at.reading = READING;
     at.identity = identity;
     file.seek(SeekFrom::Start(at.offset))
         .map_err(storage::io_error)?;
     let mut reader = BufReader::new(file);
-    let mut conversation = Conversation {
-        path: database,
-        opened: None,
-        unread: false,
-    };
-    // Keyed by step, so the last line written for a step is the one kept.
-    let mut rows = BTreeMap::new();
+    let mut walk = at.walk.clone();
+    // Keyed by rewind and step, so the last line written for a step is the one kept.
+    let mut drafts = BTreeMap::new();
+    // Each rewind in this pass: its count and the step it went back to.
+    let mut rewound = Vec::new();
     let mut bytes = Vec::new();
     let mut gap = false;
     loop {
@@ -490,17 +546,9 @@ fn scan_session(
         if bytes.last() != Some(&b'\n') {
             break;
         }
-        match step_record(
-            &bytes,
-            cascade,
-            &mut at,
-            &mut conversation,
-            pricing,
-            settings,
-            learned,
-        ) {
-            Ok(Some((step, row))) => {
-                rows.insert(step, row);
+        match usage_line(&bytes, cascade, &mut walk, &mut rewound, timeline, learned) {
+            Ok(Some(draft)) => {
+                drafts.insert((draft.rewinds, draft.step), draft);
             }
             Ok(None) => {}
             Err(error) => {
@@ -508,16 +556,40 @@ fn scan_session(
                 report.failed(&error);
             }
         }
+        // Past a line that could not be counted the position stays put, and
+        // with it what the lines before that one left.
         if !gap {
             at.offset = reader.stream_position().map_err(storage::io_error)?;
+            at.walk.clone_from(&walk);
         }
     }
     at.tail = tail(reader.get_mut(), at.offset)?;
     at.complete = at.offset == meta.len();
     at.modified = if at.complete { modified } else { String::new() };
+    let mut conversation = Conversation {
+        path: database,
+        opened: None,
+        unread: false,
+    };
+    // Only now is every rewind of this pass known.
+    let rows: Vec<Record> = drafts
+        .into_values()
+        .map(|draft| {
+            let replaced = rewound
+                .iter()
+                .any(|(count, to)| *count > draft.rewinds && *to <= draft.step);
+            complete(
+                draft,
+                replaced,
+                &mut conversation,
+                pricing,
+                settings,
+                learned,
+            )
+        })
+        .collect();
     at.unread |= conversation.unread;
     at.database = stamp;
-    let rows: Vec<Record> = rows.into_values().collect();
     for batch in rows.chunks(128) {
         store.write_batch(batch, None)?;
     }
@@ -552,6 +624,10 @@ pub(super) fn scan(
         }
     };
     let conversations = root.join("conversations");
+    let timeline = store
+        .data_dir()
+        .map(|data| crate::antigravity::auth::provider_timeline(data, Some(home)))
+        .unwrap_or_default();
     let learned = Learned::load(store);
     report.total_files += sessions.len() as u64;
     for (cascade, path) in &sessions {
@@ -566,6 +642,7 @@ pub(super) fn scan(
             settings,
             report,
             repair,
+            &timeline,
             &learned,
         ) {
             Ok(()) => report.files += 1,
