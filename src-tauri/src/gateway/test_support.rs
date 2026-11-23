@@ -136,6 +136,10 @@ pub(crate) fn policy_provider(id: &str, handoff: bool, take: bool) -> Provider {
         endless_mode: false,
         upstream_retry_seconds: 5,
         normal_retry_seconds: 3,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     }
 }
 
@@ -172,6 +176,8 @@ pub(crate) fn route(provider: Provider) -> Route {
         Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(1), 0));
     Route {
         dsh_models: None,
+        model_map: Default::default(),
+        delegate: Default::default(),
         grok: None,
         client_id: ClientId::Codex,
         provider,
@@ -313,6 +319,7 @@ pub(crate) mod loopback {
                 &gateway,
                 &dir,
                 Edit::SaveProvider {
+                    delegate: Default::default(),
                     search_only: None,
                     end_on_message_stop: None,
                     filter_count_tokens: None,
@@ -320,6 +327,10 @@ pub(crate) mod loopback {
                     endless_mode: None,
                     upstream_retry_seconds: None,
                     normal_retry_seconds: None,
+                    risk_codes: None,
+                    retry_intensity: None,
+                    limit_retry_seconds: None,
+                    limit_rest_seconds: None,
                     quota_access_token: None,
                     id: None,
                     base_url: url,

@@ -2095,3 +2095,49 @@ fn sub2api_pinned_cache_long_context_and_tier_reference_cases() {
         "422.5"
     );
 }
+
+#[test]
+fn session_imports_ask_for_prices_only_for_rows_a_price_list_could_still_price() {
+    use futures_util::FutureExt;
+    use sessions::Repository;
+    let dir = tempfile::tempdir().unwrap();
+    let service = Service::new(dir.path());
+    let mut sink = super::SessionStore {
+        service: service.clone(),
+        reader: Store::reader(&service.0.directory).unwrap(),
+        client: "antigravity".into(),
+    };
+    // A stored permit resolves at once; it is consumed by the check.
+    let hinted = || service.wait_price_hint().now_or_never().is_some();
+    let mut priced = record("fixture-priced", "antigravity", "antigravity", BASE);
+    priced.attempts[0].price = Some(price_snapshot("1"));
+    // Grok prompt totals are never priced, so they must not keep asking.
+    let mut prompt = record("fixture-prompt", "grok", "grok", BASE + 1);
+    prompt.attempts[0].transport = "session_prompt".into();
+    sink.write_batch(&[priced, prompt], None).unwrap();
+    assert!(!hinted());
+    sink.write_batch(
+        &[record(
+            "fixture-unpriced",
+            "antigravity",
+            "antigravity",
+            BASE + 2,
+        )],
+        None,
+    )
+    .unwrap();
+    assert!(hinted());
+    assert!(!hinted());
+    sink.write_batch_with_superseded(
+        &[record(
+            "fixture-later",
+            "antigravity",
+            "antigravity",
+            BASE + 3,
+        )],
+        &[],
+        None,
+    )
+    .unwrap();
+    assert!(hinted());
+}

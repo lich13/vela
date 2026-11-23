@@ -58,6 +58,39 @@ pub enum TurnEvidence {
     #[default]
     Unknown,
 }
+/// The web searches among the tools a request declares. The provider runs
+/// them, so the request needs a provider that has them.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum SearchTools {
+    #[default]
+    Absent,
+    /// Declared beside other tools.
+    Among,
+    /// The only tools the request declares.
+    Alone,
+}
+impl SearchTools {
+    fn of(tools: Option<&serde_json::Value>) -> Self {
+        let Some(tools) = tools.and_then(serde_json::Value::as_array) else {
+            return Self::Absent;
+        };
+        // Anthropic dates the tool (`web_search_20250305`); OpenAI and xAI
+        // call it `web_search`, some versions with a suffix.
+        let searches = tools
+            .iter()
+            .filter(|tool| {
+                tool.get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| kind == "web_search" || kind.starts_with("web_search_"))
+            })
+            .count();
+        match searches {
+            0 => Self::Absent,
+            n if n == tools.len() => Self::Alone,
+            _ => Self::Among,
+        }
+    }
+}
 #[derive(serde::Deserialize, Default)]
 pub struct RequestHints {
     pub previous_response_id: Option<String>,
@@ -77,6 +110,8 @@ pub struct RequestHints {
     pub capacity_replay_safe: bool,
     #[serde(skip)]
     pub auxiliary: bool,
+    #[serde(skip)]
+    pub search_tools: SearchTools,
     #[serde(skip)]
     pub routing_evidence: crate::usage::model::RoutingEvidence,
 }
@@ -110,6 +145,7 @@ impl RequestHints {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
             auxiliary: value.get("generate").and_then(serde_json::Value::as_bool) == Some(false),
+            search_tools: SearchTools::of(value.get("tools")),
             ..Default::default()
         };
         if let Some(input) = value.get("input").and_then(serde_json::Value::as_array) {
@@ -512,10 +548,24 @@ impl Replay {
         .await
         .map_err(|_| io::Error::other("request inspection interrupted"))?
     }
-    pub async fn mapped_model(&self, encoding: &str, model: &str) -> Result<Bytes, BoxError> {
+    /// The request sent as another model, at another reasoning effort, or
+    /// both. `effort` names the object of the request that holds the effort
+    /// and the level to set in it; the rest of that object is kept. For
+    /// Claude on Vertex AI, `vertex` is the provider's address and the
+    /// request's path: the body is made Vertex AI's, and where it goes comes
+    /// back with it.
+    pub async fn rewritten(
+        &self,
+        encoding: &str,
+        model: Option<&str>,
+        effort: Option<(&'static str, &str)>,
+        vertex: Option<(&str, &str)>,
+    ) -> Result<(Bytes, Option<String>), BoxError> {
         let bytes = self.prefix(MAX_BODY as usize).await?;
         let encoding = encoding.to_owned();
-        let model = model.to_owned();
+        let model = model.map(str::to_owned);
+        let effort = effort.map(|(holder, level)| (holder, level.to_owned()));
+        let vertex = vertex.map(|(base, path)| (base.to_owned(), path.to_owned()));
         tokio::task::spawn_blocking(move || {
             let decoded = decode_prefix(&bytes, &encoding, MAX_BODY as usize + 1)?;
             if decoded.len() as u64 > MAX_BODY {
@@ -525,11 +575,57 @@ impl Replay {
             let object = value
                 .as_object_mut()
                 .ok_or_else(|| io::Error::other("invalid request"))?;
-            object.insert("model".into(), model.into());
-            Ok(Bytes::from(serde_json::to_vec(&value)?))
+            if let Some(model) = model {
+                object.insert("model".into(), model.into());
+            }
+            if let Some((holder, level)) = effort {
+                match object
+                    .get_mut(holder)
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    Some(held) => {
+                        held.insert("effort".into(), level.into());
+                    }
+                    // Absent, or the null a client sends for no reasoning.
+                    None => {
+                        object.insert(holder.into(), serde_json::json!({ "effort": level }));
+                    }
+                }
+            }
+            let address = match vertex {
+                Some((base, path)) => Some(
+                    super::vertex::request(&base, &path, object)
+                        .ok_or_else(|| io::Error::other("no vertex address"))?,
+                ),
+                None => None,
+            };
+            Ok((Bytes::from(serde_json::to_vec(&value)?), address))
         })
         .await
-        .map_err(|_| io::Error::other("model mapping interrupted"))?
+        .map_err(|_| io::Error::other("request rewriting interrupted"))?
+    }
+    /// The request without one top-level member, or `None` to send it as it
+    /// came: when it has no such member, or is not a JSON object at all.
+    pub async fn without(&self, encoding: &str, member: &'static str) -> Option<Bytes> {
+        let bytes = self.prefix(MAX_BODY as usize).await.ok()?;
+        let encoding = encoding.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let decoded = decode_prefix(&bytes, &encoding, MAX_BODY as usize + 1).ok()?;
+            let needle = format!("\"{member}\"");
+            if decoded.len() as u64 > MAX_BODY
+                || !decoded
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+            {
+                return None;
+            }
+            let mut value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+            value.as_object_mut()?.remove(member)?;
+            serde_json::to_vec(&value).ok().map(Bytes::from)
+        })
+        .await
+        .ok()
+        .flatten()
     }
     pub fn has_trailers(&self) -> bool {
         self.trailers.is_some()

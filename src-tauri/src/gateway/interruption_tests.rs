@@ -100,7 +100,7 @@ async fn explicit_cancel_and_gateway_stop_are_statuses_without_fake_progress() {
     );
     assert_eq!(
         cancellation.details.message.as_deref(),
-        Some("收到明确取消指令，已结束转发")
+        Some("收到明确取消指令，已结束本次尝试")
     );
     assert_eq!(cancellation.level, Level::Info);
     assert!(matches!(

@@ -44,6 +44,7 @@ fn client_key(client: ClientId) -> &'static str {
     match client {
         ClientId::Codex => "codex",
         ClientId::Claude => "claude",
+        ClientId::Agy => "agy",
         ClientId::Grok => "grok",
         ClientId::Dsh => "dsh",
     }
@@ -357,6 +358,12 @@ impl Service {
                 .filter(scope)
                 .map(|job| project_job(job, &data.contexts))
                 .collect(),
+            last_models: data
+                .saved
+                .last_models
+                .get(&key)
+                .cloned()
+                .unwrap_or_default(),
             detection,
             degraded: data
                 .saved
@@ -401,6 +408,10 @@ impl Service {
         Ok(())
     }
     pub fn start(&self, request: Request) -> Result<Job> {
+        // The fingerprint banks hold no Gemini model.
+        if request.client_id == ClientId::Agy && request.kind == Kind::Fingerprint {
+            return Err(failure("Antigravity 支持连接测试"));
+        }
         self.start_job(request, false)
     }
     pub fn set_prompt(&self, prompt: String) -> Result<()> {
@@ -448,6 +459,8 @@ impl Service {
             request.endpoint.as_deref(),
         )?;
         request.endpoint = Some(target.base_url.clone());
+        // Remembered as picked, before the default choice resolves to a model.
+        let selected = request.model.clone();
         if request.kind == Kind::Connection && request.model.is_empty() {
             request.model = self.default_connection_model(&target);
         }
@@ -578,6 +591,16 @@ impl Service {
         };
         let mut next = data.saved.clone();
         next.jobs.push(job.clone());
+        if !automatic {
+            let last = next
+                .last_models
+                .entry(scope_key(job.client_id, &job.provider_id))
+                .or_default();
+            match job.kind {
+                Kind::Connection => last.connection = selected,
+                Kind::Fingerprint => last.fingerprint = selected,
+            }
+        }
         self.save(&mut data, next)?;
         let (cancel, receiver) = watch::channel(false);
         data.cancel.insert(job.id.clone(), cancel);

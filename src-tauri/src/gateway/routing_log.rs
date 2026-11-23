@@ -353,6 +353,9 @@ fn ordinary(decision: RoutingDecision) -> bool {
             | RoutingDecision::Auxiliary
             | RoutingDecision::ModelDetourOwnerPreserved
             | RoutingDecision::ThreadUnidentified
+            | RoutingDecision::CompactionTakeover
+            | RoutingDecision::AuxiliaryTakeover
+            | RoutingDecision::WebSearchTakeover
     )
 }
 

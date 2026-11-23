@@ -106,6 +106,14 @@ fn provider_mappings_are_exact_and_isolated_by_client_provider_and_model_field()
                 "fixture-shared",
                 "fixture-price-c",
             ),
+            // Antigravity's gateway files its calls under the platform's name.
+            mapping(
+                "antigravity",
+                "provider-a",
+                "request",
+                "fixture-shared",
+                "fixture-price-b",
+            ),
             mapping(
                 "codex",
                 "provider-a",
@@ -143,6 +151,15 @@ fn provider_mappings_are_exact_and_isolated_by_client_provider_and_model_field()
             "fixture-visible",
             "response",
             "fixture-price-c",
+            "provider_mapping",
+        ),
+        (
+            "antigravity",
+            Some("provider-a"),
+            "fixture-shared",
+            "fixture-visible",
+            "response",
+            "fixture-price-b",
             "provider_mapping",
         ),
         (

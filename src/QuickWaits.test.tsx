@@ -47,7 +47,7 @@ it("keeps long compaction cancellable and shows elapsed time without a countdown
   expect(screen.getByText("压缩中")).toBeInTheDocument();
   expect(screen.getByText("已用 601 秒")).toBeInTheDocument();
   expect(screen.queryByText(/剩余/)).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "中止" }));
+  fireEvent.click(screen.getByRole("button", { name: "重发" }));
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("cancel_gateway_wait", {
       clientId: "codex",
@@ -85,12 +85,15 @@ it("shows only long waits and cancels the selected request on its platform", asy
   const row = screen
     .getByText("model-2")
     .closest(".quick-wait-row") as HTMLElement;
-  fireEvent.click(within(row).getByRole("button", { name: "中止" }));
+  fireEvent.click(within(row).getByRole("button", { name: "重发" }));
   await waitFor(() => expect(notify).toHaveBeenCalledWith("等待已结束"));
   expect(mock.command).toHaveBeenCalledWith("cancel_gateway_wait", {
     clientId: "claude",
     requestId: "fixture-2",
   });
+  mock.command.mockResolvedValueOnce(true);
+  fireEvent.click(within(row).getByRole("button", { name: "重发" }));
+  await waitFor(() => expect(notify).toHaveBeenCalledWith("已打断并重发"));
   rerender(
     <QuickWaits
       gateway={{ ...gateway, pendingRequests: [] }}
@@ -214,11 +217,58 @@ it("maps buffering phase to 缓冲响应 with elapsed seconds and cancellation",
   );
   expect(screen.getByText("缓冲响应")).toBeInTheDocument();
   expect(screen.getByText("已用 75 秒")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "中止" }));
+  fireEvent.click(screen.getByRole("button", { name: "重发" }));
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("cancel_gateway_wait", {
       clientId: "claude",
       requestId: "fixture-buffering",
     }),
   );
+});
+
+it("adds what a receiving request has taken in, with its rate or its silence", () => {
+  const start = Math.floor(Date.now() / 1000);
+  const request = {
+    providerId: "primary",
+    model: null,
+    startedAt: start - 90,
+    elapsedSeconds: 90,
+    remainingSeconds: null,
+    phase: "buffering",
+  };
+  render(
+    <QuickWaits
+      gateway={{
+        ...gatewayDemo,
+        pendingRequests: [
+          {
+            ...request,
+            requestId: "fixture-flowing",
+            receivedBytes: 735_846,
+            bytesPerSecond: 1_638,
+            silentSeconds: 4,
+          },
+          {
+            ...request,
+            requestId: "fixture-silent",
+            receivedBytes: 512,
+            bytesPerSecond: 0,
+            silentSeconds: 45,
+          },
+          { ...request, requestId: "fixture-waiting", phase: "retry" },
+        ],
+      }}
+      clientId="claude"
+      visible
+      notify={vi.fn()}
+      error={vi.fn()}
+    />,
+  );
+  const rows = [...document.querySelectorAll<HTMLElement>(".quick-wait-row")];
+  expect(rows).toHaveLength(3);
+  expect(within(rows[0]).getByText("已收 718.6 KB")).toBeInTheDocument();
+  expect(within(rows[0]).getByText("1.6 KB/s")).toBeInTheDocument();
+  expect(within(rows[1]).getByText("已收 512 B")).toBeInTheDocument();
+  expect(within(rows[1]).getByText("静默 45 秒")).toBeInTheDocument();
+  expect(rows[2].querySelector(".quick-wait-transfer")).toBeNull();
 });

@@ -10,5 +10,14 @@ pub(crate) fn gateway(data: &Path) -> Result<(crate::gateway::Store, String)> {
     crate::gateway::Store::load(&data.join("gateway.json"))
 }
 
+/// Antigravity accounts are OAuth logins only. Before the account store is
+/// first read, hand back the app settings a retired Vertex API Key had taken
+/// over, then drop the retired ADC and key entries. A migrated store is left
+/// untouched, so this is safe to run on every start.
+pub(crate) fn antigravity_accounts(data: &Path) -> Result<()> {
+    let paths = crate::antigravity::auth::Paths::resolve(data)?;
+    crate::antigravity::auth::migrate_retired_accounts(&paths).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests;

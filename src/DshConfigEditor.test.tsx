@@ -55,9 +55,16 @@ beforeEach(() => {
       doc = { ...doc, text: "# prior\n[]\n", revision: "r2" };
       return doc;
     }
+    // Without a structure tree the editor stays on the source, as in the preview.
+    if (name === "read_config_tree")
+      throw { code: "CONFIG", message: "此处不解析 YAML" };
     throw Error("unexpected fixture command");
   });
 });
+const lastRead = () =>
+  mock.command.mock.calls
+    .filter(([name]) => name === "read_dsh_file")
+    .at(-1)?.[1];
 function mount() {
   render(
     <DshConfigEditor
@@ -163,7 +170,7 @@ it("opens the desktop patch and switches the file when choosing a different prof
     "default",
   );
   await waitFor(() =>
-    expect(mock.command).toHaveBeenLastCalledWith("read_dsh_file", {
+    expect(lastRead()).toEqual({
       profile: "default",
       key: "profilePatch",
     }),
@@ -194,8 +201,64 @@ it("remembers only an actively selected profile across editor mounts", async () 
   await waitFor(() =>
     expect(screen.getByLabelText("DSH 配置 profile")).toHaveValue("default"),
   );
-  expect(mock.command).toHaveBeenLastCalledWith("read_dsh_file", {
+  expect(lastRead()).toEqual({
     profile: "default",
     key: "profilePatch",
   });
+});
+
+function withTree() {
+  const read = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation(async (name, args) => {
+    if (name === "read_config_tree")
+      return {
+        kind: "table",
+        entries: [
+          ["enabled", { kind: "boolean", value: args.text.includes("true") }],
+        ],
+      };
+    if (name === "patch_config_tree") return `${args.path[0]}: ${args.value}\n`;
+    return read(name, args);
+  });
+}
+
+it("YAML 文件有可视化模式，并与原文共用草稿", async () => {
+  doc.text = "enabled: false\n";
+  withTree();
+  mount();
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("switch", { name: "enabled" }));
+  expect(mock.command).toHaveBeenCalledWith("patch_config_tree", {
+    format: "yaml",
+    text: "enabled: false\n",
+    path: ["enabled"],
+    value: true,
+  });
+  await user.click(screen.getByRole("button", { name: "原文" }));
+  const source = await screen.findByRole("textbox", { name: "DSH 配置内容" });
+  expect(source).toHaveValue("enabled: true\n");
+  expect(screen.getByText(/未保存/)).toBeInTheDocument();
+  fireEvent.change(source, { target: { value: "enabled: false\n# note\n" } });
+  await user.click(screen.getByRole("button", { name: "可视化" }));
+  expect(
+    await screen.findByRole("switch", { name: "enabled" }),
+  ).not.toBeChecked();
+  expect(
+    mock.command.mock.calls.some(([name]) => name === "save_dsh_file"),
+  ).toBe(false);
+});
+
+it(".env 和凭据文件没有可视化", async () => {
+  withTree();
+  mount();
+  const user = userEvent.setup();
+  await screen.findByRole("switch", { name: "enabled" });
+  for (const key of ["environment", "credentials"]) {
+    await user.selectOptions(screen.getByLabelText("DSH 配置文件"), key);
+    expect(
+      await screen.findByRole("textbox", { name: "DSH 配置内容" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "可视化" })).toBeNull();
+    expect(screen.queryByRole("switch")).toBeNull();
+  }
 });

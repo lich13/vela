@@ -37,6 +37,22 @@ vi.mock("@uiw/react-codemirror", () => ({
     />
   ),
 }));
+// The CLI form belongs to another change; a stand-in shows what the editor hands it.
+vi.mock("./AntigravityCliSettings", () => ({
+  default: ({
+    text,
+    onChange,
+  }: {
+    text: string;
+    onChange: (text: string) => void;
+  }) => (
+    <input
+      aria-label="CLI 表单"
+      value={text}
+      onChange={(e) => onChange(e.target.value)}
+    />
+  ),
+}));
 import ConfigEditor from "./ConfigEditor";
 import { get } from "./claude-settings";
 let doc: ConfigDocument;
@@ -150,7 +166,15 @@ it("locks managed connection fields and keeps preferences editable", async () =>
     "password",
   );
   await u.click(screen.getByRole("button", { name: "偏好" }));
-  await u.selectOptions(screen.getByLabelText("自动记忆"), "false");
+  // An absent boolean reads "默认"; the switch then writes an explicit value.
+  const memory = screen.getByRole("switch", { name: "自动记忆" });
+  expect(memory).not.toBeChecked();
+  expect(memory.parentElement).toHaveTextContent("默认");
+  await u.click(memory);
+  expect(memory).toBeChecked();
+  expect(memory.parentElement).toHaveTextContent("开启");
+  await u.click(memory);
+  expect(memory.parentElement).toHaveTextContent("关闭");
   await u.click(screen.getByRole("button", { name: "保存" }));
   await waitFor(() =>
     expect(JSON.parse(doc.text).autoMemoryEnabled).toBe(false),
@@ -267,11 +291,13 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
     execPolicy,
     "CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX",
   );
-  await u.selectOptions(screen.getByLabelText("终端沙盒"), "true");
+  await u.click(screen.getByRole("switch", { name: "终端沙盒" }));
 
-  // Plugin summary renders in the remote/plugins tab.
+  // Plugin summary renders in the remote/plugins tab, which offers no ADC toggle.
   await u.click(screen.getByRole("button", { name: "远程与插件" }));
   expect(screen.getByText("example.invalid")).toBeInTheDocument();
+  expect(screen.getByLabelText("远程控制")).toBeInTheDocument();
+  expect(screen.queryByLabelText(/ADC/)).not.toBeInTheDocument();
 
   // Diff modal works for Antigravity drafts.
   await u.click(screen.getByLabelText("查看改动"));
@@ -348,4 +374,243 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
   expect(
     mocks.command.mock.calls.some(([name]) => name === "read_config"),
   ).toBe(false);
+});
+
+const switcher = () =>
+  within(screen.getByRole("navigation", { name: "客户端" }))
+    .getAllByRole("button")
+    .map((b) => b.textContent);
+const order = ["Codex", "Claude Code", "Antigravity", "Grok Build", "DSH"];
+
+it("DSH 视图的切换列包含 Antigravity，顺序固定，可切过去再切回来", async () => {
+  const u = userEvent.setup();
+  localStorage.setItem("vela.config.client", "dsh");
+  mocks.command.mockImplementation(async (name) => {
+    if (name === "read_dsh_file")
+      return {
+        profiles: ["desktop"],
+        profile: "desktop",
+        key: "profilePatch",
+        files: ["profilePatch"],
+        text: "[]\n",
+        revision: "d1",
+        readOnly: false,
+        canRestore: false,
+      };
+    if (name === "read_antigravity_config")
+      return {
+        ...doc,
+        clientId: "antigravity",
+        path: "/fixture/config.json",
+        text: "{}\n",
+      };
+  });
+  mount();
+  await screen.findByLabelText("DSH 配置 profile");
+  expect(switcher()).toEqual(order);
+  expect(screen.getByRole("button", { name: "DSH" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await u.click(screen.getByRole("button", { name: "Antigravity" }));
+  expect(await screen.findByLabelText("Antigravity 配置分组")).toBeVisible();
+  expect(switcher()).toEqual(order);
+  expect(localStorage.getItem("vela.config.client")).toBe("antigravity");
+  await u.click(screen.getByRole("button", { name: "DSH" }));
+  expect(await screen.findByLabelText("DSH 配置 profile")).toBeVisible();
+  expect(screen.queryByLabelText("Antigravity 配置分组")).toBeNull();
+});
+
+const names = () => mocks.command.mock.calls.map(([name]) => name);
+
+it.each([["codex"], ["grok"]])(
+  "%s 的可视化与原文共用草稿，切换模式不保存",
+  async (clientId) => {
+    const u = userEvent.setup();
+    localStorage.setItem("vela.config.client", clientId);
+    const toml: ConfigDocument = {
+      ...doc,
+      clientId: clientId as ConfigDocument["clientId"],
+      path: "/fixture/config.toml",
+      text: "enabled = false\n",
+    };
+    mocks.command.mockImplementation(async (name, args) => {
+      if (name === "read_config") return { ...toml };
+      if (name === "read_config_tree")
+        return {
+          kind: "table",
+          entries: [
+            ["enabled", { kind: "boolean", value: args.text.includes("true") }],
+          ],
+        };
+      if (name === "patch_config_tree")
+        return `${args.path[0]} = ${args.value}\n`;
+      if (name === "save_config") return { ...toml, text: args.text };
+    });
+    mount();
+    // Curated groups come first; the file's own keys are under "全部设置".
+    await u.click(await screen.findByRole("button", { name: "全部设置" }));
+    const toggle = await screen.findByRole("switch", { name: "enabled" });
+    expect(screen.getByRole("button", { name: "可视化" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await u.click(toggle);
+    await waitFor(() => expect(screen.getByText("未保存")).toBeInTheDocument());
+    await u.click(screen.getByRole("button", { name: "原文" }));
+    const source = await screen.findByLabelText("TOML 编辑器");
+    expect(source).toHaveValue("enabled = true\n");
+    fireEvent.change(source, {
+      target: { value: "enabled = false\n# note\n" },
+    });
+    await u.click(screen.getByRole("button", { name: "可视化" }));
+    await u.click(await screen.findByRole("button", { name: "全部设置" }));
+    expect(
+      await screen.findByRole("switch", { name: "enabled" }),
+    ).not.toBeChecked();
+    expect(names()).not.toContain("save_config");
+    await u.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() =>
+      expect(mocks.command).toHaveBeenCalledWith("save_config", {
+        clientId,
+        text: "enabled = false\n# note\n",
+        expectedRevision: "r1",
+      }),
+    );
+  },
+);
+
+it("结构树读不出来时 Codex 留在原文模式并显示原因", async () => {
+  localStorage.setItem("vela.config.client", "codex");
+  mocks.command.mockImplementation(async (name) => {
+    if (name === "read_config")
+      return { ...doc, clientId: "codex", text: "model = 1\n" };
+    if (name === "read_config_tree")
+      throw { code: "CONFIG", message: "浏览器预览不解析 TOML／YAML" };
+  });
+  const u = userEvent.setup();
+  mount();
+  expect(await screen.findByLabelText("TOML 编辑器")).toHaveValue(
+    "model = 1\n",
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "浏览器预览不解析 TOML／YAML",
+  );
+  await u.click(screen.getByRole("button", { name: "可视化" }));
+  expect(screen.getByLabelText("TOML 编辑器")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "原文" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+});
+
+function antigravityFiles(missing = false) {
+  localStorage.setItem("vela.config.client", "antigravity");
+  const app = {
+    ...doc,
+    clientId: "antigravity" as const,
+    path: "/fixture/config.json",
+    text: '{"userSettings":{}}',
+  };
+  const cli = {
+    ...app,
+    path: "/fixture/antigravity-cli/settings.json",
+    text: missing ? "" : '{"notifications":true}',
+    revision: "c1",
+    canRestore: !missing,
+    missing,
+  };
+  mocks.command.mockImplementation(async (name, args) => {
+    if (name === "read_antigravity_config") return { ...app };
+    if (name === "read_antigravity_cli_config") return { ...cli };
+    if (name === "read_previous_antigravity_cli_config")
+      return '{"notifications":false}';
+    if (name === "save_antigravity_cli_config")
+      return { ...cli, text: args.text, revision: "c2" };
+  });
+}
+const file = () => screen.getByLabelText("Antigravity 配置文件");
+
+it("Antigravity 按所选文件调用对应命令，并保存 CLI 配置", async () => {
+  const u = userEvent.setup();
+  antigravityFiles();
+  mount();
+  await screen.findByLabelText("Antigravity 配置分组");
+  expect(names()).not.toContain("read_antigravity_cli_config");
+  await u.selectOptions(file(), "CLI 配置");
+  const form = await screen.findByLabelText("CLI 表单");
+  expect(form).toHaveValue('{"notifications":true}');
+  expect(screen.getByText("settings.json")).toBeInTheDocument();
+  fireEvent.change(form, { target: { value: '{"notifications":false}' } });
+  await u.click(screen.getByRole("button", { name: "JSON" }));
+  expect(await screen.findByLabelText("JSON 编辑器")).toHaveValue(
+    '{"notifications":false}',
+  );
+  await u.click(screen.getByRole("button", { name: "可视化" }));
+  await screen.findByLabelText("CLI 表单");
+  expect(mocks.command).toHaveBeenCalledWith(
+    "validate_antigravity_cli_config",
+    { text: '{"notifications":false}' },
+  );
+  await u.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() =>
+    expect(mocks.command).toHaveBeenCalledWith("save_antigravity_cli_config", {
+      text: '{"notifications":false}',
+      expectedRevision: "c1",
+    }),
+  );
+  await u.click(screen.getByLabelText("恢复上次配置"));
+  await waitFor(() =>
+    expect(names()).toContain("read_previous_antigravity_cli_config"),
+  );
+  expect(names()).not.toContain("save_antigravity_config");
+  expect(names()).not.toContain("read_previous_antigravity_config");
+});
+
+it("CLI 配置文件不存在时显示空状态，不能保存", async () => {
+  const u = userEvent.setup();
+  antigravityFiles(true);
+  mount();
+  await screen.findByLabelText("Antigravity 配置分组");
+  await u.selectOptions(file(), "CLI 配置");
+  expect(
+    await screen.findByText(
+      "尚未找到 Antigravity CLI 配置文件，首次运行 agy 后生成",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByLabelText("CLI 表单")).toBeNull();
+  expect(screen.queryByRole("button", { name: "JSON" })).toBeNull();
+  expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+  expect(screen.getByLabelText("恢复上次配置")).toBeDisabled();
+  fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+  expect(names()).not.toContain("save_antigravity_cli_config");
+});
+
+it("切换 Antigravity 文件前确认未保存的修改", async () => {
+  const u = userEvent.setup();
+  antigravityFiles();
+  mount();
+  await screen.findByLabelText("Antigravity 配置分组");
+  await u.click(screen.getByRole("button", { name: "远程与插件" }));
+  await u.type(screen.getByLabelText("远程控制主机名"), "h");
+  expect(screen.getByText("未保存")).toBeInTheDocument();
+  await u.selectOptions(file(), "CLI 配置");
+  await u.click(
+    within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+      "button",
+      { name: "取消" },
+    ),
+  );
+  expect(file()).toHaveValue("app");
+  expect(screen.getByText("未保存")).toBeInTheDocument();
+  expect(names()).not.toContain("read_antigravity_cli_config");
+  await u.selectOptions(file(), "CLI 配置");
+  await u.click(
+    within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+      "button",
+      { name: "放弃修改" },
+    ),
+  );
+  expect(await screen.findByLabelText("CLI 表单")).toBeInTheDocument();
+  expect(file()).toHaveValue("cli");
 });

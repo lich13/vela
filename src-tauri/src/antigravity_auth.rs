@@ -1,4 +1,3 @@
-use crate::gateway::antigravity::{self as vertex, VertexKey};
 use crate::{
     errors::code,
     storage::{self, AppError, Result},
@@ -9,79 +8,35 @@ use base64::engine::general_purpose::STANDARD;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
 const CREDENTIAL_LIMIT: u64 = 256 * 1024;
+/// The only account kind. Earlier versions also stored `adc` and `vertex_key`
+/// entries and still require the field, so it stays in the vault file.
+const OAUTH_KIND: &str = "oauth";
+/// What an account is called until its login says whose it is.
+const UNNAMED: &str = "OAuth 账号";
 static AUTH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 fn err(c: &str, msg: &str) -> AppError {
     AppError::new(c, msg)
-}
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AccountKind {
-    Oauth,
-    Adc,
-    VertexKey,
-}
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthMode {
-    Oauth,
-    Adc,
-    VertexKey,
-    MixedAdcFileWithoutFlag,
-    MixedFlagWithoutAdcFile,
-}
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TargetMode {
-    Oauth,
-    Adc,
-}
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AdcStatus {
-    Active,
-    Disabled,
-    BackupOnly,
-    Missing,
-}
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AdcType {
-    ServiceAccount,
-    AuthorizedUser,
-}
-impl AdcType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ServiceAccount => "service_account",
-            Self::AuthorizedUser => "authorized_user",
-        }
-    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AntigravityAccountItem {
     pub id: String,
     pub name: String,
-    pub kind: AccountKind,
     pub source_type: String,
     pub email: Option<String>,
-    pub project_id: Option<String>,
     pub current: bool,
     pub updated_at: u64,
     pub credential_revision: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vertex: Option<VertexMetadata>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -89,76 +44,19 @@ pub struct AntigravityAuthState {
     #[serde(skip)]
     pub oauth_added: bool,
     pub accounts: Vec<AntigravityAccountItem>,
-    pub mode: AuthMode,
-    pub enable_adc: bool,
     pub oauth_present: bool,
     pub oauth_email: Option<String>,
     pub oauth_auth_method: Option<String>,
-    pub adc_status: AdcStatus,
-    pub adc_type: Option<AdcType>,
-    pub adc_project: Option<String>,
+    /// Running `agy` sessions. Each keeps the login it started with and writes
+    /// it back over the shared one whenever its token is refreshed.
+    #[serde(default)]
+    pub cli_sessions: usize,
     #[serde(default)]
     pub app_restarted: bool,
     /// The switch succeeded but the application could not be reopened.
     #[serde(default)]
     pub relaunch_failed: bool,
     pub revision: String,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddAntigravityAdcInput {
-    pub name: Option<String>,
-    pub json_text: String,
-    pub quota_project_id: Option<String>,
-    #[serde(default)]
-    pub activate: bool,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct VertexMetadata {
-    pub location: String,
-    pub models: Vec<String>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveVertexKeyInput {
-    pub id: Option<String>,
-    pub name: String,
-    pub api_key: String,
-    pub project_id: Option<String>,
-    pub location: String,
-    pub models: Vec<String>,
-    pub activate: bool,
-    pub expected_revision: String,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GatewaySnapshot {
-    gateway: Option<Value>,
-    models: Option<Value>,
-    file_existed: bool,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GatewaySelection {
-    account_id: String,
-    token: String,
-    port: u16,
-    previous: GatewaySnapshot,
-}
-impl GatewaySelection {
-    fn url(&self) -> String {
-        format!("http://127.0.0.1:{}/antigravity", self.port)
-    }
-    fn matches(&self, settings: &Value) -> bool {
-        settings
-            .pointer("/gateway/enabled")
-            .and_then(Value::as_bool)
-            == Some(true)
-            && settings.pointer("/gateway/url").and_then(Value::as_str) == Some(self.url().as_str())
-            && settings.pointer("/gateway/apiKey").and_then(Value::as_str)
-                == Some(self.token.as_str())
-    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -183,10 +81,9 @@ impl ProviderTimeline {
 struct StoredEntry {
     id: String,
     name: String,
-    kind: AccountKind,
+    kind: String,
     source_type: String,
     email: Option<String>,
-    project_id: Option<String>,
     payload: String,
     updated_at: u64,
 }
@@ -201,14 +98,10 @@ struct Vault {
     active_oauth_id: Option<String>,
     #[serde(default)]
     activations: Vec<ActivationSpan>,
-    #[serde(default)]
-    gateway: Option<GatewaySelection>,
 }
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub gemini_home: PathBuf,
-    pub gcloud_dir: PathBuf,
-    pub agswitch_dir: PathBuf,
     pub data_dir: PathBuf,
 }
 impl Paths {
@@ -221,34 +114,14 @@ impl Paths {
     pub fn from_roots(user_home: &Path, data_dir: &Path) -> Self {
         Self {
             gemini_home: user_home.join(".gemini"),
-            gcloud_dir: user_home.join(".config/gcloud"),
-            agswitch_dir: user_home.join(".config/agswitch"),
             data_dir: data_dir.to_path_buf(),
         }
-    }
-    pub fn config_file(&self) -> PathBuf {
-        self.gemini_home.join("config/config.json")
     }
     pub fn oauth_file(&self) -> PathBuf {
         self.gemini_home.join("jetski-standalone-oauth-token")
     }
-    pub fn adc_file(&self) -> PathBuf {
-        self.gcloud_dir.join("application_default_credentials.json")
-    }
-    pub fn adc_disabled_file(&self) -> PathBuf {
-        self.gcloud_dir
-            .join("application_default_credentials.json.disabled")
-    }
-    pub fn agswitch_adc_file(&self) -> PathBuf {
-        self.agswitch_dir.join("adc.json")
-    }
     pub fn vault_file(&self) -> PathBuf {
         self.data_dir.join("antigravity-accounts.json")
-    }
-    pub fn app_settings_file(&self) -> PathBuf {
-        self.gemini_home
-            .with_file_name(".antigravity")
-            .join("settings.json")
     }
     /// Antigravity keeps the OAuth login in the macOS keychain. Only the real
     /// home directory maps to it, so fixtures never read or write that item.
@@ -257,18 +130,13 @@ impl Paths {
             && !cfg!(test)
             && dirs::home_dir().is_some_and(|home| home.join(".gemini") == self.gemini_home)
     }
+    /// The login file, where the login is not kept in the keychain.
     pub fn watched_files(&self) -> Vec<PathBuf> {
-        let mut files = vec![
-            self.config_file(),
-            self.adc_file(),
-            self.adc_disabled_file(),
-            self.agswitch_adc_file(),
-            self.app_settings_file(),
-        ];
-        if !self.keychain() {
-            files.push(self.oauth_file());
+        if self.keychain() {
+            Vec::new()
+        } else {
+            vec![self.oauth_file()]
         }
-        files
     }
 }
 pub trait AppLifecycle {
@@ -291,6 +159,32 @@ pub(crate) fn parse_running_antigravity_ps(ps_output: &str) -> Vec<(i32, PathBuf
             Some((pid.trim().parse().ok()?, PathBuf::from(bundle)))
         })
         .collect()
+}
+/// How many `agy` sessions `ps -axo comm=` lists.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn count_running_agy_ps(ps_output: &str) -> usize {
+    ps_output
+        .lines()
+        .filter(|line| {
+            Path::new(line.trim())
+                .file_name()
+                .is_some_and(|name| name == "agy")
+        })
+        .count()
+}
+/// `agy` shares the app's login. Only the real home is asked, as with the
+/// keychain, so fixtures never look at this machine's processes.
+fn cli_sessions(_paths: &Paths) -> usize {
+    #[cfg(target_os = "macos")]
+    if _paths.keychain() {
+        return std::process::Command::new("ps")
+            .args(["-axo", "comm="])
+            .output()
+            .map_or(0, |out| {
+                count_running_agy_ps(&String::from_utf8_lossy(&out.stdout))
+            });
+    }
+    0
 }
 #[cfg(target_os = "macos")]
 impl SystemAppLifecycle {
@@ -386,24 +280,13 @@ fn now_ms() -> i64 {
 fn file_mtime_ms(path: &Path) -> Option<i64> {
     Some(epoch_dur(fs::metadata(path).ok()?.modified().ok()?).as_millis() as i64)
 }
-fn observed_activation_ms(paths: &Paths, enable_adc: bool, initial: bool) -> i64 {
-    if !enable_adc && paths.keychain() {
+/// When the current login took effect: the token file's modification time, or
+/// now where the login is kept in the keychain.
+fn observed_activation_ms(paths: &Paths) -> i64 {
+    if paths.keychain() {
         return now_ms();
     }
-    let credential = if enable_adc {
-        paths.adc_file()
-    } else {
-        paths.oauth_file()
-    };
-    file_mtime_ms(&credential)
-        .map(|at| {
-            if enable_adc || !initial {
-                at.max(file_mtime_ms(&paths.config_file()).unwrap_or(at))
-            } else {
-                at
-            }
-        })
-        .unwrap_or_else(now_ms)
+    file_mtime_ms(&paths.oauth_file()).unwrap_or_else(now_ms)
 }
 fn clean_opt(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
@@ -623,13 +506,20 @@ fn write_oauth(paths: &Paths, raw: &str) -> Result<()> {
     }
     write_private_file(&paths.oauth_file(), raw.as_bytes())
 }
+/// Reads a vault file. Earlier versions also stored ADC and Vertex API Key
+/// accounts in it; those entries are dropped.
+fn parse_vault(bytes: &[u8]) -> Option<Vault> {
+    let mut vault: Vault = serde_json::from_slice(bytes).ok()?;
+    vault.entries.retain(|e| e.kind == OAUTH_KIND);
+    Some(vault)
+}
 fn load_vault(paths: &Paths) -> Result<(Vault, String)> {
     storage::private_dir(&paths.data_dir)?;
     let loaded = storage::read_optional(&paths.vault_file())?;
     let rev = storage::revision(loaded.as_deref());
     let mut vault = match loaded {
-        Some(b) => serde_json::from_slice(&b)
-            .map_err(|_| err(code::STORE, "Antigravity 凭据库无法读取，原文件已保留"))?,
+        Some(b) => parse_vault(&b)
+            .ok_or_else(|| err(code::STORE, "Antigravity 凭据库无法读取，原文件已保留"))?,
         None => Vault::default(),
     };
     if vault.schema == 0 {
@@ -695,101 +585,6 @@ pub fn parse_oauth_metadata(raw: &str) -> Result<(String, Option<String>)> {
         .unwrap_or_else(|| "oauth".to_owned());
     Ok((method, email))
 }
-pub fn parse_adc_metadata(raw: &str) -> Result<(AdcType, Option<String>, Option<String>, Value)> {
-    let value: Value = serde_json::from_str(raw.trim())
-        .map_err(|_| err(code::JSON, "ADC 凭据必须是有效的 JSON 对象"))?;
-    let Some(map) = value.as_object() else {
-        return Err(err(code::CONFIG_TYPE, "ADC 凭据顶层必须是 JSON 对象"));
-    };
-    let Some(raw_type) = map_str(map, &["type"]) else {
-        return Err(err(
-            code::AUTH,
-            "ADC JSON 缺少 type 字段（需为 service_account 或 authorized_user）",
-        ));
-    };
-    let cred_type = match raw_type.as_str() {
-        "service_account" => {
-            let pk = map
-                .get("private_key")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or("");
-            if pk.is_empty() {
-                return Err(err(code::AUTH, "service_account ADC 缺少 private_key 字段"));
-            }
-            if !pk.contains("PRIVATE KEY") {
-                return Err(err(
-                    code::AUTH,
-                    "service_account private_key 必须是有效的 PEM 私钥",
-                ));
-            }
-            if map_str(map, &["client_email"]).is_none() {
-                return Err(err(
-                    code::AUTH,
-                    "service_account ADC 缺少 client_email 字段",
-                ));
-            }
-            if map_str(map, &["project_id", "quota_project_id"]).is_none() {
-                return Err(err(code::AUTH, "service_account ADC 缺少 project_id 字段"));
-            }
-            AdcType::ServiceAccount
-        }
-        "authorized_user" => {
-            for f in ["client_id", "client_secret", "refresh_token"] {
-                if map_str(map, &[f]).is_none() {
-                    return Err(err(
-                        code::AUTH,
-                        &format!("authorized_user ADC 缺少必需字段：{f}"),
-                    ));
-                }
-            }
-            AdcType::AuthorizedUser
-        }
-        _ => {
-            return Err(err(
-                code::AUTH,
-                "不支持的 ADC 类型，仅支持 service_account 或 authorized_user",
-            ))
-        }
-    };
-    Ok((
-        cred_type,
-        map_str(map, &["client_email", "account", "email"]),
-        map_str(map, &["quota_project_id", "project_id"]),
-        value,
-    ))
-}
-pub(crate) fn read_enable_adc(paths: &Paths) -> Result<(bool, Option<Vec<u8>>, Value)> {
-    let raw = storage::read_bounded(&paths.config_file(), CREDENTIAL_LIMIT)?;
-    let doc = match &raw {
-        Some(b) => super::validate_text(
-            &String::from_utf8(b.clone())
-                .map_err(|_| err(code::UTF8, "Antigravity config.json 编码无效"))?,
-        )?,
-        None => json!({}),
-    };
-    let en = doc["userSettings"]["enableAdc"].as_bool().unwrap_or(false);
-    Ok((en, raw, doc))
-}
-pub(crate) fn write_enable_adc(paths: &Paths, enable: bool) -> Result<()> {
-    let (_, raw, mut doc) = read_enable_adc(paths)?;
-    let obj = doc
-        .as_object_mut()
-        .ok_or_else(|| err(code::CONFIG_TYPE, "config.json 顶层必须是对象"))?;
-    obj.entry("userSettings")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| err(code::CONFIG_TYPE, "userSettings 必须是对象"))?
-        .insert("enableAdc".into(), Value::Bool(enable));
-    let pretty = serde_json::to_string_pretty(&doc)
-        .map_err(|_| err(code::JSON, "无法序列化 config.json"))?;
-    let formatted = format!("{pretty}\n");
-    if let Some(p) = paths.config_file().parent() {
-        fs::create_dir_all(p).map_err(storage::io_error)?;
-    }
-    let rev = storage::revision(raw.as_deref());
-    storage::atomic_write(&paths.config_file(), formatted.as_bytes(), Some(&rev))
-}
 fn remember_observed(vault: &mut Vault, digest: &str) {
     vault.observed_revisions.retain(|r| r != digest);
     if vault.observed_revisions.len() >= 64 {
@@ -797,18 +592,6 @@ fn remember_observed(vault: &mut Vault, digest: &str) {
         vault.observed_revisions.drain(..drop_n);
     }
     vault.observed_revisions.push(digest.to_owned());
-}
-fn read_checked(path: &Path, clean: &mut bool) -> Option<String> {
-    read_text_optional(path).unwrap_or_else(|_| {
-        *clean = false;
-        None
-    })
-}
-fn adc_label(raw: Option<&str>, email: &Option<String>, proj: &Option<String>) -> Result<String> {
-    clean_label(
-        raw,
-        proj.as_deref().or(email.as_deref()).unwrap_or("ADC 凭据"),
-    )
 }
 impl Vault {
     fn index_of(&self, id: &str) -> Result<usize> {
@@ -820,23 +603,57 @@ impl Vault {
     fn push_new(
         &mut self,
         name: String,
-        kind: AccountKind,
-        st: &str,
-        meta: (Option<String>, Option<String>),
+        source_type: &str,
+        email: Option<String>,
         payload: String,
     ) -> String {
         let id = Uuid::new_v4().to_string();
         self.entries.push(StoredEntry {
             id: id.clone(),
             name,
-            kind,
-            source_type: st.to_owned(),
-            email: meta.0,
-            project_id: meta.1,
+            kind: OAUTH_KIND.to_owned(),
+            source_type: source_type.to_owned(),
+            email,
             payload,
             updated_at: now_secs(),
         });
         id
+    }
+    /// Drops an unnamed entry whose login a named entry also holds. Earlier
+    /// versions took a login apart from itself once it gained its address;
+    /// what the placeholder was active for goes to the entry that stays.
+    fn merge_placeholders(&mut self) -> bool {
+        let tokens: Vec<_> = self
+            .entries
+            .iter()
+            .map(|e| oauth_refresh_token(&e.payload))
+            .collect();
+        let merged: Vec<(String, String)> = self
+            .entries
+            .iter()
+            .zip(&tokens)
+            .filter(|(e, token)| e.email.is_none() && e.name == UNNAMED && token.is_some())
+            .filter_map(|(placeholder, token)| {
+                let kept = self
+                    .entries
+                    .iter()
+                    .zip(&tokens)
+                    .find(|(e, held)| e.email.is_some() && *held == token)?;
+                Some((placeholder.id.clone(), kept.0.id.clone()))
+            })
+            .collect();
+        for (gone, kept) in &merged {
+            self.entries.retain(|e| &e.id != gone);
+            for span in &mut self.activations {
+                if &span.account_id == gone {
+                    span.account_id.clone_from(kept);
+                }
+            }
+            if self.active_oauth_id.as_ref() == Some(gone) {
+                self.active_oauth_id = Some(kept.clone());
+            }
+        }
+        !merged.is_empty()
     }
 }
 fn find_oauth_idx(
@@ -846,26 +663,36 @@ fn find_oauth_idx(
     rt: &Option<String>,
 ) -> Option<usize> {
     let ok_rt = |e: &StoredEntry| !matches!((oauth_refresh_token(&e.payload), rt), (Some(a), Some(b)) if &a != b);
-    if let Some(i) = v.entries.iter().position(|e| {
-        e.kind == AccountKind::Oauth
-            && match (&e.email, email) {
-                (Some(ae), Some(de)) => ae.eq_ignore_ascii_case(de),
-                (None, None) => {
-                    payload_digest(&e.payload) == dig
-                        || (rt.is_some() && &oauth_refresh_token(&e.payload) == rt)
-                }
-                _ => false,
-            }
+    if let Some(i) = v.entries.iter().position(|e| match (&e.email, email) {
+        (Some(ae), Some(de)) => ae.eq_ignore_ascii_case(de),
+        (None, None) => {
+            payload_digest(&e.payload) == dig
+                || (rt.is_some() && &oauth_refresh_token(&e.payload) == rt)
+        }
+        _ => false,
     }) {
         return Some(i);
+    }
+    // A login stays itself while its refresh token does: Antigravity writes a
+    // new login without the address and adds it at the first refresh.
+    if rt.is_some() {
+        if let Some(i) = v
+            .entries
+            .iter()
+            .position(|e| &oauth_refresh_token(&e.payload) == rt)
+        {
+            return Some(i);
+        }
     }
     if email.is_some() {
         return None;
     }
     if let Some(id) = v.active_oauth_id.as_deref() {
-        if let Some(i) = v.entries.iter().position(|e| {
-            e.id == id && e.kind == AccountKind::Oauth && e.email.is_none() && ok_rt(e)
-        }) {
+        if let Some(i) = v
+            .entries
+            .iter()
+            .position(|e| e.id == id && e.email.is_none() && ok_rt(e))
+        {
             return Some(i);
         }
     }
@@ -873,21 +700,20 @@ fn find_oauth_idx(
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.kind == AccountKind::Oauth && e.email.is_none());
+        .filter(|(_, e)| e.email.is_none());
     let (pos, entry) = it.next()?;
     (it.next().is_none() && ok_rt(entry)).then_some(pos)
 }
 fn entry_matches(e: &StoredEntry, digest: Option<&str>, email: Option<&str>) -> bool {
     digest == Some(payload_digest(&e.payload).as_str())
-        || (e.kind == AccountKind::Oauth
-            && matches!((e.email.as_deref(), email), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b)))
+        || matches!((e.email.as_deref(), email), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b))
 }
 fn state_with_oauth(
     paths: &Paths,
     oauth_raw: Option<String>,
 ) -> Result<(AntigravityAuthState, bool)> {
     let (mut vault, mut vault_rev) = load_vault(paths)?;
-    let (mut dirty, mut clean) = (false, true);
+    let (mut dirty, mut clean) = (vault.merge_placeholders(), true);
     let mut oauth_added = false;
     let (mut oauth_auth_method, mut oauth_email, mut oauth_digest) = (None, None, None);
     if let Some(raw) = oauth_raw {
@@ -899,7 +725,14 @@ fn state_with_oauth(
                     let e = &mut vault.entries[i];
                     if payload_digest(&e.payload) != digest {
                         e.payload = raw;
-                        e.email = email.clone();
+                        // A login written without its address is still the
+                        // account it was; one that gains it takes its name.
+                        if let Some(address) = &email {
+                            if e.email.is_none() && e.name == UNNAMED {
+                                e.name = clean_label(None, address).unwrap_or(e.name.clone());
+                            }
+                            e.email = email.clone();
+                        }
                         e.source_type = auth_method.clone();
                         e.updated_at = now_secs();
                         dirty = true;
@@ -909,9 +742,8 @@ fn state_with_oauth(
                         dirty = true;
                     }
                 } else if !vault.observed_revisions.iter().any(|r| r == &digest) {
-                    let name = clean_label(None, email.as_deref().unwrap_or("OAuth 账号"))?;
-                    let meta = (email.clone(), None);
-                    let id = vault.push_new(name, AccountKind::Oauth, &auth_method, meta, raw);
+                    let name = clean_label(None, email.as_deref().unwrap_or(UNNAMED))?;
+                    let id = vault.push_new(name, &auth_method, email.clone(), raw);
                     vault.active_oauth_id = Some(id);
                     oauth_added = true;
                     dirty = true;
@@ -924,121 +756,35 @@ fn state_with_oauth(
             Err(_) => {}
         }
     }
-    // A newly seen login is kept even when a later file cannot be read.
-    if dirty {
-        vault_rev = save_vault(paths, &vault)?;
-        dirty = false;
-    }
-    let (mut adc_type, mut adc_project, mut adc_digest) = (None, None, None);
-    let adc_opt = [
-        paths.adc_file(),
-        paths.adc_disabled_file(),
-        paths.agswitch_adc_file(),
-    ]
-    .into_iter()
-    .find(|p| p.exists());
-    if let Some(adc_path) = adc_opt {
-        if let Some(raw) = read_checked(&adc_path, &mut clean) {
-            match parse_adc_metadata(&raw) {
-                Ok((cred_type, email, project_id, _)) => {
-                    let digest = payload_digest(&raw);
-                    let known = vault.entries.iter().any(|e| {
-                        e.kind == AccountKind::Adc && payload_digest(&e.payload) == digest
-                    }) || vault.observed_revisions.iter().any(|r| r == &digest);
-                    if !known {
-                        let name = adc_label(None, &email, &project_id)?;
-                        let meta = (email.clone(), project_id.clone());
-                        vault.push_new(name, AccountKind::Adc, cred_type.as_str(), meta, raw);
-                        dirty = true;
-                    }
-                    adc_type = Some(cred_type);
-                    adc_project = project_id;
-                    adc_digest = Some(digest);
-                }
-                Err(e) if e.code == code::JSON => clean = false,
-                Err(_) => {}
-            }
-        }
-    }
-    let (enable_adc, cfg_raw, _) = read_enable_adc(paths).unwrap_or_else(|_| {
-        clean = false;
-        (false, None, json!({}))
-    });
-    let adc_on = paths.adc_file().exists();
-    let backup_on = paths.adc_disabled_file().exists() || paths.agswitch_adc_file().exists();
-    let adc_status = match (adc_on, enable_adc, backup_on) {
-        (true, true, _) => AdcStatus::Active,
-        (true, false, _) => AdcStatus::Disabled,
-        (false, _, true) => AdcStatus::BackupOnly,
-        (false, _, false) => AdcStatus::Missing,
-    };
-    let app_raw = storage::read_optional(&paths.app_settings_file())?;
-    let app_settings = parse_app_settings(app_raw.as_deref())?;
-    let vertex_active = vault
-        .gateway
-        .as_ref()
-        .filter(|g| !enable_adc && g.matches(&app_settings));
-    let mode = if vertex_active.is_some() {
-        AuthMode::VertexKey
-    } else {
-        match (enable_adc, adc_on) {
-            (true, true) => AuthMode::Adc,
-            (false, false) => AuthMode::Oauth,
-            (false, true) => AuthMode::MixedAdcFileWithoutFlag,
-            (true, false) => AuthMode::MixedFlagWithoutAdcFile,
-        }
-    };
+    // An entry found by its address may only now share a placeholder's token.
+    dirty |= vault.merge_placeholders();
     let accounts: Vec<AntigravityAccountItem> = vault
         .entries
         .iter()
-        .map(|e| {
-            let current = match e.kind {
-                AccountKind::Oauth => {
-                    entry_matches(e, oauth_digest.as_deref(), oauth_email.as_deref())
-                }
-                AccountKind::Adc => entry_matches(e, adc_digest.as_deref(), None),
-                AccountKind::VertexKey => vertex_active.is_some_and(|g| g.account_id == e.id),
-            };
-            Ok(AntigravityAccountItem {
-                id: e.id.clone(),
-                name: e.name.clone(),
-                kind: e.kind,
-                source_type: e.source_type.clone(),
-                email: e.email.clone(),
-                project_id: e.project_id.clone(),
-                current,
-                updated_at: e.updated_at,
-                credential_revision: payload_digest(&e.payload),
-                vertex: if e.kind == AccountKind::VertexKey {
-                    let key = decode_vertex(e)?;
-                    Some(VertexMetadata {
-                        location: key.location,
-                        models: key.models,
-                    })
-                } else {
-                    None
-                },
-            })
+        .map(|e| AntigravityAccountItem {
+            id: e.id.clone(),
+            name: e.name.clone(),
+            source_type: e.source_type.clone(),
+            email: e.email.clone(),
+            current: entry_matches(e, oauth_digest.as_deref(), oauth_email.as_deref()),
+            updated_at: e.updated_at,
+            credential_revision: payload_digest(&e.payload),
         })
-        .collect::<Result<_>>()?;
+        .collect();
     let mut state = AntigravityAuthState {
         oauth_added,
         accounts,
-        mode,
-        enable_adc,
         oauth_present: oauth_digest.is_some(),
         oauth_email,
         oauth_auth_method,
-        adc_status,
-        adc_type,
-        adc_project,
+        cli_sessions: cli_sessions(paths),
         app_restarted: false,
         relaunch_failed: false,
         revision: String::new(),
     };
     if let Some(id) = active_account_id(&state) {
         let since = if vault.activations.is_empty() {
-            observed_activation_ms(paths, state.enable_adc, true)
+            observed_activation_ms(paths)
         } else {
             now_ms()
         };
@@ -1047,15 +793,8 @@ fn state_with_oauth(
     if dirty {
         vault_rev = save_vault(paths, &vault)?;
     }
-    let cfg_rev = storage::revision(cfg_raw.as_deref());
     let oauth_rev = oauth_digest.as_deref().unwrap_or("none");
-    state.revision = storage::digest(
-        format!(
-            "{vault_rev}:{cfg_rev}:{oauth_rev}:{adc_status:?}:{adc_digest:?}:{}",
-            storage::revision(app_raw.as_deref())
-        )
-        .as_bytes(),
-    );
+    state.revision = storage::digest(format!("{vault_rev}:{oauth_rev}").as_bytes());
     Ok((state, clean))
 }
 pub fn state_at(paths: &Paths) -> Result<AntigravityAuthState> {
@@ -1138,138 +877,19 @@ fn with_lifecycle(
         s
     })
 }
-fn write_active_adc(paths: &Paths, bytes: &[u8]) -> Result<()> {
-    write_private_file(&paths.adc_file(), bytes)?;
-    restore_file(&paths.adc_disabled_file(), None)?;
-    write_enable_adc(paths, true)
-}
-fn disable_adc(p: &Paths) -> Result<()> {
-    if let Some(adc_bytes) = storage::read_optional(&p.adc_file())? {
-        write_private_file(&p.adc_disabled_file(), &adc_bytes)?;
-        fs::remove_file(p.adc_file()).map_err(storage::io_error)?;
-    }
-    write_enable_adc(p, false)
-}
-fn enable_adc(p: &Paths, vault: &Vault) -> Result<()> {
-    if !p.adc_file().exists() {
-        let v_adc = || {
-            vault
-                .entries
-                .iter()
-                .find(|e| e.kind == AccountKind::Adc)
-                .map(|e| e.payload.as_bytes().to_vec())
-        };
-        let src = storage::read_optional(&p.adc_disabled_file())?
-            .or(storage::read_optional(&p.agswitch_adc_file())?)
-            .or_else(v_adc)
-            .ok_or_else(|| err(code::AUTH, "当前没有可用的 ADC 凭据，请先导入 ADC JSON"))?;
-        let s = std::str::from_utf8(&src).map_err(|_| err(code::UTF8, "ADC 凭据编码无效"))?;
-        parse_adc_metadata(s)?;
-        return write_active_adc(p, &src);
-    }
-    write_enable_adc(p, true)
-}
-pub fn add_adc_at(
+pub fn switch_account_at(
     paths: &Paths,
     lc: &dyn AppLifecycle,
-    input: AddAntigravityAdcInput,
+    id: &str,
+    rev: &str,
 ) -> Result<AntigravityAuthState> {
-    let text = input.json_text.trim();
-    if text.is_empty() {
-        return Err(err(code::JSON, "请粘贴或导入有效的 ADC JSON 内容"));
-    }
-    let (cred_type, email, parsed_project, mut value) = parse_adc_metadata(text)?;
-    let override_project = clean_opt(input.quota_project_id.as_deref());
-    if let (Some(ref qp), Some(obj)) = (&override_project, value.as_object_mut()) {
-        obj.insert("quota_project_id".into(), Value::String(qp.clone()));
-    }
-    let project_id = override_project.or(parsed_project);
-    let pretty =
-        serde_json::to_string_pretty(&value).map_err(|_| err(code::JSON, "无法格式化 ADC JSON"))?;
-    let payload = format!("{pretty}\n");
-    let digest = payload_digest(&payload);
-    let label = adc_label(input.name.as_deref(), &email, &project_id)?;
-    let (entry, state) = with_lock(|| {
-        let (mut vault, _) = load_vault(paths)?;
-        let id = if let Some(ex) = vault
-            .entries
-            .iter_mut()
-            .find(|e| e.kind == AccountKind::Adc && payload_digest(&e.payload) == digest)
-        {
-            if input.name.as_deref().is_some_and(|s| !s.trim().is_empty()) {
-                ex.name = label;
-            }
-            ex.email = email;
-            ex.project_id = project_id;
-            ex.payload = payload;
-            ex.updated_at = now_secs();
-            ex.id.clone()
-        } else {
-            vault.push_new(
-                label,
-                AccountKind::Adc,
-                cred_type.as_str(),
-                (email, project_id),
-                payload,
-            )
-        };
-        vault.observed_revisions.retain(|r| r != &digest);
-        save_vault(paths, &vault)?;
-        Ok((
-            vault.entries[vault.index_of(&id)?].clone(),
-            state_at(paths)?,
-        ))
+    let payload = with_lock(|| {
+        let (vault, _) = load_vault(paths)?;
+        let payload = vault.entries[vault.index_of(id)?].payload.clone();
+        parse_oauth_metadata(&payload)?;
+        Ok(payload)
     })?;
-    if input.activate {
-        switch_account_at(paths, lc, entry, &state.revision)
-    } else {
-        Ok(state)
-    }
-}
-fn switch_account_at(
-    paths: &Paths,
-    lc: &dyn AppLifecycle,
-    entry: StoredEntry,
-    rev: &str,
-) -> Result<AntigravityAuthState> {
-    match entry.kind {
-        AccountKind::Oauth => parse_oauth_metadata(&entry.payload).map(|_| ())?,
-        AccountKind::Adc => parse_adc_metadata(&entry.payload).map(|_| ())?,
-        AccountKind::VertexKey => unreachable!("Vertex uses the shared listener"),
-    }
-    with_lifecycle(paths, rev, lc, || {
-        restore_gateway_settings(paths)?;
-        match entry.kind {
-            AccountKind::Oauth => {
-                write_oauth(paths, &entry.payload)?;
-                disable_adc(paths)
-            }
-            AccountKind::Adc => write_active_adc(paths, entry.payload.as_bytes()),
-            AccountKind::VertexKey => unreachable!(),
-        }
-    })
-}
-pub fn set_mode_at(
-    paths: &Paths,
-    lc: &dyn AppLifecycle,
-    mode: TargetMode,
-    rev: &str,
-) -> Result<AntigravityAuthState> {
-    let use_adc = matches!(mode, TargetMode::Adc);
-    if !use_adc && read_oauth(paths, true)?.is_none() {
-        return Err(err(
-            code::AUTH,
-            "未检测到 Antigravity OAuth 登录令牌，请先在 Antigravity 内登录账号",
-        ));
-    }
-    with_lifecycle(paths, rev, lc, || {
-        let vault = restore_gateway_settings(paths)?;
-        if use_adc {
-            enable_adc(paths, &vault)
-        } else {
-            disable_adc(paths)
-        }
-    })
+    with_lifecycle(paths, rev, lc, || write_oauth(paths, &payload))
 }
 pub fn rename_account_at(
     paths: &Paths,
@@ -1302,43 +922,17 @@ pub fn delete_account_at(paths: &Paths, id: &str, rev: &str) -> Result<Antigravi
         let (mut vault, _) = load_vault(paths)?;
         let idx = vault.index_of(id)?;
         let target = vault.entries[idx].clone();
-        let candidates: Vec<PathBuf> = match target.kind {
-            AccountKind::Oauth => {
-                if paths.keychain() {
-                    vec![]
-                } else {
-                    vec![paths.oauth_file()]
-                }
-            }
-            AccountKind::VertexKey => vec![],
-            AccountKind::Adc => vec![
-                paths.adc_file(),
-                paths.adc_disabled_file(),
-                paths.agswitch_adc_file(),
-            ],
-        };
         let holds_target = |raw: &str| {
-            let d = payload_digest(raw);
-            let em = (target.kind == AccountKind::Oauth)
-                .then(|| parse_oauth_metadata(raw).ok()?.1)
-                .flatten();
-            let adc_value_matches = target.kind == AccountKind::Adc
-                && serde_json::from_str::<Value>(raw)
-                    .ok()
-                    .zip(serde_json::from_str::<Value>(&target.payload).ok())
-                    .is_some_and(|(a, b)| a == b);
-            entry_matches(&target, Some(&d), em.as_deref()) || adc_value_matches
+            let email = parse_oauth_metadata(raw).ok().and_then(|(_, email)| email);
+            entry_matches(&target, Some(&payload_digest(raw)), email.as_deref())
         };
         // The login left behind by an account that is not in use lives where
         // the app reads it: the keychain on macOS, the token file elsewhere.
         #[cfg(target_os = "macos")]
-        if target.kind == AccountKind::Oauth
-            && paths.keychain()
-            && keychain_oauth(true)?.is_some_and(|raw| holds_target(&raw))
-        {
+        if paths.keychain() && keychain_oauth(true)?.is_some_and(|raw| holds_target(&raw)) {
             set_keychain_oauth(None)?;
         }
-        for f in candidates {
+        for f in paths.watched_files() {
             if let Some(raw) = read_text_optional(&f)? {
                 if holds_target(&raw) {
                     let meta = fs::symlink_metadata(&f).map_err(storage::io_error)?;
@@ -1378,19 +972,9 @@ pub(crate) fn current_oauth_identity(data: &Path, home: &Path) -> Result<Option<
     with_lock(|| {
         let paths = Paths {
             gemini_home: home.to_path_buf(),
-            ..Paths::from_roots(home.parent().unwrap_or(home), data)
+            data_dir: data.to_path_buf(),
         };
         let (vault, _) = load_vault(&paths)?;
-        if read_enable_adc(&paths)?.0 || paths.adc_file().exists() {
-            return Ok(None);
-        }
-        if vault
-            .gateway
-            .as_ref()
-            .is_some_and(|g| read_app_settings(&paths).is_ok_and(|s| g.matches(&s)))
-        {
-            return Ok(None);
-        }
         let Some(raw) = read_oauth(&paths, false)? else {
             return Ok(None);
         };
@@ -1401,7 +985,7 @@ pub(crate) fn current_oauth_identity(data: &Path, home: &Path) -> Result<Option<
         Ok(vault
             .entries
             .iter()
-            .find(|e| e.kind == AccountKind::Oauth && entry_matches(e, Some(&digest), Some(&email)))
+            .find(|e| entry_matches(e, Some(&digest), Some(&email)))
             .map(|e| (e.id.clone(), email)))
     })
 }
@@ -1416,23 +1000,15 @@ pub(crate) fn usage_accounts(
             .map(|e| crate::usage::antigravity::quota::Account {
                 id: e.id,
                 name: e.name,
-                kind: e.kind,
             })
             .collect())
     })
 }
 pub fn active_account_id(state: &AntigravityAuthState) -> Option<String> {
-    let target = if state.mode == AuthMode::VertexKey {
-        AccountKind::VertexKey
-    } else if state.enable_adc {
-        AccountKind::Adc
-    } else {
-        AccountKind::Oauth
-    };
     state
         .accounts
         .iter()
-        .find(|a| a.current && a.kind == target)
+        .find(|a| a.current)
         .map(|a| a.id.clone())
 }
 fn push_span(spans: &mut Vec<ActivationSpan>, id: &str, fb_ms: i64) -> bool {
@@ -1451,42 +1027,24 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
     let Ok(Some(b)) = storage::read_optional(&v_file) else {
         return ProviderTimeline::default();
     };
-    let Ok(vault) = serde_json::from_slice::<Vault>(&b) else {
+    let Some(vault) = parse_vault(&b) else {
         return ProviderTimeline::default();
     };
     let mut spans = vault.activations;
     if let Some(g) = gemini_home {
         let p = Paths {
             gemini_home: g.to_path_buf(),
-            ..Paths::from_roots(g.parent().unwrap_or(g), data_dir)
+            data_dir: data_dir.to_path_buf(),
         };
-        let en = read_enable_adc(&p).is_ok_and(|(en, _, _)| en);
-        if !en
-            && vault.gateway.as_ref().is_some_and(|selection| {
-                read_app_settings(&p).is_ok_and(|settings| selection.matches(&settings))
-            })
-        {
-            return ProviderTimeline { spans };
-        }
-        let credential = if en {
-            read_text_optional(&p.adc_file())
-        } else {
-            read_oauth(&p, false)
-        };
-        if let Some(raw) = credential.ok().flatten() {
+        if let Some(raw) = read_oauth(&p, false).ok().flatten() {
             let d = payload_digest(&raw);
-            let em = (!en).then(|| parse_oauth_metadata(&raw).ok()?.1).flatten();
-            if let Some(e) = vault.entries.iter().find(|e| {
-                e.kind
-                    == if en {
-                        AccountKind::Adc
-                    } else {
-                        AccountKind::Oauth
-                    }
-                    && entry_matches(e, Some(&d), em.as_deref())
-            }) {
-                let since = observed_activation_ms(&p, en, spans.is_empty());
-                push_span(&mut spans, &e.id, since);
+            let em = parse_oauth_metadata(&raw).ok().and_then(|(_, email)| email);
+            if let Some(e) = vault
+                .entries
+                .iter()
+                .find(|e| entry_matches(e, Some(&d), em.as_deref()))
+            {
+                push_span(&mut spans, &e.id, observed_activation_ms(&p));
             }
         }
     }
@@ -1523,333 +1081,110 @@ pub fn poll_state(
         Ok(Some(state))
     })
 }
-fn parse_app_settings(raw: Option<&[u8]>) -> Result<Value> {
-    let value: Value = raw
-        .map(serde_json::from_slice)
-        .transpose()
-        .map_err(|_| err(code::JSON, "Antigravity App 设置不是有效的 JSON"))?
-        .unwrap_or_else(|| json!({}));
-    if !value.is_object() {
-        return Err(err(code::JSON, "Antigravity App 设置必须是 JSON 对象"));
+/// Migration only. Earlier versions also kept ADC and Vertex API Key accounts
+/// in the vault, and while a key was in use pointed the app's own gateway
+/// settings at a Vela listener, saving what they replaced under `gateway`.
+/// Nothing else reads those fields.
+mod retired {
+    use super::*;
+
+    /// The app settings a Vertex key replaced.
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Snapshot {
+        gateway: Option<Value>,
+        models: Option<Value>,
+        file_existed: bool,
     }
-    Ok(value)
-}
-fn read_app_settings(paths: &Paths) -> Result<Value> {
-    parse_app_settings(storage::read_optional(&paths.app_settings_file())?.as_deref())
-}
-fn write_app_settings(paths: &Paths, value: &Value) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(value)
-        .map_err(|_| err(code::JSON, "Antigravity App 设置无法保存"))?;
-    write_private_file(&paths.app_settings_file(), &bytes)
-}
-fn decode_vertex(entry: &StoredEntry) -> Result<VertexKey> {
-    let mut key: VertexKey = serde_json::from_str(&entry.payload)
-        .map_err(|_| err(code::AUTH, "Vertex API Key 凭据无法读取"))?;
-    key.validate()?;
-    Ok(key)
-}
-fn restore_gateway_settings(paths: &Paths) -> Result<Vault> {
-    let (mut vault, _) = load_vault(paths)?;
-    let Some(selection) = vault.gateway.take() else {
-        return Ok(vault);
-    };
-    let mut settings = read_app_settings(paths)?;
-    for (key, previous) in [
-        ("gateway", selection.previous.gateway),
-        ("models", selection.previous.models),
-    ] {
-        if let Some(value) = previous {
-            settings[key] = value;
-        } else {
-            settings.as_object_mut().unwrap().remove(key);
+    /// The key that was in use, with the listener values written for it.
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Selection {
+        token: String,
+        port: u16,
+        previous: Snapshot,
+    }
+    impl Selection {
+        /// Whether the app settings still hold what Vela wrote.
+        fn matches(&self, settings: &Value) -> bool {
+            let url = format!("http://127.0.0.1:{}/antigravity", self.port);
+            settings
+                .pointer("/gateway/enabled")
+                .and_then(Value::as_bool)
+                == Some(true)
+                && settings.pointer("/gateway/url").and_then(Value::as_str) == Some(url.as_str())
+                && settings.pointer("/gateway/apiKey").and_then(Value::as_str)
+                    == Some(self.token.as_str())
         }
     }
-    if !selection.previous.file_existed && settings.as_object().unwrap().is_empty() {
-        restore_file(&paths.app_settings_file(), None)?;
-    } else {
-        write_app_settings(paths, &settings)?;
-    }
-    save_vault(paths, &vault)?;
-    Ok(vault)
-}
-enum VertexSave {
-    Activate(StoredEntry, VertexKey, Option<String>),
-    Saved(AntigravityAuthState),
-}
-fn prepare_vertex_save(paths: &Paths, input: &SaveVertexKeyInput) -> Result<VertexSave> {
-    with_lock(|| {
-        verify_revision(paths, &input.expected_revision)?;
-        let (mut vault, _) = load_vault(paths)?;
-        let existing = input
-            .id
-            .as_deref()
-            .map(|id| vault.index_of(id).map(|i| &vault.entries[i]))
-            .transpose()?;
-        if existing.is_some_and(|e| e.kind != AccountKind::VertexKey) {
-            return Err(err(code::ACCOUNT, "此条目不是 Vertex API Key"));
+    /// Puts the app's gateway and model settings back as they were before the
+    /// key took them over. Settings changed since then are left alone.
+    fn restore_app_settings(paths: &Paths, selection: Selection) -> Result<()> {
+        let file = paths
+            .gemini_home
+            .with_file_name(".antigravity")
+            .join("settings.json");
+        let Ok(Some(raw)) = storage::read_optional(&file) else {
+            return Ok(());
+        };
+        let Ok(mut settings) = serde_json::from_slice::<Value>(&raw) else {
+            return Ok(());
+        };
+        if !selection.matches(&settings) {
+            return Ok(());
         }
-        let api_key = if input.api_key.trim().is_empty() {
-            existing
-                .map(decode_vertex)
-                .transpose()?
-                .map(|k| k.api_key)
-                .unwrap_or_default()
-        } else {
-            input.api_key.clone()
+        let Some(object) = settings.as_object_mut() else {
+            return Ok(());
         };
-        let mut key = VertexKey {
-            api_key,
-            project_id: input.project_id.clone(),
-            location: input.location.clone(),
-            models: input.models.clone(),
-        };
-        key.validate()?;
-        let entry = StoredEntry {
-            id: existing
-                .map(|e| e.id.clone())
-                .unwrap_or_else(|| Uuid::new_v4().to_string()),
-            name: clean_label(Some(&input.name), "Vertex API Key")?,
-            kind: AccountKind::VertexKey,
-            source_type: "vertex_key".into(),
-            email: None,
-            project_id: key.project_id.clone(),
-            payload: serde_json::to_string(&key)
-                .map_err(|_| err(code::JSON, "Vertex API Key 无法保存"))?,
-            updated_at: now_secs(),
-        };
-        if input.activate {
-            Ok(VertexSave::Activate(
-                entry,
-                key,
-                vault.gateway.map(|g| g.token),
-            ))
-        } else {
-            upsert_vertex(&mut vault, entry);
+        for (key, previous) in [
+            ("gateway", selection.previous.gateway),
+            ("models", selection.previous.models),
+        ] {
+            match previous {
+                Some(value) => object.insert(key.to_owned(), value),
+                None => object.remove(key),
+            };
+        }
+        if !selection.previous.file_existed && object.is_empty() {
+            return restore_file(&file, None);
+        }
+        let bytes = serde_json::to_vec_pretty(&settings)
+            .map_err(|_| err(code::JSON, "Antigravity App 设置无法保存"))?;
+        write_private_file(&file, &bytes)
+    }
+    /// Runs at startup, before the vault is first used. Returns whether the
+    /// vault was rewritten; a migrated vault is left untouched.
+    pub(crate) fn migrate(paths: &Paths) -> Result<bool> {
+        with_lock(|| {
+            let Some(bytes) = storage::read_optional(&paths.vault_file())? else {
+                return Ok(false);
+            };
+            let raw: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            let selection = raw.get("gateway").filter(|v| !v.is_null());
+            let retired_entries = raw["entries"]
+                .as_array()
+                .is_some_and(|entries| entries.iter().any(|e| e["kind"] != OAUTH_KIND));
+            if selection.is_none() && !retired_entries {
+                return Ok(false);
+            }
+            let (vault, _) = load_vault(paths)?;
+            if let Some(selection) = selection.and_then(|v| Selection::deserialize(v).ok()) {
+                restore_app_settings(paths, selection)?;
+            }
             save_vault(paths, &vault)?;
-            state_at(paths).map(VertexSave::Saved)
-        }
-    })
-}
-fn upsert_vertex(vault: &mut Vault, entry: StoredEntry) {
-    if let Some(old) = vault.entries.iter_mut().find(|e| e.id == entry.id) {
-        *old = entry;
-    } else {
-        vault.entries.push(entry);
+            Ok(true)
+        })
     }
 }
-#[allow(clippy::too_many_arguments)]
-fn activate_vertex_at(
-    paths: &Paths,
-    lc: &dyn AppLifecycle,
-    entry: StoredEntry,
-    key: &VertexKey,
-    rev: &str,
-    port: u16,
-    token: String,
-    ready: impl FnOnce() -> Result<()>,
-) -> Result<AntigravityAuthState> {
-    with_lifecycle(paths, rev, lc, || {
-        let (mut vault, _) = load_vault(paths)?;
-        let mut settings = read_app_settings(paths)?;
-        let previous = vault
-            .gateway
-            .as_ref()
-            .map(|g| g.previous.clone())
-            .unwrap_or_else(|| GatewaySnapshot {
-                gateway: settings.get("gateway").cloned(),
-                models: settings.get("models").cloned(),
-                file_existed: paths.app_settings_file().exists(),
-            });
-        let selection = GatewaySelection {
-            account_id: entry.id.clone(),
-            token,
-            port,
-            previous,
-        };
-        settings["gateway"] = json!({"enabled": true, "url": selection.url(), "apiKey": selection.token, "wireProtocol": "genai", "customHeaders": {}});
-        settings["models"] = json!({"defaultModelId": key.models[0], "list": key.models.iter().map(|m| json!({"modelId":m})).collect::<Vec<_>>()});
-        write_app_settings(paths, &settings)?;
-        disable_adc(paths)?;
-        push_span(&mut vault.activations, &entry.id, now_ms());
-        upsert_vertex(&mut vault, entry);
-        vault.gateway = Some(selection);
-        save_vault(paths, &vault)?;
-        ready()
-    })
-}
-async fn run_vertex(
-    rt: Arc<Runtime>,
-    entry: StoredEntry,
-    key: VertexKey,
-    revision: String,
-    token: Option<String>,
-) -> Result<AntigravityAuthState> {
-    let paths = Paths::resolve(&rt.data)?;
-    let token = token.unwrap_or_else(|| format!("vela_ag_{}", Uuid::new_v4().simple()));
-    let registry = rt.gateway.registry();
-    let _lifecycle = registry.lifecycle.lock().await;
-    let prepared = registry.listener.prepare().await?;
-    registry.update_ports()?;
-    let session = Arc::new(vertex::Session::new(key, token.clone(), &registry));
-    let previous = registry.antigravity.lock().clone();
-    let activate_registry = registry.clone();
-    let active = session.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        with_usage_sync(
-            true,
-            || {
-                if let Ok(home) = crate::antigravity::home() {
-                    let _ = rt
-                        .usage
-                        .sync_roots(vec![("antigravity".into(), Ok(home))], None);
-                }
-            },
-            || {
-                activate_vertex_at(
-                    &paths,
-                    &SystemAppLifecycle::default(),
-                    entry,
-                    &active.key,
-                    &revision,
-                    prepared.port,
-                    token,
-                    || {
-                        activate_registry.listener.activate_antigravity(
-                            prepared.socket,
-                            activate_registry.clone(),
-                            || {
-                                *activate_registry.antigravity.lock() = Some(active.clone());
-                                Ok(())
-                            },
-                        )
-                    },
-                )
-            },
-        )
-    })
-    .await
-    .map_err(|_| err(code::PROCESS, "Vertex API Key 切换任务异常中断"))?;
-    if result.is_err() {
-        session.stop();
-        *registry.antigravity.lock() = previous.clone();
-        if previous.is_none() {
-            registry.listener.deactivate_antigravity().await?;
-        }
-    } else if let Some(previous) = previous {
-        previous.stop();
-    }
-    registry.changed();
-    result
-}
-pub(crate) async fn restore_vertex_listener(
-    data: &Path,
-    gateway: &crate::gateway::Gateway,
-) -> Result<()> {
-    restore_vertex_listener_at(&Paths::resolve(data)?, gateway).await
-}
-async fn restore_vertex_listener_at(
-    paths: &Paths,
-    gateway: &crate::gateway::Gateway,
-) -> Result<()> {
-    let selected = with_lock(|| {
-        let (vault, _) = load_vault(paths)?;
-        let Some(selection) = vault.gateway else {
-            return Ok(None);
-        };
-        if !selection.matches(&read_app_settings(paths)?) {
-            return Ok(None);
-        }
-        let entry = vault
-            .entries
-            .iter()
-            .find(|e| e.id == selection.account_id && e.kind == AccountKind::VertexKey)
-            .ok_or_else(|| err(code::AUTH, "当前 Vertex API Key 条目不存在"))?;
-        Ok(Some((selection, decode_vertex(entry)?)))
-    })?;
-    let Some((selection, key)) = selected else {
-        return Ok(());
-    };
-    let registry = gateway.registry();
-    let _lifecycle = registry.lifecycle.lock().await;
-    let prepared = registry.listener.prepare().await?;
-    if prepared.port != selection.port {
-        return Err(err(
-            code::CONFLICT,
-            "Antigravity 共享端口已变化，请重新切换此账号",
-        ));
-    }
-    registry.update_ports()?;
-    let session = Arc::new(vertex::Session::new(key, selection.token, &registry));
-    registry
-        .listener
-        .activate_antigravity(prepared.socket, registry.clone(), || {
-            *registry.antigravity.lock() = Some(session);
-            Ok(())
-        })?;
-    registry.changed();
-    Ok(())
-}
-#[tauri::command]
-pub async fn save_antigravity_vertex_key(
-    r: R<'_>,
-    input: SaveVertexKeyInput,
-) -> Result<AntigravityAuthState> {
-    let paths = Paths::resolve(&r.data)?;
-    match prepare_vertex_save(&paths, &input)? {
-        VertexSave::Activate(entry, key, token) => {
-            run_vertex(
-                r.inner().clone(),
-                entry,
-                key,
-                input.expected_revision,
-                token,
-            )
-            .await
-        }
-        VertexSave::Saved(state) => Ok(state),
-    }
-}
+pub(crate) use retired::migrate as migrate_retired_accounts;
 pub(crate) fn with_usage_sync<T>(
-    sync: bool,
     mut synchronize: impl FnMut(),
     action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    if sync {
-        synchronize();
-    }
+    synchronize();
     let state = action()?;
-    if sync {
-        synchronize();
-    }
+    synchronize();
     Ok(state)
-}
-async fn run_blocking(
-    r: R<'_>,
-    sync: bool,
-    msg: &'static str,
-    f: impl FnOnce(Paths, SystemAppLifecycle) -> Result<AntigravityAuthState> + Send + 'static,
-) -> Result<AntigravityAuthState> {
-    let rt = r.inner().clone();
-    let registry = rt.gateway.registry();
-    let _lifecycle = registry.lifecycle.lock().await;
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        with_usage_sync(
-            sync,
-            || {
-                if let Ok(home) = crate::antigravity::home() {
-                    let roots = vec![("antigravity".into(), Ok(home))];
-                    let _ = rt.usage.sync_roots(roots, None);
-                }
-            },
-            || f(Paths::resolve(&rt.data)?, SystemAppLifecycle::default()),
-        )
-    })
-    .await
-    .map_err(|_| err(code::PROCESS, msg))?;
-    if result.as_ref().is_ok_and(|s| s.mode != AuthMode::VertexKey) {
-        vertex::stop(&registry).await?;
-    }
-    result
 }
 #[tauri::command]
 pub async fn get_antigravity_auth_state(
@@ -1866,69 +1201,32 @@ pub async fn get_antigravity_auth_state(
     Ok(state)
 }
 #[tauri::command]
-pub async fn add_antigravity_adc(
-    r: R<'_>,
-    input: AddAntigravityAdcInput,
-) -> Result<AntigravityAuthState> {
-    let (sync, msg) = (input.activate, "导入 ADC 任务异常中断");
-    run_blocking(r, sync, msg, move |p, l| add_adc_at(&p, &l, input)).await
-}
-#[tauri::command]
-pub async fn pick_antigravity_credential_file(app: tauri::AppHandle) -> Result<Option<String>> {
-    let picked = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
-            .file()
-            .add_filter("ADC JSON", &["json"])
-            .blocking_pick_file()
-    })
-    .await
-    .map_err(|_| err(code::DIALOG, "无法打开文件选择器"))?;
-    let Some(fp) = picked else {
-        return Ok(None);
-    };
-    let path = fp
-        .into_path()
-        .map_err(|_| err(code::PATH, "请选择本地文件"))?;
-    let bytes = storage::read_bounded(&path, CREDENTIAL_LIMIT)?
-        .ok_or_else(|| err(code::PATH, "所选文件不存在"))?;
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|_| err(code::UTF8, "所选文件不是 UTF-8 文本"))
-}
-#[tauri::command]
 pub async fn switch_antigravity_account(
     r: R<'_>,
     id: String,
     expected_revision: String,
 ) -> Result<AntigravityAuthState> {
-    let (entry, token) = with_lock(|| {
-        let (vault, _) = load_vault(&Paths::resolve(&r.data)?)?;
-        Ok((
-            vault.entries[vault.index_of(&id)?].clone(),
-            vault.gateway.map(|g| g.token),
-        ))
-    })?;
-    if entry.kind == AccountKind::VertexKey {
-        let key = decode_vertex(&entry)?;
-        return run_vertex(r.inner().clone(), entry, key, expected_revision, token).await;
-    }
-    let msg = "切换凭据任务异常中断";
-    run_blocking(r, true, msg, move |p, l| {
-        switch_account_at(&p, &l, entry, &expected_revision)
+    let rt = r.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        with_usage_sync(
+            || {
+                if let Ok(home) = crate::antigravity::home() {
+                    let roots = vec![("antigravity".into(), Ok(home))];
+                    let _ = rt.usage.sync_roots(roots, None);
+                }
+            },
+            || {
+                switch_account_at(
+                    &Paths::resolve(&rt.data)?,
+                    &SystemAppLifecycle::default(),
+                    &id,
+                    &expected_revision,
+                )
+            },
+        )
     })
     .await
-}
-#[tauri::command]
-pub async fn set_antigravity_auth_mode(
-    r: R<'_>,
-    mode: TargetMode,
-    expected_revision: String,
-) -> Result<AntigravityAuthState> {
-    let msg = "切换认证模式任务异常中断";
-    run_blocking(r, true, msg, move |p, l| {
-        set_mode_at(&p, &l, mode, &expected_revision)
-    })
-    .await
+    .map_err(|_| err(code::PROCESS, "切换凭据任务异常中断"))?
 }
 #[tauri::command]
 pub fn rename_antigravity_account(
@@ -1949,4 +1247,4 @@ pub fn delete_antigravity_account(
 }
 #[cfg(test)]
 #[path = "antigravity_auth_tests.rs"]
-pub(crate) mod tests;
+mod tests;

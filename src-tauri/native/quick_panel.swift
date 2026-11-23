@@ -34,6 +34,8 @@ struct LongWaitModel: Codable, Equatable, Identifiable {
     let phaseText: String
     let timingText: String
     let cancelling: Bool
+    let receivedText: String?
+    let rateText: String?
 }
 
 struct QuotaPlanRowModel: Codable, Equatable, Identifiable {
@@ -96,7 +98,6 @@ struct ProviderCardModel: Codable, Equatable, Identifiable {
     let priority: String?
     let selected: Bool
     let selectLabel: String
-    let settingsLabel: String
     let handoffStatus: String?
     let runtimeAlert: String?
     let faultEventId: String?
@@ -225,12 +226,12 @@ struct QuickPalette {
         }
     }
 
-    func quotaColor(_ tone: String) -> Color {
+    // A healthy balance wears its client's colour; only trouble changes it.
+    func quotaColor(_ tone: String, clientId: String) -> Color {
         switch tone {
-        case "good": return success
+        case "good", "normal": return clientColor(clientId)
         case "warn": return warning
         case "critical": return error
-        case "normal": return ink
         default: return muted
         }
     }
@@ -723,7 +724,7 @@ struct QuickLongWaitsView: View {
                         }
                         Spacer(minLength: 4)
                         Button(action: { onCancel(item.requestId) }) {
-                            Text(item.cancelling ? "中止中…" : "中止")
+                            Text(item.cancelling ? "重发中…" : "重发")
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(palette.ink)
                                 .padding(.horizontal, 11)
@@ -745,6 +746,15 @@ struct QuickLongWaitsView: View {
                             .font(.system(size: 12).monospacedDigit())
                     }
                     .foregroundColor(palette.muted)
+                    if let received = item.receivedText, let rate = item.rateText {
+                        HStack(spacing: 8) {
+                            Text(received)
+                            Spacer(minLength: 4)
+                            Text(rate)
+                        }
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundColor(palette.muted)
+                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
@@ -886,7 +896,9 @@ struct QuickProviderRowView: View {
                     .help("\(provider.name)（双击重命名）")
                 }
 
-                // Compact Quota Pill (terse: subscription title stays in tooltip & detail overlay)
+                // Compact Quota Pill: the amount with its unit, never cut short (the
+                // name gives way); the subscription title stays in the tooltip and
+                // the detail overlay.
                 HStack(spacing: 2) {
                     Button(action: {
                         store.quotaUsageExpanded = false
@@ -894,7 +906,7 @@ struct QuickProviderRowView: View {
                     }) {
                         Text(provider.quota.compactValue)
                             .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
-                            .foregroundColor(palette.quotaColor(provider.quota.tone))
+                            .foregroundColor(palette.quotaColor(provider.quota.tone, clientId: clientId))
                             .lineLimit(1)
                             .padding(.horizontal, 3)
                             .contentShape(Rectangle())
@@ -953,13 +965,14 @@ struct QuickProviderRowView: View {
                     store.dispatch(["op": "resetProvider", "id": provider.id])
                 }
 
-                // Whitelist / Model Mapping -> Main Window
-                iconCircleButton("slider.horizontal.3", help: provider.settingsLabel) {
+                // Edit API -> Main Window
+                iconCircleButton("square.and.pencil", help: "编辑 API") {
                     store.dispatch([
                         "op": "openMain",
                         "page": "gateway",
                         "providerId": provider.id,
-                        "clientId": clientId
+                        "clientId": clientId,
+                        "providerAction": "edit"
                     ])
                 }
 
@@ -1424,7 +1437,12 @@ struct QuickQuotaDetailOverlayView: View {
                         HStack(spacing: 8) {
                             Text(detail.headline)
                                 .font(.system(size: 14, weight: .semibold).monospacedDigit())
-                                .foregroundColor(palette.quotaColor(provider.quota.tone))
+                                .foregroundColor(
+                                    palette.quotaColor(
+                                        provider.quota.tone,
+                                        clientId: store.model.gateway?.clientId ?? ""
+                                    )
+                                )
                             Spacer(minLength: 4)
                             if let src = detail.sourceLabel {
                                 Text(src)

@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AntigravityAccounts from "./AntigravityAccounts";
@@ -26,22 +27,15 @@ vi.mock("./bridge", () => ({
 
 const initialState: AntigravityAuthState = {
   revision: "rev-1",
-  mode: "oauth",
-  enableAdc: false,
   oauthPresent: true,
   oauthEmail: "user1@example.invalid",
   oauthAuthMethod: "google-oauth",
-  adcStatus: "disabled",
-  adcType: "authorized_user",
-  adcProject: "demo-project",
   appRestarted: false,
   accounts: [
     {
       id: "oauth-1",
       name: "OAuth 主号",
-      kind: "oauth",
       email: "user1@example.invalid",
-      projectId: null,
       sourceType: "google-oauth",
       updatedAt: 1710000000,
       current: true,
@@ -50,27 +44,17 @@ const initialState: AntigravityAuthState = {
     {
       id: "oauth-2",
       name: "OAuth 备号",
-      kind: "oauth",
       email: "user2@example.invalid",
-      projectId: null,
       sourceType: "jetski-sso",
       updatedAt: 1710000010,
       current: false,
       credentialRevision: "cred-2",
     },
-    {
-      id: "adc-1",
-      name: "ADC 生产环境",
-      kind: "adc",
-      email: null,
-      projectId: "demo-project",
-      sourceType: "authorized_user",
-      updatedAt: 1710000020,
-      current: false,
-      credentialRevision: "cred-3",
-    },
   ],
 };
+
+const row = (name: string) =>
+  screen.getByText(name).closest<HTMLElement>(".account-row")!;
 
 describe("AntigravityAccounts", () => {
   afterEach(() => {
@@ -111,88 +95,225 @@ describe("AntigravityAccounts", () => {
     await screen.findByText("刷新后的主号");
   });
 
-  it("renders multi-OAuth and multi-ADC credentials and switches modes and accounts without redundant manual buttons", async () => {
-    const notify = vi.fn();
-    const setError = vi.fn();
+  it("lists only OAuth accounts, each with switch, rename and delete", async () => {
+    mockCommand.mockResolvedValue(initialState);
+    render(<AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />);
+    await screen.findByText("OAuth 主号");
 
+    const list = screen.getByLabelText("Antigravity 账号列表");
+    expect(list.querySelectorAll(".account-row")).toHaveLength(2);
+    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent(
+      "已保存账号 2",
+    );
+
+    const current = row("OAuth 主号");
+    expect(current).toHaveClass("selected");
+    expect(
+      within(current).getByText("user1@example.invalid"),
+    ).toBeInTheDocument();
+    expect(within(current).getByText("当前生效")).toBeInTheDocument();
+    expect(
+      within(current).queryByRole("button", { name: "切换到 OAuth 主号" }),
+    ).not.toBeInTheDocument();
+
+    const other = row("OAuth 备号");
+    expect(other).not.toHaveClass("selected");
+    expect(
+      within(other).getByRole("button", { name: "切换到 OAuth 备号" }),
+    ).toBeEnabled();
+    for (const item of [current, other])
+      expect(
+        [...item.querySelectorAll(".menu-popover button")].map(
+          (button) => button.textContent,
+        ),
+      ).toEqual(["重命名", "删除"]);
+
+    // Import, credential editing, mode switching and type labels are gone.
+    expect(
+      screen.queryByRole("button", { name: "导入账号" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "编辑凭据" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "切换认证模式" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+    expect(screen.queryAllByText(/模式|ADC|Vertex|OAuth ·/)).toHaveLength(0);
+    expect(
+      mockCommand.mock.calls.every(
+        ([name]) => name === "get_antigravity_auth_state",
+      ),
+    ).toBe(true);
+  });
+
+  it("说明运行中的 agy 会话会把登录改回原账号", async () => {
+    const notify = vi.fn();
+    mockCommand.mockImplementation(async (name: string) =>
+      name === "switch_antigravity_account"
+        ? { ...initialState, revision: "rev-2", cliSessions: 2 }
+        : { ...initialState, cliSessions: 2 },
+    );
+    render(<AntigravityAccounts notify={notify} setError={vi.fn()} />);
+    expect(await screen.findByRole("note")).toHaveTextContent(
+      "有 2 个 agy 会话正在运行",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "切换到 OAuth 备号" }));
+    await waitFor(() =>
+      expect(notify).toHaveBeenCalledWith(
+        "已切换到 OAuth 备号；仍有 2 个 agy 会话在用原账号，请退出后重新打开",
+      ),
+    );
+  });
+
+  it("switches, renames and deletes against the latest revision", async () => {
+    const notify = vi.fn();
     mockCommand.mockImplementation(async (name: string) => {
-      if (name === "get_antigravity_auth_state") {
-        return initialState;
-      }
-      if (name === "set_antigravity_auth_mode") {
+      if (name === "switch_antigravity_account")
         return {
           ...initialState,
           revision: "rev-2",
-          mode: "adc",
-          enableAdc: true,
-          adcStatus: "active",
-          appRestarted: true,
-        };
-      }
-      if (name === "switch_antigravity_account") {
-        return {
-          ...initialState,
-          revision: "rev-3",
-          mode: "oauth",
-          enableAdc: false,
           appRestarted: true,
           accounts: initialState.accounts.map((a) => ({
             ...a,
             current: a.id === "oauth-2",
           })),
         };
-      }
+      if (name === "rename_antigravity_account")
+        return {
+          ...initialState,
+          revision: "rev-3",
+          accounts: initialState.accounts.map((a) => ({
+            ...a,
+            current: a.id === "oauth-2",
+            name: a.id === "oauth-1" ? "改名后的主号" : a.name,
+          })),
+        };
+      if (name === "delete_antigravity_account")
+        return {
+          ...initialState,
+          revision: "rev-4",
+          accounts: [{ ...initialState.accounts[1], current: true }],
+        };
       return initialState;
     });
-
-    render(<AntigravityAccounts notify={notify} setError={setError} />);
-
-    expect(await screen.findByText("OAuth 主号")).toBeTruthy();
-    expect(screen.getByText("OAuth 备号")).toBeTruthy();
-    expect(screen.getByText("ADC 生产环境")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "备份当前" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "读取当前 OAuth" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "保存当前 ADC" })).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "ADC 模式" }));
-    await waitFor(() => {
-      expect(mockCommand).toHaveBeenCalledWith("set_antigravity_auth_mode", {
-        mode: "adc",
-        expectedRevision: "rev-1",
-      });
-    });
+    render(<AntigravityAccounts notify={notify} setError={vi.fn()} />);
+    await screen.findByText("OAuth 主号");
 
     fireEvent.click(screen.getByRole("button", { name: "切换到 OAuth 备号" }));
-    await waitFor(() => {
+    await waitFor(() =>
       expect(mockCommand).toHaveBeenCalledWith("switch_antigravity_account", {
         id: "oauth-2",
-        expectedRevision: "rev-2",
-      });
+        expectedRevision: "rev-1",
+      }),
+    );
+    await waitFor(() => expect(row("OAuth 备号")).toHaveClass("selected"));
+    expect(notify).toHaveBeenLastCalledWith(
+      "已切换到 OAuth 备号 并自动重启 Antigravity",
+    );
+
+    fireEvent.click(within(row("OAuth 主号")).getByText("重命名"));
+    const rename = screen.getByRole("dialog", { name: "重命名账号" });
+    expect(within(rename).getByLabelText("新名称")).toHaveValue("OAuth 主号");
+    fireEvent.change(within(rename).getByLabelText("新名称"), {
+      target: { value: "改名后的主号" },
     });
+    fireEvent.click(within(rename).getByRole("button", { name: "保存" }));
+    await waitFor(() =>
+      expect(mockCommand).toHaveBeenCalledWith("rename_antigravity_account", {
+        id: "oauth-1",
+        name: "改名后的主号",
+        expectedRevision: "rev-2",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(notify).toHaveBeenLastCalledWith("已重命名账号");
+
+    fireEvent.click(within(row("改名后的主号")).getByText("删除"));
+    const remove = screen.getByRole("dialog", { name: "删除账号" });
+    fireEvent.click(within(remove).getByRole("button", { name: "删除" }));
+    await waitFor(() =>
+      expect(mockCommand).toHaveBeenCalledWith("delete_antigravity_account", {
+        id: "oauth-1",
+        expectedRevision: "rev-3",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("改名后的主号")).not.toBeInTheDocument(),
+    );
+    expect(notify).toHaveBeenLastCalledWith("已删除账号");
   });
 
-  it("auto-updates accounts from antigravity-auth-state events and validates ADC JSON before submission", async () => {
-    const notify = vi.fn();
+  it("keeps a failed rename in the dialog with its error", async () => {
     const setError = vi.fn();
+    mockCommand.mockImplementation(async (name: string) => {
+      if (name === "rename_antigravity_account")
+        throw { code: "CONFLICT", message: "Antigravity 凭据状态已变更" };
+      return initialState;
+    });
+    render(<AntigravityAccounts notify={vi.fn()} setError={setError} />);
+    await screen.findByText("OAuth 主号");
+    fireEvent.click(within(row("OAuth 备号")).getByText("重命名"));
+    fireEvent.change(screen.getByLabelText("新名称"), {
+      target: { value: "草稿名称" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Antigravity 凭据状态已变更",
+    );
+    expect(screen.getByLabelText("新名称")).toHaveValue("草稿名称");
+    expect(setError).not.toHaveBeenCalledWith("Antigravity 凭据状态已变更");
+  });
 
+  it("explains how an account appears when none is saved", async () => {
+    mockCommand.mockResolvedValue({
+      ...initialState,
+      oauthPresent: false,
+      oauthEmail: null,
+      oauthAuthMethod: null,
+      accounts: [],
+    });
+    render(<AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />);
+    expect(
+      await screen.findByRole("heading", {
+        name: "尚无已保存的 Antigravity 账号",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "在 Antigravity app 内登录后，Vela 会自动识别并加入切换列表。",
+      ),
+    ).toBeInTheDocument();
+    const list = screen.getByLabelText("Antigravity 账号列表");
+    expect(list.querySelector(".account-row")).toBeNull();
+    expect(within(list).queryByRole("button")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "导入账号" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "刷新 Antigravity 认证状态" }),
+    ).toBeEnabled();
+  });
+
+  it("auto-updates accounts from antigravity-auth-state events", async () => {
+    const notify = vi.fn();
     mockCommand.mockResolvedValue(initialState);
-
-    render(<AntigravityAccounts notify={notify} setError={setError} />);
+    render(<AntigravityAccounts notify={notify} setError={vi.fn()} />);
     await screen.findByText("OAuth 主号");
 
     act(() => {
       listeners.get("antigravity-auth-state")?.({
         ...initialState,
         revision: "rev-auto",
-        mode: "mixed_adc_file_without_flag",
+        oauthEmail: "user3@example.invalid",
         accounts: [
-          ...initialState.accounts,
+          ...initialState.accounts.map((a) => ({ ...a, current: false })),
           {
             id: "oauth-3",
-            name: "user3@example.invalid",
-            kind: "oauth",
+            name: "OAuth 新号",
             email: "user3@example.invalid",
-            projectId: null,
             sourceType: "google-oauth",
             updatedAt: 1710000099,
             current: true,
@@ -201,183 +322,20 @@ describe("AntigravityAccounts", () => {
         ],
       });
     });
-    expect(
-      (await screen.findAllByText("user3@example.invalid")).length,
-    ).toBeGreaterThan(0);
-    expect(notify).not.toHaveBeenCalled();
-    notify.mockClear();
-    // The same accounts arriving again are not new.
-    act(() => {
-      listeners.get("antigravity-auth-state")?.({
-        ...initialState,
-        revision: "rev-auto-2",
-        mode: "mixed_adc_file_without_flag",
-        accounts: [
-          ...initialState.accounts,
-          {
-            id: "oauth-3",
-            name: "user3@example.invalid",
-            kind: "oauth",
-            email: "user3@example.invalid",
-            projectId: null,
-            sourceType: "google-oauth",
-            updatedAt: 1710000100,
-            current: true,
-            credentialRevision: "cred-auto-2",
-          },
-        ],
-      });
-    });
-    expect(notify).not.toHaveBeenCalled();
-    expect(
-      screen.getByText(/不一致（存在 ADC 文件但未启用设置）/),
-    ).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "导入账号" }));
-    const submitBtn = screen.getByRole("button", { name: "保存" });
-    expect(submitBtn).toBeDisabled();
-
-    fireEvent.change(screen.getByLabelText("凭据 JSON 内容"), {
-      target: {
-        value: JSON.stringify({
-          type: "authorized_user",
-          client_id: "cid.apps.googleusercontent.com",
-          client_secret: "GOCSPX-secret",
-          refresh_token: "1//refresh-token",
-          quota_project_id: "my-gcp-project",
-        }),
-      },
-    });
-    expect(submitBtn).not.toBeDisabled();
-    fireEvent.click(submitBtn);
-
-    await waitFor(() => {
-      expect(mockCommand).toHaveBeenCalledWith("add_antigravity_adc", {
-        input: {
-          name: null,
-          jsonText: JSON.stringify({
-            type: "authorized_user",
-            client_id: "cid.apps.googleusercontent.com",
-            client_secret: "GOCSPX-secret",
-            refresh_token: "1//refresh-token",
-            quota_project_id: "my-gcp-project",
-          }),
-          quotaProjectId: null,
-          activate: true,
-        },
-      });
-    });
-  });
-
-  it("imports a masked Vertex key with editable models and keeps errors in the form", async () => {
-    mockCommand.mockImplementation(async (name: string) => {
-      if (name === "get_antigravity_vertex_models")
-        return {
-          models: [{ id: "gemini-fixture-new", preview: false }],
-          error: null,
-        };
-      if (name === "save_antigravity_vertex_key")
-        throw new Error("地区格式无效");
-      return initialState;
-    });
-    render(<AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />);
-    await screen.findByText("OAuth 主号");
-    fireEvent.click(screen.getByRole("button", { name: "导入账号" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Vertex API Key" }));
-    expect(screen.getByLabelText("API Key")).toHaveAttribute(
-      "type",
-      "password",
+    expect(row("OAuth 新号")).toHaveClass("selected");
+    expect(row("OAuth 主号")).not.toHaveClass("selected");
+    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent(
+      "已保存账号 3",
     );
-    expect(screen.getByLabelText("地区")).toHaveValue("global");
-    expect(screen.getByLabelText("模型")).toHaveValue("");
-    fireEvent.change(screen.getByLabelText("名称"), {
-      target: { value: "Fixture Vertex" },
-    });
-    fireEvent.change(screen.getByLabelText("API Key"), {
-      target: { value: "fixture-key" },
-    });
-    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
-    await screen.findByRole("option", { name: /gemini-fixture-new/ });
-    fireEvent.change(screen.getByLabelText("添加目录模型"), {
-      target: { value: "gemini-fixture-new" },
-    });
-    expect(screen.getByLabelText("模型")).toHaveValue("gemini-fixture-new");
-    fireEvent.change(screen.getByLabelText("模型"), {
-      target: { value: "gemini-2.5-flash" },
-    });
-    fireEvent.click(screen.getByLabelText("立即启用"));
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("地区格式无效");
-    expect(screen.getByLabelText("API Key")).toHaveValue("fixture-key");
-    expect(mockCommand).toHaveBeenCalledWith("save_antigravity_vertex_key", {
-      input: {
-        id: null,
-        name: "Fixture Vertex",
-        apiKey: "fixture-key",
-        projectId: null,
-        location: "global",
-        models: ["gemini-2.5-flash"],
-        activate: false,
-        expectedRevision: "rev-1",
-      },
-    });
-  });
+    // The new-account notice is delivered by the backend, not by this view.
+    expect(notify).not.toHaveBeenCalled();
 
-  it("edits Vertex metadata without reading or resubmitting the stored key", async () => {
-    const vertex = {
-      ...initialState.accounts[2],
-      id: "vertex-1",
-      name: "Fixture Vertex",
-      kind: "vertex_key" as const,
-      sourceType: "vertex_key",
-      current: true,
-      vertex: { location: "global", models: ["gemini-2.5-flash"] },
-    };
-    const vertexState = {
-      ...initialState,
-      mode: "vertex_key",
-      accounts: [vertex],
-    };
-    mockCommand.mockImplementation(async (name: string) => {
-      if (name === "get_antigravity_vertex_models")
-        return {
-          models: [{ id: "gemini-fixture-new", preview: false }],
-          error: "目录刷新失败",
-        };
-      return vertexState;
-    });
-    render(<AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />);
-    await screen.findByText("Fixture Vertex");
-    fireEvent.click(screen.getByLabelText("管理 Fixture Vertex"));
-    fireEvent.click(screen.getByRole("button", { name: "编辑凭据" }));
-    expect(screen.getByLabelText("API Key")).toHaveValue("");
-    expect(await screen.findByText("目录刷新失败")).toBeInTheDocument();
-    expect(screen.getByLabelText("模型")).toHaveValue("gemini-2.5-flash");
-    fireEvent.click(screen.getByRole("button", { name: "刷新模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换到 OAuth 主号" }));
     await waitFor(() =>
-      expect(mockCommand).toHaveBeenCalledWith(
-        "get_antigravity_vertex_models",
-        { refresh: true },
-      ),
-    );
-    expect(screen.getByLabelText("模型")).toHaveValue("gemini-2.5-flash");
-    expect(screen.getByLabelText("立即启用")).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("地区"), {
-      target: { value: "us-central1" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() =>
-      expect(mockCommand).toHaveBeenCalledWith("save_antigravity_vertex_key", {
-        input: expect.objectContaining({
-          id: "vertex-1",
-          apiKey: "",
-          location: "us-central1",
-          activate: true,
-        }),
+      expect(mockCommand).toHaveBeenCalledWith("switch_antigravity_account", {
+        id: "oauth-1",
+        expectedRevision: "rev-auto",
       }),
-    );
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
   });
 

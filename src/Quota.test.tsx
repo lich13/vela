@@ -366,7 +366,7 @@ describe("quota display and refresh", () => {
     );
     const area = screen.getByLabelText(`${provider.name} 额度`);
     expect(within(area).queryByText("钱包余额")).not.toBeInTheDocument();
-    const button = within(area).getByRole("button", { name: "剩余 87.5K USD" });
+    const button = within(area).getByRole("button", { name: "剩余 87,495 USD" });
     expect(button).toHaveAttribute("title", "剩余 87,495.917 USD");
 
     rerender(<QuotaInfo provider={provider} quota={q} refresh={() => {}} />);
@@ -601,7 +601,7 @@ describe("quota display and refresh", () => {
       />,
     );
 
-    expect(screen.getByText("剩余 8.5 USD")).toBeInTheDocument();
+    expect(screen.getByText("剩余 8 USD")).toBeInTheDocument();
     expect(screen.queryByText("已过期")).not.toBeInTheDocument();
     expect(screen.queryByText("已到期")).not.toBeInTheDocument();
   });
@@ -798,11 +798,13 @@ describe("quota display and refresh", () => {
       screen.getByLabelText(`${provider.name} 额度`);
 
     expect(capsule()).toHaveAttribute("data-tone", "neutral");
+    expect(capsule()).not.toHaveAttribute("data-client");
 
     view.rerender(
       <QuotaInfo
         provider={provider}
         compact
+        clientId="claude"
         quota={quotaFixture(provider, {
           plans: [quotaPlan({ remaining: 8, used: 2, total: 10 })],
         })}
@@ -810,6 +812,7 @@ describe("quota display and refresh", () => {
       />,
     );
     expect(capsule()).toHaveAttribute("data-tone", "good");
+    expect(capsule()).toHaveAttribute("data-client", "claude");
 
     view.rerender(
       <QuotaInfo
@@ -952,7 +955,7 @@ it("keeps a failed compact query in the refresh control without hiding cached qu
   const error = "额度接口连接失败";
   const props = { provider, refresh: vi.fn(), compact: true };
   const view = render(<QuotaInfo {...props} quota={{ ...result(), state: "error", error }} />);
-  expect(screen.getByText("剩余 8.5 USD")).toBeInTheDocument();
+  expect(screen.getByText("剩余 8 USD")).toBeInTheDocument();
   expect(screen.queryByText("查询失败")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: `刷新 ${provider.name} 额度` })).toHaveAttribute("title", error);
   view.rerender(<QuotaInfo {...props} quota={{ ...result(), state: "error", error, plans: [] }} />);

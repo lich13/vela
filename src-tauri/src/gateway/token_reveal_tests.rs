@@ -6,6 +6,7 @@ fn save_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) ->
     gateway
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -13,6 +14,10 @@ fn save_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) ->
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: base_url.into(),
@@ -171,6 +176,7 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
     gateway
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -178,6 +184,10 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: Some(id.clone()),
                 base_url: base_url.into(),
@@ -203,6 +213,7 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
     gateway
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -210,6 +221,10 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: Some(id.clone()),
                 base_url: base_url.into(),
@@ -236,6 +251,7 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
     gateway
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -243,6 +259,10 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: Some(id.clone()),
                 base_url: updated_base_url.into(),

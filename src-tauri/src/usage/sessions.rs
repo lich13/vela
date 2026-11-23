@@ -250,6 +250,13 @@ pub trait Repository {
     ) -> Result<()> {
         Ok(())
     }
+    /// The model list learned from the Antigravity app, as saved.
+    fn antigravity_models(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+    fn save_antigravity_models(&mut self, _models: &str) -> Result<()> {
+        Ok(())
+    }
     fn data_dir(&self) -> Option<&Path> {
         None
     }
@@ -869,6 +876,12 @@ mod test_support {
             periods: &super::super::antigravity::quota::Periods,
         ) -> Result<()> {
             Store::save_antigravity_quota(self, id, periods)
+        }
+        fn antigravity_models(&self) -> Result<Option<String>> {
+            Store::antigravity_models(self)
+        }
+        fn save_antigravity_models(&mut self, models: &str) -> Result<()> {
+            Store::save_antigravity_models(self, models)
         }
         fn data_dir(&self) -> Option<&Path> {
             self.data_dir()

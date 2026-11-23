@@ -24,7 +24,10 @@ import ClientSelection, {
 } from "./ClientSelection";
 import ClaudeSettings from "./ClaudeSettings";
 import AntigravitySettings from "./AntigravitySettings";
+import AntigravityCliSettings from "./AntigravityCliSettings";
+import ConfigTreeSettings from "./ConfigTreeSettings";
 import { changes, get } from "./claude-settings";
+import { codexFields, configClients, grokFields } from "./config-fields";
 import Modal from "./Modal";
 import { confirmAction } from "./confirmation";
 import { useCodeMirrorSurface } from "./codeMirrorLoader";
@@ -38,8 +41,11 @@ type Props = {
   onDirty: (value: boolean) => void;
   onMessage: (s: string) => void;
 };
+/** Antigravity keeps two files: the app's and the `agy` CLI's. */
+type AntigravityFile = "app" | "cli";
 export default function ConfigEditor(props: Props) {
   const [clientId, select] = useClientSelection("config");
+  const [file, setFile] = useState<AntigravityFile>("app");
   const dirty = useRef(false);
   const changed = useCallback(
     (value: boolean) => {
@@ -65,10 +71,12 @@ export default function ConfigEditor(props: Props) {
     );
   return (
     <EditorContent
-      key={`${clientId}:${home}`}
+      key={`${clientId}:${home}:${file}`}
       {...props}
       home={home}
       clientId={clientId}
+      file={file}
+      setFile={setFile}
       select={(id) => select(id, dirty.current)}
       onDirty={changed}
     />
@@ -79,27 +87,35 @@ function EditorContent({
   home,
   clientId,
   select,
+  file,
+  setFile,
   theme,
   onDirty,
   onMessage,
-}: Props & { clientId: ConfigClientId; select: (id: ConfigClientId) => void }) {
+}: Props & {
+  clientId: ConfigClientId;
+  select: (id: ConfigClientId) => void;
+  file: AntigravityFile;
+  setFile: (file: AntigravityFile) => void;
+}) {
+  // Claude and Antigravity keep JSON; Codex and Grok keep TOML, read by Rust.
   const jsonDualMode = clientId === "claude" || clientId === "antigravity";
-  const [doc, setDoc] = useState<ConfigDocument | null>(null),
+  const cli = clientId === "antigravity" && file === "cli";
+  const [doc, setDoc] = useState<
+      (ConfigDocument & { missing?: boolean }) | null
+    >(null),
     [text, setText] = useState(""),
     [error, setError] = useState<AppError | null>(null),
     [busy, setBusy] = useState(false),
     [conflict, setConflict] = useState(false),
-    [visual, setVisual] = useState(jsonDualMode),
+    [visual, setVisual] = useState(true),
     [revealed, setRevealed] = useState(false),
     [diff, setDiff] = useState(false);
   const handleEditorLoadError = useCallback(
     (e: unknown) => setError(errorOf(e)),
     [],
   );
-  const Surface = useCodeMirrorSurface(
-    !jsonDualMode || !visual,
-    handleEditorLoadError,
-  );
+  const Surface = useCodeMirrorSurface(!visual, handleEditorLoadError);
   const docRef = useRef(doc),
     textRef = useRef(text),
     saveRef = useRef(() => {}),
@@ -115,27 +131,30 @@ function EditorContent({
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     try {
-      const d = await (clientId === "antigravity"
-        ? command("read_antigravity_config")
-        : command("read_config", { clientId }));
-      if (seq !== loadSeq.current) return;
-      let fallbackToSource = false;
-      if (jsonDualMode) {
-        try {
-          get(d.text, []);
-        } catch {
-          fallbackToSource = true;
-        }
+      const d = await (cli
+        ? command("read_antigravity_cli_config")
+        : clientId === "antigravity"
+          ? command("read_antigravity_config")
+          : command("read_config", { clientId }));
+      // A draft the form cannot read opens in the source editor, with the reason.
+      let unreadable: AppError | null = null;
+      try {
+        if (jsonDualMode) get(d.text, []);
+        else
+          await command("read_config_tree", { format: "toml", text: d.text });
+      } catch (e) {
+        unreadable = jsonDualMode ? { code: "JSON", message: "" } : errorOf(e);
       }
+      if (seq !== loadSeq.current) return;
       setDoc(d);
       setText(d.text);
-      setError(null);
+      setError(unreadable?.message ? unreadable : null);
       setConflict(false);
-      if (fallbackToSource) setVisual(false);
+      if (unreadable) setVisual(false);
     } catch (e) {
       if (seq === loadSeq.current) setError(errorOf(e));
     }
-  }, [clientId, jsonDualMode]);
+  }, [clientId, jsonDualMode, cli]);
   useEffect(() => {
     void load();
     return () => {
@@ -174,16 +193,21 @@ function EditorContent({
     setBusy(true);
     setError(null);
     try {
-      const d = await (clientId === "antigravity"
-        ? command("save_antigravity_config", {
+      const d = await (cli
+        ? command("save_antigravity_cli_config", {
             text: submitted,
             expectedRevision: current.revision,
           })
-        : command("save_config", {
-            clientId,
-            text: submitted,
-            expectedRevision: current.revision,
-          }));
+        : clientId === "antigravity"
+          ? command("save_antigravity_config", {
+              text: submitted,
+              expectedRevision: current.revision,
+            })
+          : command("save_config", {
+              clientId,
+              text: submitted,
+              expectedRevision: current.revision,
+            }));
       const restart =
         clientId === "codex" ||
         (clientId === "claude" &&
@@ -211,7 +235,7 @@ function EditorContent({
       saving.current = false;
       setBusy(false);
     }
-  }, [clientId, onMessage]);
+  }, [clientId, cli, onMessage]);
   saveRef.current = () => {
     void save();
   };
@@ -231,17 +255,21 @@ function EditorContent({
   }, [dirty, busy]);
   const validateText = useCallback(
     async (candidate: string) => {
-      if (clientId === "antigravity")
+      if (cli)
+        await command("validate_antigravity_cli_config", { text: candidate });
+      else if (clientId === "antigravity")
         await command("validate_antigravity_config", { text: candidate });
       else await command("validate_config", { clientId, text: candidate });
     },
-    [clientId],
+    [clientId, cli],
   );
   const switchMode = async (next: boolean) => {
     if (next) {
       try {
-        get(text, []);
-        await validateText(text);
+        if (jsonDualMode) {
+          get(text, []);
+          await validateText(text);
+        } else await command("read_config_tree", { format: "toml", text });
         setError(null);
       } catch (e) {
         setError(errorOf(e));
@@ -263,6 +291,24 @@ function EditorContent({
     } catch {
       /* Invalid drafts remain in the source editor. */
     }
+  const source = (
+    <div className="editor-body">
+      {Surface ? (
+        <Surface
+          mode={jsonDualMode ? "json" : "toml"}
+          value={text}
+          onChange={update}
+          theme={theme}
+          maskSecrets={jsonDualMode && !revealed}
+          onSave={() => saveRef.current()}
+          validateText={validateText}
+          ariaLabel={jsonDualMode ? "JSON 编辑器" : "TOML 编辑器"}
+        />
+      ) : (
+        <div className="empty">正在加载编辑器…</div>
+      )}
+    </div>
+  );
   return (
     <section className="config-page">
       {clientId === "claude" && (
@@ -277,13 +323,13 @@ function EditorContent({
       )}
       <div className="config-heading">
         <ClientSelection
-          visibleClients={["codex", "claude", "grok", "dsh", "antigravity"]}
+          visibleClients={configClients}
           client={clientId}
           select={select}
           disabled={busy}
         />
         <div className="inline">
-          {jsonDualMode && (
+          {!doc?.missing && (
             <div className="segmented" aria-label="编辑方式">
               <button
                 aria-pressed={visual}
@@ -297,7 +343,7 @@ function EditorContent({
                 onClick={() => void switchMode(false)}
                 disabled={busy}
               >
-                JSON
+                {jsonDualMode ? "JSON" : "原文"}
               </button>
             </div>
           )}
@@ -312,13 +358,32 @@ function EditorContent({
         </div>
       </div>
       <div className="editor-toolbar">
-        <span title={doc?.path}>
-          {clientId === "antigravity"
-            ? "config.json"
-            : clientId === "claude"
-              ? "settings.json"
-              : "config.toml"}
-        </span>
+        {clientId === "antigravity" ? (
+          <label className="config-file" title={doc?.path}>
+            文件
+            <select
+              aria-label="Antigravity 配置文件"
+              value={file}
+              disabled={busy}
+              onChange={async (e) => {
+                const next = e.target.value as AntigravityFile;
+                if (
+                  !dirty ||
+                  (await confirmAction("切换文件会丢弃未保存的修改。"))
+                )
+                  setFile(next);
+              }}
+            >
+              <option value="app">App 配置</option>
+              <option value="cli">CLI 配置</option>
+            </select>
+            <span>{cli ? "settings.json" : "config.json"}</span>
+          </label>
+        ) : (
+          <span title={doc?.path}>
+            {clientId === "claude" ? "settings.json" : "config.toml"}
+          </span>
+        )}
         <div className="inline">
           {dirty && <span className="status amber">未保存</span>}
           {jsonDualMode && dirty && (
@@ -368,7 +433,7 @@ function EditorContent({
             className="icon-button"
             aria-label="恢复上次配置"
             title="恢复上次配置"
-            disabled={!doc?.canRestore || busy}
+            disabled={!doc?.canRestore || doc.missing || busy}
             onClick={async () => {
               if (
                 dirty &&
@@ -376,9 +441,11 @@ function EditorContent({
               )
                 return;
               void (
-                clientId === "antigravity"
-                  ? command("read_previous_antigravity_config")
-                  : command("read_previous_config", { clientId })
+                cli
+                  ? command("read_previous_antigravity_cli_config")
+                  : clientId === "antigravity"
+                    ? command("read_previous_antigravity_config")
+                    : command("read_previous_config", { clientId })
               )
                 .then(update)
                 .catch((e) => setError(errorOf(e)));
@@ -416,27 +483,26 @@ function EditorContent({
       )}
       {!doc ? (
         <div className="empty">正在读取配置…</div>
-      ) : clientId === "claude" && visual ? (
+      ) : doc.missing ? (
+        <div className="empty">
+          尚未找到 Antigravity CLI 配置文件，首次运行 agy 后生成
+        </div>
+      ) : !visual ? (
+        source
+      ) : clientId === "claude" ? (
         <ClaudeSettings text={text} onChange={update} guarded={doc.guarded} />
-      ) : clientId === "antigravity" && visual ? (
+      ) : cli ? (
+        <AntigravityCliSettings text={text} onChange={update} />
+      ) : clientId === "antigravity" ? (
         <AntigravitySettings text={text} onChange={update} />
       ) : (
-        <div className="editor-body">
-          {Surface ? (
-            <Surface
-              mode={jsonDualMode ? "json" : "toml"}
-              value={text}
-              onChange={update}
-              theme={theme}
-              maskSecrets={jsonDualMode && !revealed}
-              onSave={() => saveRef.current()}
-              validateText={validateText}
-              ariaLabel={jsonDualMode ? "JSON 编辑器" : "TOML 编辑器"}
-            />
-          ) : (
-            <div className="empty">正在加载编辑器…</div>
-          )}
-        </div>
+        <ConfigTreeSettings
+          format="toml"
+          text={text}
+          onChange={update}
+          fields={clientId === "codex" ? codexFields : grokFields}
+          guarded={doc.guarded}
+        />
       )}
       {diff && (
         <Modal title="配置改动" close={() => setDiff(false)}>

@@ -1,0 +1,158 @@
+@layer pages {
+/* Controls shared by every visual config editor: switches, hints, read-only notes. */
+.config-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-content .config-switch input[type="checkbox"][role="switch"] {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface-subtle);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.settings-content .config-switch input[type="checkbox"][role="switch"]::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease;
+}
+
+.settings-content .config-switch input[type="checkbox"][role="switch"]:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.settings-content
+  .config-switch
+  input[type="checkbox"][role="switch"]:checked::before {
+  transform: translateX(16px);
+  background: var(--on-primary);
+}
+
+.settings-content .config-switch input[type="checkbox"][role="switch"]:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* An absent key shows the client's default position, drawn lighter until a value is chosen. */
+.settings-content .config-switch[data-state] input[type="checkbox"][role="switch"] {
+  border-style: dashed;
+  opacity: 0.62;
+}
+
+.settings-content
+  .config-switch[data-state="unknown"]
+  input[type="checkbox"][role="switch"]::before {
+  transform: translateX(8px);
+}
+
+/* A value that may be a switch or an amount, with the button that turns it. */
+.config-flag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.config-flag > input:not([type="checkbox"]) {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+}
+
+.config-readonly {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  min-height: 30px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.config-readonly code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--ink);
+}
+
+/* A value the structure tree shows as written: dates, null, multi-line text. */
+.config-tree-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 60%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.config-tree-settings .tree-scalar > span {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.settings-content .setting-row > label small,
+.settings-content .setting-row > span small,
+.settings-list-group h3 small {
+  display: block;
+  margin-top: 3px;
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.settings-section {
+  margin: 20px 0 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.settings-content > .settings-section:first-child {
+  margin-top: 6px;
+}
+
+.config-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-file select {
+  padding: 4px 8px;
+  border-radius: var(--radius-xs);
+  font-size: 12px;
+}
+}

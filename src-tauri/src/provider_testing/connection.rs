@@ -60,6 +60,7 @@ pub fn default_model(client: ClientId) -> &'static str {
     match client {
         ClientId::Grok => "grok-4.1-fast",
         ClientId::Claude => "claude-sonnet-4-5",
+        ClientId::Agy => "gemini-2.5-flash",
         ClientId::Dsh => "deepseek-v4-pro",
         ClientId::Codex => downgrade::DEFAULT_TEST_MODEL,
     }
@@ -136,8 +137,19 @@ impl Service {
         let mut error_detail = None;
         let result = async {
             let client = client()?;
-            let mut url = url::Url::parse(&target.url("/v1/models")?)
-                .map_err(|_| failure("模型目录地址无效"))?;
+            // Gemini lists models under their own name, a page at a time.
+            let gemini = client_id == ClientId::Agy;
+            if (gemini && crate::gateway::gemini::vertex(&target.base_url))
+                || target.vertex().is_some()
+            {
+                return Err(failure("Vertex AI 没有模型目录接口，请在白名单填写模型 ID"));
+            }
+            let mut url = url::Url::parse(&target.url(if gemini {
+                "/v1beta/models?pageSize=1000"
+            } else {
+                "/v1/models"
+            })?)
+            .map_err(|_| failure("模型目录地址无效"))?;
             let mut models = Vec::new();
             let mut cursors = std::collections::HashSet::new();
             loop {
@@ -194,10 +206,24 @@ impl Service {
                         failure("上游未返回模型目录")
                     })?;
                 for item in list {
-                    let id = item["id"]
-                        .as_str()
-                        .or_else(|| item["slug"].as_str())
-                        .or_else(|| item.as_str());
+                    // Embedding and image models answer no chat request.
+                    if gemini
+                        && item["supportedGenerationMethods"]
+                            .as_array()
+                            .is_some_and(|methods| !methods.iter().any(|m| m == "generateContent"))
+                    {
+                        continue;
+                    }
+                    let id = if gemini {
+                        item["name"]
+                            .as_str()
+                            .map(|name| name.strip_prefix("models/").unwrap_or(name))
+                    } else {
+                        item["id"]
+                            .as_str()
+                            .or_else(|| item["slug"].as_str())
+                            .or_else(|| item.as_str())
+                    };
                     if let Some(id) = id.filter(|s| {
                         !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
                     }) {
@@ -208,17 +234,29 @@ impl Service {
                             id: id.into(),
                             name: item["display_name"]
                                 .as_str()
-                                .or_else(|| item["name"].as_str())
+                                .or_else(|| item["displayName"].as_str())
+                                .or_else(|| item["name"].as_str().filter(|_| !gemini))
                                 .filter(|s| s.len() <= 256)
                                 .unwrap_or(id)
                                 .into(),
                         });
                     }
                 }
-                if data["has_more"] != true {
+                let (more, last, after) = if gemini {
+                    (
+                        data["nextPageToken"]
+                            .as_str()
+                            .is_some_and(|s| !s.is_empty()),
+                        "nextPageToken",
+                        "pageToken",
+                    )
+                } else {
+                    (data["has_more"] == true, "last_id", "after_id")
+                };
+                if !more {
                     break;
                 }
-                let cursor = data["last_id"]
+                let cursor = data[last]
                     .as_str()
                     .filter(|s| !s.is_empty() && s.len() <= 256)
                     .ok_or_else(|| failure("模型目录分页游标无效"))?;
@@ -227,13 +265,13 @@ impl Service {
                 }
                 let pairs: Vec<_> = url
                     .query_pairs()
-                    .filter(|(key, _)| key != "after_id")
+                    .filter(|(key, _)| key != after)
                     .map(|(k, v)| (k.into_owned(), v.into_owned()))
                     .collect();
                 url.query_pairs_mut()
                     .clear()
                     .extend_pairs(pairs)
-                    .append_pair("after_id", cursor);
+                    .append_pair(after, cursor);
             }
             models.sort_by(|a, b| a.id.cmp(&b.id));
             models.dedup_by(|a, b| a.id == b.id);
@@ -274,14 +312,18 @@ impl Service {
     pub(super) async fn run_connection(&self, id: &str, context: &Context) -> Result<()> {
         let target = &context.target;
         let model = target.model(&context.request.model);
-
+        // The model is part of a Gemini address.
+        if target.client_id == ClientId::Agy && !crate::gateway::gemini::valid_model(&model) {
+            return Err(failure("模型 ID 无效"));
+        }
         let (path, mut payload) = payload(&context.request, &model, &target.protocol);
         if let Some(metadata) = target.codex_metadata() {
             payload["client_metadata"] = metadata;
         }
         let started = Instant::now();
+        let address = target.address(&path, &mut payload)?;
         let response = client()?
-            .post(target.url(&path)?)
+            .post(address)
             .headers(target.headers.clone())
             .json(&payload)
             .send()

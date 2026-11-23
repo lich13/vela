@@ -707,16 +707,46 @@ kbd {
   padding: 1px 4px;
 }
 
+/* A healthy capsule wears its client's accent; one that names no client keeps
+   the tone's own colour. */
+.quota-compact[data-client="codex"] {
+  --quota-client: var(--accent);
+  --quota-client-soft: var(--accent-soft);
+}
+
+.quota-compact[data-client="claude"] {
+  --quota-client: var(--accent-blue);
+  --quota-client-soft: var(--accent-blue-soft);
+}
+
+.quota-compact[data-client="grok"] {
+  --quota-client: var(--accent-amber);
+  --quota-client-soft: var(--accent-amber-soft);
+}
+
+.quota-compact[data-client="dsh"] {
+  --quota-client: var(--accent-emerald);
+  --quota-client-soft: var(--accent-emerald-soft);
+}
+
 .quota-compact[data-tone="good"] .quota-value {
-  color: var(--accent-emerald);
-  background: var(--accent-emerald-soft);
-  border-color: color-mix(in srgb, var(--accent-emerald) 30%, var(--line));
+  color: var(--quota-client, var(--accent-emerald));
+  background: var(--quota-client-soft, var(--accent-emerald-soft));
+  border-color: color-mix(
+    in srgb,
+    var(--quota-client, var(--accent-emerald)) 30%,
+    var(--line)
+  );
 }
 
 .quota-compact[data-tone="normal"] .quota-value {
-  color: var(--accent);
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+  color: var(--quota-client, var(--accent));
+  background: var(--quota-client-soft, var(--accent-soft));
+  border-color: color-mix(
+    in srgb,
+    var(--quota-client, var(--accent)) 28%,
+    var(--line)
+  );
 }
 
 .quota-compact[data-tone="warn"] .quota-value {
@@ -746,7 +776,8 @@ kbd {
   white-space: nowrap;
 }
 
-.quota-value:not(:disabled):hover {
+/* A toned capsule keeps its own colour under the pointer. */
+.quota-compact[data-tone="neutral"] .quota-value:not(:disabled):hover {
   color: var(--accent);
 }
 

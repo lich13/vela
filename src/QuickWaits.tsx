@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { command } from "./bridge";
 import { errorOf, type ClientId, type GatewayState } from "./types";
+import { formatBytes } from "./usage-format";
 const phases: Record<string, string> = {
   admission: "等待准入",
   headers: "等待首字节",
@@ -64,7 +65,7 @@ export default function QuickWaits({
                   clientId,
                   requestId: r.requestId,
                 });
-                notify(cancelled ? "已中止等待" : "等待已结束");
+                notify(cancelled ? "已打断并重发" : "等待已结束");
               } catch (e) {
                 error(errorOf(e).message);
               } finally {
@@ -72,7 +73,7 @@ export default function QuickWaits({
               }
             }}
           >
-            {busy.includes(r.requestId) ? "中止中…" : "中止"}
+            {busy.includes(r.requestId) ? "重发中…" : "重发"}
           </button>
           <div className="quick-wait-timing">
             <time>
@@ -91,6 +92,16 @@ export default function QuickWaits({
               )}
             </span>
           </div>
+          {r.receivedBytes != null && (
+            <div className="quick-wait-transfer">
+              <span>已收 {formatBytes(r.receivedBytes)}</span>
+              <span>
+                {(r.silentSeconds ?? 0) >= 5
+                  ? `静默 ${r.silentSeconds} 秒`
+                  : `${formatBytes(r.bytesPerSecond ?? 0)}/s`}
+              </span>
+            </div>
+          )}
         </div>
       ))}
     </section>

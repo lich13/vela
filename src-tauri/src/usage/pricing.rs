@@ -225,8 +225,12 @@ fn valid_config(c: &Config) -> Result<()> {
     let mut keys = BTreeSet::new();
     if c.provider_mappings.len() > 4096
         || c.provider_mappings.iter().any(|rule| {
-            !matches!(rule.client.as_str(), "codex" | "claude" | "grok" | "dsh")
-                || rule.provider.is_empty()
+            // The platform a call is filed under: Antigravity's gateway
+            // files its calls as `antigravity`.
+            !matches!(
+                rule.client.as_str(),
+                "codex" | "claude" | "antigravity" | "grok" | "dsh"
+            ) || rule.provider.is_empty()
                 || rule.provider.len() > 128
                 || !rule
                     .provider
@@ -519,6 +523,12 @@ impl Pricing {
                     .chain(s.cache.catalog.keys())
                     .find(|key| key.eq_ignore_ascii_case(base))
                     .cloned()
+                    .or_else(|| {
+                        // The bundled tariffs keep their place ahead of models.dev.
+                        (builtin_pricing::canonical(base).is_none()
+                            && self.models_dev.price(base).is_some())
+                        .then(|| base.to_owned())
+                    })
             }) {
                 canonical = if known == "gpt-5.3-codex"
                     && requested.to_ascii_lowercase().contains("-spark")
@@ -1236,5 +1246,77 @@ mod tests {
             .quote(Some("relay-claude-opus-4-6:free"), "1")
             .data
             .is_none());
+    }
+    #[test]
+    fn gemini_effort_suffixes_take_the_models_dev_price_of_their_base_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let public = json!({"schema":1,"updated_at":1,"providers":{"google":{"name":"Google","models":{
+            "gemini-4-neon":{"cost":{"input":3,"output":15}},
+            "gemini-4-argon":{"cost":{"input":9,"output":9}},
+            "gemini-4-argon-f":{"cost":{"input":9,"output":9}}
+        }}}});
+        std::fs::write(dir.path().join("models-dev-index.json"), public.to_string()).unwrap();
+        let p = Pricing::new(dir.path()).unwrap();
+        let tokens = Tokens {
+            input: Some(1000),
+            output: Some(100),
+            ..Tokens::default()
+        };
+        let source = |model: &str| {
+            let quote = p.quote(Some(model), "1");
+            (quote.model, quote.source)
+        };
+        for model in [
+            "gemini-4-neon-xhigh",
+            "gemini-4-neon-tiered-high",
+            "google/gemini-4-neon-high",
+        ] {
+            assert_eq!(
+                source(model),
+                ("gemini-4-neon".into(), "models.dev".into()),
+                "{model}"
+            );
+            assert_eq!(
+                p.quote(Some(model), "1")
+                    .calculate(&tokens, None)
+                    .unwrap()
+                    .cost,
+                "0.0045",
+                "{model}"
+            );
+        }
+        // A base name without any price source stays unpriced, as do other families.
+        for model in [
+            "gemini-4-xenon-xhigh",
+            "gemini-4-xenon-tiered-high",
+            "fixture-neon-high",
+        ] {
+            assert!(p.quote(Some(model), "1").data.is_none(), "{model}");
+        }
+        // Bundled tariffs, the synced cache and fixed prices keep their order.
+        for model in ["gemini-4-argon-high", "gemini-4-argon-f-high"] {
+            assert_eq!(
+                source(model),
+                ("gemini-4-argon".into(), "sub2api_builtin".into()),
+                "{model}"
+            );
+        }
+        let card = json!({"input_cost_per_token":"0.1","output_cost_per_token":"0.2"});
+        Arc::make_mut(&mut p.state.write())
+            .cache
+            .catalog
+            .insert("gemini-4-neon".into(), card.clone());
+        assert_eq!(
+            source("gemini-4-neon-xhigh"),
+            ("gemini-4-neon".into(), "sub2api".into())
+        );
+        Arc::make_mut(&mut p.state.write())
+            .config
+            .fixed
+            .insert("gemini-4-neon".into(), card);
+        assert_eq!(
+            source("gemini-4-neon-tiered-high"),
+            ("gemini-4-neon".into(), "fixed".into())
+        );
     }
 }

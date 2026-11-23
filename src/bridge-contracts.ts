@@ -89,40 +89,22 @@ export type ClaudeLoginState = {
 export type AntigravityAccountItem = {
   id: string;
   name: string;
-  kind: "oauth" | "adc" | "vertex_key";
   sourceType: string;
   email: string | null;
-  projectId: string | null;
   current: boolean;
   updatedAt: number;
   credentialRevision: string;
-  vertex?: { location: string; models: string[] };
 };
-export type AntigravityAuthMode =
-  | "vertex_key"
-  | "oauth"
-  | "adc"
-  | "mixed_adc_file_without_flag"
-  | "mixed_flag_without_adc_file";
 export type AntigravityAuthState = {
   accounts: AntigravityAccountItem[];
-  mode: AntigravityAuthMode;
-  enableAdc: boolean;
   oauthPresent: boolean;
   oauthEmail: string | null;
   oauthAuthMethod: string | null;
-  adcStatus: "active" | "disabled" | "backup_only" | "missing";
-  adcType: "service_account" | "authorized_user" | null;
-  adcProject: string | null;
+  /** Running `agy` sessions; each writes its own login back at a token refresh. */
+  cliSessions?: number;
   appRestarted?: boolean;
   relaunchFailed?: boolean;
   revision: string;
-};
-export type AddAntigravityAdcInput = {
-  name?: string | null;
-  jsonText: string;
-  quotaProjectId?: string | null;
-  activate: boolean;
 };
 export type ProviderTestMode =
   | "text"
@@ -143,7 +125,7 @@ export type DetectionPlatform = {
   degradedModelId?: string;
 };
 export type ProviderTestKind = "connection" | "fingerprint";
-export type ProviderAction = "settings" | "testing";
+export type ProviderAction = "settings" | "testing" | "edit";
 export type ProviderTestRequest = {
   clientId: ClientId;
   providerId: string;
@@ -293,6 +275,8 @@ export type ProviderTestingState = {
   revision: string;
   connectionPrompt: string;
   jobs: ProviderTestJob[];
+  /** Model picked for the last manual test of each kind; empty when none or "default". */
+  lastModels: Record<ProviderTestKind, string>;
   detection: ProviderDetection;
   degraded: Record<string, ProviderDegradation>;
   banks: Record<DetectionEngine, FingerprintBankState>;
@@ -389,6 +373,8 @@ export type GatewayModels = {
     id: string;
     providers: { id: string; name: string }[];
     manual: boolean;
+    /** Antigravity: the model `agy` starts on, listed first. */
+    first?: boolean;
     source: string | null;
     pinned: string | null;
     metadata: ModelMetadata | null;
@@ -449,12 +435,32 @@ export type GatewayEdit =
   | {
       op: "saveProvider";
       searchOnly?: boolean;
+      takeCompaction?: boolean;
+      /** "" clears the model. */
+      compactionModel?: string;
+      /** "" clears the effort. */
+      compactionEffort?: string;
+      takeAuxiliary?: boolean;
+      /** "" clears the model. */
+      auxiliaryModel?: string;
+      /** "" clears the effort. */
+      auxiliaryEffort?: string;
+      /** Claude only; a Grok provider's is sent with `saveGrokProvider`. */
+      takeWebSearch?: boolean;
+      /** "" clears the model. */
+      webSearchModel?: string;
+      /** "" clears the effort. */
+      webSearchEffort?: string;
       endOnMessageStop?: boolean;
       filterCountTokens?: boolean;
       bufferCompleteResponse?: boolean;
       endlessMode?: boolean;
       upstreamRetrySeconds?: number;
+      limitRetrySeconds?: number;
+      limitRestSeconds?: number;
       normalRetrySeconds?: number;
+      riskCodes?: number[];
+      retryIntensity?: number;
       id?: string | null;
       baseUrl: string;
       token: string;
@@ -462,7 +468,28 @@ export type GatewayEdit =
       name?: string | null;
     }
   | {
-      op: "saveGrokProvider" | "saveDshProvider";
+      op: "saveGrokProvider";
+      takeWebSearch?: boolean;
+      /** "" clears the model. */
+      webSearchModel?: string;
+      /** "" clears the effort. */
+      webSearchEffort?: string;
+      id?: string | null;
+      baseUrl: string;
+      token: string;
+      quotaAccessToken?: string;
+      name?: string | null;
+      protocol: GrokProtocol;
+    }
+  | {
+      op: "saveDshProvider";
+      endlessMode?: boolean;
+      upstreamRetrySeconds?: number;
+      limitRetrySeconds?: number;
+      limitRestSeconds?: number;
+      normalRetrySeconds?: number;
+      riskCodes?: number[];
+      retryIntensity?: number;
       id?: string | null;
       baseUrl: string;
       token: string;
@@ -476,10 +503,14 @@ export type GatewayEdit =
       id: string;
       mapping: Record<string, string | null>;
     }
+  | { op: "modelMapProvider"; id: string; mapping: Record<string, string> }
   | { op: "renameProvider"; id: string; name: string }
   | { op: "endpointsProvider"; id: string; baseUrls: string[] }
   | { op: "swapEndpoint"; id: string; baseUrl: string }
-  | { op: "deleteProvider" | "select" | "reset"; id: string }
+  | {
+      op: "deleteProvider" | "duplicateProvider" | "select" | "reset";
+      id: string;
+    }
   | { op: "queueProvider"; id: string; queued: boolean }
   | { op: "concurrencyProvider"; id: string; maxConcurrency: number }
   | { op: "rpmProvider"; id: string; maxRpm: number }
@@ -531,33 +562,31 @@ export type CommandMap = {
   save_antigravity_config: Call<{ text: string } & Revision, ConfigDocument>;
   read_previous_antigravity_config: Call<None, string>;
   validate_antigravity_config: Call<{ text: string }, void>;
-  get_antigravity_auth_state: Call<None, AntigravityAuthState>;
-  add_antigravity_adc: Call<
-    { input: AddAntigravityAdcInput },
-    AntigravityAuthState
+  /** `missing` means the CLI has not created the file yet; Vela never creates it. */
+  read_antigravity_cli_config: Call<None, ConfigDocument & { missing: boolean }>;
+  save_antigravity_cli_config: Call<
+    { text: string } & Revision,
+    ConfigDocument & { missing: boolean }
   >;
-  save_antigravity_vertex_key: Call<
+  read_previous_antigravity_cli_config: Call<None, string>;
+  validate_antigravity_cli_config: Call<{ text: string }, void>;
+  read_config_tree: Call<
+    { format: import("./config-tree").ConfigTreeFormat; text: string },
+    import("./config-tree").ConfigTreeNode
+  >;
+  /** Returns the draft with one key or item replaced, added or (`value: null`) removed. */
+  patch_config_tree: Call<
     {
-      input: {
-        id: string | null;
-        name: string;
-        apiKey: string;
-        projectId: string | null;
-        location: string;
-        models: string[];
-        activate: boolean;
-        expectedRevision: string;
-      };
+      format: import("./config-tree").ConfigTreeFormat;
+      text: string;
+      path: (string | number)[];
+      value: import("./config-tree").ConfigTreeValue | null;
     },
-    AntigravityAuthState
+    string
   >;
-  pick_antigravity_credential_file: Call<None, string | null>;
+  get_antigravity_auth_state: Call<None, AntigravityAuthState>;
   switch_antigravity_account: Call<
     { id: string } & Revision,
-    AntigravityAuthState
-  >;
-  set_antigravity_auth_mode: Call<
-    { mode: "oauth" | "adc" } & Revision,
     AntigravityAuthState
   >;
   rename_antigravity_account: Call<
@@ -638,7 +667,7 @@ export type CommandMap = {
   search_models_dev: Call<{ query: string; limit?: number }, ModelSearch>;
   edit_model_list: Call<
     Client & {
-      op: "add" | "remove" | "pin" | "unpin" | "custom";
+      op: "add" | "remove" | "pin" | "unpin" | "custom" | "first";
       id: string;
       source?: string | null;
       context?: number | null;
@@ -816,13 +845,6 @@ export type CommandMap = {
     PricingSearchPage
   >;
   get_models_dev: Call<None, ModelsDevState>;
-  get_antigravity_vertex_models: Call<
-    { refresh: boolean },
-    {
-      models: { id: string; preview: boolean }[];
-      error: string | null;
-    }
-  >;
   update_models_dev: Call<None, ModelsDevState>;
   compare_model_prices: Call<
     { model: string; context: number },

@@ -159,24 +159,6 @@ pub async fn update_models_dev(r: R<'_>, app: tauri::AppHandle) -> Result<crate:
     Ok(view)
 }
 #[tauri::command]
-pub async fn get_antigravity_vertex_models(
-    r: R<'_>,
-    app: tauri::AppHandle,
-    refresh: bool,
-) -> Result<crate::models_dev::VertexModels> {
-    let catalog = &r.usage.prices()?.models_dev;
-    let before = catalog.view().version;
-    let result = catalog.vertex_models(refresh).await?;
-    if result.error.is_none() && catalog.view().version != before {
-        let service = r.usage.clone();
-        tokio::task::spawn_blocking(move || service.backfill_prices())
-            .await
-            .map_err(|_| failure("价格补算中断"))??;
-        crate::emit_if_main_visible(&app, crate::MainSignal::PricingState, ());
-    }
-    Ok(result)
-}
-#[tauri::command]
 pub fn compare_model_prices(
     r: R<'_>,
     model: String,
@@ -250,6 +232,8 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
         let mut scheduled = tokio::time::interval(std::time::Duration::from_secs(600));
         scheduled.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         scheduled.tick().await;
+        // An unpriced row asks models.dev for newer prices sooner than the timer.
+        let mut hinted = false;
         loop {
             let Some(runtime) = price_runtime.upgrade() else {
                 break;
@@ -259,17 +243,27 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
                 let before = prices.sync_stamp();
                 let _ = usage.update_prices(false).await;
                 let after = prices.sync_stamp();
-                if before.1 != after.1 {
+                let index = prices.models_dev.view().version;
+                let max_age = std::time::Duration::from_secs(if hinted { 3_600 } else { 21_600 });
+                let refreshed = prices
+                    .models_dev
+                    .refresh_stale(max_age)
+                    .await
+                    .is_ok_and(|view| view.version != index);
+                if refreshed {
+                    usage.schedule_price_backfill();
+                }
+                if before.1 != after.1 || refreshed {
                     crate::emit_if_main_visible(&price_handle, crate::MainSignal::PricingState, ());
                 }
             }
             drop(runtime);
             // Coalesce hints from unpriced requests, including high-volume streams.
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            tokio::select! {
-                _ = scheduled.tick() => {},
-                _ = usage.wait_price_hint() => {},
-            }
+            hinted = tokio::select! {
+                _ = scheduled.tick() => false,
+                _ = usage.wait_price_hint() => true,
+            };
         }
     });
     let r = Arc::downgrade(r);

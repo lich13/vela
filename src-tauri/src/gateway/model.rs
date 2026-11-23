@@ -35,15 +35,35 @@ pub struct Provider {
     pub buffer_complete_response: bool,
     #[serde(default)]
     pub endless_mode: bool,
-    /// Endless-mode wait after a risk-control rejection (429 or 520).
+    /// Endless-mode base wait after a risk-control rejection (a status in `risk_codes`).
     #[serde(default = "default_upstream_retry_seconds")]
     pub upstream_retry_seconds: u64,
     /// Endless-mode wait after any other retried failure.
     #[serde(default = "default_normal_retry_seconds")]
     pub normal_retry_seconds: u64,
+    /// Upstream statuses endless mode treats as risk control. `None` uses the
+    /// client's defaults; an empty list is a deliberate "none".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_codes: Option<Vec<u16>>,
+    /// How strongly the risk-control and rate-limit waits follow the
+    /// provider's load, 0–10. `None` is the default; 0 keeps them fixed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_intensity: Option<u8>,
+    /// Endless-mode wait after a rate limit. `None` follows the risk-control
+    /// wait, which covered rate limits before the two were told apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_retry_seconds: Option<u64>,
+    /// Seconds an endless provider is sent nothing after it rate-limits a
+    /// request. `None` is the default; 0 sends on as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_rest_seconds: Option<u64>,
 }
 pub(crate) const DEFAULT_UPSTREAM_RETRY_SECONDS: u64 = 33;
 pub(crate) const DEFAULT_NORMAL_RETRY_SECONDS: u64 = 3;
+pub(crate) const DEFAULT_RETRY_INTENSITY: u8 = 5;
+pub(crate) const DEFAULT_LIMIT_REST_SECONDS: u64 = 8;
+const MAX_RETRY_INTENSITY: u8 = 10;
+const MAX_RISK_CODES: usize = 16;
 fn default_upstream_retry_seconds() -> u64 {
     DEFAULT_UPSTREAM_RETRY_SECONDS
 }
@@ -51,24 +71,265 @@ fn default_normal_retry_seconds() -> u64 {
     DEFAULT_NORMAL_RETRY_SECONDS
 }
 impl Provider {
-    /// Endless mode's wait before the next try. A 429 or 520 is the upstream's
-    /// risk control, as is the same refusal inside a successful response;
-    /// every other retried failure waits the normal interval.
-    pub(super) fn endless_retry_seconds(
-        &self,
-        status: Option<u16>,
-        details: &crate::events::Details,
-    ) -> u64 {
-        let embedded = status.is_none_or(|status| status < 400)
-            && (matches!(details.upstream_code.as_deref(), Some("429" | "520"))
-                || details.upstream_type.as_deref() == Some("rate_limit_error"));
-        if matches!(status, Some(429 | 520)) || embedded {
-            self.upstream_retry_seconds
-        } else {
-            self.normal_retry_seconds
-        }
-        .max(1)
+    pub(super) fn retry_intensity(&self) -> u8 {
+        self.retry_intensity
+            .unwrap_or(DEFAULT_RETRY_INTENSITY)
+            .min(MAX_RETRY_INTENSITY)
     }
+    pub(super) fn limit_retry_seconds(&self) -> u64 {
+        self.limit_retry_seconds
+            .unwrap_or(self.upstream_retry_seconds)
+    }
+    pub(super) fn limit_rest_seconds(&self) -> u64 {
+        self.limit_rest_seconds
+            .unwrap_or(DEFAULT_LIMIT_REST_SECONDS)
+    }
+}
+/// Which of endless mode's three waits a retried failure gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RetryClass {
+    /// A status on the provider's risk-control list.
+    Risk,
+    /// A rate limit: a 429, or a refusal classified as one.
+    Limit,
+    Normal,
+}
+/// Sorts a failure endless mode retries. A real error status decides alone:
+/// on the risk-control list, a 429, or anything else. A refusal inside a
+/// successful response is sorted by the code and type it carries. Content the
+/// gateway classified as a rate limit counts as one under any status, and so
+/// does a quota that comes back with its day, week or month; an overloaded
+/// upstream is not a rate limit.
+pub(super) fn retry_class(
+    codes: &[u16],
+    status: Option<u16>,
+    details: &crate::events::Details,
+) -> RetryClass {
+    use crate::events::ErrorBasis;
+    let limited = match details.error_basis {
+        Some(ErrorBasis::Capacity) => false,
+        Some(ErrorBasis::QuotaExhausted) => true,
+        _ => super::failure_policy::temporary(details),
+    };
+    if let Some(status) = status.filter(|status| *status >= 400) {
+        return if codes.contains(&status) {
+            RetryClass::Risk
+        } else if status == 429 || limited {
+            RetryClass::Limit
+        } else {
+            RetryClass::Normal
+        };
+    }
+    let embedded = details
+        .upstream_code
+        .as_deref()
+        .and_then(|code| code.parse::<u16>().ok());
+    if embedded.is_some_and(|code| codes.contains(&code)) {
+        RetryClass::Risk
+    } else if embedded == Some(429)
+        || details.upstream_type.as_deref() == Some("rate_limit_error")
+        || limited
+    {
+        RetryClass::Limit
+    } else {
+        RetryClass::Normal
+    }
+}
+/// Sorted, deduplicated risk-control statuses.
+fn risk_codes(mut codes: Vec<u16>) -> Result<Vec<u16>> {
+    codes.sort_unstable();
+    codes.dedup();
+    if codes.len() > MAX_RISK_CODES || codes.iter().any(|code| !(400..=599).contains(code)) {
+        return Err(AppError::new(
+            code::SETTINGS,
+            "风控代码应为 400–599 的状态码，最多 16 个",
+        ));
+    }
+    Ok(codes)
+}
+/// The requests a provider serves in place of the rest of the queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Delegated {
+    /// A client's request to compact its conversation.
+    Compaction,
+    /// Work a client does beside the conversation: approving a command,
+    /// naming a thread, summarising, writing memories.
+    Auxiliary,
+    /// A search of the web that a client's own tool has the provider run.
+    /// Not every provider can.
+    WebSearch,
+}
+/// What one provider takes from the others, and the model and reasoning
+/// effort it runs it on. Either one set here replaces whatever the client
+/// asked for.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Delegate {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub compaction: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_effort: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auxiliary: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auxiliary_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auxiliary_effort: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub web_search: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_search_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_search_effort: Option<String>,
+}
+impl Delegate {
+    /// The model and the reasoning effort this provider runs `kind` on, each
+    /// when it names one, if it takes that kind at all.
+    pub(super) fn takes(&self, kind: Delegated) -> Option<(Option<&str>, Option<&str>)> {
+        let (taken, model, effort) = match kind {
+            Delegated::Compaction => (
+                self.compaction,
+                &self.compaction_model,
+                &self.compaction_effort,
+            ),
+            Delegated::Auxiliary => (
+                self.auxiliary,
+                &self.auxiliary_model,
+                &self.auxiliary_effort,
+            ),
+            Delegated::WebSearch => (
+                self.web_search,
+                &self.web_search_model,
+                &self.web_search_effort,
+            ),
+        };
+        taken.then_some((model.as_deref(), effort.as_deref()))
+    }
+}
+/// The delegation fields of a provider form. An absent field stays as it is;
+/// an empty model or effort clears the one that was set.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DelegateEdit {
+    pub take_compaction: Option<bool>,
+    pub compaction_model: Option<String>,
+    pub compaction_effort: Option<String>,
+    pub take_auxiliary: Option<bool>,
+    pub auxiliary_model: Option<String>,
+    pub auxiliary_effort: Option<String>,
+    pub take_web_search: Option<bool>,
+    pub web_search_model: Option<String>,
+    pub web_search_effort: Option<String>,
+}
+impl DelegateEdit {
+    /// The form asks this provider to take requests of `kind` over.
+    pub(super) fn enables(&self, kind: Delegated) -> bool {
+        let taken = match kind {
+            Delegated::Compaction => self.take_compaction,
+            Delegated::Auxiliary => self.take_auxiliary,
+            Delegated::WebSearch => self.take_web_search,
+        };
+        taken == Some(true)
+    }
+    fn applied(self, mut delegate: Delegate) -> Result<Delegate> {
+        let model = |value: String| {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(None)
+            } else if model_id(value) {
+                Ok(Some(value.to_owned()))
+            } else {
+                Err(AppError::new(
+                    code::MODELS,
+                    "指定模型应为 1–256 字节的完整模型 ID，不能包含控制字符或通配符",
+                ))
+            }
+        };
+        // An effort is the name the client's API gives a level: `low`, `xhigh`.
+        let effort = |value: String| {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(None)
+            } else if value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+            {
+                Ok(Some(value.to_owned()))
+            } else {
+                Err(AppError::new(
+                    code::SETTINGS,
+                    "思考强度应为 1–32 个小写字母、数字、下划线或连字符",
+                ))
+            }
+        };
+        if let Some(value) = self.take_compaction {
+            delegate.compaction = value;
+        }
+        if let Some(value) = self.compaction_model {
+            delegate.compaction_model = model(value)?;
+        }
+        if let Some(value) = self.compaction_effort {
+            delegate.compaction_effort = effort(value)?;
+        }
+        if let Some(value) = self.take_auxiliary {
+            delegate.auxiliary = value;
+        }
+        if let Some(value) = self.auxiliary_model {
+            delegate.auxiliary_model = model(value)?;
+        }
+        if let Some(value) = self.auxiliary_effort {
+            delegate.auxiliary_effort = effort(value)?;
+        }
+        if let Some(value) = self.take_web_search {
+            delegate.web_search = value;
+        }
+        if let Some(value) = self.web_search_model {
+            delegate.web_search_model = model(value)?;
+        }
+        if let Some(value) = self.web_search_effort {
+            delegate.web_search_effort = effort(value)?;
+        }
+        Ok(delegate)
+    }
+}
+/// A complete model ID: no wildcard, nothing a header or a log line chokes on.
+fn model_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control) && !id.contains('*')
+}
+const MAX_MODEL_MAPPINGS: usize = 512;
+/// A provider's model mapping with its IDs trimmed: complete model IDs on
+/// both sides, each requested model once, none mapped to itself.
+fn model_map(mapping: BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
+    let invalid = || {
+        AppError::new(
+            code::MODELS,
+            "模型映射应为 1–256 字节的完整模型 ID，不能包含控制字符或通配符，且请求模型与上游模型不能相同或重复",
+        )
+    };
+    if mapping.len() > MAX_MODEL_MAPPINGS {
+        return Err(AppError::new(code::MODELS, "模型映射最多 512 条"));
+    }
+    let mut result = BTreeMap::new();
+    for (from, to) in mapping {
+        let (from, to) = (from.trim(), to.trim());
+        if !model_id(from)
+            || !model_id(to)
+            || from == to
+            || result.insert(from.to_owned(), to.to_owned()).is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(result)
+}
+fn retry_intensity(value: u8) -> Result<u8> {
+    if value > MAX_RETRY_INTENSITY {
+        return Err(AppError::new(code::SETTINGS, "动态强度应为 0–10"));
+    }
+    Ok(value)
 }
 // Existing defaults: three retries allow four total upstream attempts.
 const DEFAULT_MAX_RETRIES: usize = 3;
@@ -123,12 +384,26 @@ pub struct Settings {
     /// Failed probes in a row that mean the network is down.
     #[serde(default = "default_network_probe_attempts")]
     pub network_probe_attempts: u32,
+    /// How long a Claude stream may go without upstream data once the model
+    /// has started writing. The other clients keep to `idle_seconds`.
+    #[serde(default = "default_stall_seconds")]
+    pub stall_seconds: u64,
+    /// How long a started response may go without upstream data while its
+    /// endpoint is held for a network outage.
+    #[serde(default = "default_hold_idle_seconds")]
+    pub hold_idle_seconds: u64,
 }
 fn default_network_probe() -> bool {
     true
 }
 fn default_network_probe_attempts() -> u32 {
     3
+}
+fn default_stall_seconds() -> u64 {
+    120
+}
+fn default_hold_idle_seconds() -> u64 {
+    60
 }
 fn default_endpoint_probe_seconds() -> u64 {
     300
@@ -178,6 +453,8 @@ impl Default for Settings {
             max_waiting: default_max_waiting(),
             network_probe: default_network_probe(),
             network_probe_attempts: default_network_probe_attempts(),
+            stall_seconds: default_stall_seconds(),
+            hold_idle_seconds: default_hold_idle_seconds(),
         }
     }
 }
@@ -205,6 +482,8 @@ impl Settings {
                 self.retry_budget_seconds,
                 self.connect_seconds,
                 self.queue_seconds,
+                self.stall_seconds,
+                self.hold_idle_seconds,
             ]
             .iter()
             .any(|s| *s == 0 || *s > 86400)
@@ -235,6 +514,12 @@ pub struct Store {
     pub grok_connections: BTreeMap<String, super::grok_config::Connection>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dsh_models: BTreeMap<String, super::dsh::ModelMapping>,
+    /// Per provider, the upstream model each requested model is sent as.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_maps: BTreeMap<String, BTreeMap<String, String>>,
+    /// Per provider, the kinds of request it takes over from the others.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub delegates: BTreeMap<String, Delegate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dsh_catalog: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,6 +568,8 @@ impl Default for Store {
             provider_endpoints: BTreeMap::new(),
             grok_connections: BTreeMap::new(),
             dsh_models: BTreeMap::new(),
+            model_maps: BTreeMap::new(),
+            delegates: BTreeMap::new(),
             dsh_catalog: vec![],
             grok_resume: None,
             grok_api_model: None,
@@ -322,6 +609,16 @@ pub enum Edit {
         upstream_retry_seconds: Option<u64>,
         #[serde(default)]
         normal_retry_seconds: Option<u64>,
+        #[serde(default)]
+        risk_codes: Option<Vec<u16>>,
+        #[serde(default)]
+        retry_intensity: Option<u8>,
+        #[serde(default)]
+        limit_retry_seconds: Option<u64>,
+        #[serde(default)]
+        limit_rest_seconds: Option<u64>,
+        #[serde(flatten)]
+        delegate: DelegateEdit,
         id: Option<String>,
         base_url: String,
         token: String,
@@ -331,6 +628,9 @@ pub enum Edit {
         name: Option<String>,
     },
     SaveGrokProvider {
+        /// Of these a Grok provider may take web searches only.
+        #[serde(flatten)]
+        delegate: DelegateEdit,
         id: Option<String>,
         base_url: String,
         token: String,
@@ -341,6 +641,20 @@ pub enum Edit {
         protocol: super::grok_config::Protocol,
     },
     SaveDshProvider {
+        #[serde(default)]
+        endless_mode: Option<bool>,
+        #[serde(default)]
+        upstream_retry_seconds: Option<u64>,
+        #[serde(default)]
+        normal_retry_seconds: Option<u64>,
+        #[serde(default)]
+        risk_codes: Option<Vec<u16>>,
+        #[serde(default)]
+        retry_intensity: Option<u8>,
+        #[serde(default)]
+        limit_retry_seconds: Option<u64>,
+        #[serde(default)]
+        limit_rest_seconds: Option<u64>,
         id: Option<String>,
         base_url: String,
         token: String,
@@ -350,9 +664,16 @@ pub enum Edit {
         name: Option<String>,
         protocol: super::grok_config::Protocol,
     },
+    DuplicateProvider {
+        id: String,
+    },
     DshModelsProvider {
         id: String,
         mapping: super::dsh::ModelMapping,
+    },
+    ModelMapProvider {
+        id: String,
+        mapping: BTreeMap<String, String>,
     },
     RenameProvider {
         id: String,
@@ -439,6 +760,14 @@ pub fn name(value: &str) -> Result<String> {
     } else {
         Ok(value.to_owned())
     }
+}
+/// The name of a provider's copy: the original with a suffix, shortened to
+/// stay within the name limit.
+fn copy_name(original: &str) -> String {
+    const SUFFIX: &str = " (copy)";
+    let keep = 120 - SUFFIX.chars().count();
+    let base: String = original.chars().take(keep).collect();
+    format!("{}{SUFFIX}", base.trim_end())
 }
 pub(super) fn is_local_ip(ip: std::net::IpAddr) -> bool {
     let ip = match ip {
@@ -549,6 +878,12 @@ impl Store {
         store
             .dsh_models
             .retain(|id, _| store.providers.iter().any(|p| &p.id == id));
+        store
+            .model_maps
+            .retain(|id, _| store.providers.iter().any(|p| &p.id == id));
+        store
+            .delegates
+            .retain(|id, _| store.providers.iter().any(|p| &p.id == id));
         for p in &store.providers {
             if let Some(values) = store.provider_endpoints.get_mut(&p.id) {
                 *values = endpoint_urls(&p.base_url, values, store.settings.port)?;
@@ -567,6 +902,34 @@ impl Store {
             .iter_mut()
             .find(|p| p.id == id)
             .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))
+    }
+    /// Records the wire protocol of a Grok or DSH provider that was just
+    /// saved; `existing` is `None` for a new provider, which is the last one.
+    fn save_connection(
+        &mut self,
+        existing: Option<String>,
+        replacing_token: bool,
+        protocol: super::grok_config::Protocol,
+    ) -> Result<()> {
+        let id = existing
+            .or_else(|| self.providers.last().map(|p| p.id.clone()))
+            .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))?;
+        let connection = self.grok_connections.entry(id.clone()).or_default();
+        let mut connection_changed = false;
+        if replacing_token {
+            // An explicitly edited credential replaces imported auth
+            // headers too; otherwise the old secret wins at dispatch.
+            connection_changed |= connection.headers.remove("authorization").is_some();
+            connection_changed |= connection.headers.remove("x-api-key").is_some();
+        }
+        if connection.protocol != protocol {
+            connection.protocol = protocol;
+            connection_changed = true;
+        }
+        if connection_changed {
+            self.provider_mut(&id)?.version = uuid::Uuid::new_v4().to_string();
+        }
+        Ok(())
     }
     pub fn edit(&mut self, edit: Edit, running: bool) -> Result<()> {
         if let Edit::SaveGrokProvider {
@@ -592,15 +955,19 @@ impl Store {
                 provider.version = uuid::Uuid::new_v4().to_string();
                 self.dsh_models.insert(id, mapping);
             }
-            Edit::SaveGrokProvider {
-                id,
-                base_url,
-                token,
-                quota_access_token,
-                name,
-                protocol,
+            Edit::ModelMapProvider { id, mapping } => {
+                self.provider_mut(&id)?;
+                let mapping = model_map(mapping)?;
+                // Routing still judges the requested model, so the provider's
+                // version and its conversations' affinity stay as they are.
+                if mapping.is_empty() {
+                    self.model_maps.remove(&id);
+                } else {
+                    self.model_maps.insert(id, mapping);
+                }
             }
-            | Edit::SaveDshProvider {
+            Edit::SaveGrokProvider {
+                delegate,
                 id,
                 base_url,
                 token,
@@ -612,6 +979,7 @@ impl Store {
                 let replacing_token = !token.is_empty();
                 self.edit(
                     Edit::SaveProvider {
+                        delegate,
                         search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
@@ -619,6 +987,10 @@ impl Store {
                         endless_mode: None,
                         upstream_retry_seconds: None,
                         normal_retry_seconds: None,
+                        risk_codes: None,
+                        retry_intensity: None,
+                        limit_retry_seconds: None,
+                        limit_rest_seconds: None,
                         id,
                         base_url,
                         token,
@@ -627,24 +999,78 @@ impl Store {
                     },
                     running,
                 )?;
-                let id = existing
-                    .or_else(|| self.providers.last().map(|p| p.id.clone()))
+                self.save_connection(existing, replacing_token, protocol)?;
+            }
+            Edit::SaveDshProvider {
+                endless_mode,
+                upstream_retry_seconds,
+                normal_retry_seconds,
+                risk_codes,
+                retry_intensity,
+                limit_retry_seconds,
+                limit_rest_seconds,
+                id,
+                base_url,
+                token,
+                quota_access_token,
+                name,
+                protocol,
+            } => {
+                let existing = id.clone();
+                let replacing_token = !token.is_empty();
+                self.edit(
+                    Edit::SaveProvider {
+                        delegate: Default::default(),
+                        search_only: None,
+                        end_on_message_stop: None,
+                        filter_count_tokens: None,
+                        buffer_complete_response: None,
+                        endless_mode,
+                        upstream_retry_seconds,
+                        normal_retry_seconds,
+                        risk_codes,
+                        retry_intensity,
+                        limit_retry_seconds,
+                        limit_rest_seconds,
+                        id,
+                        base_url,
+                        token,
+                        quota_access_token,
+                        name,
+                    },
+                    running,
+                )?;
+                self.save_connection(existing, replacing_token, protocol)?;
+            }
+            Edit::DuplicateProvider { id } => {
+                let index = self
+                    .providers
+                    .iter()
+                    .position(|p| p.id == id)
                     .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))?;
-                let connection = self.grok_connections.entry(id.clone()).or_default();
-                let mut connection_changed = false;
-                if replacing_token {
-                    // An explicitly edited credential replaces imported auth
-                    // headers too; otherwise the old secret wins at dispatch.
-                    connection_changed |= connection.headers.remove("authorization").is_some();
-                    connection_changed |= connection.headers.remove("x-api-key").is_some();
+                let mut copy = self.providers[index].clone();
+                copy.id = uuid::Uuid::new_v4().to_string();
+                copy.version = uuid::Uuid::new_v4().to_string();
+                copy.name = copy_name(&copy.name);
+                if let Some(token) = self.quota_access_tokens.get(&id).cloned() {
+                    self.quota_access_tokens.insert(copy.id.clone(), token);
                 }
-                if connection.protocol != protocol {
-                    connection.protocol = protocol;
-                    connection_changed = true;
+                if let Some(urls) = self.provider_endpoints.get(&id).cloned() {
+                    self.provider_endpoints.insert(copy.id.clone(), urls);
                 }
-                if connection_changed {
-                    self.provider_mut(&id)?.version = uuid::Uuid::new_v4().to_string();
+                if let Some(connection) = self.grok_connections.get(&id).cloned() {
+                    self.grok_connections.insert(copy.id.clone(), connection);
                 }
+                if let Some(mapping) = self.dsh_models.get(&id).cloned() {
+                    self.dsh_models.insert(copy.id.clone(), mapping);
+                }
+                if let Some(mapping) = self.model_maps.get(&id).cloned() {
+                    self.model_maps.insert(copy.id.clone(), mapping);
+                }
+                if let Some(delegate) = self.delegates.get(&id).cloned() {
+                    self.delegates.insert(copy.id.clone(), delegate);
+                }
+                self.providers.insert(index + 1, copy);
             }
             Edit::ImportLink {
                 base_url: raw,
@@ -668,6 +1094,7 @@ impl Store {
                 let selected = self.selected.clone();
                 self.edit(
                     Edit::SaveProvider {
+                        delegate: Default::default(),
                         search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
@@ -675,6 +1102,10 @@ impl Store {
                         endless_mode: None,
                         upstream_retry_seconds: None,
                         normal_retry_seconds: None,
+                        risk_codes: None,
+                        retry_intensity: None,
+                        limit_retry_seconds: None,
+                        limit_rest_seconds: None,
                         id: None,
                         base_url: raw.clone(),
                         token,
@@ -703,6 +1134,11 @@ impl Store {
                 endless_mode,
                 upstream_retry_seconds,
                 normal_retry_seconds,
+                risk_codes: codes,
+                retry_intensity: intensity,
+                limit_retry_seconds,
+                limit_rest_seconds,
+                delegate,
                 id,
                 base_url: raw,
                 token,
@@ -710,6 +1146,13 @@ impl Store {
                 name: display_name,
             } => {
                 let u = base_url(&raw, self.settings.port)?;
+                let codes = codes.map(risk_codes).transpose()?;
+                let intensity = intensity.map(retry_intensity).transpose()?;
+                let delegate = delegate.applied(
+                    id.as_ref()
+                        .and_then(|id| self.delegates.get(id).cloned())
+                        .unwrap_or_default(),
+                )?;
                 if quota_access_token.as_ref().is_some_and(|value| {
                     value.len() > 16384
                         || value.chars().any(char::is_control)
@@ -762,6 +1205,18 @@ impl Store {
                     if let Some(value) = normal_retry_seconds {
                         p.normal_retry_seconds = value;
                     }
+                    if codes.is_some() {
+                        p.risk_codes = codes;
+                    }
+                    if intensity.is_some() {
+                        p.retry_intensity = intensity;
+                    }
+                    if limit_retry_seconds.is_some() {
+                        p.limit_retry_seconds = limit_retry_seconds;
+                    }
+                    if limit_rest_seconds.is_some() {
+                        p.limit_rest_seconds = limit_rest_seconds;
+                    }
                     p.base_url = base_url.to_owned();
                     if !token.is_empty() {
                         p.token = token;
@@ -798,19 +1253,27 @@ impl Store {
                             .unwrap_or(DEFAULT_UPSTREAM_RETRY_SECONDS),
                         normal_retry_seconds: normal_retry_seconds
                             .unwrap_or(DEFAULT_NORMAL_RETRY_SECONDS),
+                        risk_codes: codes,
+                        retry_intensity: intensity,
+                        limit_retry_seconds,
+                        limit_rest_seconds,
                     });
                     if self.selected.is_none() {
                         self.selected = Some(id);
                     }
                 }
+                let id = existing_id.unwrap_or_else(|| self.providers.last().unwrap().id.clone());
                 if let Some(value) = quota_access_token {
-                    let id =
-                        existing_id.unwrap_or_else(|| self.providers.last().unwrap().id.clone());
                     if value.is_empty() {
                         self.quota_access_tokens.remove(&id);
                     } else {
-                        self.quota_access_tokens.insert(id, value);
+                        self.quota_access_tokens.insert(id.clone(), value);
                     }
+                }
+                if delegate == Delegate::default() {
+                    self.delegates.remove(&id);
+                } else {
+                    self.delegates.insert(id, delegate);
                 }
             }
             Edit::RenameProvider { id, name: value } => {
@@ -853,6 +1316,8 @@ impl Store {
                 self.grok_connections.remove(&id);
                 self.providers.retain(|p| p.id != id);
                 self.dsh_models.remove(&id);
+                self.model_maps.remove(&id);
+                self.delegates.remove(&id);
                 self.provider_endpoints.remove(&id);
                 if self.selected.as_deref() == Some(&id) {
                     self.selected = self.providers.first().map(|p| p.id.clone());

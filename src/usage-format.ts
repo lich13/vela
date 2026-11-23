@@ -19,6 +19,18 @@ export const preciseDate = (n: number) =>
     fractionalSecondDigits: 3,
     hour12: false,
   });
+// 1024 to a step, one decimal from KB up: 718.6 KB.
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  let value = n / 1024;
+  let unit = "KB";
+  for (const next of ["MB", "GB"]) {
+    if (value < 1024) break;
+    value /= 1024;
+    unit = next;
+  }
+  return `${value.toFixed(1)} ${unit}`;
+}
 
 export function promptTokens(attempts: Attempt[]): Tokens {
   const keys: (keyof Tokens)[] = [

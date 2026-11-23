@@ -46,6 +46,7 @@ const failoverLabels: Record<string, string> = {
   failure_fallback: "失败后重新选商",
   cursor_pinned: "响应游标固定",
   unknown_owner: "归属未确认",
+  delegated: "指定供应商承接",
   rate_limit: "临时限流",
   account_rejected: "账号明确拒绝",
   model_unavailable: "模型不可用",
@@ -57,6 +58,7 @@ const failoverLabels: Record<string, string> = {
   health: "健康限制",
   capacity: "并发容量",
   rpm: "RPM 限制",
+  rest: "限流静默",
   forwarded: "已开始交付响应",
   no_eligible_provider: "没有合格替代",
   attempts_exhausted: "重试次数耗尽",
@@ -776,10 +778,11 @@ function AttemptDetails({
           [
             "传输",
             (
-              { local_api: "本地接口", history_file: "历史文件" } as Record<
-                string,
-                string
-              >
+              {
+                local_api: "本地接口",
+                history_file: "历史文件",
+                cli_file: "CLI 会话文件",
+              } as Record<string, string>
             )[a.transport] ?? a.transport,
           ],
           ["流式", a.stream ? "是" : "否"],

@@ -384,7 +384,8 @@
   color: var(--muted);
 }
 
-.quick-wait-timing {
+.quick-wait-timing,
+.quick-wait-transfer {
   grid-column: 1 / -1;
   display: flex;
   justify-content: space-between;
@@ -506,11 +507,10 @@
   width: min(140px, 100%);
 }
 
+/* The capsule's parts lay out in the provider row itself: the name and the
+   plan badge give way, and the amount is never cut short. */
 .quick-provider-main .quota-compact {
-  flex: 0 1 auto;
-  min-width: 112px;
-  padding: 0;
-  gap: 4px;
+  display: contents;
   font-size: 13px;
   white-space: nowrap;
 }
@@ -518,10 +518,7 @@
 .quick-provider-main .quota-compact .quota-value {
   min-width: calc(5ch + 10px);
   padding-inline: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex-shrink: 1;
+  flex-shrink: 0;
 }
 
 .quick-provider-main .quota-compact .icon-button {

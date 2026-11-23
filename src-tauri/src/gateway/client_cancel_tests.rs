@@ -60,6 +60,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
             &gateway,
             &dir,
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -67,6 +68,10 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url,
@@ -612,24 +617,76 @@ async fn websocket_eof_during_generation_closes_upstream_socket() {
 #[path = "usage_tail_tests.rs"]
 mod usage_tail_tests;
 
-async fn read_panel_cancel(stream: &mut TcpStream) -> Vec<u8> {
+const RESENT: &[u8] = b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-resent\",\"status\":\"completed\"}}\n\n";
+
+/// The next upstream connection, with its request read.
+async fn accepted(upstream: &TcpListener) -> TcpStream {
+    let (mut socket, _) = tokio::time::timeout(WAIT, upstream.accept())
+        .await
+        .expect("the request was not sent to the provider")
+        .unwrap();
+    read_http_request(&mut socket).await.unwrap();
+    socket
+}
+
+/// Answers an upstream request with a finished response.
+async fn complete(socket: &mut TcpStream) {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        RESENT.len()
+    );
+    socket.write_all(head.as_bytes()).await.unwrap();
+    socket.write_all(RESENT).await.unwrap();
+    socket.flush().await.unwrap();
+}
+
+/// Reads the client's answer up to the event `complete` wrote.
+async fn read_resent(stream: &mut TcpStream) -> String {
     tokio::time::timeout(WAIT, async {
         let mut bytes = Vec::new();
         loop {
             let mut chunk = [0; 2048];
             let read = stream.read(&mut chunk).await.unwrap();
             bytes.extend_from_slice(&chunk[..read]);
-            if read == 0 || String::from_utf8_lossy(&bytes).contains("CANCELLED") {
-                return bytes;
+            if read == 0 || String::from_utf8_lossy(&bytes).contains("fixture-resent") {
+                return String::from_utf8_lossy(&bytes).into_owned();
             }
         }
     })
     .await
-    .expect("cancel response was not received")
+    .expect("the resent request was not answered")
+}
+
+/// The request's usage record once every attempt up to the last has ended.
+async fn wait_for_attempts(service: &UsageService, attempts: usize) -> UsageRecord {
+    let mut events = service.subscribe();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let rows = usage_records(service);
+            assert!(rows.len() <= 1);
+            if let Some(record) = rows.into_iter().next().filter(|record| {
+                record.attempts.len() == attempts
+                    && record.attempts.iter().all(|attempt| attempt.end.is_some())
+            }) {
+                return record;
+            }
+            let _ = events.recv().await;
+        }
+    })
+    .await
+    .expect("the resent request's usage record was not written")
+}
+
+fn causes(record: &UsageRecord) -> Vec<Option<EndCause>> {
+    record
+        .attempts
+        .iter()
+        .map(|attempt| attempt.end.as_ref().map(|end| end.cause))
+        .collect()
 }
 
 #[tokio::test]
-async fn panel_cancel_before_headers_returns_499_and_settles_neutrally() {
+async fn panel_cancel_before_headers_resends_to_the_same_provider() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (dir, gateway) = fixture(vec![format!(
         "http://{}/v1",
@@ -638,40 +695,69 @@ async fn panel_cancel_before_headers_returns_499_and_settles_neutrally() {
     .await;
     let (usage, _) = attach_observers(&dir, &gateway);
     let mut downstream = downstream_http(&gateway, REQUEST_BODY).await;
-    let (mut socket, _) = upstream.accept().await.unwrap();
-    read_http_request(&mut socket).await.unwrap();
+    let socket = accepted(&upstream).await;
     let pending = gateway.view().pending_requests;
     assert_eq!(pending.len(), 1);
     assert!(gateway.cancel_wait(&pending[0].request_id));
     assert!(!gateway.cancel_wait(&pending[0].request_id));
-    let response = read_panel_cancel(&mut downstream).await;
-    let response = String::from_utf8_lossy(&response);
-    assert!(response.contains("499"));
-    assert!(response.contains("CANCELLED"));
+    // The interrupted attempt is dropped; the client is not answered.
     tokio::time::timeout(WAIT, wait_for_disconnect(socket))
         .await
         .unwrap();
-    assert_neutral_health(&gateway).await;
-    let record = wait_for_usage_record(&usage).await;
+    let mut socket = accepted(&upstream).await;
+    complete(&mut socket).await;
+    assert!(read_resent(&mut downstream)
+        .await
+        .starts_with("HTTP/1.1 200"));
+    let record = wait_for_attempts(&usage, 2).await;
     assert_eq!(
-        record
-            .final_attempt()
-            .unwrap()
-            .end
-            .as_ref()
-            .map(|end| end.cause),
-        Some(EndCause::ClientCancelled)
+        causes(&record),
+        [Some(EndCause::ClientCancelled), Some(EndCause::Completed)]
     );
-    assert!(matches!(
-        record.failover_evidence.as_ref().and_then(|f| f.exit),
-        Some(super::failover::Exit::Cancelled)
-    ));
+    assert_neutral_health(&gateway).await;
     assert!(gateway.view().pending_requests.is_empty());
     gateway.stop().await.unwrap();
 }
 
 #[tokio::test]
-async fn panel_cancel_queued_request_does_not_cancel_its_active_neighbor() {
+async fn panel_cancel_resends_past_the_retry_limit_and_back_to_its_provider() {
+    let primary = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backup = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (dir, gateway) = fixture(vec![
+        format!("http://{}/v1", primary.local_addr().unwrap()),
+        format!("http://{}/v1", backup.local_addr().unwrap()),
+    ])
+    .await;
+    let mut settings = gateway.view().settings;
+    settings.max_retries = 0;
+    edit(&gateway, &dir, Edit::Settings { settings });
+    let mut downstream = downstream_http(&gateway, REQUEST_BODY).await;
+    // Interrupted twice: neither attempt counts, and each resend returns to
+    // the provider it was interrupted at.
+    for _ in 0..2 {
+        let socket = accepted(&primary).await;
+        let pending = gateway.view().pending_requests;
+        assert_eq!(pending.len(), 1);
+        assert!(gateway.cancel_wait(&pending[0].request_id));
+        tokio::time::timeout(WAIT, wait_for_disconnect(socket))
+            .await
+            .unwrap();
+    }
+    let mut socket = accepted(&primary).await;
+    complete(&mut socket).await;
+    assert!(read_resent(&mut downstream)
+        .await
+        .starts_with("HTTP/1.1 200"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), backup.accept())
+            .await
+            .is_err()
+    );
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn panel_cancel_queued_request_requeues_and_leaves_its_active_neighbor() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (dir, gateway) = fixture(vec![format!(
         "http://{}/v1",
@@ -686,9 +772,8 @@ async fn panel_cancel_queued_request_does_not_cancel_its_active_neighbor() {
             max_concurrency: 1,
         },
     );
-    let first = downstream_http(&gateway, REQUEST_BODY).await;
-    let (mut socket, _) = upstream.accept().await.unwrap();
-    read_http_request(&mut socket).await.unwrap();
+    let mut first = downstream_http(&gateway, REQUEST_BODY).await;
+    let mut socket = accepted(&upstream).await;
     let first_id = gateway.view().pending_requests[0].request_id.clone();
     let mut second = downstream_http(&gateway, REQUEST_BODY).await;
     let mut changes = gateway.subscribe();
@@ -709,16 +794,33 @@ async fn panel_cancel_queued_request_does_not_cancel_its_active_neighbor() {
     .await
     .unwrap();
     assert!(gateway.cancel_wait(&id));
-    let response = read_panel_cancel(&mut second).await;
-    assert!(String::from_utf8_lossy(&response).contains("CANCELLED"));
+    // It is back in the queue under a new row; its neighbor is untouched.
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let view = gateway.view();
+            if view.waiting_requests == 1
+                && view
+                    .pending_requests
+                    .iter()
+                    .any(|p| p.request_id != first_id && p.request_id != id)
+            {
+                break;
+            }
+            let _ = changes.recv().await;
+        }
+    })
+    .await
+    .expect("the interrupted request did not queue again");
     assert!(gateway
         .view()
         .pending_requests
         .iter()
         .any(|p| p.request_id == first_id));
-    assert_eq!(gateway.view().waiting_requests, 0);
-    drop(first);
-    drop(socket);
+    complete(&mut socket).await;
+    assert!(read_resent(&mut first).await.starts_with("HTTP/1.1 200"));
+    let mut socket = accepted(&upstream).await;
+    complete(&mut socket).await;
+    assert!(read_resent(&mut second).await.starts_with("HTTP/1.1 200"));
     gateway.stop().await.unwrap();
 }
 
@@ -758,7 +860,7 @@ async fn panel_cancel_websocket_turn_keeps_connection_for_next_turn() {
 }
 
 #[tokio::test]
-async fn panel_cancel_sse_before_effective_output_ends_stream_without_failure() {
+async fn panel_cancel_sse_before_effective_output_resends_and_drops_the_first_stream() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (dir, gateway) = fixture(vec![format!(
         "http://{}/v1",
@@ -767,8 +869,7 @@ async fn panel_cancel_sse_before_effective_output_ends_stream_without_failure() 
     .await;
     let (usage, _) = attach_observers(&dir, &gateway);
     let mut downstream = downstream_http(&gateway, REQUEST_BODY).await;
-    let (mut socket, _) = upstream.accept().await.unwrap();
-    read_http_request(&mut socket).await.unwrap();
+    let mut socket = accepted(&upstream).await;
     let event = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-waiting\",\"status\":\"in_progress\"}}\n\n";
     socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
     socket
@@ -785,30 +886,25 @@ async fn panel_cancel_sse_before_effective_output_ends_stream_without_failure() 
     );
     let id = gateway.view().pending_requests[0].request_id.clone();
     assert!(gateway.cancel_wait(&id));
-    let mut tail = vec![0; 4096];
-    let count = tokio::time::timeout(WAIT, downstream.read(&mut tail))
+    tokio::time::timeout(WAIT, wait_for_disconnect(socket))
         .await
-        .unwrap()
         .unwrap();
-    tail.truncate(count);
-    assert!(tail.starts_with(b"HTTP/1.1 499"));
-    assert!(!String::from_utf8_lossy(&tail).contains("response.created"));
-    let record = wait_for_usage_record(&usage).await;
+    let mut socket = accepted(&upstream).await;
+    complete(&mut socket).await;
+    let response = read_resent(&mut downstream).await;
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(!response.contains("fixture-waiting"));
+    let record = wait_for_attempts(&usage, 2).await;
     assert_eq!(
-        record
-            .final_attempt()
-            .unwrap()
-            .end
-            .as_ref()
-            .map(|end| end.cause),
-        Some(EndCause::ClientCancelled)
+        causes(&record),
+        [Some(EndCause::ClientCancelled), Some(EndCause::Completed)]
     );
     assert_neutral_health(&gateway).await;
     gateway.stop().await.unwrap();
 }
 
 #[tokio::test]
-async fn panel_cancel_capacity_backoff_releases_waiter_and_does_not_resend() {
+async fn panel_cancel_capacity_backoff_keeps_the_cooldown_and_sends_when_it_ends() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (dir, gateway) = fixture(vec![format!(
         "http://{}/v1",
@@ -819,8 +915,7 @@ async fn panel_cancel_capacity_backoff_releases_waiter_and_does_not_resend() {
     settings.rate_limit_seconds = 60;
     edit(&gateway, &dir, Edit::Settings { settings });
     let mut downstream = downstream_http(&gateway, REQUEST_BODY).await;
-    let (mut socket, _) = upstream.accept().await.unwrap();
-    read_http_request(&mut socket).await.unwrap();
+    let mut socket = accepted(&upstream).await;
     let body = r#"{"error":{"code":"model_capacity_exceeded"}}"#;
     socket.write_all(format!("HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
     drop(socket);
@@ -833,19 +928,46 @@ async fn panel_cancel_capacity_backoff_releases_waiter_and_does_not_resend() {
     .await
     .unwrap();
     let before = gateway.view();
-    assert!(gateway.cancel_wait(&before.pending_requests[0].request_id));
-    let response = read_panel_cancel(&mut downstream).await;
-    assert!(String::from_utf8_lossy(&response).contains("CANCELLED"));
-    assert_eq!(gateway.view().waiting_requests, 0);
+    let id = before.pending_requests[0].request_id.clone();
+    assert!(gateway.cancel_wait(&id));
+    // The client is not answered: the request waits out the same cooldown
+    // under a new row, and nothing is sent while it lasts.
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let view = gateway.view();
+            if view.waiting_requests == 1
+                && view.pending_requests.iter().all(|p| p.request_id != id)
+            {
+                break;
+            }
+            let _ = changes.recv().await;
+        }
+    })
+    .await
+    .expect("the interrupted request did not wait again");
     assert_eq!(
         gateway.view().providers[0].health.failures,
         before.providers[0].health.failures
     );
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), upstream.accept())
+        tokio::time::timeout(Duration::from_millis(1500), upstream.accept())
             .await
             .is_err()
     );
+    assert_eq!(gateway.view().pending_requests.len(), 1);
+    // Clearing the cooldown lets it through.
+    edit(
+        &gateway,
+        &dir,
+        Edit::Reset {
+            id: before.providers[0].id.clone(),
+        },
+    );
+    let mut socket = accepted(&upstream).await;
+    complete(&mut socket).await;
+    assert!(read_resent(&mut downstream)
+        .await
+        .starts_with("HTTP/1.1 200"));
     gateway.stop().await.unwrap();
 }
 

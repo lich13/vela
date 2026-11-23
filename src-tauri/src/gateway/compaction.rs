@@ -1494,6 +1494,38 @@ impl Lease {
         }
         self.registry.save(&mut state, changed);
     }
+    /// Records the compaction another provider wrote for this conversation
+    /// when it took the request over. The conversation stays with its owner:
+    /// the provider that compacted it served one request, not the thread.
+    pub fn register(&self, boundary: Option<&str>) {
+        let Some(boundary) = boundary.filter(|_| !self.request_only) else {
+            return;
+        };
+        let mut state = self.registry.state.lock();
+        let Some(entry) = state.entries.get_mut(&self.session) else {
+            return;
+        };
+        if entry.establishing
+            || entry.epoch != self.epoch
+            || (entry.boundary_sequence != self.boundary_sequence
+                && entry.boundary_sequence != self.sequence)
+            || entry.boundary.as_deref() == Some(boundary)
+            || entry.consumed_boundary.as_deref() == Some(boundary)
+        {
+            return;
+        }
+        entry.boundary = Some(boundary.into());
+        entry.boundary_sequence = self.sequence;
+        entry.boundary_fresh = true;
+        entry.claim = None;
+        entry.updated = now();
+        self.report(
+            &mut state,
+            crate::events::RoutingOutcome::BoundaryRegistered,
+            None,
+        );
+        self.registry.save(&mut state, true);
+    }
 }
 impl Drop for Lease {
     fn drop(&mut self) {
@@ -1569,6 +1601,10 @@ mod tests {
                     endless_mode: false,
                     upstream_retry_seconds: 5,
                     normal_retry_seconds: 3,
+                    risk_codes: None,
+                    retry_intensity: None,
+                    limit_retry_seconds: None,
+                    limit_rest_seconds: None,
                 })
                 .collect();
             self.prepare_inner(

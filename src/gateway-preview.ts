@@ -7,12 +7,17 @@ import type {
 import type {
   GatewayState,
   GatewaySettings,
+  GrokProtocol,
   Health,
   Provider,
   ProviderQuota,
 } from "./types";
 import {
+  DEFAULT_LIMIT_REST_SECONDS,
+  DEFAULT_LIMIT_RETRY_SECONDS,
   DEFAULT_NORMAL_RETRY_SECONDS,
+  DEFAULT_RETRY_INTENSITY,
+  DEFAULT_RISK_CODES,
   DEFAULT_UPSTREAM_RETRY_SECONDS,
 } from "./types";
 import { densePreview } from "./preview-fixtures";
@@ -34,13 +39,27 @@ const idle = {
   quotaCheck: null,
   rpmWaitReason: null,
   dshModels: null,
+  takeCompaction: false,
+  compactionModel: "",
+  compactionEffort: "",
+  takeAuxiliary: false,
+  auxiliaryModel: "",
+  auxiliaryEffort: "",
+  takeWebSearch: false,
+  webSearchModel: "",
+  webSearchEffort: "",
   searchOnly: false,
   endOnMessageStop: false,
   filterCountTokens: false,
   bufferCompleteResponse: false,
   endlessMode: false,
   upstreamRetrySeconds: DEFAULT_UPSTREAM_RETRY_SECONDS,
+  limitRetrySeconds: DEFAULT_LIMIT_RETRY_SECONDS,
+  limitRestSeconds: DEFAULT_LIMIT_REST_SECONDS,
   normalRetrySeconds: DEFAULT_NORMAL_RETRY_SECONDS,
+  riskCodes: [],
+  retryIntensity: DEFAULT_RETRY_INTENSITY,
+  modelMap: {},
 } satisfies Partial<Provider>;
 export const gatewayDemo: GatewayState = {
   clientId: "codex",
@@ -51,7 +70,6 @@ export const gatewayDemo: GatewayState = {
     port: 43721,
     revision: "preview-listener",
     runningClients: [],
-    antigravityActive: false,
   },
   mode: "manual",
   selected: "primary",
@@ -81,6 +99,8 @@ export const gatewayDemo: GatewayState = {
     maxWaiting: 100,
     networkProbe: true,
     networkProbeAttempts: 3,
+    stallSeconds: 120,
+    holdIdleSeconds: 60,
   },
   providers: [
     {
@@ -193,6 +213,7 @@ export const claudeGatewayDemo: GatewayState = {
     name: i ? "Claude 备用供应商" : "claude.example.com",
     baseUrl: "https://claude.example.com",
     allowedModels: null,
+    riskCodes: [...DEFAULT_RISK_CODES.claude],
   })),
 };
 if (densePreview) {
@@ -238,10 +259,19 @@ export const dshGatewayDemo: GatewayState = {
   providers: [],
   running: false,
 };
+export const agyGatewayDemo: GatewayState = {
+  ...structuredClone(grokGatewayDemo),
+  clientId: "agy",
+  revision: "preview-agy",
+  providers: [],
+  running: false,
+  agyShell: null,
+};
 function syncListener(port = gatewayDemo.settings.port, changed = false) {
   const states = [
     gatewayDemo,
     claudeGatewayDemo,
+    agyGatewayDemo,
     grokGatewayDemo,
     dshGatewayDemo,
   ];
@@ -257,9 +287,8 @@ function syncListener(port = gatewayDemo.settings.port, changed = false) {
       port,
       revision,
       runningClients,
-      antigravityActive: false,
     };
-    state.address = `http://127.0.0.1:${port}${state.clientId === "claude" ? "" : "/v1"}`;
+    state.address = `http://127.0.0.1:${port}${state.clientId === "claude" || state.clientId === "agy" ? "" : "/v1"}`;
   }
 }
 syncListener();
@@ -277,11 +306,13 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
   const s =
     args.clientId === "dsh"
       ? dshGatewayDemo
-      : args.clientId === "claude"
-        ? claudeGatewayDemo
-        : args.clientId === "grok"
-          ? grokGatewayDemo
-          : gatewayDemo;
+      : args.clientId === "agy"
+        ? agyGatewayDemo
+        : args.clientId === "claude"
+          ? claudeGatewayDemo
+          : args.clientId === "grok"
+            ? grokGatewayDemo
+            : gatewayDemo;
   if (name === "cancel_gateway_wait") {
     const found = s.pendingRequests.some((r) => r.requestId === args.requestId);
     s.pendingRequests = s.pendingRequests.filter(
@@ -754,15 +785,47 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     if (e.op === "reset" && p) p.health = { ...healthy };
     if (e.op === "deleteProvider")
       s.providers = s.providers.filter((p) => p.id !== id);
+    if (e.op === "duplicateProvider" && p)
+      s.providers.splice(s.providers.indexOf(p) + 1, 0, {
+        ...structuredClone(p),
+        id: crypto.randomUUID(),
+        name: `${p.name} (copy)`,
+      });
+    if (e.op === "modelMapProvider" && p)
+      p.modelMap = e.mapping as Record<string, string>;
     if (e.op === "reorder")
       s.providers.sort(
         (a, b) =>
           (e.ids as string[]).indexOf(a.id) - (e.ids as string[]).indexOf(b.id),
       );
-    if (e.op === "saveProvider") {
+    if (
+      e.op === "saveProvider" ||
+      e.op === "saveDshProvider" ||
+      e.op === "saveGrokProvider"
+    ) {
       if (p) {
         p.baseUrl = String(e.baseUrl);
+        if (e.op === "saveGrokProvider")
+          p.protocol = e.protocol as GrokProtocol;
         if (e.searchOnly !== undefined) p.searchOnly = Boolean(e.searchOnly);
+        if (e.takeCompaction !== undefined)
+          p.takeCompaction = Boolean(e.takeCompaction);
+        if (e.compactionModel !== undefined)
+          p.compactionModel = String(e.compactionModel);
+        if (e.compactionEffort !== undefined)
+          p.compactionEffort = String(e.compactionEffort);
+        if (e.takeAuxiliary !== undefined)
+          p.takeAuxiliary = Boolean(e.takeAuxiliary);
+        if (e.auxiliaryModel !== undefined)
+          p.auxiliaryModel = String(e.auxiliaryModel);
+        if (e.auxiliaryEffort !== undefined)
+          p.auxiliaryEffort = String(e.auxiliaryEffort);
+        if (e.takeWebSearch !== undefined)
+          p.takeWebSearch = Boolean(e.takeWebSearch);
+        if (e.webSearchModel !== undefined)
+          p.webSearchModel = String(e.webSearchModel);
+        if (e.webSearchEffort !== undefined)
+          p.webSearchEffort = String(e.webSearchEffort);
         if (e.filterCountTokens !== undefined)
           p.filterCountTokens = Boolean(e.filterCountTokens);
         if (e.bufferCompleteResponse !== undefined)
@@ -770,14 +833,33 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         if (e.endlessMode !== undefined) p.endlessMode = Boolean(e.endlessMode);
         if (e.upstreamRetrySeconds !== undefined)
           p.upstreamRetrySeconds = Number(e.upstreamRetrySeconds);
+        if (e.limitRetrySeconds !== undefined)
+          p.limitRetrySeconds = Number(e.limitRetrySeconds);
+        if (e.limitRestSeconds !== undefined)
+          p.limitRestSeconds = Number(e.limitRestSeconds);
         if (e.normalRetrySeconds !== undefined)
           p.normalRetrySeconds = Number(e.normalRetrySeconds);
+        if (e.riskCodes !== undefined) p.riskCodes = e.riskCodes as number[];
+        if (e.retryIntensity !== undefined)
+          p.retryIntensity = Number(e.retryIntensity);
         if (e.endOnMessageStop !== undefined)
           p.endOnMessageStop = Boolean(e.endOnMessageStop);
       } else
         s.providers.push({
           ...structuredClone(idle),
+          ...(e.op === "saveDshProvider" || e.op === "saveGrokProvider"
+            ? { protocol: e.protocol as GrokProtocol }
+            : {}),
           id: crypto.randomUUID(),
+          takeCompaction: Boolean(e.takeCompaction),
+          compactionModel: String(e.compactionModel ?? ""),
+          compactionEffort: String(e.compactionEffort ?? ""),
+          takeAuxiliary: Boolean(e.takeAuxiliary),
+          auxiliaryModel: String(e.auxiliaryModel ?? ""),
+          auxiliaryEffort: String(e.auxiliaryEffort ?? ""),
+          takeWebSearch: Boolean(e.takeWebSearch),
+          webSearchModel: String(e.webSearchModel ?? ""),
+          webSearchEffort: String(e.webSearchEffort ?? ""),
           endOnMessageStop: Boolean(e.endOnMessageStop),
           filterCountTokens: Boolean(e.filterCountTokens),
           bufferCompleteResponse: Boolean(e.bufferCompleteResponse),
@@ -785,9 +867,19 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           upstreamRetrySeconds: Number(
             e.upstreamRetrySeconds ?? DEFAULT_UPSTREAM_RETRY_SECONDS,
           ),
+          limitRetrySeconds: Number(
+            e.limitRetrySeconds ?? DEFAULT_LIMIT_RETRY_SECONDS,
+          ),
+          limitRestSeconds: Number(
+            e.limitRestSeconds ?? DEFAULT_LIMIT_REST_SECONDS,
+          ),
           normalRetrySeconds: Number(
             e.normalRetrySeconds ?? DEFAULT_NORMAL_RETRY_SECONDS,
           ),
+          riskCodes: (e.riskCodes as number[] | undefined) ?? [
+            ...DEFAULT_RISK_CODES[s.clientId],
+          ],
+          retryIntensity: Number(e.retryIntensity ?? DEFAULT_RETRY_INTENSITY),
           name: new URL(String(e.baseUrl)).hostname,
           baseUrl: String(e.baseUrl),
           preferredBaseUrl: String(e.baseUrl),

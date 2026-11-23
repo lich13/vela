@@ -2,20 +2,6 @@ use super::*;
 use parking_lot::Mutex;
 use tempfile::TempDir;
 
-/// Switches to an account already in the vault; the usage tests share it.
-pub(crate) fn switch_fixture_account(
-    paths: &Paths,
-    lc: &dyn AppLifecycle,
-    id: &str,
-    revision: &str,
-) -> Result<AntigravityAuthState> {
-    let entry = with_lock(|| {
-        let (vault, _) = load_vault(paths)?;
-        Ok(vault.entries[vault.index_of(id)?].clone())
-    })?;
-    switch_account_at(paths, lc, entry, revision)
-}
-
 struct MockLifecycle {
     running: Mutex<bool>,
     events: Mutex<Vec<&'static str>>,
@@ -68,12 +54,25 @@ fn setup_paths() -> (TempDir, Paths) {
     let tmp = TempDir::new().expect("tempdir");
     let user_home = tmp.path().join("home");
     let vela_data = tmp.path().join("vela");
-    fs::create_dir_all(user_home.join(".gemini/config")).unwrap();
-    fs::create_dir_all(user_home.join(".config/gcloud")).unwrap();
-    fs::create_dir_all(user_home.join(".config/agswitch")).unwrap();
+    fs::create_dir_all(user_home.join(".gemini")).unwrap();
     fs::create_dir_all(&vela_data).unwrap();
     let paths = Paths::from_roots(&user_home, &vela_data);
     (tmp, paths)
+}
+
+const FIRST_LOGIN: &str = r#"{"email":"u1@example.invalid","access_token":"tok-1"}"#;
+const SECOND_LOGIN: &str = r#"{"email":"u2@example.invalid","access_token":"tok-2"}"#;
+
+/// Signs the app in to both logins in turn, so the second one is current.
+/// Returns both account ids and the state after the second login.
+fn two_accounts(paths: &Paths) -> (String, String, AntigravityAuthState) {
+    write_private_file(&paths.oauth_file(), FIRST_LOGIN.as_bytes()).unwrap();
+    let first = state_at(paths).unwrap().accounts[0].id.clone();
+    write_private_file(&paths.oauth_file(), SECOND_LOGIN.as_bytes()).unwrap();
+    let state = state_at(paths).unwrap();
+    let second = active_account_id(&state).unwrap();
+    assert_ne!(first, second);
+    (first, second, state)
 }
 
 #[test]
@@ -160,17 +159,21 @@ fn oauth_validation_requires_access_or_refresh_token_and_disk_read_tolerates_cor
 
     // Half-written OAuth file marks clean = false so polling retries on next tick.
     write_private_file(&paths.oauth_file(), b"{\"access_token\":\"half").unwrap();
-    write_private_file(&paths.adc_file(), br#"{"type":"external_account"}"#).unwrap();
     let (state, clean) = state_with_oauth(&paths, read_oauth(&paths, false).unwrap()).unwrap();
     assert!(!clean);
     assert!(!state.oauth_present);
     assert!(state.accounts.is_empty());
 
-    // Complete JSON with permanently unsupported schema (external_account ADC) marks clean = true
+    // Complete JSON that can never be a login (no token) marks clean = true
     // so the auth stamp advances and background polling does not spin on every tick.
-    fs::remove_file(paths.oauth_file()).unwrap();
+    write_private_file(
+        &paths.oauth_file(),
+        br#"{"id_token_email":"only-email@example.invalid"}"#,
+    )
+    .unwrap();
     let (state2, clean2) = state_with_oauth(&paths, read_oauth(&paths, false).unwrap()).unwrap();
     assert!(clean2);
+    assert!(!state2.oauth_present);
     assert!(state2.accounts.is_empty());
 }
 
@@ -233,239 +236,302 @@ fn no_email_oauth_refresh_updates_in_place_without_overwriting_other_no_email_ac
 }
 
 #[test]
-fn adc_validation_and_auto_recognition_support_service_account_and_authorized_user() {
+fn a_login_that_gains_its_address_stays_one_account() {
     let (_tmp, paths) = setup_paths();
-    let lifecycle = MockLifecycle::new(false);
-
-    let bad = add_adc_at(
-        &paths,
-        &lifecycle,
-        AddAntigravityAdcInput {
-            name: None,
-            json_text: r#"{"type":"external_account"}"#.to_string(),
-            quota_project_id: None,
-            activate: false,
-        },
-    )
-    .expect_err("external_account should be rejected");
-    assert_eq!(bad.code, code::AUTH);
-
-    let sa = serde_json::json!({
-        "type": "service_account",
-        "project_id": "gcp-prod-1",
-        "private_key": "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----\n",
-        "client_email": "bot@gcp-prod-1.iam.gserviceaccount.com"
-    });
-    let s1 = add_adc_at(
-        &paths,
-        &lifecycle,
-        AddAntigravityAdcInput {
-            name: Some("生产 SA".to_string()),
-            json_text: sa.to_string(),
-            quota_project_id: Some("override-proj".to_string()),
-            activate: false,
-        },
-    )
-    .unwrap();
-    assert_eq!(s1.accounts.len(), 1);
-    assert_eq!(s1.accounts[0].project_id.as_deref(), Some("override-proj"));
-
-    let au = serde_json::json!({
-        "type": "authorized_user",
-        "client_id": "cid.apps.googleusercontent.com",
-        "client_secret": "secret",
-        "refresh_token": "1//refresh",
-        "quota_project_id": "user-proj"
-    });
-    write_private_file(&paths.adc_file(), au.to_string().as_bytes()).unwrap();
-    let s2 = state_at(&paths).unwrap();
-    assert_eq!(s2.accounts.len(), 2);
-    assert!(s2
-        .accounts
-        .iter()
-        .any(|a| a.project_id.as_deref() == Some("user-proj") && a.current));
+    let login = |access: &str, email: Option<&str>| {
+        let mut value = serde_json::json!({
+            "auth_method": "consumer",
+            "token": { "access_token": access, "refresh_token": "1//fixture-new" }
+        });
+        if let Some(email) = email {
+            value["id_token_email"] = email.into();
+        }
+        write_private_file(&paths.oauth_file(), value.to_string().as_bytes()).unwrap();
+    };
+    write_private_file(&paths.oauth_file(), FIRST_LOGIN.as_bytes()).unwrap();
+    state_at(&paths).unwrap();
+    // A new sign-in is written without the address; the first refresh adds it.
+    login("fixture-a", None);
+    let unnamed = state_at(&paths).unwrap();
+    assert_eq!(unnamed.accounts.len(), 2);
+    let id = active_account_id(&unnamed).unwrap();
+    assert_eq!(unnamed.accounts[1].name, "OAuth 账号");
+    login("fixture-b", Some("new@example.invalid"));
+    let named = state_at(&paths).unwrap();
+    assert_eq!(named.accounts.len(), 2);
+    assert_eq!(active_account_id(&named).as_deref(), Some(id.as_str()));
+    assert_eq!(named.accounts[1].name, "new@example.invalid");
+    assert_eq!(
+        named.accounts[1].email.as_deref(),
+        Some("new@example.invalid")
+    );
+    // A name the user gave is kept, and a write without the address keeps both.
+    let renamed = rename_account_at(&paths, &id, "Fixture", &named.revision).unwrap();
+    assert_eq!(renamed.accounts[1].name, "Fixture");
+    login("fixture-c", None);
+    let state = state_at(&paths).unwrap();
+    assert_eq!(state.accounts.len(), 2);
+    assert_eq!(state.accounts[1].name, "Fixture");
+    assert_eq!(
+        state.accounts[1].email.as_deref(),
+        Some("new@example.invalid")
+    );
+    assert!(state.accounts[1].current);
 }
 
 #[test]
-fn auth_mode_distinguishes_two_mixed_states_and_target_mode_rejects_mixed() {
+fn signing_in_again_to_a_known_account_leaves_no_placeholder() {
     let (_tmp, paths) = setup_paths();
-    let au = serde_json::json!({
-        "type": "authorized_user",
-        "client_id": "cid",
-        "client_secret": "sec",
-        "refresh_token": "ref"
-    });
-    write_private_file(&paths.adc_file(), au.to_string().as_bytes()).unwrap();
-    write_enable_adc(&paths, false).unwrap();
-
-    let s1 = state_at(&paths).unwrap();
-    assert_eq!(s1.mode, AuthMode::MixedAdcFileWithoutFlag);
-
-    fs::remove_file(paths.adc_file()).unwrap();
-    write_enable_adc(&paths, true).unwrap();
-    let s2 = state_at(&paths).unwrap();
-    assert_eq!(s2.mode, AuthMode::MixedFlagWithoutAdcFile);
-
-    assert!(serde_json::from_str::<TargetMode>("\"mixed_adc_file_without_flag\"").is_err());
-    assert!(serde_json::from_str::<TargetMode>("\"mixed_flag_without_adc_file\"").is_err());
+    let login = |refresh: &str, email: Option<&str>| {
+        let mut value = serde_json::json!({
+            "auth_method": "consumer",
+            "token": { "access_token": "fixture-a", "refresh_token": refresh }
+        });
+        if let Some(email) = email {
+            value["id_token_email"] = email.into();
+        }
+        write_private_file(&paths.oauth_file(), value.to_string().as_bytes()).unwrap();
+    };
+    login("1//fixture-old", Some("known@example.invalid"));
+    let id = active_account_id(&state_at(&paths).unwrap()).unwrap();
+    login("1//fixture-again", None);
+    assert_eq!(state_at(&paths).unwrap().accounts.len(), 2);
+    login("1//fixture-again", Some("known@example.invalid"));
+    let state = state_at(&paths).unwrap();
+    assert_eq!(state.accounts.len(), 1);
+    assert_eq!(active_account_id(&state), Some(id));
 }
 
 #[test]
-fn switch_account_switches_between_oauth_and_adc_and_restarts_running_app() {
+fn a_placeholder_left_by_an_earlier_version_joins_its_account() {
     let (_tmp, paths) = setup_paths();
-    let oauth1 = serde_json::json!({
-        "email": "u1@example.invalid",
-        "access_token": "tok-1"
+    let entry = |id: &str, name: &str, email: Option<&str>, access: &str, refresh: &str| {
+        serde_json::json!({
+            "id": id, "name": name, "kind": "oauth", "sourceType": "consumer",
+            "email": email, "updatedAt": 1,
+            "payload": serde_json::json!({
+                "auth_method": "consumer",
+                "id_token_email": email,
+                "token": { "access_token": access, "refresh_token": refresh }
+            }).to_string(),
+        })
+    };
+    let vault = serde_json::json!({
+        "schema": 1,
+        "entries": [
+            entry("kept", "old@example.invalid", Some("old@example.invalid"), "fixture-a", "1//fixture-old"),
+            entry("placeholder", "OAuth 账号", None, "fixture-b", "1//fixture-new"),
+            entry("named", "new@example.invalid", Some("new@example.invalid"), "fixture-c", "1//fixture-new"),
+            // Unnamed and nobody else's: it stays.
+            entry("alone", "OAuth 账号", None, "fixture-d", "1//fixture-alone"),
+        ],
+        "activeOauthId": "placeholder",
+        "activations": [
+            { "accountId": "kept", "sinceMs": 1 },
+            { "accountId": "placeholder", "sinceMs": 2 },
+            { "accountId": "kept", "sinceMs": 3 },
+        ],
     });
-    write_private_file(&paths.oauth_file(), oauth1.to_string().as_bytes()).unwrap();
-    let s0 = state_at(&paths).unwrap();
-    let oauth1_id = s0.accounts[0].id.clone();
-
-    let au = serde_json::json!({
-        "type": "authorized_user",
-        "client_id": "cid",
-        "client_secret": "sec",
-        "refresh_token": "ref",
-        "quota_project_id": "p-1"
-    });
-    let lifecycle = MockLifecycle::new(true);
-    let s1 = add_adc_at(
-        &paths,
-        &lifecycle,
-        AddAntigravityAdcInput {
-            name: Some("ADC 1".to_string()),
-            json_text: au.to_string(),
-            quota_project_id: None,
-            activate: true,
-        },
-    )
-    .unwrap();
-    assert_eq!(s1.mode, AuthMode::Adc);
-    assert!(s1.app_restarted);
-    assert_eq!(lifecycle.events(), vec!["quit", "launch"]);
-
-    let s2 = switch_account_at(
-        &paths,
-        &lifecycle,
-        load_vault(&paths)
-            .unwrap()
-            .0
-            .entries
+    write_private_file(&paths.vault_file(), vault.to_string().as_bytes()).unwrap();
+    let state = state_at(&paths).unwrap();
+    assert_eq!(
+        state
+            .accounts
             .iter()
-            .find(|e| e.id == oauth1_id)
-            .unwrap()
-            .clone(),
-        &s1.revision,
-    )
-    .unwrap();
-    assert_eq!(s2.mode, AuthMode::Oauth);
-    assert!(!paths.adc_file().exists());
-    assert!(paths.adc_disabled_file().exists());
-    assert!(s2.app_restarted);
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>(),
+        ["kept", "named", "alone"]
+    );
+    let (vault, _) = load_vault(&paths).unwrap();
+    assert_eq!(vault.active_oauth_id.as_deref(), Some("named"));
+    assert_eq!(
+        vault
+            .activations
+            .iter()
+            .map(|s| s.account_id.as_str())
+            .collect::<Vec<_>>(),
+        ["kept", "named", "kept"]
+    );
+    assert_eq!(state.cli_sessions, 0);
+    assert_eq!(
+        count_running_agy_ps("/Users/fixture/.local/bin/agy\nagy\n/usr/bin/agy-helper\n/Applications/Antigravity.app/Contents/MacOS/Antigravity\n"),
+        2
+    );
+}
+
+#[test]
+fn auth_state_serializes_exactly_the_frontend_fields() {
+    let (_tmp, paths) = setup_paths();
+    write_private_file(&paths.oauth_file(), FIRST_LOGIN.as_bytes()).unwrap();
+    let state = serde_json::to_value(state_at(&paths).unwrap()).unwrap();
+    let keys =
+        |value: &Value| -> Vec<String> { value.as_object().unwrap().keys().cloned().collect() };
+    assert_eq!(
+        keys(&state),
+        [
+            "accounts",
+            "appRestarted",
+            "cliSessions",
+            "oauthAuthMethod",
+            "oauthEmail",
+            "oauthPresent",
+            "relaunchFailed",
+            "revision"
+        ]
+    );
+    assert_eq!(
+        keys(&state["accounts"][0]),
+        [
+            "credentialRevision",
+            "current",
+            "email",
+            "id",
+            "name",
+            "sourceType",
+            "updatedAt"
+        ]
+    );
+}
+
+#[test]
+fn switch_account_writes_the_saved_login_and_restarts_a_running_app() {
+    let (_tmp, paths) = setup_paths();
+    let (first, second, before) = two_accounts(&paths);
+
+    let lifecycle = MockLifecycle::new(true);
+    let switched = switch_account_at(&paths, &lifecycle, &first, &before.revision).unwrap();
+    assert!(switched.app_restarted && !switched.relaunch_failed);
+    assert_eq!(lifecycle.events(), vec!["quit", "launch"]);
+    assert_eq!(fs::read_to_string(paths.oauth_file()).unwrap(), FIRST_LOGIN);
+    assert_eq!(switched.oauth_email.as_deref(), Some("u1@example.invalid"));
+    assert_eq!(active_account_id(&switched), Some(first.clone()));
+    assert_eq!(switched.accounts.iter().filter(|a| a.current).count(), 1);
+    let (vault, _) = load_vault(&paths).unwrap();
+    assert_eq!(vault.entries.len(), 2);
+    assert_eq!(vault.active_oauth_id.as_deref(), Some(first.as_str()));
+    assert_eq!(vault.activations.last().unwrap().account_id, first);
+
+    // An app that is not running is left closed.
+    let closed = MockLifecycle::new(false);
+    let back = switch_account_at(&paths, &closed, &second, &switched.revision).unwrap();
+    assert!(!back.app_restarted && !back.relaunch_failed);
+    assert!(closed.events().is_empty());
+    assert_eq!(
+        fs::read_to_string(paths.oauth_file()).unwrap(),
+        SECOND_LOGIN
+    );
+    assert_eq!(active_account_id(&back), Some(second));
+
+    // The switch stays in place when the app cannot be reopened.
+    let mut stuck = MockLifecycle::new(true);
+    stuck.fail_launch = true;
+    let kept = switch_account_at(&paths, &stuck, &first, &back.revision).unwrap();
+    assert!(kept.relaunch_failed && !kept.app_restarted);
+    assert_eq!(stuck.events(), vec!["quit", "launch"]);
+    assert_eq!(active_account_id(&kept), Some(first));
+
+    let unknown = switch_account_at(&paths, &closed, "missing", &kept.revision).unwrap_err();
+    assert_eq!(unknown.code, code::ACCOUNT);
+    assert!(closed.events().is_empty());
+}
+
+#[test]
+fn a_failed_switch_restores_the_login_and_the_vault() {
+    let (_tmp, paths) = setup_paths();
+    let (_, _, before) = two_accounts(&paths);
+    let vault = fs::read(paths.vault_file()).unwrap();
+
+    let lifecycle = MockLifecycle::new(true);
+    let failed = with_lifecycle(&paths, &before.revision, &lifecycle, || {
+        write_oauth(&paths, FIRST_LOGIN)?;
+        // Observing the new login records it in the vault.
+        state_at(&paths)?;
+        assert_ne!(fs::read(paths.vault_file()).unwrap(), vault);
+        Err(err(code::PROCESS, "fixture failure"))
+    });
+    assert_eq!(failed.unwrap_err().message, "fixture failure");
+    assert_eq!(
+        fs::read_to_string(paths.oauth_file()).unwrap(),
+        SECOND_LOGIN
+    );
+    assert_eq!(fs::read(paths.vault_file()).unwrap(), vault);
+    assert_eq!(state_at(&paths).unwrap().revision, before.revision);
+    // The app that was closed for the switch is opened again.
+    assert_eq!(lifecycle.events(), vec!["quit", "launch"]);
 }
 
 #[test]
 fn rename_and_delete_account_prevent_active_deletion_and_suppress_reimport() {
     let (_tmp, paths) = setup_paths();
-    let lifecycle = MockLifecycle::new(false);
-    let au = serde_json::json!({
-        "type": "authorized_user",
-        "client_id": "cid",
-        "client_secret": "sec",
-        "refresh_token": "ref"
-    });
-    write_private_file(&paths.adc_disabled_file(), au.to_string().as_bytes()).unwrap();
-    let s1 = state_at(&paths).unwrap();
-    assert_eq!(s1.accounts.len(), 1);
-    let adc_id = s1.accounts[0].id.clone();
+    let (first, second, s1) = two_accounts(&paths);
 
-    let err = delete_account_at(&paths, &adc_id, &s1.revision).expect_err("cannot delete current");
+    let err = delete_account_at(&paths, &second, &s1.revision).expect_err("cannot delete current");
     assert_eq!(err.code, code::CONFLICT);
+    assert_eq!(state_at(&paths).unwrap().accounts.len(), 2);
 
-    fs::remove_file(paths.adc_disabled_file()).unwrap();
-    let s2 = state_at(&paths).unwrap();
-    let s3 = rename_account_at(&paths, &adc_id, "新名称", &s2.revision).unwrap();
-    assert_eq!(s3.accounts[0].name, "新名称");
-
-    let s4 = delete_account_at(&paths, &adc_id, &s3.revision).unwrap();
-    assert!(s4.accounts.is_empty());
-    assert!(!paths.agswitch_adc_file().exists());
-
-    // When ADC 1 is active and ADC 2 is stored in agswitch_adc_file (inactive backup),
-    // deleting ADC 2 also removes the matching agswitch_adc_file without touching active ADC 1.
-    let au2 = serde_json::json!({
-        "type": "authorized_user",
-        "client_id": "cid2",
-        "client_secret": "sec2",
-        "refresh_token": "ref2"
-    });
-    let s5 = add_adc_at(
-        &paths,
-        &lifecycle,
-        AddAntigravityAdcInput {
-            name: Some("ADC Active".to_string()),
-            json_text: au.to_string(),
-            quota_project_id: None,
-            activate: true,
-        },
-    )
-    .unwrap();
-    assert!(!paths.agswitch_adc_file().exists());
-    let s6 = add_adc_at(
-        &paths,
-        &lifecycle,
-        AddAntigravityAdcInput {
-            name: Some("ADC Backup".to_string()),
-            json_text: au2.to_string(),
-            quota_project_id: None,
-            activate: false,
-        },
-    )
-    .unwrap();
-    let adc2_id = s6.accounts.iter().find(|a| !a.current).unwrap().id.clone();
-    write_private_file(&paths.agswitch_adc_file(), au2.to_string().as_bytes()).unwrap();
-    let s7 = state_at(&paths).unwrap();
-    #[cfg(unix)]
-    {
-        let target = paths.agswitch_adc_file().with_extension("target");
-        fs::rename(paths.agswitch_adc_file(), &target).unwrap();
-        std::os::unix::fs::symlink(&target, paths.agswitch_adc_file()).unwrap();
-        assert_eq!(
-            delete_account_at(&paths, &adc2_id, &s7.revision)
-                .unwrap_err()
-                .code,
-            code::SYMLINK
-        );
-        fs::remove_file(paths.agswitch_adc_file()).unwrap();
-        fs::rename(&target, paths.agswitch_adc_file()).unwrap();
-        assert_eq!(state_at(&paths).unwrap().accounts.len(), 2);
+    let s2 = rename_account_at(&paths, &first, " 新名称 ", &s1.revision).unwrap();
+    assert!(s2
+        .accounts
+        .iter()
+        .any(|a| a.id == first && a.name == "新名称"));
+    for (id, name, expected) in [
+        (first.as_str(), " ", code::NAME),
+        ("missing", "X", code::ACCOUNT),
+    ] {
+        let err = rename_account_at(&paths, id, name, &s2.revision).unwrap_err();
+        assert_eq!(err.code, expected);
     }
-    let s8 = delete_account_at(&paths, &adc2_id, &s7.revision).unwrap();
-    assert_eq!(s8.accounts.len(), 1);
-    assert!(!paths.agswitch_adc_file().exists());
-    assert!(paths.adc_file().exists());
-    let _ = s5;
+
+    // Deleting an account that is not in use leaves the app's login alone.
+    let s3 = delete_account_at(&paths, &first, &s2.revision).unwrap();
+    assert_eq!(s3.accounts.len(), 1);
+    assert_eq!(s3.accounts[0].id, second);
+    assert!(s3.accounts[0].current);
+    assert_eq!(
+        fs::read_to_string(paths.oauth_file()).unwrap(),
+        SECOND_LOGIN
+    );
+
+    // The deleted login is not saved again when it comes back unchanged.
+    write_private_file(&paths.oauth_file(), FIRST_LOGIN.as_bytes()).unwrap();
+    let s4 = state_at(&paths).unwrap();
+    assert!(s4.oauth_present && !s4.oauth_added);
+    assert_eq!(s4.accounts.len(), 1);
+    assert!(!s4.accounts[0].current);
+
+    // Once the app is signed out, the last account can go too.
+    fs::remove_file(paths.oauth_file()).unwrap();
+    let s5 = state_at(&paths).unwrap();
+    let s6 = delete_account_at(&paths, &second, &s5.revision).unwrap();
+    assert!(s6.accounts.is_empty());
+    assert!(load_vault(&paths).unwrap().0.active_oauth_id.is_none());
 }
 
 #[test]
 fn revision_conflict_and_quit_failure_preserve_disk_files() {
     let (_tmp, paths) = setup_paths();
-    let oauth = serde_json::json!({
-        "email": "u1@example.invalid",
-        "access_token": "tok-1"
-    });
-    write_private_file(&paths.oauth_file(), oauth.to_string().as_bytes()).unwrap();
-    let s1 = state_at(&paths).unwrap();
+    let (first, _, s1) = two_accounts(&paths);
+    let vault = fs::read(paths.vault_file()).unwrap();
 
-    let conflict = rename_account_at(&paths, &s1.accounts[0].id, "X", "stale-rev")
-        .expect_err("stale revision must fail");
+    let conflict =
+        rename_account_at(&paths, &first, "X", "stale-rev").expect_err("stale revision must fail");
+    assert_eq!(conflict.code, code::CONFLICT);
+    let conflict = delete_account_at(&paths, &first, "stale-rev").unwrap_err();
+    assert_eq!(conflict.code, code::CONFLICT);
+    let closed = MockLifecycle::new(false);
+    let conflict = switch_account_at(&paths, &closed, &first, "stale-rev").unwrap_err();
     assert_eq!(conflict.code, code::CONFLICT);
 
     let mut failing = MockLifecycle::new(true);
     failing.fail_quit = true;
-    let res = set_mode_at(&paths, &failing, TargetMode::Adc, &s1.revision);
-    assert!(res.is_err());
-    assert!(!read_enable_adc(&paths).unwrap().0);
+    let res = switch_account_at(&paths, &failing, &first, &s1.revision);
+    assert_eq!(res.unwrap_err().code, code::PROCESS);
+    assert_eq!(failing.events(), vec!["quit"]);
+    assert_eq!(
+        fs::read_to_string(paths.oauth_file()).unwrap(),
+        SECOND_LOGIN
+    );
+    assert_eq!(fs::read(paths.vault_file()).unwrap(), vault);
 }
 
 #[cfg(target_os = "macos")]
@@ -505,8 +571,6 @@ fn initial_activation_uses_current_credentials_and_preserves_existing_zero_histo
             .unwrap();
     };
     write_private_file(&paths.oauth_file(), br#"{"auth_method":"google-oauth","user":{"email":"fixture@example.invalid"},"token":{"access_token":"fixture","refresh_token":"fixture"}}"#).unwrap();
-    write_enable_adc(&paths, false).unwrap();
-    set_mtime(&paths.config_file(), 3_000);
     set_mtime(&paths.oauth_file(), 2_000);
     let state = state_at(&paths).unwrap();
     let id = active_account_id(&state).unwrap();
@@ -523,7 +587,6 @@ fn initial_activation_uses_current_credentials_and_preserves_existing_zero_histo
     assert_eq!(timeline.provider_at(2_000), Some(id.as_str()));
     vault.activations[0].since_ms = 0;
     save_vault(&paths, &vault).unwrap();
-    set_mtime(&paths.config_file(), 3_000);
     state_at(&paths).unwrap();
     assert_eq!(load_vault(&paths).unwrap().0.activations[0].since_ms, 0);
     assert_eq!(
@@ -531,29 +594,18 @@ fn initial_activation_uses_current_credentials_and_preserves_existing_zero_histo
         Some(id.as_str())
     );
 
-    write_private_file(&paths.adc_file(), br#"{"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}"#).unwrap();
-    write_enable_adc(&paths, true).unwrap();
-    set_mtime(&paths.adc_file(), 2_500);
-    set_mtime(&paths.config_file(), 3_000);
-    vault.activations.clear();
-    save_vault(&paths, &vault).unwrap();
-    let state = state_at(&paths).unwrap();
-    assert!(state.enable_adc);
+    // A saved account the vault has not yet recorded as active takes over
+    // from the time its login was written.
+    write_private_file(&paths.oauth_file(), SECOND_LOGIN.as_bytes()).unwrap();
+    let other = active_account_id(&state_at(&paths).unwrap()).unwrap();
     let (mut vault, _) = load_vault(&paths).unwrap();
-    assert_eq!(vault.activations[0].since_ms, 3_000);
-    assert_eq!(
-        vault.activations[0].account_id,
-        active_account_id(&state).unwrap()
-    );
-    let adc_id = vault.activations[0].account_id.clone();
-    vault.activations = vec![ActivationSpan {
-        account_id: id.clone(),
-        since_ms: 0,
-    }];
+    vault.activations.truncate(1);
     save_vault(&paths, &vault).unwrap();
+    set_mtime(&paths.oauth_file(), 2_500);
     let timeline = provider_timeline(&paths.data_dir, Some(&paths.gemini_home));
-    assert_eq!(timeline.provider_at(2_999), Some(id.as_str()));
-    assert_eq!(timeline.provider_at(3_000), Some(adc_id.as_str()));
+    assert_eq!(timeline.provider_at(2_499), Some(id.as_str()));
+    assert_eq!(timeline.provider_at(2_500), Some(other.as_str()));
+
     vault.activations.clear();
     save_vault(&paths, &vault).unwrap();
     let observed = now_ms();
@@ -562,274 +614,31 @@ fn initial_activation_uses_current_credentials_and_preserves_existing_zero_histo
     assert!(timeline.spans[0].since_ms <= now_ms());
 }
 
-fn vertex_input(revision: String) -> SaveVertexKeyInput {
-    SaveVertexKeyInput {
-        id: None,
-        name: "Fixture Vertex".into(),
-        api_key: "fixture-vertex-key".into(),
-        project_id: None,
-        location: "global".into(),
-        models: vec!["gemini-3-flash-preview".into(), "gemini-2.5-flash".into()],
-        activate: true,
-        expected_revision: revision,
-    }
-}
-fn vertex_entry(paths: &Paths, input: &SaveVertexKeyInput) -> Result<(StoredEntry, VertexKey)> {
-    match prepare_vertex_save(paths, input)? {
-        VertexSave::Activate(entry, key, _) => Ok((entry, key)),
-        VertexSave::Saved(_) => panic!("fixture expected activation"),
-    }
-}
 #[test]
-fn inactive_vertex_save_updates_in_place_without_changing_app_files() {
+fn current_account_and_timeline_follow_the_app_login() {
     let (_tmp, paths) = setup_paths();
-    let mut input = vertex_input(state_at(&paths).unwrap().revision);
-    input.activate = false;
-    let VertexSave::Saved(saved) = prepare_vertex_save(&paths, &input).unwrap() else {
-        panic!("inactive entry must save without activation");
+    let (first, second, _) = two_accounts(&paths);
+    let current = || {
+        let identity = current_oauth_identity(&paths.data_dir, &paths.gemini_home).unwrap();
+        let timeline = provider_timeline(&paths.data_dir, Some(&paths.gemini_home));
+        (
+            identity.map(|(id, _)| id),
+            timeline.provider_at(i64::MAX).map(str::to_owned),
+        )
     };
-    assert!(!paths.app_settings_file().exists());
-    assert!(!paths.config_file().exists());
-    let account = saved
-        .accounts
-        .iter()
-        .find(|a| a.kind == AccountKind::VertexKey)
-        .unwrap();
-    input.id = Some(account.id.clone());
-    input.api_key.clear();
-    input.name = "Fixture renamed key".into();
-    input.expected_revision = saved.revision;
-    let VertexSave::Saved(updated) = prepare_vertex_save(&paths, &input).unwrap() else {
-        panic!("inactive edit must save without activation");
-    };
-    assert_eq!(updated.accounts.len(), 1);
-    assert_eq!(updated.accounts[0].name, "Fixture renamed key");
-    assert!(!updated.accounts[0].current);
-    assert!(prepare_vertex_save(&paths, &input).is_err());
-    let (vault, _) = load_vault(&paths).unwrap();
-    assert_eq!(
-        decode_vertex(&vault.entries[0]).unwrap().api_key,
-        "fixture-vertex-key"
-    );
-}
-#[test]
-fn vertex_activation_edit_and_adc_restore_preserve_private_credentials_and_settings() {
-    let (_tmp, paths) = setup_paths();
-    let lifecycle = MockLifecycle::new(true);
-    let initial = state_at(&paths).unwrap();
-    let adc = add_adc_at(&paths,&lifecycle,AddAntigravityAdcInput {
-        name: Some("Fixture ADC".into()), json_text: r#"{"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}"#.into(), quota_project_id: None, activate: true,
-    }).unwrap();
-    assert_ne!(initial.revision, adc.revision);
-    let original = json!({"gateway":{"enabled":false,"customHeaders":{"fixture":"kept"}},"models":{"defaultModelId":"fixture-original"},"theme":"fixture-theme"});
-    write_app_settings(&paths, &original).unwrap();
-    let before = state_at(&paths).unwrap();
-    let (entry, key) = vertex_entry(&paths, &vertex_input(before.revision.clone())).unwrap();
-    let id = entry.id.clone();
-    let selected = activate_vertex_at(
-        &paths,
-        &lifecycle,
-        entry,
-        &key,
-        &before.revision,
-        43721,
-        "fixture-local-token".into(),
-        || {
-            assert!(!paths.adc_file().exists());
-            assert!(paths.adc_disabled_file().exists());
-            assert_eq!(
-                read_app_settings(&paths)?["gateway"]["url"],
-                "http://127.0.0.1:43721/antigravity"
-            );
-            Ok(())
-        },
-    )
-    .unwrap();
-    assert_eq!(selected.mode, AuthMode::VertexKey);
-    assert_eq!(active_account_id(&selected).as_deref(), Some(id.as_str()));
-    let visible = serde_json::to_string(&selected).unwrap();
-    assert!(!visible.contains("fixture-vertex-key") && !visible.contains("fixture-local-token"));
-    assert_eq!(
-        provider_timeline(&paths.data_dir, Some(&paths.gemini_home)).provider_at(now_ms()),
-        Some(id.as_str())
-    );
-    let mut edit = vertex_input(selected.revision.clone());
-    edit.id = Some(id.clone());
-    edit.api_key.clear();
-    edit.models = vec!["gemini-2.5-flash".into()];
-    let (updated, updated_key) = vertex_entry(&paths, &edit).unwrap();
-    assert_eq!(
-        decode_vertex(&updated).unwrap().api_key,
-        "fixture-vertex-key"
-    );
-    let state = activate_vertex_at(
-        &paths,
-        &lifecycle,
-        updated,
-        &updated_key,
-        &selected.revision,
-        43721,
-        "fixture-local-token".into(),
-        || Ok(()),
-    )
-    .unwrap();
-    assert_eq!(
-        read_app_settings(&paths).unwrap()["models"]["defaultModelId"],
-        "gemini-2.5-flash"
-    );
-    let state = set_mode_at(&paths, &lifecycle, TargetMode::Adc, &state.revision).unwrap();
-    assert_eq!(state.mode, AuthMode::Adc);
-    assert_eq!(read_app_settings(&paths).unwrap(), original);
-    assert!(load_vault(&paths).unwrap().0.gateway.is_none());
-    let renamed = rename_account_at(&paths, &id, "Renamed Vertex", &state.revision).unwrap();
-    assert!(renamed
-        .accounts
-        .iter()
-        .any(|a| a.id == id && a.name == "Renamed Vertex"));
-    assert!(!delete_account_at(&paths, &id, &renamed.revision)
-        .unwrap()
-        .accounts
-        .iter()
-        .any(|a| a.id == id));
-}
-#[test]
-fn vertex_listener_failure_restores_files_and_restart_failure_keeps_the_switch() {
-    let snapshot = |paths: &Paths| -> Vec<_> {
-        paths
-            .watched_files()
-            .into_iter()
-            .chain(std::iter::once(paths.vault_file()))
-            .map(|p| {
-                let bytes = storage::read_optional(&p).unwrap();
-                (p, bytes)
-            })
-            .collect()
-    };
-    for fail_launch in [false, true] {
-        let (_tmp, paths) = setup_paths();
-        let mut lifecycle = MockLifecycle::new(true);
-        lifecycle.fail_launch = fail_launch;
-        let state = state_at(&paths).unwrap();
-        let (entry, key) = vertex_entry(&paths, &vertex_input(state.revision.clone())).unwrap();
-        let before = snapshot(&paths);
-        let result = activate_vertex_at(
-            &paths,
-            &lifecycle,
-            entry,
-            &key,
-            &state.revision,
-            43721,
-            "fixture-local-token".into(),
-            || {
-                if fail_launch {
-                    Ok(())
-                } else {
-                    Err(err(code::CONFLICT, "fixture listener conflict"))
-                }
-            },
-        );
-        if fail_launch {
-            let switched = result.unwrap();
-            assert!(switched.relaunch_failed && !switched.app_restarted);
-            assert_ne!(snapshot(&paths), before);
-            assert_eq!(lifecycle.events(), vec!["quit", "launch"]);
-            continue;
-        }
-        assert_eq!(result.unwrap_err().code, code::CONFLICT);
-        assert_eq!(snapshot(&paths), before);
-        let current = state_at(&paths).unwrap();
-        let mut input = vertex_input(current.revision);
-        write_app_settings(&paths, &json!({"theme":"external-change"})).unwrap();
-        assert!(vertex_entry(&paths, &input).is_err());
-        input.expected_revision = state_at(&paths).unwrap().revision;
-        assert!(vertex_entry(&paths, &input).is_ok());
-    }
-}
-#[tokio::test]
-async fn selected_vertex_listener_restores_after_restart_without_rewriting_app_settings() {
-    let (_tmp, paths) = setup_paths();
-    let lifecycle = MockLifecycle::new(false);
-    let gateway = crate::gateway::Gateway::new(paths.data_dir.clone()).unwrap();
-    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = socket.local_addr().unwrap().port();
-    drop(socket);
-    gateway
-        .set_listener_port(port, &gateway.listener_view().revision)
-        .unwrap();
-    let state = state_at(&paths).unwrap();
-    let (entry, key) = vertex_entry(&paths, &vertex_input(state.revision.clone())).unwrap();
-    activate_vertex_at(
-        &paths,
-        &lifecycle,
-        entry,
-        &key,
-        &state.revision,
-        port,
-        "fixture-local-token".into(),
-        || Ok(()),
-    )
-    .unwrap();
-    let before = fs::read(paths.app_settings_file()).unwrap();
-    restore_vertex_listener_at(&paths, &gateway).await.unwrap();
-    assert!(gateway.listener_view().antigravity_active);
-    let catalog: Value = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap()
-        .get(format!("http://127.0.0.1:{port}/antigravity/v1beta/models"))
-        .bearer_auth("fixture-local-token")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(catalog["models"].as_array().unwrap().len(), 2);
-    vertex::stop(&gateway.registry()).await.unwrap();
-    assert_eq!(fs::read(paths.app_settings_file()).unwrap(), before);
-    assert_eq!(state_at(&paths).unwrap().mode, AuthMode::VertexKey);
-}
+    assert_eq!(current(), (Some(second.clone()), Some(second.clone())));
 
-#[test]
-fn current_account_and_timeline_do_not_fall_back_across_credential_kinds() {
-    let (_tmp, paths) = setup_paths();
-    let lifecycle = MockLifecycle::new(false);
-    let added = add_adc_at(&paths,&lifecycle,AddAntigravityAdcInput {name:Some("Fixture ADC".into()),json_text:r#"{"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}"#.into(),quota_project_id:None,activate:true}).unwrap();
-    let adc = added
-        .accounts
-        .iter()
-        .find(|a| a.kind == AccountKind::Adc)
-        .unwrap()
-        .id
-        .clone();
-    let (entry, key) = vertex_entry(&paths, &vertex_input(added.revision.clone())).unwrap();
-    let mut selected = activate_vertex_at(
-        &paths,
-        &lifecycle,
-        entry,
-        &key,
-        &added.revision,
-        43721,
-        "fixture-local".into(),
-        || Ok(()),
+    // A refreshed login is matched by its email before the vault has seen it.
+    write_private_file(
+        &paths.oauth_file(),
+        br#"{"email":"U1@Example.Invalid","access_token":"tok-1-refreshed"}"#,
     )
     .unwrap();
-    selected.mode = AuthMode::Oauth;
-    selected.enable_adc = false;
-    selected.accounts.retain(|a| a.kind != AccountKind::Oauth);
-    assert_eq!(active_account_id(&selected), None);
-    let bytes = fs::read(paths.adc_disabled_file()).unwrap();
-    write_active_adc(&paths, &bytes).unwrap();
-    let state = state_at(&paths).unwrap();
-    assert_eq!(state.mode, AuthMode::Adc);
-    assert_eq!(active_account_id(&state), Some(adc.clone()));
-    assert_eq!(
-        provider_timeline(&paths.data_dir, Some(&paths.gemini_home)).provider_at(now_ms()),
-        Some(adc.as_str())
-    );
-    assert!(current_oauth_identity(&paths.data_dir, &paths.gemini_home)
-        .unwrap()
-        .is_none());
+    assert_eq!(current(), (Some(first.clone()), Some(first)));
+
+    // Signed out, no account is current and usage stays with the last one.
+    fs::remove_file(paths.oauth_file()).unwrap();
+    assert_eq!(current(), (None, Some(second)));
 }
 
 #[test]
@@ -920,25 +729,6 @@ fn fixture_homes_never_reach_the_keychain() {
 }
 
 #[test]
-fn a_new_login_is_saved_even_when_a_later_file_is_unreadable() {
-    let (_tmp, paths) = setup_paths();
-    write_private_file(
-        &paths.oauth_file(),
-        br#"{"auth_method":"google-oauth","id_token_email":"new@example.invalid","token":{"access_token":"fixture","refresh_token":"fixture"}}"#,
-    )
-    .unwrap();
-    fs::create_dir_all(paths.app_settings_file().parent().unwrap()).unwrap();
-    fs::write(paths.app_settings_file(), b"{ not json").unwrap();
-    assert!(state_at(&paths).is_err());
-    let (vault, _) = load_vault(&paths).unwrap();
-    assert_eq!(vault.entries.len(), 1);
-    assert_eq!(
-        vault.entries[0].email.as_deref(),
-        Some("new@example.invalid")
-    );
-}
-
-#[test]
 fn captured_keychain_login_never_falls_back_to_the_legacy_file() {
     let (_tmp, paths) = setup_paths();
     let legacy = r#"{"auth_method":"google-oauth","id_token_email":"old@example.invalid","token":{"access_token":"fixture-old","refresh_token":"fixture-old"}}"#;
@@ -1001,4 +791,282 @@ fn new_oauth_notice_survives_hidden_updates_and_is_drained_once() {
     assert!(drained.antigravity_auth.as_ref().unwrap().oauth_added);
     assert_eq!(drained.antigravity_auth.unwrap().revision, "newer");
     assert!(pending.drain().antigravity_auth.is_none());
+}
+
+/// The vault an earlier version left behind: one account of each kind it
+/// supported, plus what it recorded while a Vertex API Key was in use.
+fn write_retired_vault(paths: &Paths, gateway: Value) {
+    let vault = serde_json::json!({
+        "schema": 1,
+        "entries": [
+            {
+                "id": "fixture-oauth",
+                "name": "Fixture OAuth",
+                "kind": "oauth",
+                "sourceType": "google-oauth",
+                "email": "fixture@example.invalid",
+                "projectId": null,
+                "payload": "{\"email\":\"fixture@example.invalid\",\"access_token\":\"fixture\"}",
+                "updatedAt": 10
+            },
+            {
+                "id": "fixture-adc",
+                "name": "Fixture ADC",
+                "kind": "adc",
+                "sourceType": "authorized_user",
+                "email": null,
+                "projectId": "fixture-project",
+                "payload": "{\"type\":\"authorized_user\",\"refresh_token\":\"fixture\"}",
+                "updatedAt": 20
+            },
+            {
+                "id": "fixture-key",
+                "name": "Fixture Vertex",
+                "kind": "vertex_key",
+                "sourceType": "vertex_key",
+                "email": null,
+                "projectId": null,
+                "payload": "{\"apiKey\":\"fixture-vertex-key\",\"projectId\":null,\"location\":\"global\",\"models\":[\"gemini-2.5-flash\"]}",
+                "updatedAt": 30
+            }
+        ],
+        "observedRevisions": ["fixture-revision"],
+        "activeOauthId": "fixture-oauth",
+        "activations": [
+            { "accountId": "fixture-oauth", "sinceMs": 1_000 },
+            { "accountId": "fixture-adc", "sinceMs": 2_000 },
+            { "accountId": "fixture-key", "sinceMs": 3_000 }
+        ],
+        "gateway": gateway
+    });
+    fs::write(
+        paths.vault_file(),
+        serde_json::to_vec_pretty(&vault).unwrap(),
+    )
+    .unwrap();
+}
+/// What that version recorded for the key in use, with the app settings the
+/// key replaced.
+fn key_takeover(previous: Value) -> Value {
+    serde_json::json!({
+        "accountId": "fixture-key",
+        "token": "fixture-local-token",
+        "port": 43721,
+        "previous": previous
+    })
+}
+/// The app settings as that version left them for the key.
+fn managed_app_settings() -> Value {
+    serde_json::json!({
+        "gateway": {
+            "enabled": true,
+            "url": "http://127.0.0.1:43721/antigravity",
+            "apiKey": "fixture-local-token",
+            "wireProtocol": "genai",
+            "customHeaders": {}
+        },
+        "models": {
+            "defaultModelId": "gemini-2.5-flash",
+            "list": [{ "modelId": "gemini-2.5-flash" }]
+        },
+        "theme": "fixture-theme"
+    })
+}
+fn app_settings_file(paths: &Paths) -> PathBuf {
+    let home = paths.gemini_home.parent().unwrap();
+    home.join(".antigravity/settings.json")
+}
+fn write_app_settings(paths: &Paths, text: &str) {
+    let file = app_settings_file(paths);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(file, text).unwrap();
+}
+fn saved_vault(paths: &Paths) -> Value {
+    serde_json::from_slice(&fs::read(paths.vault_file()).unwrap()).unwrap()
+}
+
+#[test]
+fn an_old_vault_loads_with_only_its_oauth_accounts() {
+    let (_tmp, paths) = setup_paths();
+    let previous = serde_json::json!({ "gateway": null, "models": null, "fileExisted": false });
+    write_retired_vault(&paths, key_takeover(previous));
+    let written = fs::read(paths.vault_file()).unwrap();
+
+    let (vault, _) = load_vault(&paths).unwrap();
+    assert_eq!(vault.entries.len(), 1);
+    assert_eq!(vault.entries[0].id, "fixture-oauth");
+    assert_eq!(vault.active_oauth_id.as_deref(), Some("fixture-oauth"));
+    assert_eq!(vault.observed_revisions, ["fixture-revision"]);
+    let state = state_at(&paths).unwrap();
+    assert_eq!(state.accounts.len(), 1);
+    assert_eq!(state.accounts[0].id, "fixture-oauth");
+
+    // Usage recorded under a retired account stays attributed to its id.
+    let timeline = provider_timeline(&paths.data_dir, Some(&paths.gemini_home));
+    for (at, id) in [
+        (1_500, "fixture-oauth"),
+        (2_500, "fixture-adc"),
+        (3_500, "fixture-key"),
+    ] {
+        assert_eq!(timeline.provider_at(at), Some(id));
+    }
+    // Reading leaves the file as it is; only the migration rewrites it.
+    assert_eq!(fs::read(paths.vault_file()).unwrap(), written);
+}
+
+#[test]
+fn migration_hands_back_app_settings_a_key_took_over_and_drops_retired_accounts() {
+    let (_tmp, paths) = setup_paths();
+    let home = paths.gemini_home.parent().unwrap();
+    // What the retired account kinds used stays exactly as it is.
+    let untouched = [
+        (
+            home.join(".config/gcloud/application_default_credentials.json"),
+            r#"{"type":"authorized_user","refresh_token":"fixture"}"#,
+        ),
+        (
+            home.join(".config/agswitch/adc.json"),
+            r#"{"type":"service_account"}"#,
+        ),
+        (
+            paths.gemini_home.join("config/config.json"),
+            r#"{"userSettings":{"enableAdc":true}}"#,
+        ),
+    ];
+    for (file, text) in &untouched {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+    }
+    let previous = serde_json::json!({
+        "gateway": { "enabled": false, "customHeaders": { "fixture": "kept" }, "fixtureLimit": 3 },
+        "models": { "defaultModelId": "fixture-original" },
+        "fileExisted": true
+    });
+    write_retired_vault(&paths, key_takeover(previous.clone()));
+    write_app_settings(&paths, &managed_app_settings().to_string());
+
+    assert!(migrate_retired_accounts(&paths).unwrap());
+    let settings: Value =
+        serde_json::from_slice(&fs::read(app_settings_file(&paths)).unwrap()).unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({
+            "gateway": previous["gateway"],
+            "models": previous["models"],
+            "theme": "fixture-theme"
+        })
+    );
+    let saved = saved_vault(&paths);
+    assert!(saved.get("gateway").is_none());
+    assert_eq!(saved["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(saved["entries"][0]["id"], "fixture-oauth");
+    assert_eq!(saved["entries"][0]["kind"], "oauth");
+    assert!(saved["entries"][0].get("projectId").is_none());
+    assert_eq!(saved["activeOauthId"], "fixture-oauth");
+    assert_eq!(
+        saved["observedRevisions"],
+        serde_json::json!(["fixture-revision"])
+    );
+    assert_eq!(saved["activations"].as_array().unwrap().len(), 3);
+    for (file, text) in &untouched {
+        assert_eq!(fs::read_to_string(file).unwrap(), *text);
+    }
+
+    // A migrated vault is left untouched.
+    let files = [paths.vault_file(), app_settings_file(&paths)];
+    let migrated = files.clone().map(|file| fs::read(file).unwrap());
+    assert!(!migrate_retired_accounts(&paths).unwrap());
+    assert_eq!(files.map(|file| fs::read(file).unwrap()), migrated);
+}
+
+#[test]
+fn migration_removes_app_settings_that_only_held_the_takeover() {
+    let (_tmp, paths) = setup_paths();
+    let previous = serde_json::json!({ "gateway": null, "models": null, "fileExisted": false });
+    write_retired_vault(&paths, key_takeover(previous));
+    let mut settings = managed_app_settings();
+    settings.as_object_mut().unwrap().remove("theme");
+    write_app_settings(&paths, &settings.to_string());
+
+    assert!(migrate_retired_accounts(&paths).unwrap());
+    assert!(!app_settings_file(&paths).exists());
+    assert!(saved_vault(&paths).get("gateway").is_none());
+}
+
+#[test]
+fn migration_leaves_app_settings_changed_since_the_takeover() {
+    let previous = serde_json::json!({
+        "gateway": { "enabled": false },
+        "models": null,
+        "fileExisted": true
+    });
+    let changed = |pointer: &str, value: Value| {
+        let mut settings = managed_app_settings();
+        *settings.pointer_mut(pointer).unwrap() = value;
+        Some(settings.to_string())
+    };
+    for settings in [
+        changed("/gateway/url", "https://example.invalid/v1".into()),
+        changed("/gateway/apiKey", "fixture-own-key".into()),
+        changed("/gateway/enabled", false.into()),
+        Some("{ not json".to_owned()),
+        None,
+    ] {
+        let (_tmp, paths) = setup_paths();
+        write_retired_vault(&paths, key_takeover(previous.clone()));
+        if let Some(text) = &settings {
+            write_app_settings(&paths, text);
+        }
+        assert!(migrate_retired_accounts(&paths).unwrap());
+        assert_eq!(fs::read_to_string(app_settings_file(&paths)).ok(), settings);
+        // The retired accounts and the takeover record go all the same.
+        let saved = saved_vault(&paths);
+        assert!(saved.get("gateway").is_none());
+        assert_eq!(saved["entries"].as_array().unwrap().len(), 1);
+        assert!(!migrate_retired_accounts(&paths).unwrap());
+    }
+
+    // Without a recorded takeover the app settings are not Vela's to restore.
+    let (_tmp, paths) = setup_paths();
+    write_retired_vault(&paths, Value::Null);
+    let managed = managed_app_settings().to_string();
+    write_app_settings(&paths, &managed);
+    assert!(migrate_retired_accounts(&paths).unwrap());
+    assert_eq!(
+        fs::read_to_string(app_settings_file(&paths)).unwrap(),
+        managed
+    );
+    assert_eq!(saved_vault(&paths)["entries"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn migration_skips_a_vault_without_retired_content() {
+    let (_tmp, paths) = setup_paths();
+    assert!(!migrate_retired_accounts(&paths).unwrap());
+    assert!(!paths.vault_file().exists());
+
+    // OAuth accounts as an earlier version wrote them, and a file that
+    // cannot be read, both stay byte for byte.
+    let oauth_only = serde_json::json!({
+        "schema": 1,
+        "entries": [{
+            "id": "fixture-oauth",
+            "name": "Fixture OAuth",
+            "kind": "oauth",
+            "sourceType": "google-oauth",
+            "email": "fixture@example.invalid",
+            "projectId": null,
+            "payload": "{\"access_token\":\"fixture\"}",
+            "updatedAt": 10
+        }],
+        "observedRevisions": [],
+        "activeOauthId": "fixture-oauth",
+        "activations": [],
+        "gateway": null
+    });
+    for vault in [oauth_only.to_string(), "{ not json".to_owned()] {
+        fs::write(paths.vault_file(), &vault).unwrap();
+        assert!(!migrate_retired_accounts(&paths).unwrap());
+        assert_eq!(fs::read_to_string(paths.vault_file()).unwrap(), vault);
+    }
 }

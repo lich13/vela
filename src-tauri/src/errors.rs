@@ -60,7 +60,6 @@ local_codes! {
     ConnectTimeout => CONNECT_TIMEOUT = "CONNECT_TIMEOUT",
     ConversationOwnership => CONVERSATION_OWNERSHIP = "CONVERSATION_OWNERSHIP",
     Custom => CUSTOM = "CUSTOM",
-    Dialog => DIALOG = "DIALOG",
     Duplicate => DUPLICATE = "DUPLICATE",
     Endpoint => ENDPOINT = "ENDPOINT",
     EndpointAffinity => ENDPOINT_AFFINITY = "ENDPOINT_AFFINITY",

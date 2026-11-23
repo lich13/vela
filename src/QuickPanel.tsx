@@ -17,7 +17,7 @@ import {
   Pin,
   Power,
   X,
-  Settings2,
+  SquarePen,
   RotateCcw,
 } from "lucide-react";
 import { command, preview } from "./bridge";
@@ -401,6 +401,7 @@ function QuickContent({
                           <QuotaInfo
                             compact
                             terse
+                            clientId={clientId}
                             provider={p}
                             quota={quota.quotaFor(p)}
                             refresh={() => void quota.refresh(p.id)}
@@ -436,17 +437,18 @@ function QuickContent({
                           <button
                             className="icon-button quick-provider-settings"
                             disabled={rowBusy}
-                            aria-label={`${p.name} ${clientId === "dsh" ? "模型映射" : "白名单"}`}
-                            title={clientId === "dsh" ? "模型映射" : "白名单"}
+                            aria-label={`${p.name} 编辑 API`}
+                            title="编辑 API"
                             onClick={() =>
                               void command("open_main", {
                                 page: "gateway",
                                 providerId: p.id,
                                 clientId,
+                                providerAction: "edit",
                               }).catch((e) => setError(errorOf(e).message))
                             }
                           >
-                            <Settings2 size={14} />
+                            <SquarePen size={14} />
                           </button>
                           <button
                             type="button"

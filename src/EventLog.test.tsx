@@ -396,9 +396,7 @@ describe("event log", () => {
     render(<EventLog />);
     await screen.findByRole("button", { name: /模型不支持/ });
     await user.click(screen.getByRole("button", { name: "清空全部日志" }));
-    expect(mock.confirm).toHaveBeenCalledWith(
-      "清空全部日志（包含全部来源）？",
-    );
+    expect(mock.confirm).toHaveBeenCalledWith("清空全部日志（包含全部来源）？");
     await waitFor(() =>
       expect(mock.command).toHaveBeenCalledWith("clear_app_events"),
     );
@@ -411,7 +409,7 @@ it("queries providers only on mount and keeps event names through filtering and 
   await screen.findByRole("button", { name: /模型不支持/ });
   const gateways = () =>
     mock.command.mock.calls.filter(([name]) => name === "get_gateway");
-  expect(gateways()).toHaveLength(4);
+  expect(gateways()).toHaveLength(5);
   const initial = eventCalls().length;
   await user.selectOptions(
     screen.getByRole("combobox", { name: "客户端" }),
@@ -420,7 +418,7 @@ it("queries providers only on mount and keeps event names through filtering and 
   await waitFor(() => expect(eventCalls()).toHaveLength(initial + 1));
   await user.click(screen.getByRole("button", { name: "下一页" }));
   await waitFor(() => expect(eventCalls()).toHaveLength(initial + 2));
-  expect(gateways()).toHaveLength(4);
+  expect(gateways()).toHaveLength(5);
   act(() =>
     mock.listeners.get("gateway-state")?.({
       clientId: "codex",
@@ -516,8 +514,8 @@ it("separates origins, resets pagination, and hides policy actions for internal 
     within(screen.getByRole("tablist", { name: "日志来源" }))
       .getAllByRole("tab")
       .map((t) => t.textContent),
-  ).toEqual(["上游报错", "网关内部", "Claude Code", "Antigravity app"]);
-  await user.click(screen.getByRole("tab", { name: "Antigravity app" }));
+  ).toEqual(["上游报错", "网关内部", "Claude Code", "Antigravity"]);
+  await user.click(screen.getByRole("tab", { name: "Antigravity" }));
   await waitFor(() =>
     expect(eventCalls().at(-1)?.[1]).toEqual({
       filter: { origin: "antigravity", page: 1, from: null, to: null },
@@ -637,7 +635,7 @@ it("polls only the visible Antigravity tab and preserves the page and open detai
       await vi.advanceTimersByTimeAsync(10_000);
     });
     expect(eventCalls()).toHaveLength(1);
-    fireEvent.click(screen.getByRole("tab", { name: "Antigravity app" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Antigravity" }));
     await act(async () => {
       await Promise.resolve();
     });
@@ -705,7 +703,7 @@ it("coalesces slow log refreshes and ignores a response from the previous tab", 
     await act(async () => {
       await Promise.resolve();
     });
-    fireEvent.click(screen.getByRole("tab", { name: "Antigravity app" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Antigravity" }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15_000);
     });

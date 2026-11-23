@@ -1488,6 +1488,13 @@ fn import_selection(
             store.settings.port = port;
             store.edit(
                 super::model::Edit::SaveDshProvider {
+                    endless_mode: None,
+                    upstream_retry_seconds: None,
+                    normal_retry_seconds: None,
+                    risk_codes: None,
+                    retry_intensity: None,
+                    limit_retry_seconds: None,
+                    limit_rest_seconds: None,
                     quota_access_token: None,
                     id: None,
                     base_url: base,
@@ -1767,6 +1774,13 @@ mod tests {
                 store
                     .edit(
                         super::super::Edit::SaveDshProvider {
+                            endless_mode: None,
+                            upstream_retry_seconds: None,
+                            normal_retry_seconds: None,
+                            risk_codes: None,
+                            retry_intensity: None,
+                            limit_retry_seconds: None,
+                            limit_rest_seconds: None,
                             quota_access_token: None,
                             id: None,
                             base_url: "https://example.invalid/v1".into(),

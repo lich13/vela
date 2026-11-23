@@ -212,6 +212,7 @@ async fn capacity_spills_over_and_returns_to_priority_without_circuit_failures()
     let selected = g.view().selected;
     g.edit(
         Edit::SaveProvider {
+            delegate: Default::default(),
             search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
@@ -219,6 +220,10 @@ async fn capacity_spills_over_and_returns_to_priority_without_circuit_failures()
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
             quota_access_token: None,
             id: None,
             base_url: "https://new.invalid/v1".into(),
@@ -360,6 +365,7 @@ async fn rpm_windows_are_isolated_between_codex_and_claude() {
     codex
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -367,6 +373,10 @@ async fn rpm_windows_are_isolated_between_codex_and_claude() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://shared.example.test".into(),
@@ -475,6 +485,7 @@ async fn dynamic_limits_keep_slots_across_route_edits_and_do_not_oversubscribe()
         &g,
         &t,
         Edit::SaveProvider {
+            delegate: Default::default(),
             search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
@@ -482,6 +493,10 @@ async fn dynamic_limits_keep_slots_across_route_edits_and_do_not_oversubscribe()
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
             quota_access_token: None,
             id: Some(r[0].provider.id.clone()),
             base_url: "https://changed.invalid".into(),
@@ -570,6 +585,7 @@ async fn panel_edits_preserve_live_slots_files_and_persist_queue_priority() {
         &g,
         &t,
         Edit::SaveProvider {
+            delegate: Default::default(),
             search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
@@ -577,6 +593,10 @@ async fn panel_edits_preserve_live_slots_files_and_persist_queue_priority() {
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
             quota_access_token: None,
             id: Some(ids[0].clone()),
             base_url: g.view().providers[1].base_url.clone(),

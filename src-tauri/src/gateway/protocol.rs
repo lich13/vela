@@ -619,6 +619,12 @@ impl Write for Sink {
                         };
                         self.field.clear();
                         self.skip_space = true;
+                    } else if b == b'{' && self.field.is_empty() {
+                        // A relay that fails after it began the stream writes
+                        // its JSON error into it unframed: read that as data.
+                        self.line_kind = 1;
+                        self.skip_space = false;
+                        continue;
                     } else if self.field.len() < 32 {
                         self.field.push(b);
                     } else {
@@ -817,6 +823,9 @@ pub struct Protocol {
     started: std::time::Instant,
     first_usage_ms: Option<u64>,
     ownership: Option<(std::sync::Arc<super::compaction::Lease>, String)>,
+    /// The provider serves this one request in place of the conversation's
+    /// own: what it writes is recorded, the conversation does not move.
+    took_over: bool,
     compaction_operation: bool,
     buffering: bool,
     routing_log: Option<std::sync::Arc<super::routing_log::RoutingLog>>,
@@ -861,6 +870,7 @@ impl Protocol {
             started: std::time::Instant::now(),
             first_usage_ms: None,
             ownership: None,
+            took_over: false,
             compaction_operation: false,
             buffering: false,
             routing_log: None,
@@ -1034,6 +1044,9 @@ impl Protocol {
             .get_or_insert_with(crate::usage::model::now);
         self.transfer.upstream_bytes = self.transfer.upstream_bytes.saturating_add(bytes as u64);
         self.last_progress = std::time::Instant::now();
+        if let Some((budget, deadline)) = &self.wait_budget {
+            budget.progress(*deadline, bytes);
+        }
     }
     pub fn websocket_progress(&mut self, bytes: usize) {
         self.progress(bytes);
@@ -1136,6 +1149,16 @@ impl Protocol {
             lease.attach_usage(usage.routing_completion());
         }
     }
+    /// The provider serves this one request in place of the conversation's
+    /// own: the compaction it writes is recorded, the conversation stays.
+    pub fn attach_takeover(
+        &mut self,
+        lease: Option<std::sync::Arc<super::compaction::Lease>>,
+        provider: &str,
+    ) {
+        self.attach_ownership(lease, provider);
+        self.took_over = true;
+    }
     pub fn search_content_observed(&self) -> bool {
         self.observation.search_content
             || self.observation.opaque_output
@@ -1148,6 +1171,11 @@ impl Protocol {
                 self.terminal(),
                 Some(Terminal::Failure | Terminal::Rejected | Terminal::Unknown)
             )
+    }
+    /// A stream has carried model content: text, thinking or tool arguments.
+    /// An opened content block alone is not content yet.
+    pub fn output_started(&self) -> bool {
+        self.stream && self.observation.meter.content_seen
     }
     pub fn business_observed(&self) -> bool {
         !self.stream
@@ -1166,7 +1194,7 @@ impl Protocol {
                 traffic.streaming();
             }
         }
-        if business && !self.compaction_operation {
+        if business && !self.compaction_operation && !self.took_over {
             if let Some((lease, provider)) = &self.ownership {
                 lease.output_started(provider);
             }
@@ -1184,7 +1212,12 @@ impl Protocol {
                     if let Some(log) = &self.routing_log {
                         log.finish(self.status, true);
                     }
-                    lease.complete(provider, self.observation.compaction_fingerprint.as_deref());
+                    let boundary = self.observation.compaction_fingerprint.as_deref();
+                    if self.took_over {
+                        lease.register(boundary);
+                    } else {
+                        lease.complete(provider, boundary);
+                    }
                 }
             }
         }
@@ -1641,7 +1674,7 @@ impl Protocol {
         };
         let (local, message, status_only) = match self.end_reason.as_deref() {
             Some(code::GATEWAY_STOPPED) => (code::GATEWAY_STOPPED, "网关停止，已结束转发", true),
-            Some(code::CANCELLED) => (code::CANCELLED, "收到明确取消指令，已结束转发", true),
+            Some(code::CANCELLED) => (code::CANCELLED, "收到明确取消指令，已结束本次尝试", true),
             _ => match self.transfer.downstream_error.as_deref() {
                 Some("DOWNSTREAM_PROTOCOL_ERROR") => {
                     ("DOWNSTREAM_PROTOCOL_ERROR", "下游协议处理失败", false)
@@ -1813,7 +1846,9 @@ impl Drop for Protocol {
         }
         if let Some(usage) = &mut self.usage {
             usage.transfer(self.transfer.clone());
-            if self.routing_decision.is_some() {
+            // A request taken over outside a tracked conversation has no
+            // ownership to report on.
+            if self.routing_decision.is_some() && !(self.took_over && self.ownership.is_none()) {
                 usage
                     .routing_completion()
                     .finish(if settlement == RoutingSettlement::Delivered {

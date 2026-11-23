@@ -1759,9 +1759,6 @@
   padding-top: 8px;
   border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
 }
-.usage-ag-window-stats.is-three {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
 .usage-ag-window-stats > div {
   display: flex;
   align-items: center;
@@ -1938,9 +1935,6 @@
   }
   .usage-ag-kpis > div:last-child {
     grid-column: 1 / -1;
-  }
-  .usage-ag-window-stats.is-three {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .usage-ag-family-meta {
     flex-wrap: wrap;

@@ -51,6 +51,7 @@ export function providerTestingPreview(
           lmDetector: lmBank,
         },
         jobs: [],
+        lastModels: { connection: "", fingerprint: "" },
         degraded: {},
         detectionStatus: [],
         error: null,
@@ -217,6 +218,7 @@ export function providerTestingPreview(
       job.error = "上游返回 HTTP 403";
     }
     state.jobs.unshift(job);
+    state.lastModels[request.kind] = request.model;
     details.set(job.id, {
       job,
       output: {

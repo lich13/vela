@@ -14,6 +14,7 @@ fn save_account(g: &Gateway, t: &tempfile::TempDir, token: Option<&str>, base: O
         g,
         t,
         Edit::SaveProvider {
+            delegate: Default::default(),
             search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
@@ -21,6 +22,10 @@ fn save_account(g: &Gateway, t: &tempfile::TempDir, token: Option<&str>, base: O
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
             id: Some(p.id.clone()),
             base_url: base.unwrap_or(&p.base_url).into(),
             token: String::new(),

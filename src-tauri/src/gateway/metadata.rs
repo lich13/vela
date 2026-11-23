@@ -276,6 +276,7 @@ fn retained(key: &str) -> bool {
             | "last_token_usage"
             | "rate_limits"
             | "limit_id"
+            | "tools"
     )
 }
 fn content(key: &str) -> bool {
@@ -442,6 +443,26 @@ impl Projector {
                     }
                     self.retained_bytes = self.retained_bytes.saturating_add(metadata_size(&value));
                     items.push(value);
+                } else if frame.role == "tools" {
+                    // What a request may call tells what it is for, however
+                    // many tools it declares: a declaration is kept as its
+                    // type alone, and each type once.
+                    if frame.keep {
+                        if !value.is_string() {
+                            self.retained_bytes = self.retained_bytes.saturating_sub(before);
+                        }
+                        let kind = value
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        let kind = serde_json::json!({ "type": kind });
+                        if items.len() < ITEMS && !items.contains(&kind) {
+                            self.retained_bytes = self
+                                .retained_bytes
+                                .saturating_add(64 + metadata_size(&kind));
+                            items.push(kind);
+                        }
+                    }
                 } else if frame.keep && items.len() < ITEMS {
                     self.retained_bytes = self
                         .retained_bytes

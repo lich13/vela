@@ -14,6 +14,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "antigravity_cli.rs"]
+mod cli;
 #[path = "antigravity_quota.rs"]
 pub(crate) mod quota;
 const LIMIT: usize = 32 * 1024 * 1024;
@@ -29,6 +31,10 @@ struct Cursor {
     count: usize,
     covered: BTreeSet<u64>,
     last_model: Option<String>,
+    /// Stamp of the local conversation database at which a conversation the
+    /// app does not list was read in full, or no running instance served it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    local_stamp: String,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -133,6 +139,8 @@ struct ModelCatalogEntry {
     thinking_only: bool,
 }
 
+/// Frozen seed for records older than the learned list. New models are
+/// learned from the app (`Learned`), not added here.
 const MODEL_CATALOG: &[ModelCatalogEntry] = &[
     ModelCatalogEntry {
         aliases: &["MODEL_PLACEHOLDER_M417"],
@@ -387,6 +395,113 @@ fn strip_display_effort_suffix(name: &str) -> Option<(&str, Option<String>)> {
         _ => None,
     }?;
     (!base.is_empty()).then_some((base, effort))
+}
+
+/// A backend model name without its effort suffix, and the effort it carried.
+fn split_effort_suffix(model: &str) -> (&str, Option<&'static str>) {
+    ["minimal", "low", "medium", "high", "xhigh", "max"]
+        .into_iter()
+        .find_map(|effort| {
+            let base = model.strip_suffix(effort)?.strip_suffix('-')?;
+            (!base.is_empty()).then_some((base, Some(effort)))
+        })
+        .unwrap_or((model, None))
+}
+
+/// One model the app listed. The app reuses enum names for unrelated models.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct LearnedModel {
+    model: String,
+    display_name: Option<String>,
+    seen_at: i64,
+}
+
+/// The app's own model list, kept by model id so that earlier sessions still
+/// resolve after a model is withdrawn.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct Learned {
+    fetched_at: i64,
+    models: BTreeMap<String, LearnedModel>,
+}
+impl Learned {
+    fn load(store: &impl Repository) -> Self {
+        store
+            .antigravity_models()
+            .ok()
+            .flatten()
+            .and_then(|saved| serde_json::from_str(&saved).ok())
+            .unwrap_or_default()
+    }
+    /// Adds one `GetAvailableModels` reply. False when it carries no list.
+    fn merge(&mut self, reply: &Value, at: i64) -> bool {
+        let Some(models) = reply["response"]["models"].as_object() else {
+            return false;
+        };
+        for (id, entry) in models {
+            let (Some(id), Some(model)) = (model_id(Some(id)), model_id(text(entry, &["model"])))
+            else {
+                continue;
+            };
+            self.models.insert(
+                id,
+                LearnedModel {
+                    model,
+                    display_name: label(text(entry, &["displayName"])),
+                    seen_at: at,
+                },
+            );
+        }
+        self.fetched_at = at;
+        true
+    }
+    /// The priced model behind a listed id: an effort that one of `labels`
+    /// also shows and the `-tiered` variant are serving details of that model.
+    fn base(id: &str, labels: [Option<&str>; 2]) -> String {
+        let base = labels
+            .into_iter()
+            .flatten()
+            .filter_map(|label| strip_display_effort_suffix(label)?.1)
+            .find_map(|effort| id.strip_suffix(effort.as_str())?.strip_suffix('-'))
+            .unwrap_or(id);
+        base.strip_suffix("-tiered").unwrap_or(base).to_owned()
+    }
+    /// The most recently listed model of an enum name, optionally only the
+    /// one shown under `shown`.
+    fn find(&self, key: &str, shown: Option<&str>) -> Option<(&str, &LearnedModel)> {
+        self.models
+            .iter()
+            .filter(|(_, entry)| {
+                entry.model.eq_ignore_ascii_case(key.trim())
+                    && shown.is_none_or(|shown| {
+                        entry
+                            .display_name
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(shown.trim()))
+                    })
+            })
+            .max_by_key(|(_, entry)| entry.seen_at)
+            .map(|(id, entry)| (id.as_str(), entry))
+    }
+    /// The model an enum name stands for. The (enum, label) pair comes first
+    /// so a reused enum is not taken for its earlier model; then the seed,
+    /// then the enum alone.
+    fn resolve(&self, key: &str, shown: Option<&str>) -> Option<String> {
+        shown
+            .and_then(|shown| self.find(key, Some(shown)))
+            .map(|(id, _)| Self::base(id, [shown, None]))
+            .or_else(|| resolve_model_alias(Some(key)).map(|alias| alias.canonical.to_owned()))
+            .or_else(|| {
+                let (id, entry) = self.find(key, None)?;
+                Some(Self::base(id, [shown, entry.display_name.as_deref()]))
+            })
+    }
+    /// A model id the app lists under a label: its priced model and label.
+    fn listed(&self, id: &str) -> Option<(String, &str)> {
+        let shown = self.models.get(id)?.display_name.as_deref()?;
+        Some((Self::base(id, [Some(shown), None]), shown))
+    }
 }
 
 pub(super) fn normalize_attempt(a: &mut Attempt) -> bool {
@@ -656,6 +771,9 @@ fn classify_error_text(raw: &str) -> Option<&'static str> {
         || lower.contains("timed out")
     {
         Some("STREAM_TIMEOUT")
+    } else if lower.contains("unexpected eof") || lower.contains("stream reading error") {
+        // The connection closed while the reply was still being read.
+        Some("STREAM_INTERRUPTED")
     } else if lower.contains("resource_exhausted")
         || lower.contains("quota")
         || lower.contains("rate limit")
@@ -681,9 +799,12 @@ fn classify_error_text(raw: &str) -> Option<&'static str> {
         None
     }
 }
-fn failed(v: &Value) -> bool {
+fn has_error(v: &Value) -> bool {
     v.get("error")
         .is_some_and(|e| !e.is_null() && e != "" && e != &json!({}))
+}
+fn failed(v: &Value) -> bool {
+    has_error(v)
         || text(v, &["errorMessage", "errorCode", "failureReason"]).is_some()
         || v["status"]
             .as_str()
@@ -725,6 +846,7 @@ fn record(
     entry: &Value,
     steps: &Steps,
     generator_index: usize,
+    learned: &Learned,
 ) -> Result<Option<Record>> {
     let Some(chat) = entry.get("chatModel") else {
         return Ok(None);
@@ -820,6 +942,10 @@ fn record(
         session_id: Some(safe_id(cascade)),
         ..Record::default()
     };
+    let request_label = label(text(chat, &["modelDisplayName"]));
+    let requested_model = text(chat, &["model"])
+        .and_then(|model| learned.resolve(model, request_label.as_deref()))
+        .or_else(|| actual_model(text(chat, &["model"])));
     for (index, (u, info, attempt_key)) in usages.into_iter().enumerate() {
         let final_info = final_index == Some(index);
         let field = |key: &str| {
@@ -843,7 +969,10 @@ fn record(
                     .zip(explicit_end)
                     .and_then(|(s, e)| u64::try_from(e.checked_sub(s)?).ok())
             });
-        let is_failed = failed(info) || (final_info && failed(chat));
+        let mut tokens = tokens(u);
+        tokens.fill_missing(&self::tokens(&info["usage"]));
+        // The app reports a failed request on the entry, not on its chat model.
+        let is_failed = failed(info) || (final_info && (failed(chat) || has_error(entry)));
         let completed_at = explicit_end
             .or_else(|| {
                 attempt_start
@@ -854,8 +983,18 @@ fn record(
             // clock has insufficient precision to measure elapsed time.
             .or_else(|| reported_end.filter(|end| attempt_start.is_none_or(|start| *end >= start)))
             .or_else(|| is_failed.then_some(end).flatten());
-        let mut tokens = tokens(u);
-        tokens.fill_missing(&self::tokens(&info["usage"]));
+        if !is_failed && completed_at.is_some() && u.is_object() {
+            // Proto3 leaves zero counters out of a usage that was reported.
+            tokens.input.get_or_insert(0);
+            tokens.output.get_or_insert(0);
+            tokens.cache_read.get_or_insert(0);
+        }
+        let stream = first.is_some() || generation.is_some();
+        // A request that failed before any token still reports "0s" clocks
+        // that nothing measured.
+        let unmeasured = is_failed && !tokens.has_consumption();
+        let clock = |ms: Option<u64>| ms.filter(|ms| !unmeasured || *ms > 0);
+        let (first, generation, elapsed) = (clock(first), clock(generation), clock(elapsed));
         let outcome = if is_failed {
             "failed"
         } else if completed_at.is_some() && tokens.input.is_some() && tokens.output.is_some() {
@@ -865,6 +1004,21 @@ fn record(
         } else {
             "in_progress"
         };
+        let own = [
+            text(u, &["model"]),
+            text(&info["usage"], &["model"]),
+            text(info, &["responseModel"]),
+            final_info.then(|| text(chat, &["responseModel"])).flatten(),
+        ];
+        // The request's model and label stand in only for an attempt that
+        // named no model itself, so a retry on another model keeps its own.
+        let follows_request = final_info || own.iter().all(Option::is_none);
+        let shown = request_label.as_deref().filter(|_| follows_request);
+        let placed = own
+            .into_iter()
+            .chain([text(chat, &["model"]).filter(|_| follows_request)])
+            .flatten()
+            .find_map(|key| learned.resolve(key, shown));
         let explicit_attempt_model = non_enum_model(text(u, &["model"]))
             .or_else(|| non_enum_model(text(&info["usage"], &["model"])))
             .or_else(|| non_enum_model(text(info, &["responseModel"])))
@@ -904,30 +1058,54 @@ fn record(
                     })
                     .flatten()
             });
-        let response_model =
-            explicit_attempt_model.or_else(|| alias_hint.map(|alias| alias.canonical.to_owned()));
+        // Only a backend name no list places keeps its own spelling, less the
+        // effort suffix; that effort is then the attempt's.
+        let (backend, suffix_effort) = match explicit_attempt_model.as_deref() {
+            Some(model) if placed.is_none() => {
+                let (base, effort) = split_effort_suffix(model);
+                (Some(base.to_owned()), effort)
+            }
+            _ => (None, None),
+        };
+        let response_model = placed
+            .or(backend)
+            .or_else(|| alias_hint.map(|alias| alias.canonical.to_owned()));
         let mut a = Attempt {
             id: safe_id(&format!("{}:{attempt_key}", r.id)),
             response_id: response_id(u).map(safe_id),
             upstream_request_hash: text(info, &["traceId"]).map(safe_id),
             thread_hash: r.session_id.clone(),
-            requested_model: actual_model(text(chat, &["model"])),
+            requested_model: requested_model.clone(),
             response_model,
             model_display_name: final_info
                 .then(|| {
-                    label(text(chat, &["modelDisplayName"]))
+                    request_label
+                        .clone()
                         .or_else(|| alias_hint.map(|alias| alias.display_name.to_owned()))
                 })
                 .flatten(),
-            reasoning_effort: alias_hint.and_then(|alias| alias.effort).map(str::to_owned),
+            // The entry's own label names the effort; the seed only speaks
+            // for records that carry no label.
+            reasoning_effort: match shown {
+                Some(shown) => strip_display_effort_suffix(shown).and_then(|(_, effort)| effort),
+                None => alias_hint.and_then(|alias| alias.effort).map(str::to_owned),
+            }
+            .or_else(|| suffix_effort.map(str::to_owned)),
             api_provider: label(text(u, &["apiProvider"]))
                 .or_else(|| label(text(&info["usage"], &["apiProvider"]))),
-            error_code: error_code(info).or_else(|| final_info.then(|| error_code(chat)).flatten()),
+            error_code: error_code(info).or_else(|| {
+                final_info
+                    .then(|| {
+                        error_code(chat)
+                            .or_else(|| has_error(entry).then(|| error_code(entry)).flatten())
+                    })
+                    .flatten()
+            }),
             started_at: attempt_start.unwrap_or(start),
             duration_ms: elapsed.unwrap_or(0),
             first_token_ms: first,
             generation_ms: generation,
-            stream: first.is_some() || generation.is_some(),
+            stream,
             transport: "local_api".into(),
             outcome: outcome.into(),
             usage_status: if tokens.input.is_some() && tokens.output.is_some() {
@@ -987,6 +1165,79 @@ fn record(
 struct Endpoint {
     origin: String,
     token: String,
+}
+
+fn rpc(
+    http: &reqwest::Client,
+    endpoint: &Endpoint,
+    method: &str,
+    body: &Value,
+) -> reqwest::RequestBuilder {
+    http.post(format!(
+        "{}/exa.language_server_pb.LanguageServerService/{method}",
+        endpoint.origin
+    ))
+    .header("Connect-Protocol-Version", "1")
+    .header("x-codeium-csrf-token", &endpoint.token)
+    .json(body)
+}
+
+/// Antigravity 2.33 publishes each language server it starts in `daemon/`.
+/// Files of earlier launches stay behind and refuse connections, so every
+/// candidate is probed before it is trusted.
+async fn discover_daemon_endpoints(http: &reqwest::Client, daemon: &Path) -> Vec<Endpoint> {
+    let mut files: Vec<_> = std::fs::read_dir(daemon)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|item| {
+            item.file_name().to_str().is_some_and(|name| {
+                (name.starts_with("hub_") || name.starts_with("ls_")) && name.ends_with(".json")
+            })
+        })
+        .filter_map(|item| Some((item.metadata().ok()?.modified().ok()?, item.path())))
+        .collect();
+    files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    files.truncate(64);
+    let probes = files.iter().filter_map(|(_, path)| {
+        let published: Value =
+            serde_json::from_slice(&storage::read_bounded(path, 8192).ok()??).ok()?;
+        let token = published["csrfToken"]
+            .as_str()
+            .filter(|t| !t.is_empty() && t.len() < 4096)?
+            .to_owned();
+        let origins: Vec<_> = [("https", "httpsPort"), ("http", "httpPort")]
+            .into_iter()
+            .filter_map(|(scheme, key)| {
+                let port = number(&published[key]).and_then(|p| u16::try_from(p).ok())?;
+                (port > 0).then(|| format!("{scheme}://127.0.0.1:{port}"))
+            })
+            .collect();
+        Some(async move {
+            for origin in origins {
+                let endpoint = Endpoint {
+                    origin,
+                    token: token.clone(),
+                };
+                let status = rpc(http, &endpoint, "GetStatus", &json!({}))
+                    .timeout(std::time::Duration::from_millis(1500));
+                if Api::fetch(status)
+                    .await
+                    .is_ok_and(|(status, _)| status == reqwest::StatusCode::OK)
+                {
+                    return Some(endpoint);
+                }
+            }
+            None
+        })
+    });
+    let mut seen = BTreeSet::new();
+    futures_util::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .filter(|endpoint| seen.insert(endpoint.origin.clone()))
+        .collect()
 }
 
 fn parse_page_origins(pages: &Value) -> Vec<String> {
@@ -1053,21 +1304,35 @@ fn summary_freshness_wins(candidate: &Value, current: &Value) -> bool {
 struct Api {
     http: reqwest::Client,
     endpoints: Vec<Endpoint>,
+    /// The learned model list, and whether this run already asked the app
+    /// for it.
+    models: parking_lot::Mutex<(Learned, bool)>,
 }
 #[cfg(test)]
 thread_local! {
     static TEST_ENDPOINT: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }
 impl Api {
-    async fn bytes(request: reqwest::RequestBuilder) -> Result<Vec<u8>> {
+    fn new(http: reqwest::Client, endpoints: Vec<Endpoint>) -> Self {
+        Self {
+            http,
+            endpoints,
+            models: Default::default(),
+        }
+    }
+    /// Sends one read and keeps its HTTP status, so a caller can tell a stale
+    /// token (401) and another instance's conversation (404) from a reply.
+    /// Only a successful reply carries a body.
+    async fn fetch(request: reqwest::RequestBuilder) -> Result<(reqwest::StatusCode, Vec<u8>)> {
         let mut response = request
             .send()
             .await
             .map_err(|_| failure("Antigravity 本地只读接口不可用，请启动 app 后同步"))?;
-        if !response.status().is_success() {
-            return Err(failure("Antigravity 本地接口拒绝读取，未更新同步位置"));
-        }
+        let status = response.status();
         let mut bytes = Vec::new();
+        if !status.is_success() {
+            return Ok((status, bytes));
+        }
         while let Some(chunk) = response
             .chunk()
             .await
@@ -1078,17 +1343,31 @@ impl Api {
             }
             bytes.extend_from_slice(&chunk);
         }
-        Ok(bytes)
+        Ok((status, bytes))
     }
-    async fn connect() -> Result<Option<Self>> {
+    async fn bytes(request: reqwest::RequestBuilder) -> Result<Vec<u8>> {
+        match Self::fetch(request).await? {
+            (status, bytes) if status.is_success() => Ok(bytes),
+            _ => Err(failure("Antigravity 本地接口拒绝读取，未更新同步位置")),
+        }
+    }
+    async fn connect(home: &Path) -> Result<Option<Self>> {
         #[cfg(test)]
         if let Some((origin, token)) = TEST_ENDPOINT.with(|endpoint| endpoint.borrow().clone()) {
             return Ok(Some(Self::from_single(loopback_client()?, origin, token)));
         }
-        let port_path = dirs::config_dir()
-            .ok_or_else(|| failure("无法定位 Antigravity app"))?
-            .join("Antigravity/DevToolsActivePort");
-        let Some(bytes) = storage::read_bounded(&port_path, 4096)? else {
+        let port_file = dirs::config_dir().map(|dir| dir.join("Antigravity/DevToolsActivePort"));
+        Self::connect_at(home, port_file.as_deref()).await
+    }
+    async fn connect_at(home: &Path, port_file: Option<&Path>) -> Result<Option<Self>> {
+        let http = loopback_client()?;
+        let endpoints = discover_daemon_endpoints(&http, &home.join("antigravity/daemon")).await;
+        if !endpoints.is_empty() {
+            return Ok(Some(Self::new(http, endpoints)));
+        }
+        // Releases before 2.33 only expose the debugging port of their windows.
+        let port_path = port_file.ok_or_else(|| failure("无法定位 Antigravity app"))?;
+        let Some(bytes) = storage::read_bounded(port_path, 4096)? else {
             return Ok(None);
         };
         let port = std::str::from_utf8(&bytes)
@@ -1097,7 +1376,6 @@ impl Api {
             .and_then(|s| s.parse::<u16>().ok())
             .filter(|p| *p > 0)
             .ok_or_else(|| failure("Antigravity 本地端口无效"))?;
-        let http = loopback_client()?;
         let pages: Value = serde_json::from_slice(
             &Self::bytes(http.get(format!("http://127.0.0.1:{port}/json/list"))).await?,
         )
@@ -1123,21 +1401,125 @@ impl Api {
         if endpoints.is_empty() {
             return Err(last_error.unwrap_or_else(|| failure("Antigravity app 只读接口认证不可用")));
         }
-        Ok(Some(Self { http, endpoints }))
+        Ok(Some(Self::new(http, endpoints)))
     }
     async fn call_on(&self, endpoint: &Endpoint, method: &str, body: &Value) -> Result<Value> {
-        let bytes = Self::bytes(
-            self.http
-                .post(format!(
-                    "{}/exa.language_server_pb.LanguageServerService/{method}",
-                    endpoint.origin
-                ))
-                .header("Connect-Protocol-Version", "1")
-                .header("x-codeium-csrf-token", &endpoint.token)
-                .json(body),
-        )
-        .await?;
+        let bytes = Self::bytes(rpc(&self.http, endpoint, method, body)).await?;
         serde_json::from_slice(&bytes).map_err(|_| failure("Antigravity 用量响应格式无效"))
+    }
+    /// Loads the stored model list and asks the app for a newer one when it
+    /// is missing or a day old.
+    async fn load_models(&self, store: &mut impl Repository) -> Result<()> {
+        let learned = Learned::load(store);
+        let stale = !(0..86_400_000).contains(&now().saturating_sub(learned.fetched_at));
+        *self.models.lock() = (learned, false);
+        if stale {
+            self.learn(store).await?;
+        }
+        Ok(())
+    }
+    /// A request that fails is not an error: the stored list and the seed
+    /// still resolve models, and the next sync asks again.
+    async fn learn(&self, store: &mut impl Repository) -> Result<()> {
+        let mut learned = {
+            let mut models = self.models.lock();
+            models.1 = true;
+            models.0.clone()
+        };
+        let at = now();
+        let mut listed = false;
+        for endpoint in &self.endpoints {
+            if let Ok(reply) = self
+                .call_on(endpoint, "GetAvailableModels", &json!({}))
+                .await
+            {
+                listed |= learned.merge(&reply, at);
+            }
+        }
+        if listed {
+            let saved = serde_json::to_string(&learned)
+                .map_err(|_| failure("Antigravity 模型目录无法保存"))?;
+            store.save_antigravity_models(&saved)?;
+            self.models.lock().0 = learned;
+        }
+        Ok(())
+    }
+    /// True for a request whose enum name and label the list does not pair
+    /// while the app was not yet asked in this run: it has gained or renamed
+    /// a model since.
+    fn unplaced(&self, entry: &Value) -> bool {
+        let chat = &entry["chatModel"];
+        let (Some(model), Some(shown)) = (
+            text(chat, &["model"]),
+            label(text(chat, &["modelDisplayName"])),
+        ) else {
+            return false;
+        };
+        let models = self.models.lock();
+        !models.1 && models.0.find(model, Some(&shown)).is_none()
+    }
+    /// Finds the instance that serves a conversation the app's list left out.
+    /// 404 means another instance owns it, and an empty reply claims nothing;
+    /// neither is a failure. An unclaimed conversation is asked for again
+    /// only after its local database changes.
+    async fn claim(
+        &self,
+        id: &str,
+        stamp: &str,
+        store: &mut impl Repository,
+        repair: bool,
+    ) -> Result<Option<(usize, Value)>> {
+        let cursor_id = safe_id(&format!("antigravity:rpc:{id}"));
+        let mut cursor: Cursor = store
+            .cursor(&cursor_id)?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        if !repair && cursor.local_stamp == stamp {
+            return Ok(None);
+        }
+        let offset = if repair {
+            0
+        } else {
+            cursor.count.saturating_sub(1)
+        };
+        let request =
+            json!({"cascadeId":id,"generatorMetadataOffset":offset,"includeMessages":false});
+        let mut last_error = None;
+        for (index, endpoint) in self.endpoints.iter().enumerate() {
+            let read = rpc(
+                &self.http,
+                endpoint,
+                "GetCascadeTrajectoryGeneratorMetadata",
+                &request,
+            );
+            match Self::fetch(read).await {
+                Ok((reqwest::StatusCode::NOT_FOUND, _)) => {}
+                Ok((status, bytes)) if status.is_success() => {
+                    match serde_json::from_slice::<Value>(&bytes) {
+                        Ok(page)
+                            if page["generatorMetadata"]
+                                .as_array()
+                                .is_some_and(|entries| !entries.is_empty()) =>
+                        {
+                            return Ok(Some((index, page)));
+                        }
+                        Ok(_) => {}
+                        Err(_) => last_error = Some(failure("Antigravity 用量响应格式无效")),
+                    }
+                }
+                Ok(_) => last_error = Some(failure("Antigravity 本地接口拒绝读取，未更新同步位置")),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        // An instance that could not answer may still own the conversation.
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+        cursor.local_stamp = stamp.into();
+        let saved =
+            serde_json::to_string(&cursor).map_err(|_| failure("Antigravity 同步位置无效"))?;
+        store.write_batch(&[], Some((&cursor_id, &saved)))?;
+        Ok(None)
     }
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn collect_with_files(
@@ -1150,6 +1532,7 @@ impl Api {
         report: &mut Report,
         repair: bool,
     ) -> Result<()> {
+        self.load_models(store).await?;
         let mut summaries: BTreeMap<String, (Option<usize>, Value)> = BTreeMap::new();
         let mut any_endpoint_ok = false;
         let mut last_error = None;
@@ -1185,6 +1568,26 @@ impl Api {
         }
         if !any_endpoint_ok {
             return Err(last_error.unwrap_or_else(|| failure("Antigravity 会话目录不完整")));
+        }
+        // A conversation the app leaves out of its list still answers by id
+        // while its local database exists. The app keeps these databases in
+        // WAL mode, where a commit changes the log before the database.
+        let conversations = brain.parent().map(|root| root.join("conversations"));
+        for path in conversations
+            .iter()
+            .flat_map(std::fs::read_dir)
+            .flatten()
+            .flatten()
+            .map(|item| item.path())
+            .filter(|path| path.extension().is_some_and(|kind| kind == "db"))
+        {
+            if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                summaries.entry(id.to_owned()).or_insert_with(|| {
+                    let log = local_file_stamp(&path.with_extension("db-wal"));
+                    let stamp = format!("{}+{log}", local_file_stamp(&path));
+                    (None, json!({"conversationStamp": stamp}))
+                });
+            }
         }
         for path in files {
             let id = cascade_id(brain, path)?;
@@ -1230,8 +1633,18 @@ impl Api {
         repair: bool,
         timeline: &crate::antigravity::auth::ProviderTimeline,
     ) -> Result<()> {
-        let Some(active_endpoint) = owner else {
-            return Ok(());
+        let conversation = summary["conversationStamp"].as_str();
+        let mut first_page = None;
+        let active_endpoint = match (owner, conversation) {
+            (Some(owner), _) => owner,
+            (None, Some(stamp)) => match self.claim(id, stamp, store, repair).await? {
+                Some((owner, page)) => {
+                    first_page = Some(page);
+                    owner
+                }
+                None => return Ok(()),
+            },
+            (None, None) => return Ok(()),
         };
         let cursor_id = safe_id(&format!("antigravity:rpc:{id}"));
         let mut cursor: Cursor = if repair {
@@ -1273,6 +1686,7 @@ impl Api {
             return Err(failure("Antigravity 会话步骤超过读取限制"));
         }
         let mut steps = Steps::default();
+        let mut learned = self.models.lock().0.clone();
         let mut failed_steps = BTreeSet::new();
         let mut wrote_any = false;
         let mut fallback_loaded = false;
@@ -1281,13 +1695,17 @@ impl Api {
         loop {
             let meta_req =
                 json!({"cascadeId":id,"generatorMetadataOffset":offset,"includeMessages":false});
-            let page = self
-                .call_on(
-                    &self.endpoints[active_endpoint],
-                    "GetCascadeTrajectoryGeneratorMetadata",
-                    &meta_req,
-                )
-                .await?;
+            let page = match first_page.take() {
+                Some(page) => page,
+                None => {
+                    self.call_on(
+                        &self.endpoints[active_endpoint],
+                        "GetCascadeTrajectoryGeneratorMetadata",
+                        &meta_req,
+                    )
+                    .await?
+                }
+            };
             let entries = match page["generatorMetadata"].as_array() {
                 Some(entries) => entries,
                 None if page.as_object().is_some_and(|o| o.is_empty()) => break,
@@ -1373,7 +1791,11 @@ impl Api {
                         .flatten()
                         .filter_map(number)
                         .collect();
-                    let parsed = match record(id, entry, &steps, offset) {
+                    if self.unplaced(entry) {
+                        self.learn(store).await?;
+                        learned = self.models.lock().0.clone();
+                    }
+                    let parsed = match record(id, entry, &steps, offset, &learned) {
                         Ok(parsed) => parsed,
                         Err(error) => {
                             failed_steps.extend(indices);
@@ -1477,6 +1899,10 @@ impl Api {
         } else {
             String::new()
         };
+        cursor.local_stamp = conversation
+            .filter(|_| stable == offset)
+            .unwrap_or_default()
+            .into();
         let cursor =
             serde_json::to_string(&cursor).map_err(|_| failure("Antigravity 同步位置无效"))?;
         store.write_batch_with_superseded(&[], &superseded, Some((&cursor_id, &cursor)))?;
@@ -1543,9 +1969,10 @@ pub(super) fn scan_file_list(
             crate::antigravity::auth::provider_timeline(d, brain.parent().and_then(Path::parent))
         })
         .unwrap_or_default();
+    let learned = Learned::load(store);
     for path in files {
         if let Err(error) = scan_file(
-            store, brain, path, pricing, settings, report, repair, &timeline,
+            store, brain, path, pricing, settings, report, repair, &timeline, &learned,
         ) {
             report.failed(&error);
         }
@@ -1587,6 +2014,7 @@ fn scan_file(
     report: &mut Report,
     repair: bool,
     timeline: &crate::antigravity::auth::ProviderTimeline,
+    learned: &Learned,
 ) -> Result<()> {
     let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
     let saved_raw = if repair { None } else { store.cursor(&key)? };
@@ -1734,9 +2162,27 @@ fn scan_file(
                 }
                 let id = safe_id(&format!("antigravity:request:{request}"));
                 let alias = resolve_model_alias(model);
-                let model_for_id = explicit_model
+                // A model id the app lists under a label resolves through
+                // that entry; any other backend name only drops its effort
+                // suffix.
+                let listed = explicit_model.and_then(|id| learned.listed(id));
+                let (backend, suffix_effort) = match (&listed, explicit_model) {
+                    (Some((base, _)), _) => (Some(base.as_str()), None),
+                    (None, Some(name)) if alias.is_none() => {
+                        let (base, effort) = split_effort_suffix(name);
+                        (Some(base), effort)
+                    }
+                    (None, name) => (name, None),
+                };
+                let model_for_id = backend
                     .or_else(|| alias.map(|a| a.canonical))
                     .or(inherited_rpc_model);
+                // The label the user selected still names a row that only
+                // carries its backend model. A model id inherited from the
+                // app's own reading is not such a label.
+                let selected = c.model.as_deref().filter(|inherited| {
+                    explicit_model.is_none() || model_id(Some(inherited)).is_none()
+                });
                 let is_failed = failed(&v);
                 let mut attempt = Attempt {
                     id: safe_id(&format!("{id}:final")),
@@ -1745,9 +2191,13 @@ fn scan_file(
                     requested_model: actual_model(model_for_id),
                     response_model: actual_model(model_for_id),
                     model_display_name: label(text(&v, &["model_display_name"]))
+                        .or_else(|| listed.as_ref().map(|(_, shown)| (*shown).to_owned()))
                         .or_else(|| alias.map(|a| a.display_name.to_owned()))
-                        .or_else(|| explicit_model.is_none().then(|| c.model.clone()).flatten()),
-                    reasoning_effort: alias.and_then(|a| a.effort).map(str::to_owned),
+                        .or_else(|| selected.map(str::to_owned)),
+                    reasoning_effort: alias
+                        .and_then(|a| a.effort)
+                        .or(suffix_effort)
+                        .map(str::to_owned),
                     error_code: is_failed.then(|| error_code(&v)).flatten(),
                     started_at: at,
                     outcome: if is_failed { "failed" } else { "unknown" }.into(),
@@ -1850,7 +2300,7 @@ pub fn sync(
     let runtime = tokio::runtime::Handle::try_current()
         .map_err(|_| failure("Antigravity 同步运行时不可用"))?;
     let connected = runtime.block_on(async {
-        match Api::connect().await? {
+        match Api::connect(home).await? {
             Some(api) => {
                 if let Some(data) = store.data_dir() {
                     match api.quota(data, home).await {
@@ -1886,6 +2336,8 @@ pub fn sync(
         &mut report,
         repair,
     )?;
+    // CLI sessions are files of their own and do not need the app running.
+    cli::scan(store, home, &pricing, settings, &mut report, repair);
     connected?;
     report.phase = if report.errors == 0 {
         "done"
@@ -2198,7 +2650,6 @@ impl UsageStatsAggregator {
                     cost: row_cost,
                     unpriced_requests: u64::from(row.provider_unpriced),
                 },
-                row.time >= self.filter_start && row.time <= self.filter_end,
             );
         }
 
@@ -2407,22 +2858,19 @@ mod tests {
     }
     impl Api {
         pub(super) fn from_single(http: reqwest::Client, origin: String, token: String) -> Self {
-            Self {
-                http,
-                endpoints: vec![Endpoint { origin, token }],
-            }
+            Self::new(http, vec![Endpoint { origin, token }])
         }
         pub(super) fn from_endpoints(
             http: reqwest::Client,
             endpoints: Vec<(String, String)>,
         ) -> Self {
-            Self {
+            Self::new(
                 http,
-                endpoints: endpoints
+                endpoints
                     .into_iter()
                     .map(|(origin, token)| Endpoint { origin, token })
                     .collect(),
-            }
+            )
         }
     }
     #[test]
@@ -2434,6 +2882,7 @@ mod tests {
             &entry,
             &Steps::from(steps.as_array().unwrap().as_slice()),
             0,
+            &Learned::default(),
         )
         .unwrap()
         .unwrap();
@@ -2445,7 +2894,8 @@ mod tests {
                 "child",
                 &entry,
                 &Steps::from(steps.as_array().unwrap().as_slice()),
-                2
+                2,
+                &Learned::default(),
             )
             .unwrap()
             .unwrap()
@@ -2457,6 +2907,7 @@ mod tests {
             &entry,
             &Steps::from(steps.as_array().unwrap().as_slice()),
             1,
+            &Learned::default(),
         )
         .unwrap()
         .unwrap();
@@ -2471,6 +2922,7 @@ mod tests {
             &m,
             &Steps::from(steps.as_array().unwrap().as_slice()),
             0,
+            &Learned::default(),
         )
         .unwrap()
         .unwrap();
@@ -2486,7 +2938,8 @@ mod tests {
                 "child",
                 &m,
                 &Steps::from(steps.as_array().unwrap().as_slice()),
-                0
+                0,
+                &Learned::default(),
             )
             .unwrap()
             .unwrap()
@@ -2502,6 +2955,7 @@ mod tests {
             &m,
             &Steps::from(steps.as_array().unwrap().as_slice()),
             0,
+            &Learned::default(),
         )
         .unwrap()
         .unwrap();
@@ -2512,7 +2966,8 @@ mod tests {
             "cascade",
             &m,
             &Steps::from(steps.as_array().unwrap().as_slice()),
-            0
+            0,
+            &Learned::default(),
         )
         .is_err());
     }

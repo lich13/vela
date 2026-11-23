@@ -371,6 +371,20 @@ impl Store {
         }
         Ok(())
     }
+    pub(super) fn antigravity_models(&self) -> Result<Option<String>> {
+        db(self
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key='antigravity_models'",
+                [],
+                |r| r.get(0),
+            )
+            .optional())
+    }
+    pub(super) fn save_antigravity_models(&mut self, models: &str) -> Result<()> {
+        db(self.connection.execute("INSERT INTO metadata(key,value) VALUES('antigravity_models',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [models]))?;
+        Ok(())
+    }
     pub fn antigravity_stats(
         &self,
         f: &Filter,
@@ -406,19 +420,14 @@ impl Store {
         let mut min_time = f.start.unwrap_or(0);
         let mut max_time = f.end.unwrap_or(now_ms);
         for (order, account) in accounts.into_iter().enumerate() {
-            let raw: Option<String> =
-                if account.kind == crate::antigravity::auth::AccountKind::Oauth {
-                    db(self
-                        .connection
-                        .query_row(
-                            "SELECT value FROM metadata WHERE key=?1",
-                            [format!("antigravity_quota:{}", account.id)],
-                            |r| r.get(0),
-                        )
-                        .optional())?
-                } else {
-                    None
-                };
+            let raw: Option<String> = db(self
+                .connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key=?1",
+                    [format!("antigravity_quota:{}", account.id)],
+                    |r| r.get(0),
+                )
+                .optional())?;
             let periods = raw
                 .map(|s| serde_json::from_str(&s).map_err(|_| failure("已保存的账号周期无法读取")))
                 .transpose()?

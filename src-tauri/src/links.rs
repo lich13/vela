@@ -86,6 +86,7 @@ fn parse(raw: &str) -> Result<Parsed> {
     let client_id = match source_app.as_deref() {
         Some("codex") => Some(gateway::ClientId::Codex),
         Some("claude") => Some(gateway::ClientId::Claude),
+        Some("agy" | "antigravity") => Some(gateway::ClientId::Agy),
         Some("grok") => Some(gateway::ClientId::Grok),
         Some("dsh") => Some(gateway::ClientId::Dsh),
         _ => None,
@@ -338,10 +339,12 @@ mod tests {
     #[test]
     fn source_defaults_do_not_restrict_import_targets() {
         use gateway::provider_protocol::Protocol;
-        let agy = parse(&URL.replace("app=codex", "app=agy")).unwrap();
-        assert_eq!(agy.preview.client_id, None);
-        assert_eq!(agy.preview.protocol, None);
-        assert_eq!(agy.preview.model.as_deref(), Some("ignored"));
+        for app in ["agy", "antigravity"] {
+            let agy = parse(&URL.replace("app=codex", &format!("app={app}"))).unwrap();
+            assert_eq!(agy.preview.client_id, Some(gateway::ClientId::Agy));
+            assert_eq!(agy.preview.protocol, Some(Protocol::GeminiNative));
+            assert_eq!(agy.preview.model.as_deref(), Some("ignored"));
+        }
         let gemini = parse(&URL.replace("app=codex", "app=gemini")).unwrap();
         assert_eq!(gemini.preview.client_id, None);
         assert_eq!(gemini.preview.protocol, Some(Protocol::GeminiNative));

@@ -75,12 +75,9 @@ const categories = {
 } as const;
 
 export type EventOrigin =
-  | "upstream"
-  | "gateway"
-  | "antigravity"
-  | "claude_code";
+  "upstream" | "gateway" | "antigravity" | "claude_code";
 /** Identities of applications whose own error files the log page reads. */
-type ExternalClient = "agy" | "antigravity" | "claude_code";
+type ExternalClient = "antigravity" | "claude_code";
 /** Whether the tab lists another application's errors, not gateway events. */
 const external = (origin: EventOrigin) =>
   origin === "antigravity" || origin === "claude_code";
@@ -88,7 +85,7 @@ const origins = {
   upstream: "上游报错",
   gateway: "网关内部",
   claude_code: "Claude Code",
-  antigravity: "Antigravity app",
+  antigravity: "Antigravity",
 } as const satisfies Record<EventOrigin, string>;
 
 export type EventRecord = {
@@ -163,17 +160,13 @@ export type EventPage = {
 };
 
 type StatusGroup =
-  | ""
-  | "success"
-  | "client_error"
-  | "server_error"
-  | "no_status";
+  "" | "success" | "client_error" | "server_error" | "no_status";
 
 const client = (id: ClientId | ExternalClient | null) =>
   id === "antigravity"
-    ? "Antigravity app"
+    ? "Antigravity"
     : id === "agy"
-      ? "Antigravity CLI"
+      ? "Antigravity"
       : id === "codex"
         ? "Codex"
         : id === "claude" || id === "claude_code"
@@ -231,6 +224,9 @@ const timeoutPhases: Record<string, string> = {
   first_event_idle: "首事件接收静默",
   error_body_idle: "错误响应接收静默",
   stream_idle: "上游流静默",
+  buffer_idle: "上游流静默",
+  stream_stall: "传输中静默",
+  hold_idle: "断网时静默",
   downstream_write: "下游发送无进展",
   ws_idle: "WebSocket 接收静默",
   ws_first_byte: "WebSocket 等待首字节",
@@ -416,43 +412,46 @@ export default function EventLog({
       });
   }, [focus?.sequence]);
 
-  const load = useCallback(async (fresh = false) => {
-    if (fresh) flight.current = null;
-    const request = ++sequence.current;
-    try {
-      const filter = Object.fromEntries(
-        Object.entries(filters).filter(([, value]) => value),
-      );
-      const args = {
-        filter: {
-          ...filter,
-          origin,
-          page,
-          from: filters.from
-            ? Math.floor(new Date(filters.from).getTime() / 1000)
-            : null,
-          to: filters.to
-            ? Math.floor(new Date(filters.to).getTime() / 1000)
-            : null,
-        },
-      };
-      const key = JSON.stringify(args);
-      const promise =
-        flight.current?.key === key
-          ? flight.current.promise
-          : command("get_app_events", args);
-      flight.current = { key, promise };
-      const result = await promise.finally(() => {
-        if (flight.current?.promise === promise) flight.current = null;
-      });
-      if (request === sequence.current) {
-        setData(result);
-        setError("");
+  const load = useCallback(
+    async (fresh = false) => {
+      if (fresh) flight.current = null;
+      const request = ++sequence.current;
+      try {
+        const filter = Object.fromEntries(
+          Object.entries(filters).filter(([, value]) => value),
+        );
+        const args = {
+          filter: {
+            ...filter,
+            origin,
+            page,
+            from: filters.from
+              ? Math.floor(new Date(filters.from).getTime() / 1000)
+              : null,
+            to: filters.to
+              ? Math.floor(new Date(filters.to).getTime() / 1000)
+              : null,
+          },
+        };
+        const key = JSON.stringify(args);
+        const promise =
+          flight.current?.key === key
+            ? flight.current.promise
+            : command("get_app_events", args);
+        flight.current = { key, promise };
+        const result = await promise.finally(() => {
+          if (flight.current?.promise === promise) flight.current = null;
+        });
+        if (request === sequence.current) {
+          setData(result);
+          setError("");
+        }
+      } catch (e) {
+        if (request === sequence.current) setError(errorOf(e).message);
       }
-    } catch (e) {
-      if (request === sequence.current) setError(errorOf(e).message);
-    }
-  }, [filters, page, origin]);
+    },
+    [filters, page, origin],
+  );
 
   useEffect(() => {
     if (visible) void load(true);
@@ -485,7 +484,7 @@ export default function EventLog({
       });
 
     const received = new Set<ClientId>();
-    for (const id of ["codex", "claude", "grok", "dsh"] as const)
+    for (const id of ["codex", "claude", "agy", "grok", "dsh"] as const)
       void command("get_gateway", { clientId: id })
         .then((s) => {
           if (!disposed && !received.has(id)) accept(s);
@@ -770,7 +769,9 @@ export default function EventLog({
                             : "client"
                           : statusTone(r.status))
                       }
-                      data-ws={r.details?.wsCloseCode != null ? "true" : undefined}
+                      data-ws={
+                        r.details?.wsCloseCode != null ? "true" : undefined
+                      }
                       title={wireStatus(r)}
                     >
                       {r.status != null && <span>{statusText(r.status)}</span>}
@@ -827,8 +828,8 @@ export default function EventLog({
                     </span>
                   </td>
                 </tr>
-                );
-              })}
+              );
+            })}
           </tbody>
         </table>
         {data.items.length === 0 && <div className="event-empty">暂无日志</div>}
@@ -931,19 +932,18 @@ function EventDetail({
       <div className="event-drawer-inner">
         {addingRule &&
           r.clientId &&
-          r.clientId !== "agy" &&
           r.clientId !== "antigravity" &&
           r.clientId !== "claude_code" && (
-          <FailureRuleDialog
-            clientId={r.clientId}
-            initial={{
-              value: r.details?.upstreamCode ?? "",
-              matchKind: r.details?.upstreamCode ? "code" : "keyword",
-              category: r.details?.errorBasis ?? "",
-            }}
-            close={() => setAddingRule(false)}
-          />
-        )}
+            <FailureRuleDialog
+              clientId={r.clientId}
+              initial={{
+                value: r.details?.upstreamCode ?? "",
+                matchKind: r.details?.upstreamCode ? "code" : "keyword",
+                category: r.details?.errorBasis ?? "",
+              }}
+              close={() => setAddingRule(false)}
+            />
+          )}
         <header>
           <h2 ref={heading} id="event-title" tabIndex={-1}>
             {reasonText(r)}
@@ -1190,10 +1190,7 @@ function EventDetail({
             ["最近发生", time(r.lastAt)],
             ["合并次数", r.count],
           ].map(([key, value]) => (
-            <div
-              key={key}
-              data-field={key === "类别" ? "category" : undefined}
-            >
+            <div key={key} data-field={key === "类别" ? "category" : undefined}>
               <dt>{key}</dt>
               <dd>{value}</dd>
             </div>

@@ -41,13 +41,7 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
         if native {
             while store.compact_storage_batch().unwrap() {}
         }
-        let profiles = [
-            ("b", "oauth"),
-            ("a", "oauth"),
-            ("key", "vertex_key"),
-            ("adc", "adc"),
-        ];
-        let entries: Vec<_> = profiles.iter().map(|(id, kind)| json!({"id":id,"name":format!("Fixture {id}"),"kind":kind,"sourceType":"fixture","payload":"{}","updatedAt":0})).collect();
+        let entries: Vec<_> = ["b", "a"].iter().map(|id| json!({"id":id,"name":format!("Fixture {id}"),"kind":"oauth","sourceType":"fixture","payload":"{}","updatedAt":0})).collect();
         std::fs::write(
             dir.path().join("antigravity-accounts.json"),
             serde_json::to_vec(&json!({"schema":1,"entries":entries})).unwrap(),
@@ -106,9 +100,8 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
                         periods["3p-5h"].start,
                     ),
                     make("other-account", "b", "gemini-3-flash", now),
-                    make("key-current", "key", "gemini-3-flash", now),
-                    make("key-old", "key", "gemini-3-flash", start - 1),
-                    make("adc-current", "adc", "gemini-3-flash", now),
+                    // Usage of an account that no longer exists adds no account.
+                    make("deleted-account", "gone", "gemini-3-flash", now),
                 ],
                 None,
             )
@@ -125,7 +118,7 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
                 .iter()
                 .map(|a| a.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["b", "a", "key", "adc"]
+            vec!["b", "a"]
         );
         let a = stats.accounts.iter().find(|a| a.id == "a").unwrap();
         assert_eq!(a.total.requests, 0);
@@ -139,12 +132,6 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
             .tracks
             .iter()
             .all(|t| t.burst_5h.period.is_none() && t.weekly_7d.period.is_none()));
-        for kind in ["key", "adc"] {
-            let a = stats.accounts.iter().find(|a| a.id == kind).unwrap();
-            assert!(a.tracks.is_empty());
-            assert_eq!(a.total.requests, 1);
-            assert_eq!(a.total.tokens, 120);
-        }
         // A previously seen inactive account can use its still-current periods.
         store.save_antigravity_quota("b", &periods).unwrap();
         let other = store.antigravity_stats(&filter, now).unwrap();
@@ -193,7 +180,13 @@ async fn quota_requires_the_app_identity_to_match_the_selected_account() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
-        for method in ["GetUserStatus", "GetUserStatus", "RetrieveUserQuotaSummary"] {
+        for method in [
+            "GetUserStatus",
+            "GetUserStatus",
+            "RetrieveUserQuotaSummary",
+            "GetUserStatus",
+            "RetrieveUserQuotaSummary",
+        ] {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = [0; 4096];
             let len = socket.read(&mut request).await.unwrap();
@@ -218,7 +211,7 @@ async fn quota_requires_the_app_identity_to_match_the_selected_account() {
     });
     let api = Api::from_single(
         super::super::loopback_client().unwrap(),
-        origin,
+        origin.clone(),
         "fixture".into(),
     );
     assert!(api
@@ -233,5 +226,36 @@ async fn quota_requires_the_app_identity_to_match_the_selected_account() {
             .unwrap(),
         parse(&summary())
     );
+
+    // An instance that cannot answer does not hide the one that can; when
+    // none answers, that is a failure rather than "no quota".
+    let stale = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stale_origin = format!("http://{}", stale.local_addr().unwrap());
+    let closing = tokio::spawn(async move {
+        while let Ok((socket, _)) = stale.accept().await {
+            drop(socket);
+        }
+    });
+    let api = Api::from_endpoints(
+        super::super::loopback_client().unwrap(),
+        vec![
+            (stale_origin.clone(), "fixture".into()),
+            (origin, "fixture".into()),
+        ],
+    );
+    assert_eq!(
+        api.quota_for("fixture@example.invalid")
+            .await
+            .unwrap()
+            .unwrap(),
+        parse(&summary())
+    );
+    let api = Api::from_single(
+        super::super::loopback_client().unwrap(),
+        stale_origin,
+        "fixture".into(),
+    );
+    assert!(api.quota_for("fixture@example.invalid").await.is_err());
+    closing.abort();
     server.await.unwrap();
 }

@@ -131,7 +131,43 @@ pub(super) const CODES: &[Code] = &[
         category: QuotaExhausted,
     },
     Code {
+        value: "quota_exhausted",
+        category: QuotaExhausted,
+    },
+    Code {
         value: "api_key_quota_exhausted",
+        category: Billing,
+    },
+    Code {
+        value: "pre_consume_token_quota_failed",
+        category: Billing,
+    },
+    Code {
+        value: "subscription_not_found",
+        category: Billing,
+    },
+    Code {
+        value: "subscription_invalid",
+        category: Billing,
+    },
+    Code {
+        value: "usage_not_included",
+        category: Billing,
+    },
+    Code {
+        value: "contract_spend_limit_reached",
+        category: Billing,
+    },
+    Code {
+        value: "insufficient_g1_credits_balance",
+        category: Billing,
+    },
+    Code {
+        value: "exceeded_current_quota_error",
+        category: Billing,
+    },
+    Code {
+        value: "accountoverdueerror",
         category: Billing,
     },
     Code {
@@ -164,6 +200,14 @@ pub(super) const CODES: &[Code] = &[
     },
     Code {
         value: "account_suspended",
+        category: Authentication,
+    },
+    Code {
+        value: "organization_on_hold",
+        category: Authentication,
+    },
+    Code {
+        value: "claude_code_key_creator_not_member",
         category: Authentication,
     },
     Code {
@@ -243,6 +287,14 @@ pub(super) const CODES: &[Code] = &[
         category: Concurrency,
     },
     Code {
+        value: "gateway_concurrency_limit",
+        category: Concurrency,
+    },
+    Code {
+        value: "gateway_queue_full",
+        category: Concurrency,
+    },
+    Code {
         value: "slow_down",
         category: Acceleration,
     },
@@ -279,6 +331,14 @@ pub(super) const CODES: &[Code] = &[
         category: Capacity,
     },
     Code {
+        value: "model_capacity_exhausted",
+        category: Capacity,
+    },
+    Code {
+        value: "flex_unavailable",
+        category: Capacity,
+    },
+    Code {
         value: "context_length_exceeded",
         category: RequestTooLarge,
     },
@@ -311,6 +371,14 @@ pub(super) const CODES: &[Code] = &[
         category: InvalidRequest,
     },
     Code {
+        value: "unsupported_parameter",
+        category: InvalidRequest,
+    },
+    Code {
+        value: "unsupported_value",
+        category: InvalidRequest,
+    },
+    Code {
         value: "timeout_error",
         category: ServiceError,
     },
@@ -335,6 +403,18 @@ pub(super) const CODES: &[Code] = &[
         category: ServiceError,
     },
     Code {
+        value: "upstream_error",
+        category: ServiceError,
+    },
+    Code {
+        value: "rate_limit_check_failed",
+        category: ServiceError,
+    },
+    Code {
+        value: "compact_not_supported",
+        category: ServiceError,
+    },
+    Code {
         value: "upstream_stream_read_error",
         category: ServiceError,
     },
@@ -355,7 +435,39 @@ pub(super) const CODES: &[Code] = &[
         category: SafetyRejection,
     },
     Code {
+        value: "safety",
+        category: SafetyRejection,
+    },
+    Code {
+        value: "invalid_prompt",
+        category: SafetyRejection,
+    },
+    Code {
         value: "cyber_policy",
+        category: SafetyRejection,
+    },
+    Code {
+        value: "session_blocked_by_cyber_policy",
+        category: SafetyRejection,
+    },
+    Code {
+        value: "prompt_blocked",
+        category: SafetyRejection,
+    },
+    Code {
+        value: "request_rejected",
+        category: SafetyRejection,
+    },
+    Code {
+        value: "response_rejected",
+        category: SafetyRejection,
+    },
+    Code {
+        value: "sensitive_words_detected",
+        category: SafetyRejection,
+    },
+    Code {
+        value: "prompt_guard_blocked",
         category: SafetyRejection,
     },
 ];
@@ -368,6 +480,8 @@ pub(super) const MSG_0: &[&str] = &[
     "prompt is too long",
     "context window",
     "exceed context limit",
+    "maximum prompt length",
+    "token length too long",
     "请求体过大",
     "上下文长度超限",
 ];
@@ -379,6 +493,17 @@ pub(super) const MSG_3: &[&str] = &[
     "safety policy",
     "cyber_policy",
     "安全策略拒绝",
+    "cyber-security policy",
+    "网络安全策略",
+    "rejected by policy",
+    "stopped by policy",
+    "flagged by content moderation",
+    "被策略拒绝",
+    "被策略拒絕",
+    "被策略中止",
+    "violates usage guidelines",
+    "内容审计命中风险规则",
+    "content filtering policy",
 ];
 pub(super) const MSG_4: &[&str] = &[
     "spend rate",
@@ -405,6 +530,8 @@ pub(super) const MSG_6: &[&str] = &[
     "account_deactivated",
     "account_suspended",
     "account has been disabled",
+    "organization has been disabled",
+    "invalid credentials",
     "api key is invalid",
     "api key has expired",
     "密钥无效",
@@ -412,12 +539,15 @@ pub(super) const MSG_6: &[&str] = &[
     "密钥已撤销",
     "账号已禁用",
     "账户已禁用",
+    "api key not valid",
+    "key 已过期",
 ];
 pub(super) const MSG_7: &[&str] = &[
     "ip not authorized",
     "ip allowlist",
     "country, region, or territory not supported",
     "project has been denied access",
+    "user location is not supported",
 ];
 pub(super) const MSG_8: &[&str] = &["input tokens per minute", "input token rate", "itpm"];
 pub(super) const MSG_9: &[&str] = &["output tokens per minute", "output token rate", "otpm"];
@@ -437,6 +567,11 @@ pub(super) const MSG_11: &[&str] = &[
     "并发数",
     "并发限制",
     "并发上限",
+    "too many pending requests",
+    "too many open websocket connections",
+    "in-flight requests",
+    "max concurrency",
+    "max connections reached",
 ];
 pub(super) const MSG_12: &[&str] = &[
     "requests per second",
@@ -449,6 +584,8 @@ pub(super) const MSG_13: &[&str] = &[
     "acceleration limit",
     "traffic increased too quickly",
     "流量增长过快",
+    "ramp limit",
+    "usage increase rate",
 ];
 pub(super) const MSG_14: &[&str] = &[
     "at capacity",
@@ -458,6 +595,11 @@ pub(super) const MSG_14: &[&str] = &[
     "容量",
     "繁忙",
     "负载过高",
+    "capacity is exhausted",
+    "reset reason: overflow",
+    "no capacity available",
+    "experiencing high demand",
+    "访问量过大",
 ];
 pub(super) const MSG_15: &[&str] = &["usage_limit"];
 pub(super) const MSG_16: &[&str] = &[
@@ -487,9 +629,13 @@ pub(super) const MODEL_ZH: &[&str] = &[
     "未开通",
     "未启用",
     "不允许",
+    "价格尚未",
+    "價格尚未",
+    "价格未配置",
+    "價格未設定",
 ];
 pub(super) const MODEL_EN: &[&str] = &[
-    "does not exist",
+    "not exist",
     "not found",
     "not supported",
     "unsupported",
@@ -510,6 +656,12 @@ pub(super) const MODEL_EN: &[&str] = &[
     "not enabled",
     "not authorized",
     "not entitled",
+    "has not been priced",
+    "price not configured",
+    "mapped on multiple provider platforms",
+    "not in whitelist",
+    "credits are required for this model",
+    "exhausted its free trial quota",
 ];
 pub(super) const MODEL_CODES: &[&str] = &[
     "model_not_found",
@@ -523,7 +675,11 @@ pub(super) const MODEL_CODES: &[&str] = &[
     "no_available_model",
     "model_not_exist",
     "model_not_exists",
+    "model_price_error",
+    "setlimitexceeded",
 ];
+/// Refusals of a model that never say the word.
+pub(super) const MODEL_PHRASES: &[&str] = &["订阅套餐暂未开放"];
 pub(super) const BILLING_WORDS: &[&str] = &[
     "insufficient_quota",
     "insufficient_balance",
@@ -556,12 +712,27 @@ pub(super) const BILLING_WORDS: &[&str] = &[
     "余额已用完",
     "账户欠费",
     "账号欠费",
+    "已欠费",
+    "overdue balance",
     "账户额度已耗尽",
     "账户额度已用完",
     "api key 额度已用完",
     "api key额度已用完",
     "令牌额度已用完",
     "令牌额度不足",
+    "insufficient user quota",
+    "not enough quota",
+    "quota is not enough",
+    "quota is insufficient",
+    "used all available credits",
+    "monthly spending limit",
+    "no active subscription",
+    "subscription has expired",
+    "subscription is suspended",
+    "额度不足",
+    "額度不足",
+    "预扣费额度失败",
+    "預扣費額度失敗",
 ];
 pub(super) const QUOTA_WORDS: &[&str] = &[
     "daily usage limit exceeded",
@@ -587,6 +758,17 @@ pub(super) const QUOTA_WORDS: &[&str] = &[
     "月额度已耗尽",
     "月额度已用尽",
     "每月用量已达上限",
+    "daily usage quota exhausted",
+    "weekly usage quota exhausted",
+    "monthly usage quota exhausted",
+    "小时限额已用完",
+    "日限额已用完",
+    "天限额已用完",
+    "monthly spending cap",
+    "-hour usage quota",
+    "小时 的使用上限",
+    "小时的使用上限",
+    "budget limit exceeded",
 ];
 pub(super) const QUOTA_NEGATIVES: &[&str] = &[
     "documentation:",
@@ -615,6 +797,7 @@ pub(super) const RPM_WORDS: &[&str] = &[
     "rpm_limit_exceeded",
     "每分钟请求数超限",
     "每分钟请求次数已达上限",
+    "requests per min",
 ];
 pub(super) const RPM_NEGATIVES: &[&str] = &[
     "not an rpm",
@@ -630,6 +813,33 @@ pub(super) const RPM_NEGATIVES: &[&str] = &[
     "没有超",
     "未超",
 ];
+/// How OpenAI opens a refusal of one request field. The model it names is
+/// where the field is refused, not a model that is missing.
+pub(super) const PARAMETER_PREFIXES: &[&str] = &[
+    "unsupported parameter",
+    "unsupported value",
+    "unknown parameter",
+    "invalid parameter",
+    "invalid value",
+    "invalid type",
+    "missing required parameter",
+];
+/// How Anthropic refuses one request field for the model in use.
+pub(super) const PARAMETER_PHRASES: &[&str] = &[
+    "not supported for this model",
+    "not supported on this model",
+];
+/// Refusals of what one request asks for, whatever the status beside them.
+pub(super) const REQUEST_WORDS: &[&str] = &[
+    "extra usage is required for long context requests",
+    "cachedcontent not found",
+];
+/// The 1xxx codes with which Cloudflare refuses the caller. Its other 1xxx
+/// codes report a fault of the site behind it.
+pub(super) const CLOUDFLARE_BLOCKS: &[u64] =
+    &[1005, 1006, 1007, 1008, 1009, 1010, 1012, 1020, 1106];
+/// The 1xxx codes with which Cloudflare limits a rate.
+pub(super) const CLOUDFLARE_LIMITS: &[u64] = &[1015, 1027, 1200];
 pub(super) const PERMANENT_CODES: &[&str] = &[
     "DAILY_LIMIT_EXCEEDED",
     "WEEKLY_LIMIT_EXCEEDED",

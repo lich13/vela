@@ -10,11 +10,17 @@ vi.mock("./bridge", () => ({
   command: mock.command,
   subscribe: async (name: string, fn: (v: unknown) => void) => {
     const previous = mock.listeners.get(name);
-    const listener = (v: unknown) => { previous?.(v); fn(v); };
+    const listener = (v: unknown) => {
+      previous?.(v);
+      fn(v);
+    };
     mock.listeners.set(name, listener);
-    return () => { if (mock.listeners.get(name) === listener) {
-      if (previous) mock.listeners.set(name, previous); else mock.listeners.delete(name);
-    } };
+    return () => {
+      if (mock.listeners.get(name) === listener) {
+        if (previous) mock.listeners.set(name, previous);
+        else mock.listeners.delete(name);
+      }
+    };
   },
 }));
 import QuickPanel from "./QuickPanel";
@@ -34,7 +40,13 @@ beforeEach(() => {
   );
   mock.command.mockImplementation(
     async (name: string, args: Record<string, unknown>) => {
-      if (name === "get_gateway_freeze") return { clients: ["codex", "claude", "grok", "dsh"].map((clientId) => ({ clientId, frozen: false })) };
+      if (name === "get_gateway_freeze")
+        return {
+          clients: ["codex", "claude", "grok", "dsh"].map((clientId) => ({
+            clientId,
+            frozen: false,
+          })),
+        };
       if (name === "get_state" || name === "switch_account")
         return structuredClone(demo);
       if (name === "get_gateway" || name === "update_gateway")
@@ -163,9 +175,10 @@ it("omits the provider/account tab row, hides wallet placeholder badges, and com
   ).not.toBeInTheDocument();
   expect(within(quota).queryByText("钱包余额")).not.toBeInTheDocument();
   const valueButton = within(quota).getByRole("button", {
-    name: "87.5K",
+    name: "87,495 USD",
   });
   expect(valueButton).toHaveAttribute("title", "剩余 87,495.917 USD");
+  expect(quota).toHaveAttribute("data-client", "codex");
 });
 
 it("refreshes the waiting budget once on freeze and thaw", async () => {
@@ -267,18 +280,22 @@ it("keeps provider naming separate from selection and exposes reset in the quick
     expectedRevision: gatewayDemo.revision,
   });
 });
-it("keeps provider settings HTTP/SSE-only and opens shared policy settings", async () => {
+it("keeps provider settings HTTP/SSE-only and opens the API editor", async () => {
   const user = userEvent.setup();
   render(<QuickPanel />);
   await screen.findByText("api.example.com");
   expect(screen.queryByText("HTTP 桥接")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "api.example.com 白名单" }),
+  ).not.toBeInTheDocument();
   await user.click(
-    screen.getByRole("button", { name: "api.example.com 白名单" }),
+    screen.getByRole("button", { name: "api.example.com 编辑 API" }),
   );
   expect(mock.command).toHaveBeenCalledWith("open_main", {
     page: "gateway",
     clientId: "codex",
     providerId: "primary",
+    providerAction: "edit",
   });
   expect(
     mock.command.mock.calls.some(([name]) => name === "update_gateway"),
@@ -540,7 +557,7 @@ it("synchronizes hidden platforms, falls back, and never stops a gateway", async
       screen.queryByRole("button", { name: "Codex" }),
     ).not.toBeInTheDocument(),
   );
-  hiddenClients = ["codex", "claude", "grok", "dsh"];
+  hiddenClients = ["codex", "claude", "agy", "grok", "dsh"];
   act(() =>
     mock.listeners.get("quick-state")?.({
       pinned: false,
@@ -586,20 +603,38 @@ it("refreshes a frozen wait when the panel first observes thaw", async () => {
   let thawed = false;
   mock.command.mockImplementation(async (name, args) => {
     const value = await original(name, args);
-    if (name === "get_gateway") return { ...value, pendingRequests: [{
-      requestId: "fixture-frozen-wait", phase: thawed ? "capacity" : "frozen",
-      startedAt: Date.now() / 1000 - 90, elapsedSeconds: 90, remainingSeconds: 60,
-      providerId: value.providers[0].id, providerName: value.providers[0].name,
-      model: "fixture-model",
-    }] };
+    if (name === "get_gateway")
+      return {
+        ...value,
+        pendingRequests: [
+          {
+            requestId: "fixture-frozen-wait",
+            phase: thawed ? "capacity" : "frozen",
+            startedAt: Date.now() / 1000 - 90,
+            elapsedSeconds: 90,
+            remainingSeconds: 60,
+            providerId: value.providers[0].id,
+            providerName: value.providers[0].name,
+            model: "fixture-model",
+          },
+        ],
+      };
     return value;
   });
   render(<QuickPanel />);
   expect(await screen.findByText("已暂存")).toBeInTheDocument();
-  const before = mock.command.mock.calls.filter(([name]) => name === "get_gateway").length;
+  const before = mock.command.mock.calls.filter(
+    ([name]) => name === "get_gateway",
+  ).length;
   thawed = true;
-  await act(async () => mock.listeners.get("gateway-freeze")!({ clients: [{ clientId: "codex", frozen: false }] }));
-  expect(mock.command.mock.calls.filter(([name]) => name === "get_gateway")).toHaveLength(before + 1);
+  await act(async () =>
+    mock.listeners.get("gateway-freeze")!({
+      clients: [{ clientId: "codex", frozen: false }],
+    }),
+  );
+  expect(
+    mock.command.mock.calls.filter(([name]) => name === "get_gateway"),
+  ).toHaveLength(before + 1);
   expect(screen.getByText("容量等待")).toBeInTheDocument();
   expect(screen.getByText("剩余 60 秒")).toBeInTheDocument();
 });

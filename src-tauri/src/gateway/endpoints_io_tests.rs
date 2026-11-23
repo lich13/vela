@@ -41,6 +41,10 @@ fn fixture_provider(base_url: &str) -> Provider {
         endless_mode: false,
         upstream_retry_seconds: 5,
         normal_retry_seconds: 3,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     }
 }
 
@@ -206,6 +210,7 @@ async fn first_affinity_persist_failure_returns_before_sending_to_upstream() {
     gateway
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -213,6 +218,10 @@ async fn first_affinity_persist_failure_returns_before_sending_to_upstream() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: base_url.clone(),
@@ -301,6 +310,7 @@ async fn frozen_queued_probes_preserve_complete_samples_and_manual_probes_still_
     gateway
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 id: None,
                 name: None,
                 base_url: primary.clone(),
@@ -313,6 +323,10 @@ async fn frozen_queued_probes_preserve_complete_samples_and_manual_probes_still_
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
             },
             &gateway.view().revision,
             dir.path(),

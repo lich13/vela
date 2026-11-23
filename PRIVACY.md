@@ -26,19 +26,20 @@ Vela 面向本机使用。账号、供应商地址、访问令牌和客户端配
 | 来源 | 目标与用途 | 触发方式 |
 | --- | --- | --- |
 | 应用直接请求 | `api.github.com`：本仓库最新 Release；`raw.githubusercontent.com`：公开价格 JSON 与 SHA-256、openai/codex 的公开模型目录 `models.json` | 用户检查更新；现有价格自动更新或手动更新；模型目录仅在 Codex“接管模型列表”选用“官方最新列表”期间每天下载一次，不携带凭据 |
+| 模型元数据与参考价格 | `models.dev`：公开的模型元数据与价格索引（`https://models.dev/api.json`） | 首次缺少缓存、用户点击刷新；后台每 6 小时一次，出现未定价记录后满 1 小时再试一次；不携带凭据或用量数据 |
 | 用户配置的目标 | 已保存供应商主、副地址：业务转发、额度、模型列表、端点测速、连接测试、模型指纹及可选分词器探测 | 按用户启用的功能与现有刷新间隔 |
-| Antigravity Vertex Key | `aiplatform.googleapis.com` 或所选地区的 `*-aiplatform.googleapis.com`：生成、流式生成与 Token 计数 | 用户启用 Key 账号后，由 App 请求触发；仅向 Google 发送该 Key |
-| 模型检测资源 | `api.github.com` 与 `raw.githubusercontent.com`：校验并下载 ModelTrace／LM Detector 的公开指纹资源 | 仅用户点击更新指纹库；全部文件固定同一提交，无供应商凭据 |
+| 模型检测资源 | `api.github.com` 与 `raw.githubusercontent.com`：校验并下载 ModelTrace／LM Detector 的公开指纹资源 | 仅用户在指纹库点击“一键更新”，两个来源一并检查；每个来源的全部文件固定同一提交，无供应商凭据 |
 | 系统浏览器 | `github.com`：项目仓库和发布页 | 用户主动打开 |
 | 原生 CLI 登录 | Codex、Claude 官方 CLI 自行完成认证及网络通信；应用识别 Codex 的 `auth.openai.com`／`chatgpt.com` 登录链接并转交浏览器 | 用户主动登录或刷新 |
 | 本机通信 | 网关回环连接、Tauri IPC、原生 CLI 的本机登录回调 | 对应本机操作；不属于对外请求 |
 
 源码中的 `api.openai.com` JWT 声明名称空间、系统文档链接、配置 schema 和模拟数据不代表应用访问这些服务。CI 的依赖下载、漏洞审计及依赖更新属于开发工程流量，不属于桌面应用运行时通信。
 
-- 启用网关后，业务请求发送到用户配置的供应商地址或明确启用的 Vertex AI 端点；额度查询按用户保存的自动刷新间隔访问供应商（默认 60 秒，可关闭）；手动刷新和供应商模型列表查询也只访问对应供应商。
+- 启用网关后，业务请求发送到用户配置的供应商地址；额度查询按用户保存的自动刷新间隔访问供应商（默认 60 秒，可关闭）；手动刷新和供应商模型列表查询也只访问对应供应商。
 - 多端点测速只向已保存的主、副地址发出不带认证的 GET，不调用模型、不跟随重定向；结果只保存延迟、HTTP 状态及固定错误类别，不记录响应正文。自动测速仅在网关开启且存在辅助端点时进行，默认间隔五分钟。
 - “检查更新”只请求 [lich13/vela 的 GitHub Releases API](https://api.github.com/repos/lich13/vela/releases/latest)，并仅打开官方仓库或发布页。
 - 模型自动价格来自公开的 `Wei-Shaw/model-price-repo` JSON 和 SHA-256，启动检查、每 10 分钟更新，可关闭。请求不携带供应商凭据；哈希校验失败或离线时保留有效价格。检查时间不代表来源中的价格刚更新。
+- models.dev 的公开模型索引用于模型元数据和补充价格：首次缺少缓存、手动刷新时下载，后台另外每 6 小时刷新一次，出现未定价记录后满 1 小时再试一次。请求只下载同一个公开文件，直连且不跟随重定向，User-Agent 为 `vela/<版本号>`，不携带供应商凭据、模型名或用量数据；下载失败保留原缓存。
 - 应用不包含广告、遥测或使用行为上报服务。
 
 ## 公开仓库与发布包
@@ -100,6 +101,8 @@ Grok 会话只提取轮次与会话标识摘要、模型、时间、调用次数
 
 ## Antigravity app
 
-OAuth、ADC 与 Vertex Key 凭据保存在现有私有账号库，列表及事件只返回元数据。macOS 上 App 把 OAuth 登录保存在登录钥匙串（服务 `gemini`、账户 `antigravity`）；Vela 通过系统 `/usr/bin/security` 读取，切换账号时通过 `/usr/bin/security -i` 的标准输入（`stdin`）原位更新（命令长度上限 4096 字节，凭据绝不作为命令行参数传递，避免在进程列表中暴露），删除账号时移除残留的同一登录，并按 `~/Library/Keychains/login.keychain-db` 文件元数据指纹缓存成功结果以消除高频轮询与跨版本重授权；凭据不进入日志、事件或前端。访问失败保留上次账号状态，项目不存在、为空或无法解码则视为未登录。macOS 不再读取、同步或删除旧 OAuth 令牌文件，Windows 继续读写令牌文件。Vertex 接管前的网关与模型设置快照、本地令牌和所选账号保存在同一账号库；App 设置只写入回环地址与独立本地令牌，真实 Vertex Key 由 Vela 以 `x-goog-api-key` 发送到 Google。请求和流式响应直接转发，不保留对话正文；必要遥测请求在本机返回，不外发。使用该账号期间 Vela 必须运行，退出停止转发但不自动切换认证方式。
+账号库只保存 OAuth 账号的登录凭据，列表及事件只返回元数据。macOS 上 App 把 OAuth 登录保存在登录钥匙串（服务 `gemini`、账户 `antigravity`）；Vela 通过系统 `/usr/bin/security` 读取，切换账号时通过 `/usr/bin/security -i` 的标准输入（`stdin`）原位更新（命令长度上限 4096 字节，凭据绝不作为命令行参数传递，避免在进程列表中暴露），删除账号时移除残留的同一登录，并按 `~/Library/Keychains/login.keychain-db` 文件元数据指纹缓存成功结果以消除高频轮询与跨版本重授权；凭据不进入日志、事件或前端。访问失败保留上次账号状态，项目不存在、为空或无法解码则视为未登录。macOS 不再读取、同步或删除旧 OAuth 令牌文件，Windows 继续读写令牌文件。Vela 不为 App 提供网关或转发，不使用已保存的登录凭据发起网络请求；App 的请求由 App 自行直连，不经过 Vela。除下述启动清理外，Vela 不读写 App 的 `~/.antigravity/settings.json`（网关与模型设置）；认证方式由 App 自身决定，Vela 不切换。
 
-用量通过 App 本地只读接口与历史文件采集，Vertex 转发层不重复计账。会话标题按 App 原名保存在现有私有同步游标中，关闭 App 后仍可供账单使用；标题可能包含用户输入内容，仅在本机保存，不写入公开日志、通知或项目服务。内部关联继续使用摘要；完整消息正文、工具参数与认证头不进入用量记录。OAuth／ADC 直连流量由 App 管理。
+启动时若账号库里仍有旧版本保存的 Google Cloud ADC 凭据、Vertex API Key 或接管记录（含当时的本地令牌与设置快照），Vela 把它们从账号库中移除，只保留 OAuth 账号。App 的 `~/.antigravity/settings.json` 仅在其 `gateway` 仍是 Vela 当时写入的回环地址与本地令牌时，才把 `gateway`、`models` 两个键还原为接管前的值；已被改动、不是 JSON 或不存在时不触碰。此过程不改动 `~/.config/gcloud`、`~/.config/agswitch`、App `config.json` 的 `enableAdc`、钥匙串和令牌文件，旧版留在这些位置的 ADC 文件由用户自行处理。
+
+用量通过 App 本地只读接口与历史文件采集。Antigravity 2.33.0 起，Vela 只读 `~/.gemini/antigravity/daemon/` 下的 `hub_*.json` 与 `ls_*.json`，从中取得实例的本机端口和本机接口令牌；令牌只在内存中使用，只发往 `127.0.0.1` 上的该实例做只读查询，不写入 Vela 的文件、日志、事件或前端。`~/.gemini/antigravity/conversations/` 只列出会话库文件名并读取文件身份、大小和修改时间，不打开会话库、不读取其中内容。App 返回的模型目录只含模型 ID、内部名称和显示名，保存在本机用量数据库。会话标题按 App 原名保存在现有私有同步游标中，关闭 App 后仍可供账单使用；标题可能包含用户输入内容，仅在本机保存，不写入公开日志、通知或项目服务。内部关联继续使用摘要；完整消息正文、工具参数与认证头不进入用量记录。

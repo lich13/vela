@@ -4,7 +4,9 @@ import { Save, RotateCcw, History } from "lucide-react";
 import { command } from "./bridge";
 import type { DshFileKey, DshFileView } from "./bridge-contracts";
 import ClientSelection from "./ClientSelection";
-import { errorOf, type ClientId } from "./types";
+import { configClients, dshFields } from "./config-fields";
+import ConfigTreeSettings from "./ConfigTreeSettings";
+import { errorOf, type ConfigClientId } from "./types";
 import { confirmAction } from "./confirmation";
 import Modal from "./Modal";
 import { useCodeMirrorSurface } from "./codeMirrorLoader";
@@ -23,7 +25,7 @@ export default function DshConfigEditor({
   onDirty,
   onMessage,
 }: {
-  select: (id: ClientId) => void;
+  select: (id: ConfigClientId) => void;
   theme: "light" | "dark";
   onDirty: (dirty: boolean) => void;
   onMessage: (message: string) => void;
@@ -52,6 +54,36 @@ export default function DshConfigEditor({
   );
   const Surface = useCodeMirrorSurface(true, handleEditorLoadError);
   const dirty = !!doc && !doc.readOnly && text !== doc.text;
+  const [visual, setVisual] = useState(true);
+  // The YAML files have a visual form; `.env` and the credentials file do not.
+  const yaml =
+    !!doc && !doc.readOnly && key !== "environment" && key !== "credentials";
+  // A file the form cannot read opens in the source editor, with the reason.
+  useEffect(() => {
+    if (!doc || !yaml) return;
+    let gone = false;
+    command("read_config_tree", { format: "yaml", text: doc.text }).catch(
+      (e) => {
+        if (gone) return;
+        setVisual(false);
+        setError(errorOf(e).message);
+      },
+    );
+    return () => {
+      gone = true;
+    };
+  }, [doc, yaml]);
+  async function switchMode(next: boolean) {
+    if (next)
+      try {
+        await command("read_config_tree", { format: "yaml", text });
+        setError("");
+      } catch (e) {
+        setError(errorOf(e).message);
+        return;
+      }
+    setVisual(next);
+  }
   useEffect(() => {
     onDirty(dirty);
     return () => onDirty(false);
@@ -171,10 +203,29 @@ export default function DshConfigEditor({
     >
       <div className="config-heading">
         <ClientSelection
+          visibleClients={configClients}
           client="dsh"
           select={select}
           disabled={busy || loading}
         />
+        {yaml && (
+          <div className="segmented" aria-label="编辑方式">
+            <button
+              aria-pressed={visual}
+              disabled={busy || loading}
+              onClick={() => void switchMode(true)}
+            >
+              可视化
+            </button>
+            <button
+              aria-pressed={!visual}
+              disabled={busy || loading}
+              onClick={() => void switchMode(false)}
+            >
+              原文
+            </button>
+          </div>
+        )}
       </div>
       <div className="editor-toolbar">
         <div className="dsh-file-selectors">
@@ -267,7 +318,14 @@ export default function DshConfigEditor({
         </p>
       )}
       <div className="dsh-source-editor">
-        {Surface ? (
+        {yaml && visual && !loading ? (
+          <ConfigTreeSettings
+            format="yaml"
+            text={text}
+            onChange={setText}
+            fields={key === "settings" ? {} : dshFields}
+          />
+        ) : Surface ? (
           <Surface
             mode="yaml"
             ariaLabel="DSH 配置内容"

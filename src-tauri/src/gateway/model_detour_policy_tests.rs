@@ -22,6 +22,10 @@ fn provider(id: &str, model: Option<&str>, special: bool) -> Provider {
         endless_mode: false,
         upstream_retry_seconds: 5,
         normal_retry_seconds: 3,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     }
 }
 fn hints(model: &str, compacted: bool) -> RequestHints {

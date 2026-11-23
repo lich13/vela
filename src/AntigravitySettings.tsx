@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { errorOf } from "./types";
-import { get, patch, type Field, type Json } from "./claude-settings";
-import { JsonNode, Setting, type Editing } from "./ClaudeSettings";
+import { get, type Field, type Json } from "./claude-settings";
+import { JsonNode, Settings, jsonEditing } from "./ClaudeSettings";
 
 export const antigravityGroups = [
   "外观与交互",
@@ -89,11 +88,6 @@ export const antigravityFields: Record<string, Field[]> = {
   ],
   远程与插件: [
     {
-      path: ["userSettings", "enableAdc"],
-      label: "启用 Google Cloud ADC 认证",
-      kind: "boolean",
-    },
-    {
       path: ["userSettings", "remoteControlEnabled"],
       label: "远程控制",
       kind: "boolean",
@@ -159,18 +153,7 @@ export default function AntigravitySettings({
       </div>
     );
   }
-  const editing: Editing = {
-    text,
-    guarded: false,
-    change: (path, next) => {
-      try {
-        onChange(patch(text, path, next));
-        setError("");
-      } catch (e) {
-        setError(errorOf(e).message);
-      }
-    },
-  };
+  const editing = jsonEditing(text, onChange, setError);
   return (
     <div className="claude-settings antigravity-settings">
       <nav className="settings-tabs" aria-label="Antigravity 配置分组">
@@ -190,9 +173,11 @@ export default function AntigravitySettings({
             {error}
           </div>
         )}
-        {(antigravityFields[group] ?? []).map((f) => (
-          <Setting key={f.label} field={f} editing={editing} flagUnknown />
-        ))}
+        <Settings
+          fields={antigravityFields[group] ?? []}
+          editing={editing}
+          flagUnknown
+        />
         {group === "远程与插件" && <PluginsOverview text={text} />}
         {group === "高级" && (
           <JsonNode path={[]} value={value} editing={editing} />

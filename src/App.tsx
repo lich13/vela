@@ -165,9 +165,7 @@ export default function App() {
   );
   useEffect(() => {
     const menus = () =>
-      document.querySelectorAll<HTMLDetailsElement>(
-        ".row-menu[open], .account-menu[open]",
-      );
+      document.querySelectorAll<HTMLDetailsElement>(".account-menu[open]");
     const key = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || document.querySelector("dialog[open]"))
         return;
@@ -236,7 +234,7 @@ export default function App() {
         if (
           hasUnsavedDraft() &&
           !(await confirmAction(
-            `${p.action === "testing" ? "打开连接测试" : "打开白名单"}会丢弃未保存的草稿。`,
+            `${p.action === "testing" ? "打开连接测试" : p.action === "edit" ? "打开编辑 API" : "打开白名单"}会丢弃未保存的草稿。`,
           ))
         )
           return;

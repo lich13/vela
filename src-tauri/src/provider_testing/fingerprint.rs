@@ -329,6 +329,7 @@ pub(super) fn target(context: &Context) -> Result<fingerprint_stream::Target> {
     };
     Ok(fingerprint_stream::Target {
         url: context.target.url(path)?,
+        vertex: context.target.vertex().map(str::to_owned),
         headers: context.target.headers.clone(),
         model: context.target.model(&context.request.model),
         protocol: context.target.protocol.clone(),

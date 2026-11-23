@@ -10,6 +10,9 @@ use serde::{
 use serde_json::Value;
 use std::{fmt, path::Path};
 
+#[path = "config_tree.rs"]
+pub mod tree;
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Document {

@@ -34,6 +34,10 @@ fn fixture_provider(id: &str, handoff: bool, take: bool) -> Provider {
         endless_mode: false,
         upstream_retry_seconds: 5,
         normal_retry_seconds: 3,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     }
 }
 fn ordinary_hints() -> RequestHints {

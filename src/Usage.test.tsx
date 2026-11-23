@@ -239,30 +239,26 @@ beforeEach(() => {
               {
                 id: "ag-oauth-1",
                 name: "dev@example.invalid",
-                kind: "oauth",
+                sourceType: "google-oauth",
                 email: "dev@example.invalid",
-                projectId: null,
                 current: true,
                 updatedAt: 1,
-                disabled: false,
-                disabledReason: null,
+                credentialRevision: "ag-cred-1",
               },
               {
-                id: "ag-adc-1",
-                name: "ADC 凭据 · prod-proj",
-                kind: "adc",
-                email: "adc@example.invalid",
-                projectId: "prod-proj",
+                id: "ag-oauth-2",
+                name: "backup@example.invalid",
+                sourceType: "google-oauth",
+                email: "backup@example.invalid",
                 current: false,
                 updatedAt: 1,
-                disabled: false,
-                disabledReason: null,
+                credentialRevision: "ag-cred-2",
               },
             ],
-            authRevision: "ag-rev-1",
-            currentState: "saved",
-            enableAdc: false,
-            error: null,
+            oauthPresent: true,
+            oauthEmail: "dev@example.invalid",
+            oauthAuthMethod: "google-oauth",
+            revision: "ag-rev-1",
           };
         case "get_antigravity_usage_stats":
           return {
@@ -507,7 +503,7 @@ describe("usage records", () => {
     expect(calls("set_usage_settings")).toHaveLength(4);
   });
 
-  it("omits the interruption button and filters Antigravity usage by account and credential provider", async () => {
+  it("omits the interruption button and filters Antigravity usage by account", async () => {
     await renderUsage();
     expect(
       screen.queryByRole("button", { name: "统计中断" }),
@@ -522,16 +518,16 @@ describe("usage records", () => {
         .map((o) => o.textContent),
     ).toEqual([
       "全部供应商",
-      "dev@example.invalid (OAuth)",
-      "ADC 凭据 · prod-proj (ADC)",
+      "dev@example.invalid",
+      "backup@example.invalid",
       "本机会话（未归属）",
     ]);
 
-    await userEvent.selectOptions(providerSelect, "ag-adc-1");
+    await userEvent.selectOptions(providerSelect, "ag-oauth-2");
     await waitFor(() =>
       expect(calls("get_usage_dashboard").at(-1)?.[1].filter).toMatchObject({
         client: "antigravity",
-        provider: "ag-adc-1",
+        provider: "ag-oauth-2",
       }),
     );
     await userEvent.click(screen.getByRole("tab", { name: "Antigravity" }));
@@ -540,7 +536,7 @@ describe("usage records", () => {
         calls("get_antigravity_usage_stats").at(-1)?.[1].filter,
       ).toMatchObject({
         client: "antigravity",
-        provider: "ag-adc-1",
+        provider: "ag-oauth-2",
       }),
     );
   });

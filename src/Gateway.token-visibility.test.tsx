@@ -72,11 +72,11 @@ async function openProviderEditor(
 ) {
   const provider = gateways[clientId].providers[0];
   await screen.findByRole("button", { name: "添加" });
-  const menuSummary = screen.getByLabelText(`${provider.name} 操作`);
-  const menu = menuSummary.closest("details");
-  if (!menu) throw new Error("供应商操作菜单不存在");
-  await user.click(menuSummary);
-  await user.click(within(menu).getByRole("button", { name: "编辑 API" }));
+  await user.click(
+    within(screen.getByLabelText(`${provider.name} 操作`)).getByRole("button", {
+      name: `${provider.name} 编辑 API`,
+    }),
+  );
   await screen.findByRole("dialog", { name: "编辑供应商" });
   return provider;
 }
@@ -102,6 +102,7 @@ beforeEach(() => {
   gateways = {
     codex: structuredClone(gatewayDemo),
     claude: structuredClone(claudeGatewayDemo),
+    agy: { ...structuredClone(grokGatewayDemo), clientId: "agy" },
     grok: structuredClone(grokGatewayDemo),
     dsh: { ...structuredClone(grokGatewayDemo), clientId: "dsh" },
   };
@@ -180,14 +181,27 @@ describe("gateway provider token visibility", () => {
             id: null,
             baseUrl,
             token: `fixture-user-${clientId}-token`,
+            endlessMode: false,
+            upstreamRetrySeconds: 33,
+            limitRetrySeconds: 33,
+            limitRestSeconds: 8,
+            normalRetrySeconds: 3,
+            riskCodes: clientId === "claude" ? [520] : [],
+            retryIntensity: 5,
+            takeCompaction: false,
+            compactionModel: "",
+            compactionEffort: "",
+            takeAuxiliary: false,
+            auxiliaryModel: "",
+            auxiliaryEffort: "",
             ...(clientId === "claude"
               ? {
+                  takeWebSearch: false,
+                  webSearchModel: "",
+                  webSearchEffort: "",
                   endOnMessageStop: false,
                   filterCountTokens: false,
                   bufferCompleteResponse: false,
-                  endlessMode: false,
-                  upstreamRetrySeconds: 33,
-                  normalRetrySeconds: 3,
                 }
               : {}),
             name,

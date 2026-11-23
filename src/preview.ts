@@ -12,7 +12,7 @@ import { densePreview } from "./preview-fixtures";
 const previewParams = new URLSearchParams(location.search);
 const previewTheme = previewParams.get("theme");
 const freezePreview = previewParams.get("freeze");
-const freezeScopes = ["codex", "claude", "grok", "dsh", "antigravity"].map(
+const freezeScopes = ["codex", "claude", "agy", "grok", "dsh"].map(
   (clientId, i) => ({
     clientId,
     frozen:
@@ -51,7 +51,7 @@ function freezeView() {
     streaming: sum("streaming"),
     finishing: sum("finishing"),
     queued: sum("queued"),
-    clients: freezeScopes.slice(0, 4).map((s) => ({ ...s })),
+    clients: freezeScopes.map((s) => ({ ...s })),
   };
 }
 let freezeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -214,7 +214,7 @@ let quick = {
   visible: true,
   hiddenClients:
     previewParams.get("hiddenClients") === "all"
-      ? ["codex", "claude", "grok", "dsh"]
+      ? ["codex", "claude", "agy", "grok", "dsh"]
       : [],
 };
 const importPreview = previewParams.get("importPreview");
@@ -482,6 +482,8 @@ export async function run(
     };
     return structuredClone(antigravityDoc);
   }
+  if (name.includes("antigravity_cli_config") || name.endsWith("_config_tree"))
+    return (await import("./config-preview")).run(name, args);
   switch (name) {
     case "preview_account_import":
       return {
@@ -756,15 +758,8 @@ export async function run(
       };
       emit("login-state", login);
       return;
-    case "get_antigravity_vertex_models":
-      return { models: [], error: null };
-    case "pick_antigravity_credential_file":
-      return null;
     case "get_antigravity_auth_state":
-    case "add_antigravity_adc":
-    case "save_antigravity_vertex_key":
     case "switch_antigravity_account":
-    case "set_antigravity_auth_mode":
     case "rename_antigravity_account":
     case "delete_antigravity_account":
       return {
@@ -772,53 +767,25 @@ export async function run(
           {
             id: "ag-oauth-1",
             name: "Antigravity OAuth",
-            kind: "oauth",
             sourceType: "google-oauth",
             email: "dev@example.invalid",
-            projectId: null,
             current: true,
             updatedAt: Math.floor(Date.now() / 1000) - 600,
             credentialRevision: "rev-oauth-1",
           },
           {
-            id: "ag-adc-1",
-            name: "GCP Project Alpha",
-            kind: "adc",
-            sourceType: "authorized_user",
-            email: "dev@example.invalid",
-            projectId: "gcp-alpha-demo",
-            current: true,
-            updatedAt: Math.floor(Date.now() / 1000) - 300,
-            credentialRevision: "rev-adc-1",
-          },
-          {
-            id: "ag-vertex-1",
-            name: "Vertex Preview",
-            kind: "vertex_key",
-            sourceType: "vertex_key",
-            email: null,
-            projectId: null,
+            id: "ag-oauth-2",
+            name: "Antigravity Backup",
+            sourceType: "google-oauth",
+            email: "backup@example.invalid",
             current: false,
-            updatedAt: Math.floor(Date.now() / 1000) - 60,
-            credentialRevision: "rev-vertex-1",
-            vertex: {
-              location: "global",
-              models: [
-                "gemini-3-flash-preview",
-                "gemini-3.1-pro-preview",
-                "gemini-2.5-flash",
-              ],
-            },
+            updatedAt: Math.floor(Date.now() / 1000) - 300,
+            credentialRevision: "rev-oauth-2",
           },
         ],
-        mode: "oauth",
-        enableAdc: false,
         oauthPresent: true,
         oauthEmail: "dev@example.invalid",
         oauthAuthMethod: "google-oauth",
-        adcStatus: "disabled",
-        adcType: "authorized_user",
-        adcProject: "gcp-alpha-demo",
         appRestarted: false,
         revision: "ag-preview-rev",
       };

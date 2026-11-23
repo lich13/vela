@@ -62,6 +62,10 @@ fn provider(id: &str, base: &str, token: &str) -> Provider {
         endless_mode: false,
         upstream_retry_seconds: 5,
         normal_retry_seconds: 3,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     }
 }
 
@@ -327,6 +331,7 @@ async fn v020_gateway_api_mode_owns_only_base_and_auth_through_select_start_swit
         &gateway,
         &home,
         Edit::SaveProvider {
+            delegate: Default::default(),
             search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
@@ -334,6 +339,10 @@ async fn v020_gateway_api_mode_owns_only_base_and_auth_through_select_start_swit
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
             quota_access_token: None,
             id: None,
             base_url: second_base.into(),

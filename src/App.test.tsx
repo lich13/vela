@@ -141,6 +141,9 @@ beforeEach(() => {
           };
         case "read_config":
           return { ...doc };
+        // These workflows edit the source; without a tree the editor opens there.
+        case "read_config_tree":
+          throw { code: "CONFIG", message: "" };
         case "save_config":
           if (String(args.text).includes("bad = ["))
             throw { code: "TOML", message: "TOML 语法错误", line: 2 };

@@ -4,25 +4,25 @@ use parking_lot::Mutex;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::{sync::watch, time::Instant};
 
-const CLIENTS: [ClientId; 4] = [
+const CLIENTS: [ClientId; 5] = [
     ClientId::Codex,
     ClientId::Claude,
+    ClientId::Agy,
     ClientId::Grok,
     ClientId::Dsh,
 ];
 #[derive(Clone, Copy, Debug)]
 pub enum Scope {
     Client(ClientId),
-    Antigravity,
 }
 impl Scope {
     fn index(self) -> usize {
         match self {
             Self::Client(ClientId::Codex) => 0,
             Self::Client(ClientId::Claude) => 1,
-            Self::Client(ClientId::Grok) => 2,
-            Self::Client(ClientId::Dsh) => 3,
-            Self::Antigravity => 4,
+            Self::Client(ClientId::Agy) => 2,
+            Self::Client(ClientId::Grok) => 3,
+            Self::Client(ClientId::Dsh) => 4,
         }
     }
 }
@@ -388,7 +388,7 @@ impl Ticket {
 mod tests {
     use super::*;
     #[tokio::test(start_paused = true)]
-    async fn platform_freeze_and_timed_resume_are_independent_and_global_keeps_vertex() {
+    async fn platform_freeze_and_timed_resume_are_independent() {
         let gate = Gate::default();
         let mut tickets = Vec::new();
         for client in CLIENTS {
@@ -396,8 +396,6 @@ mod tests {
             ticket.waiting();
             tickets.push(ticket);
         }
-        let vertex = gate.request(Scope::Antigravity);
-        vertex.waiting();
         gate.set_selected(Some(ClientId::Codex), true).unwrap();
         assert!(gate.view().partial);
         assert!(!gate.view().frozen);
@@ -406,8 +404,6 @@ mod tests {
             assert!(ticket.dispatch());
             ticket.finish();
         }
-        assert!(vertex.dispatch());
-        vertex.finish();
         gate.schedule(ClientId::Codex, Some(60_000), 0).unwrap();
         gate.set(true).unwrap();
         assert!(gate.view().frozen);
@@ -423,14 +419,10 @@ mod tests {
         assert_eq!(tickets[0].paused_for(), Duration::from_secs(90));
         assert!(tickets[0].dispatch());
         tickets[0].finish();
-        let vertex = gate.request(Scope::Antigravity);
-        vertex.waiting();
-        assert!(!vertex.dispatch());
         gate.schedule(ClientId::Grok, Some(300_000), 90_000)
             .unwrap();
         gate.set(false).unwrap();
         assert_eq!(gate.next_resume(), None);
-        assert!(vertex.dispatch());
         assert!(gate
             .view()
             .clients

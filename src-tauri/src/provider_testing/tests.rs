@@ -364,6 +364,64 @@ async fn native_connection_protocols_keep_ua_mapping_and_business_accounting_sep
     }
 }
 #[tokio::test]
+async fn claude_on_vertex_is_tested_at_the_model_address_with_a_google_key() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let capture = seen.clone();
+    let port = server(move |r| {
+        let capture = capture.clone();
+        async move {
+            let headers = r.headers().clone();
+            let path = r.uri().path().to_owned();
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            lock(&capture).push((path, headers, serde_json::from_slice::<Value>(&body).unwrap()));
+            response(200,"application/json",json!({"id":"fixture-response","model":"fixture-returned","status":"completed","output_text":"fixture output","usage":{"input_tokens":2,"output_tokens":1}}).to_string())
+        }
+    })
+    .await;
+    let (dir, service) = fixture();
+    let gateway = service.gateway(ClientId::Claude);
+    let publisher = "/v1/projects/fixture/locations/global/publishers/anthropic";
+    let args = json!({"op":"saveProvider","baseUrl":format!("http://127.0.0.1:{port}{publisher}"),"token":"fixture-test-token","name":"Fixture provider"});
+    gateway
+        .edit(
+            serde_json::from_value(args).unwrap(),
+            &gateway.view().revision,
+            dir.path(),
+        )
+        .unwrap();
+    let id = gateway.view().providers.last().unwrap().id.clone();
+    ua(&service, ClientId::Claude);
+    let job = service
+        .start(request(&service, ClientId::Claude, &id))
+        .unwrap();
+    let result = completed(&service, &job.id).await;
+    assert_eq!(result.job.status, "completed", "{:?}", result.job.error);
+    {
+        let seen = lock(&seen);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].0,
+            format!("{publisher}/models/fixture-model:streamRawPredict")
+        );
+        assert_eq!(seen[0].1["x-goog-api-key"], "fixture-test-token");
+        assert!(!seen[0].1.contains_key("x-api-key"));
+        assert!(!seen[0].1.contains_key("authorization"));
+        assert!(seen[0].2.get("model").is_none());
+        assert_eq!(seen[0].2["anthropic_version"], "vertex-2023-10-16");
+        assert_eq!(seen[0].2["stream"], true);
+    }
+    // Vertex AI lists no models to a key: nothing is asked.
+    let models = service
+        .models(ClientId::Claude, &id, &gateway.view().revision, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        models.error.as_deref(),
+        Some("Vertex AI 没有模型目录接口，请在白名单填写模型 ID")
+    );
+    assert_eq!(lock(&seen).len(), 1);
+}
+#[tokio::test]
 async fn global_prompt_survives_failure_and_restart_across_clients() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let capture = seen.clone();
@@ -1458,6 +1516,7 @@ async fn search_only_connection_uses_ordinary_chat_and_streamed_text() {
     gateway
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 id: Some(id.clone()),
                 base_url: format!("http://127.0.0.1:{port}/v1"),
                 token: String::new(),
@@ -1470,6 +1529,10 @@ async fn search_only_connection_uses_ordinary_chat_and_streamed_text() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
             },
             &previous.revision,
             dir.path(),
@@ -1562,6 +1625,54 @@ async fn defaults_use_each_provider_catalog_and_missing_catalog_uses_platform_de
     service.cancel(&job.id).unwrap();
     completed(&service, &job.id).await;
     drop(permit);
+}
+
+#[tokio::test]
+async fn last_manual_models_stay_per_provider_across_restart_and_ignore_scheduled_rounds() {
+    let port = server(|_| async { fingerprint_response(&sample("above_99", 0)) }).await;
+    let (dir, service) = fixture();
+    let id = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    let other = add(&service, dir.path(), ClientId::Codex, port, "responses");
+    ua(&service, ClientId::Codex);
+    let last = |service: &Service, id: &str| {
+        let last = service.state(ClientId::Codex, id).unwrap().last_models;
+        (last.connection, last.fingerprint)
+    };
+    assert_eq!(last(&service, &id), (String::new(), String::new()));
+
+    for provider in [&id, &other] {
+        let job = service
+            .start(request(&service, ClientId::Codex, provider))
+            .unwrap();
+        completed(&service, &job.id).await;
+        assert_eq!(last(&service, provider).0, "fixture-model");
+    }
+    // The default choice is kept as picked; only the job records what it resolved to.
+    let mut default = request(&service, ClientId::Codex, &other);
+    default.model.clear();
+    let job = service.start(default).unwrap();
+    assert_eq!(
+        job.requested_model,
+        connection::default_model(ClientId::Codex)
+    );
+    completed(&service, &job.id).await;
+    assert_eq!(last(&service, &other), (String::new(), String::new()));
+
+    let mut manual = fingerprint_request(&service, &id, 1);
+    manual.model = "fixture-manual".into();
+    seed_catalog(&service, &id, &[&manual.model]);
+    let manual = service.start(manual).unwrap();
+    completed(&service, &manual.id).await;
+    let automatic = scheduled_fingerprint(&service, dir.path(), &id);
+    assert_eq!(automatic.requested_model, "gpt-6-sol");
+    completed(&service, &automatic.id).await;
+
+    let reopened = Service::new(dir.path(), service.0.gateways.clone()).unwrap();
+    assert_eq!(
+        last(&reopened, &id),
+        ("fixture-model".into(), "fixture-manual".into())
+    );
+    assert_eq!(last(&reopened, &other), (String::new(), String::new()));
 }
 
 #[tokio::test]
@@ -2516,7 +2627,7 @@ async fn tokenizer_reads_late_usage_and_preserves_zero_and_message_cache_counts(
         ("responses","data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"OK\"}}\n\n",None),
     ] {
         let port=server(move |_|async move{response(200,"text/event-stream",body)}).await;
-        let target=fingerprint_stream::Target{url:format!("http://127.0.0.1:{port}"),headers:Default::default(),model:"fixture".into(),protocol:protocol.into(),client_metadata:None};
+        let target=fingerprint_stream::Target{url:format!("http://127.0.0.1:{port}"),vertex:None,headers:Default::default(),model:"fixture".into(),protocol:protocol.into(),client_metadata:None};
         let mut diag=json!({});
         let (text,_)=fingerprint_stream::execute_body(&target,&target.lm_payload("fixture").unwrap(),0,&target.client().unwrap(),None,&mut diag,true).await.unwrap();
         assert_eq!(text,"OK");assert_eq!(diag["input_tokens"].as_i64(),expected);
@@ -3413,6 +3524,7 @@ fn offline_lm_payloads_preserve_sdk_protocol_defaults() {
     ] {
         let mut target = fingerprint_stream::Target {
             url: "https://example.invalid".into(),
+            vertex: None,
             headers: Default::default(),
             model: " fixture-model ".into(),
             protocol: protocol.into(),

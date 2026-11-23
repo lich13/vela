@@ -12,6 +12,8 @@ pub enum Stage {
     FailureFallback,
     CursorPinned,
     UnknownOwner,
+    /// With the provider set to take this kind of request from the queue.
+    Delegated,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +36,8 @@ pub enum Exclusion {
     Health,
     Capacity,
     Rpm,
+    /// Resting after a rate limit.
+    Rest,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -144,6 +148,7 @@ impl Tracker {
                 Gate::Health(_) => Exclusion::Health,
                 Gate::Capacity => Exclusion::Capacity,
                 Gate::Rpm(_) => Exclusion::Rpm,
+                Gate::Rest(_) => Exclusion::Rest,
             };
             *self.evidence.exclusions.entry(excluded).or_default() += 1;
         }

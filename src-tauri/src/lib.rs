@@ -63,6 +63,7 @@ struct Runtime {
     provider_tests: provider_testing::Service,
     gateway: gateway::Gateway,
     claude: gateway::Gateway,
+    agy: gateway::Gateway,
     grok: gateway::Gateway,
     dsh: gateway::Gateway,
     login: Mutex<login::Session>,
@@ -292,9 +293,15 @@ impl Runtime {
     }
 
     fn background_poll_active(&self) -> bool {
-        [&self.gateway, &self.claude, &self.grok, &self.dsh]
-            .into_iter()
-            .any(gateway::Gateway::is_running)
+        [
+            &self.gateway,
+            &self.claude,
+            &self.agy,
+            &self.grok,
+            &self.dsh,
+        ]
+        .into_iter()
+        .any(gateway::Gateway::is_running)
             || login_active(&self.login.lock().state)
             || matches!(
                 self.claude_login.lock().state.phase.as_str(),
@@ -313,15 +320,22 @@ impl Runtime {
         match client {
             gateway::ClientId::Codex => &self.gateway,
             gateway::ClientId::Claude => &self.claude,
+            gateway::ClientId::Agy => &self.agy,
             gateway::ClientId::Grok => &self.grok,
             gateway::ClientId::Dsh => &self.dsh,
         }
     }
+    /// Where a client keeps what the gateway changes for it. For Antigravity
+    /// that is the user's own home: its `agy` function lives in the shell
+    /// startup files there.
     fn home(&self, client: gateway::ClientId) -> Result<PathBuf> {
         let core = self.core.lock();
         Ok(match client {
             gateway::ClientId::Codex => core.home(),
             gateway::ClientId::Claude => PathBuf::from(core.preferences().claude_home),
+            gateway::ClientId::Agy => {
+                dirs::home_dir().ok_or_else(|| AppError::new(code::PATH, "无法定位用户主目录"))?
+            }
             gateway::ClientId::Grok => PathBuf::from(core.preferences().grok_home),
             gateway::ClientId::Dsh => PathBuf::from(core.preferences().dsh_home),
         })
@@ -330,11 +344,9 @@ impl Runtime {
         let _official_guard = self.official_tx.lock().await;
         let a = self.gateway.stop_for_exit().await;
         let b = self.claude.stop_for_exit().await;
-        let c = self.grok.stop_for_exit().await;
-        let d = self.dsh.stop_for_exit().await;
-        let registry = self.gateway.registry();
-        let _listener = registry.lifecycle.lock().await;
-        let e = gateway::antigravity::stop(&registry).await;
+        let c = self.agy.stop_for_exit().await;
+        let d = self.grok.stop_for_exit().await;
+        let e = self.dsh.stop_for_exit().await;
         a.and(b).and(c).and(d).and(e).map(|_| ())
     }
 }
@@ -538,7 +550,7 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     if let Ok(state) = state_for(&r) {
         let _ = window.emit("switch-state", &state);
     }
-    for g in [&r.gateway, &r.claude, &r.grok, &r.dsh] {
+    for g in [&r.gateway, &r.claude, &r.agy, &r.grok, &r.dsh] {
         if let Ok(view) = g.try_view() {
             let _ = window.emit("gateway-state", &view);
             let client_id = g.client_id();
@@ -865,6 +877,7 @@ pub(crate) enum ProviderAction {
     #[default]
     Settings,
     Testing,
+    Edit,
 }
 fn valid_main_page(page: &str) -> bool {
     [
@@ -1317,6 +1330,7 @@ fn set_quota_refresh(
     let state = r.core.lock().set_quota_refresh(seconds, expected_seconds)?;
     r.gateway.set_quota_interval(seconds);
     r.claude.set_quota_interval(seconds);
+    r.agy.set_quota_interval(seconds);
     r.grok.set_quota_interval(seconds);
     r.dsh.set_quota_interval(seconds);
     publish(&app, state.clone());
@@ -1378,6 +1392,8 @@ async fn set_preferences(
     r.gateway
         .set_quota_interval(s.preferences.quota_refresh_seconds);
     r.claude
+        .set_quota_interval(s.preferences.quota_refresh_seconds);
+    r.agy
         .set_quota_interval(s.preferences.quota_refresh_seconds);
     r.grok
         .set_quota_interval(s.preferences.quota_refresh_seconds);
@@ -2010,12 +2026,14 @@ pub fn run() {
             let core = Core::new(data.clone(), home)?;
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;
+            let agy = gateway.agy_companion(data.join("antigravity"))?;
             let grok = gateway.grok_companion(data.join("grok"))?;
             let dsh = gateway.dsh_companion(data.join("dsh"))?;
             let startup = startup::Service::new();
             let start_silently = startup::login_source(&args);
             app.manage(quick::Panel::new(&data)?);
             let power = power::Service::new();
+            let antigravity_migration_error = migrations::antigravity_accounts(&data).err();
             let auth_data = data.clone();
             let _ = tauri::async_runtime::block_on(tauri::async_runtime::spawn_blocking(move || {
                 antigravity::auth::poll_state(&auth_data, &mut None)
@@ -2023,6 +2041,7 @@ pub fn run() {
             let usage = usage::Service::new(&data);
             gateway.set_usage(usage.clone());
             claude.set_usage(usage.clone());
+            agy.set_usage(usage.clone());
             grok.set_usage(usage.clone());
             dsh.set_usage(usage.clone());
             let codex_import_error = gateway.import_initial(&core.home()).err();
@@ -2039,16 +2058,17 @@ pub fn run() {
             };
             let grok_import_error = grok.import_initial(&PathBuf::from(core.preferences().grok_home)).err();
             gateway.set_quota_interval(core.preferences().quota_refresh_seconds);
+            agy.set_quota_interval(core.preferences().quota_refresh_seconds);
             grok.set_quota_interval(core.preferences().quota_refresh_seconds);
             dsh.set_quota_interval(core.preferences().quota_refresh_seconds);
             claude.set_quota_interval(core.preferences().quota_refresh_seconds);
             let diagnostics = events::Service::new(&data);
             gateway.set_diagnostics(diagnostics.clone());
             claude.set_diagnostics(diagnostics.clone());
+            agy.set_diagnostics(diagnostics.clone());
             grok.set_diagnostics(diagnostics.clone());
             dsh.set_diagnostics(diagnostics.clone());
-            let provider_tests = provider_testing::Service::new(&data, [gateway.clone(), claude.clone(), grok.clone(), dsh.clone()])?;
-            let vertex_error = tauri::async_runtime::block_on(antigravity::auth::restore_vertex_listener(&data, &gateway)).err();
+            let provider_tests = provider_testing::Service::new(&data, [gateway.clone(), claude.clone(), agy.clone(), grok.clone(), dsh.clone()])?;
             let runtime = Arc::new(Runtime {
                 usage,
                 diagnostics,
@@ -2058,6 +2078,7 @@ pub fn run() {
                 provider_tests,
                 gateway,
                 claude,
+                agy,
                 grok,
                 dsh,
                 login: Mutex::new(Default::default()),
@@ -2067,7 +2088,7 @@ pub fn run() {
                 startup,
                 power,
                 force_quitting: AtomicBool::new(false),
-                startup_error: Mutex::new(codex_import_error.or(claude_import_error).or(grok_import_error).or(vertex_error)),
+                startup_error: Mutex::new(codex_import_error.or(claude_import_error).or(grok_import_error).or(antigravity_migration_error)),
                 startup_error_consumed: AtomicBool::new(false),
                 official_tx: tokio::sync::Mutex::new(()),
                 window_wake: tokio::sync::Notify::new(),
@@ -2092,6 +2113,7 @@ pub fn run() {
             provider_testing::commands::connect(app.handle());
             notifications::connect(app.handle(), &runtime.diagnostics);
             usage::commands::connect(app.handle(), &runtime);
+            runtime.agy.observe_home(&runtime.home(gateway::ClientId::Agy)?);
             runtime.grok.observe_home(&runtime.home(gateway::ClientId::Grok)?);
             runtime.dsh.observe_home(&runtime.home(gateway::ClientId::Dsh)?);
             {
@@ -2102,6 +2124,7 @@ pub fn run() {
                     for client in [
                         gateway::ClientId::Codex,
                         gateway::ClientId::Claude,
+                        gateway::ClientId::Agy,
                         gateway::ClientId::Grok,
                         gateway::ClientId::Dsh,
                     ] {
@@ -2137,7 +2160,7 @@ pub fn run() {
                     }
                 });
             }
-            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
+            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.agy.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = g.backfill_models().await {
                         g.report_model_error(e);
@@ -2157,6 +2180,7 @@ pub fn run() {
                 });
             }
             runtime.gateway.report_diagnostics();
+            runtime.agy.report_diagnostics();
             runtime.grok.report_diagnostics();
             runtime.dsh.report_diagnostics();
             runtime.claude.report_diagnostics();
@@ -2232,6 +2256,7 @@ pub fn run() {
             for probe_gateway in [
                 runtime.gateway.clone(),
                 runtime.claude.clone(),
+                runtime.agy.clone(),
                 runtime.grok.clone(),
                 runtime.dsh.clone(),
             ] {
@@ -2261,7 +2286,7 @@ pub fn run() {
                     }
                 });
             }
-            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
+            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.agy.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
                 let mut quota_events = g.quota_events();
                 let quota_app = app.handle().clone();
                 let client_id = g.client_id();
@@ -2287,7 +2312,20 @@ pub fn run() {
                 let mut events = g.subscribe();
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let mut waiting = g.has_health_wait();
+                    // The view moves by the second, with no event to announce
+                    // it, while a circuit counts down or a request is
+                    // receiving its response. Only a web panel needs the
+                    // latter: the native one refreshes itself.
+                    let ticking = || {
+                        g.has_health_wait()
+                            || (cfg!(not(target_os = "macos"))
+                                && g.try_view().is_ok_and(|view| {
+                                    view.pending_requests
+                                        .iter()
+                                        .any(|request| request.received_bytes.is_some())
+                                }))
+                    };
+                    let mut waiting = ticking();
                     loop {
                         tokio::select! {
                             event = events.recv() => {
@@ -2295,10 +2333,10 @@ pub fn run() {
                                     break;
                                 }
                                 coalesce_gateway_events(&mut events);
-                                waiting = g.has_health_wait();
+                                waiting = ticking();
                             }
                             _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if waiting => {
-                                let current = g.has_health_wait();
+                                let current = ticking();
                                 let refresh = waiting || current;
                                 waiting = current;
                                 // Include the final zero so an idle open circuit
@@ -2628,12 +2666,14 @@ pub fn run() {
             antigravity::save_antigravity_config,
             antigravity::read_previous_antigravity_config,
             antigravity::validate_antigravity_config,
+            antigravity::cli::read_antigravity_cli_config,
+            antigravity::cli::save_antigravity_cli_config,
+            antigravity::cli::read_previous_antigravity_cli_config,
+            antigravity::cli::validate_antigravity_cli_config,
+            configuration::tree::read_config_tree,
+            configuration::tree::patch_config_tree,
             antigravity::auth::get_antigravity_auth_state,
-            antigravity::auth::add_antigravity_adc,
-            antigravity::auth::save_antigravity_vertex_key,
-            antigravity::auth::pick_antigravity_credential_file,
             antigravity::auth::switch_antigravity_account,
-            antigravity::auth::set_antigravity_auth_mode,
             antigravity::auth::rename_antigravity_account,
             antigravity::auth::delete_antigravity_account,
             usage::commands::get_usage_state,
@@ -2652,7 +2692,6 @@ pub fn run() {
             usage::commands::get_usage_calculator_totals,
             usage::commands::search_pricing,
             usage::commands::get_models_dev,
-            usage::commands::get_antigravity_vertex_models,
             usage::commands::update_models_dev,
             usage::commands::compare_model_prices,
             usage::commands::configure_pricing,

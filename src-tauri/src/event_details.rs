@@ -45,6 +45,10 @@ pub enum ErrorBasis {
     ServiceError,
     Capacity,
     UsageLimit,
+    /// Endless mode is retrying the provider's risk control.
+    RiskControl,
+    /// Endless mode is retrying a rate limit that says nothing more specific.
+    LimitRetry,
     #[serde(other)]
     Unknown,
 }
@@ -299,6 +303,9 @@ impl Details {
                     | "first_event_idle"
                     | "error_body_idle"
                     | "stream_idle"
+                    | "stream_stall"
+                    | "hold_idle"
+                    | "buffer_idle"
                     | "downstream_write"
                     | "ws_idle"
                     | "ws_first_byte"

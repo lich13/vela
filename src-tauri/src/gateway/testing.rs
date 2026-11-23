@@ -120,9 +120,34 @@ impl Target {
         let incoming = path
             .parse()
             .map_err(|_| AppError::new(code::PROVIDER, "测试接口无效"))?;
-        let uri = forward::target(&self.base_url, &incoming)
-            .map_err(|_| AppError::new(code::PROVIDER, "测试接口地址无效"))?;
+        let uri = if self.client_id == ClientId::Agy {
+            super::gemini::target(&self.base_url, &incoming)
+        } else {
+            forward::target(&self.base_url, &incoming)
+        }
+        .map_err(|_| AppError::new(code::PROVIDER, "测试接口地址无效"))?;
         Ok(self.connection.query_uri(uri)?.to_string())
+    }
+    /// Claude on Vertex AI, which has an address for each model and method.
+    pub fn vertex(&self) -> Option<&str> {
+        (self.client_id == ClientId::Claude && super::vertex::anthropic(&self.base_url))
+            .then_some(self.base_url.as_str())
+    }
+    /// Where `payload` is posted. On Vertex AI the model and the method are
+    /// in the address, so both leave the payload for it.
+    pub fn address(&self, path: &str, payload: &mut serde_json::Value) -> Result<String> {
+        let Some(base) = self.vertex() else {
+            return self.url(path);
+        };
+        payload
+            .as_object_mut()
+            .and_then(|body| super::vertex::request(base, path, body))
+            .ok_or_else(|| {
+                AppError::new(
+                    code::PROVIDER,
+                    "Vertex AI 只接受带有效模型 ID 的 Messages 请求",
+                )
+            })
     }
     pub fn model(&self, requested: &str) -> String {
         self.mapping
@@ -244,15 +269,7 @@ impl Gateway {
             .lock()
             .clone()
             .ok_or_else(|| AppError::new(code::STATE, "调用统计暂不可用，等待重新读取"))?;
-        usage.recent_gateway_requests(
-            match self.client_id() {
-                ClientId::Codex => "codex",
-                ClientId::Claude => "claude",
-                ClientId::Grok => "grok",
-                ClientId::Dsh => "dsh",
-            },
-            at,
-        )
+        usage.recent_gateway_requests(self.client_id().usage_name(), at)
     }
     pub(crate) fn test_candidates(&self) -> Result<Vec<Candidate>> {
         Ok(self
@@ -296,6 +313,10 @@ impl Gateway {
                 .cloned()
                 .unwrap_or_default(),
             ClientId::Codex => provider_protocol::Connection::default(),
+            ClientId::Agy => provider_protocol::Connection {
+                protocol: provider_protocol::Protocol::GeminiNative,
+                ..Default::default()
+            },
         };
         let mut headers = if self.client_id() == ClientId::Codex {
             state
@@ -327,6 +348,12 @@ impl Gateway {
             headers
         };
         connection.authenticate(&mut headers, &provider.token)?;
+        if self.client_id() == ClientId::Claude
+            && super::vertex::anthropic(&provider.base_url)
+            && super::vertex::headers(&mut headers, &provider.token).is_none()
+        {
+            return Err(AppError::new(code::PROVIDER, "Token 格式无效"));
+        }
         if self.client_id() == ClientId::Codex {
             let installation =
                 codex_installation(&headers[header::USER_AGENT], state.home.as_deref())?;

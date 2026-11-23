@@ -772,6 +772,12 @@ pub enum RoutingDecision {
     NewThreadModelCooling,
     NewThreadProviderUnavailable,
     NewThreadQueueWaiting,
+    /// A provider set to take compactions served this one.
+    CompactionTakeover,
+    /// A provider set to take the client's side requests served this one.
+    AuxiliaryTakeover,
+    /// A provider set to take web searches served this one.
+    WebSearchTakeover,
     #[serde(other)]
     Unknown,
 }

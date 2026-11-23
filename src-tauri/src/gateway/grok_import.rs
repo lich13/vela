@@ -586,6 +586,7 @@ impl Gateway {
         } else {
             next.edit(
                 Edit::SaveProvider {
+                    delegate: Default::default(),
                     search_only: None,
                     end_on_message_stop: None,
                     filter_count_tokens: None,
@@ -593,6 +594,10 @@ impl Gateway {
                     endless_mode: None,
                     upstream_retry_seconds: None,
                     normal_retry_seconds: None,
+                    risk_codes: None,
+                    retry_intensity: None,
+                    limit_retry_seconds: None,
+                    limit_rest_seconds: None,
                     quota_access_token: None,
                     id: None,
                     base_url: base,

@@ -118,3 +118,34 @@ it("shows transfer timestamps, byte counts, and timeout metadata in request deta
   expect(detailValue(dialog, "超时阈值")).toHaveTextContent("600 秒");
   expect(detailValue(dialog, "距最后进展")).toHaveTextContent("23 ms");
 });
+
+it("adds what an interrupted request had received to its performance cell", async () => {
+  const base = attempt();
+  records = [
+    record(),
+    record({
+      id: "fixture-interrupted-request",
+      attempts: [
+        attempt({
+          id: "fixture-interrupted-attempt",
+          responseModel: "fixture-interrupted",
+          end: {
+            cause: "stream_timeout",
+            terminalReceived: false,
+            responseStarted: true,
+          },
+          transfer: { ...base.transfer!, upstreamBytes: 735_846 },
+        }),
+      ],
+    }),
+  ];
+  render(<Usage />);
+  const interrupted = (await screen.findByText("fixture-interrupted")).closest(
+    "tr",
+  )!;
+  expect(within(interrupted).getByLabelText("已收")).toHaveTextContent(
+    "已收718.6 KB",
+  );
+  const finished = screen.getByText("fixture-response").closest("tr")!;
+  expect(within(finished).queryByLabelText("已收")).not.toBeInTheDocument();
+});

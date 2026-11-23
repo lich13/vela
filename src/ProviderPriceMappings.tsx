@@ -28,18 +28,20 @@ export default function ProviderPriceMappings({
   const [retry, setRetry] = useState(false),
     [error, setError] = useState("");
   const [providers, setProviders] = useState<
-    Record<ClientId, { id: string; name: string }[]>
-  >({ codex: [], claude: [], grok: [], dsh: [] });
+    Record<ProviderPriceMapping["client"], { id: string; name: string }[]>
+  >({ codex: [], claude: [], antigravity: [], grok: [], dsh: [] });
   useEffect(() => {
     let disposed = false;
     void Promise.all(
-      (["codex", "claude", "grok", "dsh"] as const).map(async (clientId) => {
-        const state = await command("get_gateway", { clientId });
-        return [
-          clientId,
-          state.providers.map(({ id, name }) => ({ id, name })),
-        ] as const;
-      }),
+      (["codex", "claude", "agy", "grok", "dsh"] as const).map(
+        async (clientId) => {
+          const state = await command("get_gateway", { clientId });
+          return [
+            clientId === "agy" ? "antigravity" : clientId,
+            state.providers.map(({ id, name }) => ({ id, name })),
+          ] as const;
+        },
+      ),
     )
       .then((values) => {
         if (!disposed)
@@ -125,13 +127,15 @@ export default function ProviderPriceMappings({
                     value={rule.client}
                     onChange={(e) =>
                       change(index, {
-                        client: e.target.value as ClientId,
+                        client: e.target
+                          .value as ProviderPriceMapping["client"],
                         provider: "",
                       })
                     }
                   >
                     <option value="codex">Codex</option>
                     <option value="claude">Claude Code</option>
+                    <option value="antigravity">Antigravity</option>
                     <option value="grok">Grok Build</option>
                     <option value="dsh">DeepSeek Harness</option>
                   </select>

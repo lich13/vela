@@ -394,23 +394,12 @@ export default function Usage({
     const seenAgKeyRef = { current: null as string | null };
     const agSignature = (ag: AntigravityAuthState | null) =>
       ag
-        ? `${ag.revision ?? ""}:${ag.mode ?? ""}:${Boolean(ag.enableAdc)}:${(ag.accounts ?? []).map((a) => `${a.id}:${a.kind}:${Boolean(a.current)}`).join(",")}`
+        ? `${ag.revision ?? ""}:${(ag.accounts ?? []).map((a) => `${a.id}:${Boolean(a.current)}`).join(",")}`
         : "none";
     const updateAccounts = (ag: AntigravityAuthState | null) => {
-      const kind =
-        ag?.mode === "vertex_key"
-          ? "vertex_key"
-          : ag?.enableAdc
-            ? "adc"
-            : "oauth";
-      setAgCurrentAccount(
-        ag?.accounts.find((a) => a.current && a.kind === kind)?.id ?? null,
-      );
+      setAgCurrentAccount(ag?.accounts.find((a) => a.current)?.id ?? null);
       const names = Object.fromEntries(
-        (ag?.accounts ?? []).map((a) => [
-          a.id,
-          `${a.name} (${a.kind === "oauth" ? "OAuth" : a.kind === "adc" ? "ADC" : "Vertex Key"})`,
-        ]),
+        (ag?.accounts ?? []).map((a) => [a.id, a.name]),
       );
       setAgProviders(names);
       return names;
@@ -420,12 +409,13 @@ export default function Usage({
       command("get_gateway", { clientId: "claude" }),
       command("get_gateway", { clientId: "grok" }),
       command("get_gateway", { clientId: "dsh" }),
+      command("get_gateway", { clientId: "agy" }),
       command("get_antigravity_auth_state").catch(() => null),
     ])
-      .then(([codex, claude, grok, dsh, ag]) => {
+      .then(([codex, claude, grok, dsh, agy, ag]) => {
         if (gone) return;
         const gw = Object.fromEntries(
-          [codex, claude, grok, dsh].flatMap((s) =>
+          [codex, claude, grok, dsh, agy].flatMap((s) =>
             s.providers.map((p) => [p.id, p.name]),
           ),
         );
@@ -595,9 +585,9 @@ export default function Usage({
           <option value="">全部客户端</option>
           <option value="codex">Codex</option>
           <option value="claude">Claude Code</option>
+          <option value="antigravity">Antigravity</option>
           <option value="grok">Grok Build</option>
           <option value="dsh">DeepSeek Harness</option>
-          <option value="antigravity">Antigravity app</option>
         </select>
         <select
           aria-label="用量供应商"

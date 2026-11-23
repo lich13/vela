@@ -630,8 +630,44 @@
   color: var(--muted);
   margin-left: 8px;
 }
+.provider-test-banks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+  gap: 16px;
+}
+/* Sources share the row tracks: status cards end level and model lists start level. */
 .provider-test-bank-source {
-  margin-bottom: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: subgrid;
+  grid-row: span 2;
+  row-gap: 16px;
+  min-width: 0;
+}
+.provider-test-bank-status {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+.provider-test-bank-status h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.provider-test-bank-status .provider-test-summary {
+  grid-template-columns: minmax(0, 1fr);
+}
+.provider-test-bank-status p {
+  margin: 0;
+}
+.provider-test-bank-source .provider-test-bank {
+  align-self: start;
+  margin-top: 0;
 }
 .provider-test-ranking {
   margin-top: 16px;

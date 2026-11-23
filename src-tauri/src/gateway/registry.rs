@@ -19,7 +19,6 @@ pub struct Registry {
     pub lifecycle: tokio::sync::Mutex<()>,
     pub listener: Listener,
     pub freeze: super::freeze::Gate,
-    pub antigravity: Mutex<Option<Arc<super::antigravity::Session>>>,
 }
 impl Registry {
     pub fn new(data: PathBuf, port: Option<u16>) -> Result<Self> {
@@ -32,7 +31,6 @@ impl Registry {
             lifecycle: tokio::sync::Mutex::new(()),
             listener,
             freeze: super::freeze::Gate::default(),
-            antigravity: Mutex::new(None),
         })
     }
     pub fn gateway(&self, client: ClientId) -> Option<Gateway> {

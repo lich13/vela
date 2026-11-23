@@ -105,14 +105,16 @@ fn settle_protocol_for(
         None | Some(Terminal::Success | Terminal::Limited)
     ) && protocol.observation.error.error_basis.is_some()
     {
+        // Endless mode keeps retrying the provider, so only a rejection that
+        // cannot recover leaves a cooldown behind.
         if endless
-            && matches!(
+            && !matches!(
                 super::failure_policy::outcome(
                     status,
                     &protocol.observation.error,
                     protocol.observation.retry_after
                 ),
-                Outcome::Failure(_)
+                Outcome::HardRejected(_)
             )
         {
             permits.observed(cfg);

@@ -1,0 +1,587 @@
+use super::*;
+use crate::gateway::test_support::{
+    downstream::{attach_observers, usage_records},
+    until,
+};
+use crate::gateway::tests::server;
+use http_body_util::BodyExt;
+use serde_json::json;
+use std::sync::Arc;
+
+const STREAM: &str = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"fixture\"}]},\"finishReason\":\"STOP\"}],\"modelVersion\":\"gemini-fixture\",\"responseId\":\"fixture-response\",\"usageMetadata\":{\"promptTokenCount\":100,\"cachedContentTokenCount\":20,\"candidatesTokenCount\":5,\"thoughtsTokenCount\":7}}\n\n";
+
+struct Fixture {
+    temp: tempfile::TempDir,
+    root: Gateway,
+    agy: Gateway,
+    home: PathBuf,
+}
+impl Fixture {
+    fn edit(&self, edit: Edit) -> View {
+        self.agy
+            .edit(edit, &self.agy.view().revision, &self.home)
+            .unwrap()
+    }
+    fn save(&self, base: &str) -> String {
+        self.edit(Edit::SaveProvider {
+            delegate: Default::default(),
+            search_only: None,
+            end_on_message_stop: None,
+            filter_count_tokens: None,
+            buffer_complete_response: None,
+            endless_mode: None,
+            upstream_retry_seconds: None,
+            normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
+            quota_access_token: None,
+            id: None,
+            base_url: base.into(),
+            token: "fixture-upstream".into(),
+            name: Some("Fixture".into()),
+        })
+        .providers
+        .last()
+        .unwrap()
+        .id
+        .clone()
+    }
+    async fn start(&self) -> View {
+        self.agy
+            .start(&self.agy.view().revision, &self.home)
+            .await
+            .unwrap()
+    }
+    fn environment(&self) -> PathBuf {
+        self.temp.path().join("data/antigravity/agy.env")
+    }
+    fn token(&self) -> String {
+        self.agy.0.inner.lock().store.local_token.clone()
+    }
+    /// A request the way `agy` sends one: its gateway key as a bearer token.
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .request(method, format!("{}{path}", self.agy.view().address))
+            .bearer_auth(self.token())
+    }
+}
+
+async fn fixture() -> Fixture {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let root = Gateway::new(temp.path().join("data")).unwrap();
+    let agy = root
+        .agy_companion(temp.path().join("data/antigravity"))
+        .unwrap();
+    let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+    root.set_listener_port(port, &root.listener_view().revision)
+        .unwrap();
+    let fixture = Fixture {
+        temp,
+        root,
+        agy,
+        home,
+    };
+    fixture.edit(Edit::Mode {
+        mode: "auto".into(),
+    });
+    fixture
+}
+
+type Seen = Arc<parking_lot::Mutex<Vec<(String, hyper::HeaderMap, bytes::Bytes)>>>;
+
+/// An upstream that keeps what it was sent and answers every call alike, but
+/// for the response id, which is numbered as a real one is unique.
+async fn upstream(content_type: &'static str, body: String) -> (u16, Seen) {
+    let seen = Seen::default();
+    let port = server({
+        let seen = seen.clone();
+        move |request| {
+            let (seen, body) = (seen.clone(), body.clone());
+            async move {
+                let (parts, sent) = request.into_parts();
+                let sent = sent.collect().await.unwrap().to_bytes();
+                let body = {
+                    let mut seen = seen.lock();
+                    seen.push((parts.uri.to_string(), parts.headers, sent));
+                    body.replace(
+                        "fixture-response",
+                        &format!("fixture-response-{}", seen.len()),
+                    )
+                };
+                hyper::Response::builder()
+                    .header("content-type", content_type)
+                    .body(replay::full(body))
+                    .unwrap()
+            }
+        }
+    })
+    .await;
+    (port, seen)
+}
+
+#[tokio::test]
+async fn the_environment_file_lives_exactly_while_the_gateway_runs() {
+    let f = fixture().await;
+    f.save("https://example.invalid/api");
+    assert_eq!(f.agy.view().agy_shell.map(|shell| shell.profiles), None);
+    let view = f.start().await;
+    assert_eq!(view.listener.running_clients, [ClientId::Agy]);
+    assert!(!f.root.view().running);
+    assert_eq!(
+        view.current.protocol,
+        Some(provider_protocol::Protocol::GeminiNative)
+    );
+    let port = view.listener.port;
+    let written = std::fs::read_to_string(f.environment()).unwrap();
+    assert_eq!(
+        written,
+        format!(
+            "AGY_LLM_GATEWAY_URL=http://127.0.0.1:{port}\nAGY_LLM_GATEWAY_API_KEY={}\nAGY_LLM_GATEWAY_WIRE_PROTOCOL=genai\n",
+            f.token()
+        )
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = f.environment().metadata().unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let shell = view.agy_shell.unwrap();
+    assert_eq!(shell.command.is_some(), cfg!(unix));
+    // Neither the local token nor the address reaches a view or a dotfile.
+    assert!(!serde_json::to_string(&f.agy.view())
+        .unwrap()
+        .contains(&f.token()));
+    // Quitting keeps the wish to run; the file goes, since nothing listens.
+    f.agy.stop_for_exit().await.unwrap();
+    assert!(!f.environment().exists());
+    assert!(f.agy.0.inner.lock().store.resume.as_ref().unwrap().desired);
+    f.agy.resume(&f.home).await.unwrap();
+    assert!(f.agy.view().running && f.environment().exists());
+    // Turned off by the user: it stays off at the next start.
+    f.agy.stop().await.unwrap();
+    assert!(!f.environment().exists());
+    assert!(!f.agy.0.inner.lock().store.resume.as_ref().unwrap().desired);
+    f.agy.resume(&f.home).await.unwrap();
+    assert!(!f.agy.view().running);
+    assert!(f.agy.view().agy_shell.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_function_stays_across_a_quit_and_leaves_with_the_gateway() {
+    let f = fixture().await;
+    f.save("https://example.invalid/api");
+    // bash's file is where it is whatever this process's own shell is.
+    let rc = f.home.join(if cfg!(target_os = "macos") {
+        ".bash_profile"
+    } else {
+        ".bashrc"
+    });
+    std::fs::write(&rc, "export KEPT=1\n").unwrap();
+    let shown = format!("~/{}", rc.file_name().unwrap().to_str().unwrap());
+    let view = f.start().await;
+    assert_eq!(view.error, None);
+    assert!(view.agy_shell.unwrap().profiles.contains(&shown));
+    let block = std::fs::read_to_string(&rc).unwrap();
+    assert!(block.starts_with("export KEPT=1\n\n# >>> vela agy >>>\n"));
+    assert!(block.contains(&f.environment().display().to_string()));
+    // The function is fixed text: the token is only ever in the private file.
+    assert!(!block.contains(&f.token()));
+    f.agy.stop_for_exit().await.unwrap();
+    assert_eq!(std::fs::read_to_string(&rc).unwrap(), block);
+    f.agy.resume(&f.home).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&rc).unwrap(), block);
+    f.agy.stop().await.unwrap();
+    assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export KEPT=1\n");
+    // A file left by a run that ended without stopping names a dead gateway.
+    let reopened = Gateway::new(f.temp.path().join("reopened")).unwrap();
+    std::fs::create_dir_all(f.temp.path().join("reopened/antigravity")).unwrap();
+    std::fs::write(
+        f.temp.path().join("reopened/antigravity/agy.env"),
+        "AGY_LLM_GATEWAY_URL=stale\n",
+    )
+    .unwrap();
+    reopened
+        .agy_companion(f.temp.path().join("reopened/antigravity"))
+        .unwrap();
+    assert!(!f.temp.path().join("reopened/antigravity/agy.env").exists());
+}
+
+#[tokio::test]
+async fn a_stream_is_sent_on_natively_and_counted_under_antigravity() {
+    let f = fixture().await;
+    let (usage, _events) = attach_observers(&f.temp, &f.agy);
+    let (port, seen) = upstream("text/event-stream", STREAM.into()).await;
+    f.save(&format!("http://127.0.0.1:{port}/prefix"));
+    f.start().await;
+    let path = "/v1beta/models/gemini-fixture:streamGenerateContent?alt=sse&key=fixture-local";
+    // Sent as it came when nothing in it is refused upstream.
+    let plain = r#" {"contents":[{"role":"user","parts":[{"text":"fixture"}]}],"unknown":9007199254740993} "#;
+    let response = f
+        .request(reqwest::Method::POST, path)
+        .header("content-type", "application/json")
+        .body(plain)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.text().await.unwrap(),
+        STREAM.replace("fixture-response", "fixture-response-1")
+    );
+    // Antigravity's billing labels are for Vertex AI alone.
+    let labelled = json!({"contents":[{"role":"user","parts":[{"text":"fixture"}]}],"labels":{"client":"fixture"},"generationConfig":{"temperature":0}});
+    let response = f
+        .request(reqwest::Method::POST, path)
+        .json(&labelled)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.text().await.unwrap(),
+        STREAM.replace("fixture-response", "fixture-response-2")
+    );
+    {
+        let seen = seen.lock();
+        assert_eq!(seen.len(), 2);
+        for (uri, headers, _) in seen.iter() {
+            assert_eq!(
+                uri,
+                "/prefix/v1beta/models/gemini-fixture:streamGenerateContent?alt=sse"
+            );
+            assert_eq!(headers["x-goog-api-key"], "fixture-upstream");
+            assert!(!headers.contains_key("authorization"));
+            assert!(!headers.contains_key("x-api-key"));
+        }
+        assert_eq!(seen[0].2.as_ref(), plain.as_bytes());
+        let sent: serde_json::Value = serde_json::from_slice(&seen[1].2).unwrap();
+        assert_eq!(
+            sent,
+            json!({"contents":labelled["contents"],"generationConfig":{"temperature":0}})
+        );
+        assert_eq!(
+            seen[1].1["content-length"].to_str().unwrap(),
+            seen[1].2.len().to_string()
+        );
+    }
+    until(|| usage_records(&usage).iter().filter(|r| r.completed).count() == 2).await;
+    // What a CLI session row is matched to, so one call is counted once.
+    let mut ids: Vec<_> = usage_records(&usage)
+        .iter()
+        .map(|r| r.final_attempt().unwrap().response_id.clone())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        ["fixture-response-1", "fixture-response-2"]
+            .map(|id| Some(crate::usage::model::safe_id(id)))
+    );
+    for record in usage_records(&usage) {
+        assert_eq!(
+            (record.client.as_str(), record.source.as_str()),
+            ("antigravity", "proxy")
+        );
+        let attempt = record.final_attempt().unwrap();
+        assert_eq!(attempt.requested_model.as_deref(), Some("gemini-fixture"));
+        assert!(attempt.stream);
+        let tokens = &attempt.tokens;
+        assert_eq!(
+            (
+                tokens.input,
+                tokens.cache_read,
+                tokens.output,
+                tokens.reasoning
+            ),
+            (Some(80), Some(20), Some(12), Some(7))
+        );
+    }
+    // Another client's key opens no Gemini path, and this one no other protocol.
+    let wrong = reqwest::Client::builder().no_proxy().build().unwrap();
+    let address = f.agy.view().address;
+    assert_eq!(
+        wrong
+            .post(format!("{address}{path}"))
+            .bearer_auth("fixture-wrong")
+            .body(plain)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        f.request(reqwest::Method::POST, "/v1/responses")
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert_eq!(seen.lock().len(), 2);
+}
+
+#[tokio::test]
+async fn a_vertex_address_keeps_its_own_path_and_the_labels() {
+    let f = fixture().await;
+    let (port, seen) = upstream("text/event-stream", STREAM.into()).await;
+    f.save(&format!(
+        "http://127.0.0.1:{port}/v1/projects/fixture/locations/global/publishers/google"
+    ));
+    f.start().await;
+    let labelled = r#"{"contents":[],"labels":{"client":"fixture"}}"#;
+    let response = f
+        .request(
+            reqwest::Method::POST,
+            "/v1beta/models/gemini-fixture:streamGenerateContent?alt=sse",
+        )
+        .header("content-type", "application/json")
+        .body(labelled)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let seen = seen.lock();
+    assert_eq!(
+        seen[0].0,
+        "/v1/projects/fixture/locations/global/publishers/google/models/gemini-fixture:streamGenerateContent?alt=sse"
+    );
+    assert_eq!(seen[0].1["x-goog-api-key"], "fixture-upstream");
+    assert_eq!(seen[0].2.as_ref(), labelled.as_bytes());
+}
+
+#[tokio::test]
+async fn the_model_list_is_answered_here_with_the_default_first() {
+    let f = fixture().await;
+    let (port, seen) = upstream(
+        "application/json",
+        json!({"models":[{"name":"models/gemini-upstream"}]}).to_string(),
+    )
+    .await;
+    let id = f.save(&format!("http://127.0.0.1:{port}"));
+    f.start().await;
+    let list = || async {
+        f.request(reqwest::Method::GET, "/v1beta/models?pageSize=1000")
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+    let names = |value: &serde_json::Value| -> Vec<String> {
+        value["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // Nothing known yet: the provider's own list goes through.
+    assert_eq!(names(&list().await), ["models/gemini-upstream"]);
+    assert_eq!(seen.lock()[0].0, "/v1beta/models?pageSize=1000");
+    f.edit(Edit::ModelsProvider {
+        id,
+        allowed_models: Some(vec!["gemini-a".into(), "gemini-b".into()]),
+    });
+    f.agy
+        .edit_model_list(
+            model_list::Operation::Add,
+            "gemini-c",
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    // A name that cannot stand in a request's address is not offered.
+    f.agy
+        .edit_model_list(
+            model_list::Operation::Add,
+            "maker/gemini-d",
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    let listed = list().await;
+    assert_eq!(
+        names(&listed),
+        ["models/gemini-a", "models/gemini-b", "models/gemini-c"]
+    );
+    assert_eq!(
+        listed["models"][0]["supportedGenerationMethods"],
+        json!(["generateContent", "countTokens"])
+    );
+    let view = f
+        .agy
+        .edit_model_list(
+            model_list::Operation::First,
+            "gemini-c",
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        view.models
+            .iter()
+            .map(|m| (m.id.as_str(), m.first))
+            .collect::<Vec<_>>(),
+        [
+            ("gemini-c", true),
+            ("gemini-a", false),
+            ("gemini-b", false),
+            ("maker/gemini-d", false)
+        ]
+    );
+    assert_eq!(
+        names(&list().await),
+        ["models/gemini-c", "models/gemini-a", "models/gemini-b"]
+    );
+    // Chosen again, it goes back to its own place.
+    f.agy
+        .edit_model_list(
+            model_list::Operation::First,
+            "gemini-c",
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(names(&list().await)[0], "models/gemini-a");
+    assert_eq!(seen.lock().len(), 1);
+    // Only Antigravity starts on the head of its list.
+    assert!(f
+        .root
+        .edit_model_list(
+            model_list::Operation::First,
+            "gemini-c",
+            None,
+            Default::default()
+        )
+        .is_err());
+}
+
+#[tokio::test]
+async fn metric_calls_are_answered_and_never_sent_on() {
+    let f = fixture().await;
+    let (port, seen) = upstream("application/json", "{}".into()).await;
+    f.save(&format!("http://127.0.0.1:{port}"));
+    f.start().await;
+    let response = f
+        .request(reqwest::Method::POST, "/v1beta:recordClientEvents")
+        .json(&json!({"events":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.text().await.unwrap(), "{}");
+    let unknown = reqwest::Client::builder().no_proxy().build().unwrap();
+    assert_eq!(
+        unknown
+            .post(format!(
+                "{}/v1beta:recordClientEvents",
+                f.agy.view().address
+            ))
+            .bearer_auth("fixture-wrong")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert!(seen.lock().is_empty());
+}
+
+#[tokio::test]
+async fn the_catalog_follows_page_tokens_and_keeps_chat_models_only() {
+    let f = fixture().await;
+    let seen = Seen::default();
+    let port = server({
+        let seen = seen.clone();
+        move |request| {
+            let seen = seen.clone();
+            async move {
+                let uri = request.uri().to_string();
+                seen.lock()
+                    .push((uri.clone(), request.headers().clone(), Default::default()));
+                let body = if uri.contains("pageToken=") {
+                    json!({"models":[
+                        {"name":"models/gemini-b","supportedGenerationMethods":["generateContent"]},
+                        {"name":"models/embedding-fixture","supportedGenerationMethods":["embedContent"]}
+                    ]})
+                } else {
+                    json!({"models":[{"name":"models/gemini-a"}],"nextPageToken":"next/fixture+="})
+                };
+                hyper::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(replay::full(body.to_string()))
+                    .unwrap()
+            }
+        }
+    })
+    .await;
+    let id = f.save(&format!("http://127.0.0.1:{port}/v1beta"));
+    let models = f.agy.list_models(&id, true).await.unwrap();
+    assert_eq!(models.error, None);
+    assert_eq!(models.models, ["gemini-a", "gemini-b"]);
+    {
+        let seen = seen.lock();
+        assert_eq!(
+            seen.iter()
+                .map(|(uri, ..)| uri.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "/v1beta/models?pageSize=1000",
+                "/v1beta/models?pageSize=1000&pageToken=next%2Ffixture%2B%3D"
+            ]
+        );
+        assert_eq!(seen[0].1["x-goog-api-key"], "fixture-upstream");
+        assert!(!seen[0].1.contains_key("authorization"));
+    }
+    // Vertex AI has no list to ask for with a key.
+    let vertex = f.save("https://example.invalid/v1/publishers/google");
+    let models = f.agy.list_models(&vertex, true).await.unwrap();
+    assert!(models.models.is_empty());
+    assert_eq!(
+        models.error.as_deref(),
+        Some("Vertex AI 没有模型列表接口，请在白名单填写模型 ID")
+    );
+}
+
+#[tokio::test]
+async fn providers_come_as_gemini_addresses_and_from_nowhere_else() {
+    let f = fixture().await;
+    let link = |protocol| Edit::ImportLink {
+        base_url: "https://example.invalid/api".into(),
+        token: "fixture-key".into(),
+        display_name: "Fixture".into(),
+        protocol,
+    };
+    let revision = f.agy.view().revision;
+    assert!(f
+        .agy
+        .edit(
+            link(provider_protocol::Protocol::Responses),
+            &revision,
+            &f.home
+        )
+        .is_err());
+    assert!(f.agy.edit(Edit::Import, &revision, &f.home).is_err());
+    let view = f.edit(link(provider_protocol::Protocol::GeminiNative));
+    assert_eq!(view.providers.len(), 1);
+    assert_eq!(
+        view.providers[0].protocol,
+        Some(provider_protocol::Protocol::GeminiNative)
+    );
+    // Antigravity has no file of its own for the gateway page to edit.
+    assert!(f.agy.read_config(&f.home).is_err());
+    assert!(std::fs::read_dir(&f.home).unwrap().next().is_none());
+}

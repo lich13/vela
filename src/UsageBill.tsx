@@ -82,9 +82,9 @@ export default function UsageBill({
             disabled={busy}
             onChange={(e) => setClients(e.target.value)}
           >
-            <option value="both">Claude Code 与 Antigravity app</option>
+            <option value="both">Claude Code 与 Antigravity</option>
             <option value="claude">Claude Code</option>
-            <option value="antigravity">Antigravity app</option>
+            <option value="antigravity">Antigravity</option>
           </select>
         </label>
         <div className="usage-bill-times">

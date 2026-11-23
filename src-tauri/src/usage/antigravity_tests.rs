@@ -13,9 +13,15 @@ fn entry(id: &str, index: usize) -> Value {
     json!({"executionId":"exec","stepIndices":[index],"chatModel":{"model":"MODEL_PLACEHOLDER_FIXTURE","responseModel":"fixture-response","modelDisplayName":"Fixture Model (High)","customMetadata":{"request_id":id},"usage":usage,"retryInfos":[{"usage":usage}],"timeToFirstToken":"0.25s","streamingDuration":"1.75s"}})
 }
 fn parsed(v: &Value) -> Record {
-    record("fixture", v, &Steps::from([step()].as_slice()), 0)
-        .unwrap()
-        .unwrap()
+    record(
+        "fixture",
+        v,
+        &Steps::from([step()].as_slice()),
+        0,
+        &Learned::default(),
+    )
+    .unwrap()
+    .unwrap()
 }
 
 #[test]
@@ -87,7 +93,9 @@ fn zero_step_clock_uses_request_timings_and_unknown_suffixes_are_preserved() {
     let steps = Steps::from([s].as_slice());
     let mut v = entry("one", 0);
     v["chatModel"]["responseModel"] = json!("gemini-4-argon-f");
-    let r = record("fixture", &v, &steps, 0).unwrap().unwrap();
+    let r = record("fixture", &v, &steps, 0, &Learned::default())
+        .unwrap()
+        .unwrap();
     assert_eq!(r.attempts[0].measured_duration_ms(), Some(2000));
     assert_eq!(r.finished_at, Some(r.started_at + 2000));
     assert_eq!(
@@ -109,7 +117,9 @@ fn zero_step_clock_uses_request_timings_and_unknown_suffixes_are_preserved() {
     for key in ["timeToFirstToken", "streamingDuration"] {
         v["chatModel"].as_object_mut().unwrap().remove(key);
     }
-    let r = record("fixture", &v, &steps, 0).unwrap().unwrap();
+    let r = record("fixture", &v, &steps, 0, &Learned::default())
+        .unwrap()
+        .unwrap();
     assert_eq!(r.attempts[0].measured_duration_ms(), None);
     assert!(r.completed);
 }
@@ -202,7 +212,9 @@ fn final_mirror_preserves_retry_fields_and_running_requests_have_an_identity() {
     v["chatModel"] =
         json!({"customMetadata":{"request_id":"one"},"responseModel":"fixture-response"});
     let steps = Steps::from([json!({"metadata":{"startedAt":"2026-01-01T00:00:00Z"}})].as_slice());
-    let pending = record("fixture", &v, &steps, 0).unwrap().unwrap();
+    let pending = record("fixture", &v, &steps, 0, &Learned::default())
+        .unwrap()
+        .unwrap();
     assert_eq!(pending.id, r.id);
     assert_eq!(pending.final_attempt().unwrap().outcome, "in_progress");
     assert_eq!(pending.final_attempt().unwrap().tokens.output, None);
@@ -254,9 +266,15 @@ fn tool_completion_and_partial_timing_do_not_invent_success_or_duration() {
         .as_object_mut()
         .unwrap()
         .remove("finishedGeneratingAt");
-    let r = record("fixture", &v, &Steps::from([tool].as_slice()), 0)
-        .unwrap()
-        .unwrap();
+    let r = record(
+        "fixture",
+        &v,
+        &Steps::from([tool].as_slice()),
+        0,
+        &Learned::default(),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(r.finished_at, None);
     assert_eq!(r.known_success(), None);
     assert_eq!(r.attempts[0].outcome, "in_progress");
@@ -329,6 +347,8 @@ struct Fixture {
     calls: Arc<Mutex<Vec<(String, Value)>>>,
     changed: Arc<Mutex<String>>,
     entries: Arc<Mutex<Vec<Value>>>,
+    /// The reply to `GetAvailableModels`; `{}` carries no list.
+    models: Arc<Mutex<Value>>,
     server: tokio::task::JoinHandle<()>,
 }
 impl Drop for Fixture {
@@ -340,19 +360,23 @@ async fn fixture(broken: bool) -> Fixture {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let changed = Arc::new(Mutex::new("first".to_string()));
     let entries = Arc::new(Mutex::new(vec![entry("first", 0), entry("second", 1)]));
+    let models = Arc::new(Mutex::new(json!({})));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (history, version, metadata) = (calls.clone(), changed.clone(), entries.clone());
+    let listed = models.clone();
     let server = tokio::spawn(async move {
         loop {
             let Ok((socket, _)) = listener.accept().await else {
                 break;
             };
             let (history, version, metadata) = (history.clone(), version.clone(), metadata.clone());
+            let listed = listed.clone();
             tokio::spawn(async move {
                 let service = service_fn(move |r: hyper::Request<hyper::body::Incoming>| {
                     let (history, version, metadata) =
                         (history.clone(), version.clone(), metadata.clone());
+                    let listed = listed.clone();
                     async move {
                         let method = r.uri().path().rsplit('/').next().unwrap().to_owned();
                         let body: Value = serde_json::from_slice(
@@ -360,10 +384,18 @@ async fn fixture(broken: bool) -> Fixture {
                         )
                         .unwrap();
                         history.lock().push((method.clone(), body.clone()));
+                        // `a-foreign` belongs to another instance and
+                        // `a-empty` is known here without any usage.
+                        let foreign = body["cascadeId"] == "a-foreign";
                         let value = if body["cascadeId"] == "a-broken" {
                             json!({"unexpected":"fixture"})
+                        } else if foreign {
+                            json!({"code":"not_found"})
+                        } else if body["cascadeId"] == "a-empty" {
+                            json!({})
                         } else {
                             match method.as_str() {
+                                "GetAvailableModels" => listed.lock().clone(),
                                 "GetUserStatus" => {
                                     json!({"userStatus":{"email":"fixture@example.invalid"}})
                                 }
@@ -414,9 +446,13 @@ async fn fixture(broken: bool) -> Fixture {
                                 _ => panic!("unexpected read method"),
                             }
                         };
-                        Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from(
+                        let mut response = Response::new(Full::new(Bytes::from(
                             serde_json::to_vec(&value).unwrap(),
-                        ))))
+                        )));
+                        if foreign {
+                            *response.status_mut() = hyper::StatusCode::NOT_FOUND;
+                        }
+                        Ok::<_, std::convert::Infallible>(response)
                     }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
@@ -434,6 +470,7 @@ async fn fixture(broken: bool) -> Fixture {
         calls,
         changed,
         entries,
+        models,
         server,
     }
 }
@@ -933,7 +970,9 @@ fn known_placeholders_and_enums_resolve_pricing_and_effort_while_unknown_stays_u
                 "streamingDuration": "1.0s"
             }
         });
-        let mut rec = record("cascade-one", &item, &steps, 0).unwrap().unwrap();
+        let mut rec = record("cascade-one", &item, &steps, 0, &Learned::default())
+            .unwrap()
+            .unwrap();
         price(&mut rec, &pricing, &settings);
         let a = &rec.attempts[0];
         assert_eq!(a.requested_model.as_deref(), expected_model, "{raw}");
@@ -1716,29 +1755,27 @@ fn extract_settings_model_accepts_unknown_new_models_and_rejects_malformed_block
 fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfill() {
     let dir = tempfile::tempdir().unwrap();
     let ag_home = dir.path().join(".gemini");
-    let gcloud_dir = dir.path().join(".config/gcloud");
     let path_pre =
         ag_home.join("antigravity/brain/conv-pre/.system_generated/logs/transcript.jsonl");
     let path1 =
         ag_home.join("antigravity/brain/conv-oauth/.system_generated/logs/transcript.jsonl");
-    let path2 = ag_home.join("antigravity/brain/conv-adc/.system_generated/logs/transcript.jsonl");
+    let path2 =
+        ag_home.join("antigravity/brain/conv-second/.system_generated/logs/transcript.jsonl");
     std::fs::create_dir_all(path_pre.parent().unwrap()).unwrap();
     std::fs::create_dir_all(path1.parent().unwrap()).unwrap();
     std::fs::create_dir_all(path2.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(&gcloud_dir).unwrap();
-    std::fs::create_dir_all(ag_home.join("config")).unwrap();
 
     // Pre-tracking historical request (2026-10-19), pre-switch request (00:30), post-switch request (01:30)
     let row_pre = "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-10-19T00:00:01Z\",\"model\":\"claude-opus-4-6-thinking\",\"input_tokens\":50,\"output_tokens\":10}\n";
     let row_oauth = "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-10-20T00:30:00Z\",\"model\":\"claude-opus-4-6-thinking\",\"input_tokens\":100,\"output_tokens\":25}\n";
-    let row_adc = "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-10-20T01:30:00Z\",\"model\":\"claude-opus-4-6-thinking\",\"input_tokens\":200,\"output_tokens\":50}\n";
+    let row_second = "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-10-20T01:30:00Z\",\"model\":\"claude-opus-4-6-thinking\",\"input_tokens\":200,\"output_tokens\":50}\n";
     // Append a half-written trailing line without newline to verify it does not fail sync
-    let row_adc_with_partial = format!("{row_adc}{{\"step_index\":2,\"source\":\"MODEL\"");
+    let row_second_with_partial = format!("{row_second}{{\"step_index\":2,\"source\":\"MODEL\"");
     std::fs::write(&path_pre, row_pre).unwrap();
     std::fs::write(&path1, row_oauth).unwrap();
-    std::fs::write(&path2, row_adc_with_partial).unwrap();
+    std::fs::write(&path2, row_second_with_partial).unwrap();
 
-    // OAuth activated at 2026-10-20T00:00:00Z (1792454400000), switched to ADC at 2026-10-20T01:00:00Z (1792458000000)
+    // The first account was activated at 2026-10-20T00:00:00Z (1792454400000), the second at 2026-10-20T01:00:00Z (1792458000000)
     let vault_json = serde_json::json!({
         "schema": 1,
         "entries": [
@@ -1748,24 +1785,22 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
                 "kind": "oauth",
                 "sourceType": "oauth",
                 "email": "oauth@example.invalid",
-                "projectId": null,
                 "payload": "{\"access_token\":\"tok-1\"}",
                 "updatedAt": 1792454400
             },
             {
-                "id": "ag-adc-1",
-                "name": "ADC 凭据 · p1",
-                "kind": "adc",
-                "sourceType": "authorized_user",
-                "email": null,
-                "projectId": "p1",
-                "payload": "{\"type\":\"authorized_user\",\"client_id\":\"c\",\"client_secret\":\"s\",\"refresh_token\":\"r\"}",
+                "id": "ag-oauth-2",
+                "name": "second@example.invalid",
+                "kind": "oauth",
+                "sourceType": "oauth",
+                "email": "second@example.invalid",
+                "payload": "{\"access_token\":\"tok-2\"}",
                 "updatedAt": 1792458000
             }
         ],
         "activations": [
             { "accountId": "ag-oauth-1", "sinceMs": 1_792_454_400_000i64 },
-            { "accountId": "ag-adc-1", "sinceMs": 1_792_458_000_000i64 }
+            { "accountId": "ag-oauth-2", "sinceMs": 1_792_458_000_000i64 }
         ]
     });
     std::fs::write(
@@ -1773,18 +1808,14 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
         serde_json::to_vec(&vault_json).unwrap(),
     )
     .unwrap();
+    // The app is signed in to the second account.
     std::fs::write(
-        ag_home.join("config/config.json"),
-        "{\"userSettings\":{\"enableAdc\":true}}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        gcloud_dir.join("application_default_credentials.json"),
-        "{\"type\":\"authorized_user\",\"client_id\":\"c\",\"client_secret\":\"s\",\"refresh_token\":\"r\"}",
+        ag_home.join("jetski-standalone-oauth-token"),
+        "{\"access_token\":\"tok-2\"}",
     )
     .unwrap();
 
-    // Sync happens AFTER switching to ag-adc-1, yet conv-oauth (00:30) is attributed to ag-oauth-1
+    // Sync happens AFTER switching to ag-oauth-2, yet conv-oauth (00:30) is attributed to ag-oauth-1
     // and conv-pre (2026-10-19) stays unattributed (None).
     // Open Store inside the `usage` subdirectory while `antigravity-accounts.json` is in `dir.path()`
     // to verify the production directory layout (`~/.vela` vs `~/.vela/usage`).
@@ -1809,13 +1840,16 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
     assert_eq!(dash.totals.requests, 3);
     let mut provider_ids: Vec<String> = dash.providers.iter().map(|g| g.id.clone()).collect();
     provider_ids.sort();
-    assert_eq!(provider_ids, vec!["ag-adc-1", "ag-oauth-1", "session"]);
+    assert_eq!(provider_ids, vec!["ag-oauth-1", "ag-oauth-2", "session"]);
 
     let stats_all = store.antigravity_stats(&all_ag, 1_800_000_000_000).unwrap();
     let mut stat_provider_ids: Vec<String> =
         stats_all.providers.iter().map(|p| p.id.clone()).collect();
     stat_provider_ids.sort();
-    assert_eq!(stat_provider_ids, vec!["ag-adc-1", "ag-oauth-1", "session"]);
+    assert_eq!(
+        stat_provider_ids,
+        vec!["ag-oauth-1", "ag-oauth-2", "session"]
+    );
 
     let oauth_only = Filter {
         client: Some("antigravity".into()),
@@ -1833,7 +1867,7 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
     filtered_provider_ids.sort();
     assert_eq!(
         filtered_provider_ids,
-        vec!["ag-adc-1", "ag-oauth-1", "session"]
+        vec!["ag-oauth-1", "ag-oauth-2", "session"]
     );
     let oauth_group = stats_oauth
         .providers
@@ -1852,7 +1886,6 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
                 "kind": "oauth",
                 "sourceType": "oauth",
                 "email": "oauth@example.invalid",
-                "projectId": null,
                 "payload": "{\"access_token\":\"tok-1\"}",
                 "updatedAt": 1792454400
             }
@@ -1874,17 +1907,17 @@ fn antigravity_provider_attributes_by_request_time_and_clears_historical_backfil
     );
     assert_eq!(single_tl.provider_at(1_792_456_200_000), Some("ag-oauth-1"));
 
-    let adc_only = Filter {
+    let second_only = Filter {
         client: Some("antigravity".into()),
-        provider: Some("ag-adc-1".into()),
+        provider: Some("ag-oauth-2".into()),
         ..Filter::default()
     };
-    assert_eq!(store.dashboard(&adc_only).unwrap().totals.requests, 1);
-    let stats_adc = store
-        .antigravity_stats(&adc_only, 1_800_000_000_000)
+    assert_eq!(store.dashboard(&second_only).unwrap().totals.requests, 1);
+    let stats_second = store
+        .antigravity_stats(&second_only, 1_800_000_000_000)
         .unwrap();
-    assert_eq!(stats_adc.requests, 1);
-    assert_eq!(stats_adc.token_mix.total, 250);
+    assert_eq!(stats_second.requests, 1);
+    assert_eq!(stats_second.token_mix.total, 250);
 
     let session_only = Filter {
         client: Some("antigravity".into()),
@@ -1917,23 +1950,27 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
     let dir = tempfile::tempdir().unwrap();
     let paths = auth::Paths::from_roots(&dir.path().join("home"), &dir.path().join("auth"));
     std::fs::create_dir_all(paths.oauth_file().parent().unwrap()).unwrap();
+    // Both logins are recognised; the app ends up signed in to the fixture account.
+    std::fs::write(
+        paths.oauth_file(),
+        br#"{"email":"other@example.invalid","access_token":"fixture-other"}"#,
+    )
+    .unwrap();
+    let other = auth::state_at(&paths).unwrap().accounts[0].id.clone();
     std::fs::write(
         paths.oauth_file(),
         br#"{"email":"fixture@example.invalid","access_token":"fixture-oauth"}"#,
     )
     .unwrap();
-    let initial = auth::state_at(&paths).unwrap();
-    let oauth = initial.accounts[0].id.clone();
-    let added = auth::add_adc_at(&paths, &Lifecycle, auth::AddAntigravityAdcInput {
-        name: Some("Fixture ADC".into()), json_text: r#"{"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}"#.into(), quota_project_id: None, activate: false,
-    }).unwrap();
-    let adc = added
+    let added = auth::state_at(&paths).unwrap();
+    let oauth = added
         .accounts
         .iter()
-        .find(|a| a.id != oauth)
+        .find(|a| a.current)
         .unwrap()
         .id
         .clone();
+    assert_ne!(oauth, other);
     let service = crate::usage::Service::new(&paths.data_dir);
     let pricing = Pricing::new(dir.path()).unwrap();
     let settings = Settings::default();
@@ -1974,7 +2011,6 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
             .unwrap();
         fixture.calls.lock().clear();
         let state = auth::with_usage_sync(
-            true,
             || {
                 service
                     .sync_roots(
@@ -1997,7 +2033,7 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
             },
             || {
                 let switched =
-                    auth::tests::switch_fixture_account(&paths, &Lifecycle, &adc, &added.revision)?;
+                    auth::switch_account_at(&paths, &Lifecycle, &other, &added.revision)?;
                 *fixture.changed.lock() = "after-switch".into();
                 Ok(switched)
             },
@@ -2019,7 +2055,7 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
             })
             .unwrap();
         TEST_ENDPOINT.with(|endpoint| *endpoint.borrow_mut() = None);
-        assert_eq!(state.mode, auth::AuthMode::Adc);
+        assert_eq!(auth::active_account_id(&state), Some(other));
         assert_eq!(
             service
                 .read(|store| Ok(store.dashboard(&Filter::default())?.totals.requests))
@@ -2146,9 +2182,10 @@ fn retry_attempt_without_model_inherits_final_attempt_model_and_repairs_existing
     ]);
     let r = parsed(&v);
     assert_eq!(r.attempts.len(), 2);
+    // An enum no list places keeps the backend name, less its effort suffix.
     assert_eq!(
         r.attempts[0].response_model.as_deref(),
-        Some("gemini-3.1-pro-high")
+        Some("gemini-3.1-pro")
     );
     assert_eq!(r.attempts[0].model_display_name, None);
 
@@ -2161,7 +2198,7 @@ fn retry_attempt_without_model_inherits_final_attempt_model_and_repairs_existing
     assert!(!normalize_record(&mut legacy));
     assert_eq!(
         legacy.attempts[0].response_model.as_deref(),
-        Some("gemini-3.1-pro-high")
+        Some("gemini-3.1-pro")
     );
     assert_eq!(legacy.attempts[0].model_display_name, None);
 }
@@ -2538,4 +2575,654 @@ fn history_read_and_line_failures_keep_the_first_reason() {
     .unwrap();
     assert_eq!(report.errors, 1);
     assert!(report.last_error.is_some());
+}
+
+/// A language server that answers only the token it was started with.
+async fn hub(token: &'static str) -> (u16, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let paths = seen.clone();
+    let server = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let paths = paths.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |r: hyper::Request<hyper::body::Incoming>| {
+                    paths.lock().push(r.uri().path().to_owned());
+                    let allowed = r
+                        .headers()
+                        .get("x-codeium-csrf-token")
+                        .is_some_and(|sent| sent == token);
+                    async move {
+                        let mut response = Response::new(Full::new(Bytes::from_static(b"{}")));
+                        if !allowed {
+                            *response.status_mut() = hyper::StatusCode::UNAUTHORIZED;
+                        }
+                        Ok::<_, std::convert::Infallible>(response)
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(socket), service)
+                    .await;
+            });
+        }
+    });
+    (port, seen, server)
+}
+
+/// The port of an earlier launch: every connection is closed unanswered.
+async fn closed_port() -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            drop(socket);
+        }
+    });
+    (port, server)
+}
+
+#[tokio::test]
+async fn daemon_files_connect_only_a_live_instance_before_the_window_port_is_tried() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = dir.path().join("antigravity/daemon");
+    std::fs::create_dir_all(&daemon).unwrap();
+    let (live, live_seen, live_server) = hub("fixture-live").await;
+    let (stale, stale_server) = closed_port().await;
+    let (window, window_seen, window_server) = hub("fixture-window").await;
+    let publish = |name: &str, https: u16, http: u16, token: &str| {
+        let file = json!({"pid":1,"httpsPort":https,"httpPort":http,"lsVersion":"fixture","csrfToken":token});
+        std::fs::write(daemon.join(name), file.to_string()).unwrap();
+    };
+    // A file an earlier launch left behind, and a live port whose token was replaced (401).
+    publish("hub_1.json", stale, stale, "fixture-live");
+    publish("hub_2.json", live, live, "fixture-replaced");
+    let port_file = dir.path().join("DevToolsActivePort");
+
+    // Nothing answers and no window port is published: the app is not running.
+    assert!(Api::connect_at(dir.path(), Some(&port_file))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!live_seen.lock().is_empty());
+    assert!(live_seen
+        .lock()
+        .iter()
+        .all(|path| path.ends_with("/GetStatus")));
+
+    // Only then is the window port of earlier releases asked.
+    std::fs::write(&port_file, format!("{window}\n/devtools/browser/fixture\n")).unwrap();
+    assert!(Api::connect_at(dir.path(), Some(&port_file)).await.is_err());
+    assert_eq!(*window_seen.lock(), ["/json/list"]);
+
+    // https comes first and gives way to http; a second file of the same
+    // instance, a foreign file name and an oversized file add nothing.
+    publish("hub_3.json", stale, live, "fixture-live");
+    publish("ls_3.json", stale, live, "fixture-live");
+    publish("other_3.json", live, live, "fixture-live");
+    std::fs::write(daemon.join("hub_4.json"), " ".repeat(8193)).unwrap();
+    window_seen.lock().clear();
+    let api = Api::connect_at(dir.path(), Some(&port_file))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(api.endpoints.len(), 1);
+    assert_eq!(api.endpoints[0].origin, format!("http://127.0.0.1:{live}"));
+    assert_eq!(api.endpoints[0].token, "fixture-live");
+    assert!(window_seen.lock().is_empty());
+    for server in [live_server, stale_server, window_server] {
+        server.abort();
+    }
+}
+
+#[test]
+fn models_resolve_by_listed_pair_then_seed_then_enum_then_backend_name() {
+    let steps = Steps::from([step()].as_slice());
+    let mut list = Learned::default();
+    assert!(!list.merge(&json!({}), 1));
+    assert!(list.merge(
+        &json!({"response":{"models":{
+            "fixture-neon-tiered-high":{"model":"MODEL_PLACEHOLDER_M900","displayName":"Fixture Neon (High)"},
+            // The app reused an enum the seed still knows as Gemini 3 Pro.
+            "fixture-flash-lite":{"model":"MODEL_PLACEHOLDER_M19","displayName":"Fixture Flash Lite"},
+            "fixture-carbon-low":{"model":"MODEL_PLACEHOLDER_M901","displayName":"Fixture Carbon (Low)"},
+            "fixture person@example.invalid":{"model":"MODEL_PLACEHOLDER_M903"}
+        }}}),
+        1
+    ));
+    assert_eq!(list.models.len(), 3);
+    let resolved = |model: &str, shown: &str, backend: &str| {
+        let mut v = entry("one", 0);
+        v["chatModel"]["model"] = json!(model);
+        v["chatModel"]["usage"]["model"] = json!(model);
+        v["chatModel"]["retryInfos"][0]["usage"]["model"] = json!(model);
+        v["chatModel"]["modelDisplayName"] = json!(shown);
+        v["chatModel"]["responseModel"] = json!(backend);
+        let r = record("fixture", &v, &steps, 0, &list).unwrap().unwrap();
+        let a = r.attempts[0].clone();
+        (
+            a.response_model,
+            a.requested_model,
+            a.model_display_name,
+            a.reasoning_effort,
+        )
+    };
+    let text = |s: &str| Some(s.to_owned());
+    // 1. The listed (enum, label) pair, less the effort its label shows and `-tiered`.
+    assert_eq!(
+        resolved(
+            "MODEL_PLACEHOLDER_M900",
+            "Fixture Neon (High)",
+            "fixture-backend-f"
+        ),
+        (
+            text("fixture-neon"),
+            text("fixture-neon"),
+            text("Fixture Neon"),
+            text("high")
+        )
+    );
+    assert_eq!(
+        resolved(
+            "MODEL_PLACEHOLDER_M19",
+            "Fixture Flash Lite",
+            "fixture-backend"
+        ),
+        (
+            text("fixture-flash-lite"),
+            text("fixture-flash-lite"),
+            text("Fixture Flash Lite"),
+            None
+        )
+    );
+    // 2. Without that pair the seed decides, yet label and effort stay the entry's own.
+    assert_eq!(
+        resolved(
+            "MODEL_PLACEHOLDER_M19",
+            "Gemini 3 Pro (Low)",
+            "fixture-backend"
+        ),
+        (
+            text("gemini-3-pro-preview"),
+            text("gemini-3-pro-preview"),
+            text("Gemini 3 Pro"),
+            text("low")
+        )
+    );
+    // 3. An enum only the list knows, under a label it does not show.
+    assert_eq!(
+        resolved(
+            "MODEL_PLACEHOLDER_M901",
+            "Fixture Carbon Renamed (High)",
+            "fixture-backend-high"
+        ),
+        (
+            text("fixture-carbon"),
+            text("fixture-carbon"),
+            text("Fixture Carbon Renamed"),
+            text("high")
+        )
+    );
+    // 4. An enum nothing places: the backend name without its effort suffix.
+    assert_eq!(
+        resolved(
+            "MODEL_PLACEHOLDER_M902",
+            "Fixture Argon (XHigh)",
+            "fixture-argon-xhigh"
+        ),
+        (
+            text("fixture-argon"),
+            None,
+            text("Fixture Argon"),
+            text("xhigh")
+        )
+    );
+    assert_eq!(
+        resolved(
+            "MODEL_PLACEHOLDER_M902",
+            "Fixture Argon",
+            "fixture-argon-max"
+        ),
+        (
+            text("fixture-argon"),
+            None,
+            text("Fixture Argon"),
+            text("max")
+        )
+    );
+
+    // A later list keeps what it no longer names, and a reused enum means
+    // its newest model unless the label says otherwise.
+    assert!(list.merge(
+        &json!({"response":{"models":{
+            "fixture-xenon":{"model":"MODEL_PLACEHOLDER_M901"},
+            "fixture-hydrogen-tiered-high":{"model":"MODEL_PLACEHOLDER_M904"}
+        }}}),
+        2
+    ));
+    assert_eq!((list.models.len(), list.fetched_at), (5, 2));
+    assert_eq!(
+        list.resolve("MODEL_PLACEHOLDER_M901", None).as_deref(),
+        Some("fixture-xenon")
+    );
+    assert_eq!(
+        list.resolve("MODEL_PLACEHOLDER_M901", Some("Fixture Carbon (Low)"))
+            .as_deref(),
+        Some("fixture-carbon")
+    );
+    // An entry listed without a label drops the effort the request shows.
+    for (shown, model) in [
+        ("Fixture Hydrogen (High)", "fixture-hydrogen"),
+        ("Fixture Hydrogen (Low)", "fixture-hydrogen-tiered-high"),
+    ] {
+        assert_eq!(
+            list.resolve("MODEL_PLACEHOLDER_M904", Some(shown))
+                .as_deref(),
+            Some(model)
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_model_list_is_learned_once_a_day_and_again_for_an_unplaced_model() {
+    let f = fixture(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let pricing = Pricing::new(dir.path()).unwrap();
+    let settings = Settings::default();
+    let asked = |f: &Fixture| {
+        f.calls
+            .lock()
+            .iter()
+            .filter(|(m, _)| m == "GetAvailableModels")
+            .count()
+    };
+    *f.models.lock() = json!({"response":{"models":{"fixture-neon-high":{"model":"MODEL_PLACEHOLDER_FIXTURE","displayName":"Fixture Model (High)"}}}});
+    let mut sync = Vec::new();
+    for (step, repair) in [(0, false), (1, false), (2, true), (3, false)] {
+        match step {
+            // Within a day, with every model placed, the app is not asked again.
+            1 => *f.changed.lock() = "next".into(),
+            // A label the list does not pair asks once in that run.
+            2 => {
+                for entry in f.entries.lock().iter_mut() {
+                    entry["chatModel"]["modelDisplayName"] = json!("Fixture Renamed (High)");
+                }
+            }
+            // A list older than a day is fetched again.
+            3 => {
+                let mut saved: Learned =
+                    serde_json::from_str(&store.antigravity_models().unwrap().unwrap()).unwrap();
+                assert!(saved.models.contains_key("fixture-neon-high"));
+                saved.fetched_at -= 86_400_000;
+                store
+                    .save_antigravity_models(&serde_json::to_string(&saved).unwrap())
+                    .unwrap();
+            }
+            _ => {}
+        }
+        collect_home(
+            &f.api,
+            &mut store,
+            dir.path(),
+            &pricing,
+            &settings,
+            &mut Report::default(),
+            repair,
+        )
+        .await
+        .unwrap();
+        sync.push(asked(&f));
+    }
+    assert_eq!(sync, [1, 1, 2, 3]);
+    // The list was there before the first session was read.
+    let first = store.detail(&parsed(&entry("first", 0)).id).unwrap();
+    assert_eq!(
+        (
+            first.attempts[0].requested_model.as_deref(),
+            first.attempts[0].response_model.as_deref()
+        ),
+        (Some("fixture-neon"), Some("fixture-neon"))
+    );
+}
+
+#[test]
+fn transcript_models_resolve_through_the_list_and_keep_the_selected_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("antigravity/brain/cascade/.system_generated/logs/transcript.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let rows = concat!(
+        "{\"step_index\":0,\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:00Z\",\"content\":\"<USER_SETTINGS_CHANGE>\\nThe user changed setting `Model Selection` from None to Fixture Argon (XHigh). No need to comment on this change.\\n</USER_SETTINGS_CHANGE>\"}\n",
+        "{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:01Z\",\"model\":\"fixture-argon-xhigh\",\"input_tokens\":10,\"output_tokens\":2}\n",
+        "{\"step_index\":2,\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:02Z\",\"model\":\"fixture-neon-tiered-high\",\"input_tokens\":10,\"output_tokens\":2}\n",
+        "{\"step_index\":3,\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:03Z\",\"model\":\"fixture-argon-f\",\"input_tokens\":10,\"output_tokens\":2}\n",
+    );
+    std::fs::write(&path, rows).unwrap();
+    let mut store = Store::open(&dir.path().join("db")).unwrap();
+    let pricing = Pricing::new(&dir.path().join("db")).unwrap();
+    let mut list = Learned::default();
+    list.merge(
+        &json!({"response":{"models":{"fixture-neon-tiered-high":{"model":"MODEL_PLACEHOLDER_M900","displayName":"Fixture Neon (High)"}}}}),
+        1,
+    );
+    store
+        .save_antigravity_models(&serde_json::to_string(&list).unwrap())
+        .unwrap();
+    let mut report = Report::default();
+    scan_home(
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .unwrap();
+    assert_eq!((report.errors, report.imported), (0, 3));
+    let row = |step: u64| {
+        let r = store
+            .detail(&safe_id(&format!(
+                "antigravity:request:cascade:step:{step}"
+            )))
+            .unwrap();
+        let a = r.attempts[0].clone();
+        (a.response_model, a.model_display_name, a.reasoning_effort)
+    };
+    let text = |s: &str| Some(s.to_owned());
+    // A backend name the list does not know only loses its effort suffix,
+    // and keeps the label the user selected.
+    assert_eq!(
+        row(1),
+        (text("fixture-argon"), text("Fixture Argon"), text("xhigh"))
+    );
+    // A listed id resolves through its own entry, label included.
+    assert_eq!(
+        row(2),
+        (text("fixture-neon"), text("Fixture Neon"), text("high"))
+    );
+    // Any other suffix is part of the name.
+    assert_eq!(
+        row(3),
+        (
+            text("fixture-argon-f"),
+            text("Fixture Argon"),
+            text("xhigh")
+        )
+    );
+
+    // A model id inherited from the app's own reading is not a label.
+    let other = dir
+        .path()
+        .join("antigravity/brain/other/.system_generated/logs/transcript.jsonl");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    let rpc = serde_json::to_string(&Cursor {
+        last_model: Some("fixture-carbon".into()),
+        ..Cursor::default()
+    })
+    .unwrap();
+    store
+        .write_batch(&[], Some((&safe_id("antigravity:rpc:other"), &rpc)))
+        .unwrap();
+    let mut written = String::new();
+    for step in 1..=2 {
+        written += &format!("{{\"step_index\":{step},\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"created_at\":\"2026-01-01T00:00:0{step}Z\",\"model\":\"fixture-argon-f\",\"input_tokens\":10,\"output_tokens\":2}}\n");
+        std::fs::write(&other, &written).unwrap();
+        scan_home(
+            &mut store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+            false,
+        )
+        .unwrap();
+    }
+    let later = store
+        .detail(&safe_id("antigravity:request:other:step:2"))
+        .unwrap();
+    assert_eq!(
+        (
+            later.attempts[0].response_model.as_deref(),
+            later.attempts[0].model_display_name.as_deref()
+        ),
+        (Some("fixture-argon-f"), None)
+    );
+}
+
+#[tokio::test]
+async fn unlisted_conversations_are_read_by_id_and_unclaimed_ones_wait_for_a_change() {
+    let f = fixture(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let conversations = dir.path().join("antigravity/conversations");
+    std::fs::create_dir_all(&conversations).unwrap();
+    for id in ["a-unlisted", "a-foreign", "a-empty", "z-good"] {
+        std::fs::write(conversations.join(format!("{id}.db")), b"fixture").unwrap();
+    }
+    std::fs::write(conversations.join("a-unlisted.db-wal"), b"fixture").unwrap();
+    let mut store = Store::open(&dir.path().join("db")).unwrap();
+    let pricing = Pricing::new(&dir.path().join("db")).unwrap();
+    let settings = Settings::default();
+    let asked = |id: &str| {
+        f.calls
+            .lock()
+            .iter()
+            .filter(|(m, b)| m == "GetCascadeTrajectoryGeneratorMetadata" && b["cascadeId"] == id)
+            .count()
+    };
+    let stamp = |id: &str| {
+        let db = conversations.join(format!("{id}.db"));
+        format!(
+            "{}+{}",
+            local_file_stamp(&db),
+            local_file_stamp(&db.with_extension("db-wal"))
+        )
+    };
+    let cursor = |store: &Store, id: &str| -> Cursor {
+        let saved = store.cursor(&safe_id(&format!("antigravity:rpc:{id}")));
+        serde_json::from_str(&saved.unwrap().unwrap()).unwrap()
+    };
+    let mut report = Report::default();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &settings,
+        &mut report,
+        false,
+    )
+    .await
+    .unwrap();
+    // The app lists one session; the unlisted one answers by id just as fully.
+    assert_eq!(
+        (
+            report.total_files,
+            report.files,
+            report.errors,
+            report.imported
+        ),
+        (4, 4, 0, 4)
+    );
+    assert_eq!(
+        store.dashboard(&Filter::default()).unwrap().totals.requests,
+        4
+    );
+    // The page that claimed the conversation is not fetched a second time.
+    assert_eq!(asked("a-unlisted"), 3);
+    let unlisted = cursor(&store, "a-unlisted");
+    assert_eq!(
+        (unlisted.count, unlisted.local_stamp),
+        (2, stamp("a-unlisted"))
+    );
+    assert_eq!(cursor(&store, "z-good").local_stamp, "");
+    // 404 is another instance's conversation and an empty reply claims
+    // nothing: both are remembered without an error.
+    for id in ["a-foreign", "a-empty"] {
+        let unclaimed = cursor(&store, id);
+        assert_eq!((unclaimed.count, unclaimed.local_stamp), (0, stamp(id)));
+        assert_eq!(asked(id), 1);
+    }
+
+    // An unchanged database is not asked for again.
+    f.calls.lock().clear();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &settings,
+        &mut Report::default(),
+        false,
+    )
+    .await
+    .unwrap();
+    for id in ["a-unlisted", "a-foreign", "a-empty"] {
+        assert_eq!(asked(id), 0, "{id}");
+    }
+
+    // A changed one is, and so is one whose write-ahead log alone changed.
+    std::fs::write(conversations.join("a-foreign.db"), b"fixture changed").unwrap();
+    std::fs::write(conversations.join("a-unlisted.db-wal"), b"fixture changed").unwrap();
+    collect_home(
+        &f.api,
+        &mut store,
+        dir.path(),
+        &pricing,
+        &settings,
+        &mut Report::default(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!((asked("a-foreign"), asked("a-empty")), (1, 0));
+    assert!(asked("a-unlisted") > 0);
+    for id in ["a-foreign", "a-unlisted"] {
+        assert_eq!(cursor(&store, id).local_stamp, stamp(id), "{id}");
+    }
+    assert_eq!(
+        store.dashboard(&Filter::default()).unwrap().totals.requests,
+        4
+    );
+}
+
+#[test]
+fn omitted_zero_counters_complete_a_reported_usage_but_never_invent_one() {
+    let mut v = entry("one", 0);
+    v["chatModel"].as_object_mut().unwrap().remove("retryInfos");
+    for key in [
+        "outputTokens",
+        "cacheReadTokens",
+        "thinkingOutputTokens",
+        "responseOutputTokens",
+    ] {
+        v["chatModel"]["usage"].as_object_mut().unwrap().remove(key);
+    }
+    let r = parsed(&v);
+    let a = &r.attempts[0];
+    assert_eq!(
+        (a.outcome.as_str(), r.known_success()),
+        ("success", Some(true))
+    );
+    assert_eq!(
+        (
+            a.tokens.input,
+            a.tokens.output,
+            a.tokens.cache_read,
+            a.tokens.cache_write
+        ),
+        (Some(100), Some(0), Some(0), None)
+    );
+    assert_eq!(a.usage_status, "reported");
+
+    // A failed request keeps exactly what it reported.
+    v["error"] = json!("fixture rejected");
+    let r = parsed(&v);
+    assert_eq!(
+        (r.attempts[0].outcome.as_str(), r.attempts[0].tokens.output),
+        ("failed", None)
+    );
+    v.as_object_mut().unwrap().remove("error");
+
+    // So does a request that is still running.
+    for key in ["timeToFirstToken", "streamingDuration"] {
+        v["chatModel"].as_object_mut().unwrap().remove(key);
+    }
+    let running = Steps::from(
+        [json!({"metadata":{"executionId":"exec","startedAt":"2026-01-01T00:00:00Z"}})].as_slice(),
+    );
+    let r = record("fixture", &v, &running, 0, &Learned::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (r.attempts[0].outcome.as_str(), r.attempts[0].tokens.output),
+        ("in_progress", None)
+    );
+
+    // Completion without any usage reports no tokens at all.
+    let mut silent = entry("one", 0);
+    for key in ["retryInfos", "usage"] {
+        silent["chatModel"].as_object_mut().unwrap().remove(key);
+    }
+    let r = parsed(&silent);
+    assert_eq!(
+        (r.attempts[0].outcome.as_str(), r.tokens().total()),
+        ("unknown", None)
+    );
+}
+
+#[test]
+fn an_error_on_the_entry_fails_the_request_and_drops_clocks_nothing_measured() {
+    let mut v = entry("one", 0);
+    for key in ["retryInfos", "usage"] {
+        v["chatModel"].as_object_mut().unwrap().remove(key);
+    }
+    v["chatModel"]["timeToFirstToken"] = json!("0s");
+    v["chatModel"]["streamingDuration"] = json!("0s");
+    v["error"] = json!("stream reading error: unexpected EOF");
+    let r = parsed(&v);
+    let a = r.final_attempt().unwrap();
+    assert_eq!(
+        (a.outcome.as_str(), r.known_success()),
+        ("failed", Some(false))
+    );
+    assert_eq!(a.error_code.as_deref(), Some("STREAM_INTERRUPTED"));
+    assert_eq!(
+        (a.first_token_ms, a.generation_ms, a.measured_duration_ms()),
+        (None, None, None)
+    );
+    assert!(r.finished_at.is_some());
+
+    // Any other text on the entry still fails the request.
+    v["error"] = json!("fixture rejected");
+    assert_eq!(
+        parsed(&v).final_attempt().unwrap().error_code.as_deref(),
+        Some("ANTIGRAVITY_ERROR")
+    );
+
+    // Once tokens were consumed the reported clocks stand.
+    v["chatModel"]["usage"] = json!({"responseId":"response-one","inputTokens":"100"});
+    let r = parsed(&v);
+    let a = r.final_attempt().unwrap();
+    assert_eq!(
+        (
+            a.outcome.as_str(),
+            a.first_token_ms,
+            a.measured_duration_ms()
+        ),
+        ("failed", Some(0), Some(0))
+    );
+
+    for (text, class) in [
+        ("unexpected EOF", Some("STREAM_INTERRUPTED")),
+        ("stream reading error: closed", Some("STREAM_INTERRUPTED")),
+        (
+            "context deadline exceeded: unexpected EOF",
+            Some("STREAM_TIMEOUT"),
+        ),
+        ("fixture rejected", None),
+    ] {
+        assert_eq!(classify_error_text(text), class, "{text}");
+    }
 }

@@ -603,6 +603,15 @@ export function usagePreview(
     name === "get_claude_usage_stats"
   ) {
     const now = Date.now();
+    const unobserved = {
+      period: null,
+      requests: 0,
+      tokens: 0,
+      reasoningTokens: 0,
+      costUsd: "0",
+      unpricedRequests: 0,
+      tokensPerHour: 0,
+    };
     const previewStats: AntigravityUsageStats = {
       requests: 18,
       costUsd: "1.4826",
@@ -626,16 +635,7 @@ export function usagePreview(
         {
           id: "ag-oauth-1",
           name: "Antigravity OAuth",
-          kind: "oauth",
-          total: {
-            period: null,
-            requests: 0,
-            tokens: 0,
-            reasoningTokens: 0,
-            costUsd: "0",
-            unpricedRequests: 0,
-            tokensPerHour: 0,
-          },
+          total: unobserved,
           tracks: [
             {
               id: "gemini",
@@ -703,26 +703,25 @@ export function usagePreview(
             },
           ],
         },
-        ...(
-          [
-            ["ag-adc-1", "GCP Project Alpha", "adc"],
-            ["ag-vertex-1", "Vertex Preview", "vertex_key"],
-          ] as const
-        ).map(([id, name, kind]) => ({
-          id,
-          name,
-          kind,
-          total: {
-            period: null,
-            requests: 0,
-            tokens: 0,
-            reasoningTokens: 0,
-            costUsd: "0",
-            unpricedRequests: 0,
-            tokensPerHour: 0,
-          },
-          tracks: [],
-        })),
+        {
+          id: "ag-oauth-2",
+          name: "Antigravity Backup",
+          total: unobserved,
+          tracks: [
+            {
+              id: "gemini",
+              label: "Gemini",
+              burst5h: unobserved,
+              weekly7d: unobserved,
+            },
+            {
+              id: "claude_gpt",
+              label: "Claude / GPT",
+              burst5h: unobserved,
+              weekly7d: unobserved,
+            },
+          ],
+        },
       ],
       families: [
         {

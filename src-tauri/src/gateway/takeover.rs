@@ -228,7 +228,13 @@ pub(super) fn pair_for(client: ClientId, text: &str) -> Result<Pair> {
         ClientId::Claude => super::claude_config::pair(text),
         ClientId::Grok => super::grok_config::pair(text),
         ClientId::Dsh => Err(AppError::new(code::CONFIG, "请使用 DSH profile 接入")),
+        ClientId::Agy => Err(unmanaged()),
     }
+}
+/// Antigravity keeps no connection in a file: its gateway comes from the
+/// environment of the shell that starts it.
+fn unmanaged() -> AppError {
+    AppError::new(code::CONFIG, "Antigravity 没有可接管的连接配置")
 }
 pub fn patch(text: &str, target: &Pair) -> Result<String> {
     let doc = parse(text)?;
@@ -337,6 +343,7 @@ fn write_pair(
     }
     let output = match client {
         ClientId::Dsh => return Err(AppError::new(code::CONFIG, "请使用 DSH profile 接入")),
+        ClientId::Agy => return Err(unmanaged()),
         ClientId::Codex => patch(text, target)?,
         ClientId::Claude => super::claude_config::patch(text, target)?,
         ClientId::Grok => super::grok_config::Snapshot::new(text, target)?

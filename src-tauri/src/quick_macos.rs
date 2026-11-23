@@ -97,6 +97,10 @@ pub struct LongWaitModel {
     pub phase_text: String,
     pub timing_text: String,
     pub cancelling: bool,
+    /// A third line while the response is being received: the amount so far,
+    /// and its rate or how long it has been silent.
+    pub received_text: Option<String>,
+    pub rate_text: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -170,7 +174,6 @@ pub struct ProviderCardModel {
     pub priority: Option<String>,
     pub selected: bool,
     pub select_label: String,
-    pub settings_label: String,
     pub handoff_status: Option<String>,
     pub runtime_alert: Option<String>,
     pub fault_event_id: Option<String>,
@@ -237,9 +240,10 @@ pub struct QuickPanelViewModel {
 
 // MARK: - Pure Derivation & Validation Logic
 
-pub const ALL_CLIENTS: [ClientId; 4] = [
+pub const ALL_CLIENTS: [ClientId; 5] = [
     ClientId::Codex,
     ClientId::Claude,
+    ClientId::Agy,
     ClientId::Grok,
     ClientId::Dsh,
 ];
@@ -248,6 +252,7 @@ pub fn quick_client_label(client: ClientId) -> &'static str {
     match client {
         ClientId::Codex => "Codex",
         ClientId::Claude => "Claude",
+        ClientId::Agy => "agy",
         ClientId::Grok => "Grok",
         ClientId::Dsh => "DSH",
     }
@@ -347,6 +352,8 @@ pub fn limit_label(cause: Option<&Cause>) -> &'static str {
         Some(ErrorBasis::ModelUnavailable) => "模型不可用",
         Some(ErrorBasis::Capacity) => "临时容量限制",
         Some(ErrorBasis::UsageLimit) => "用量限制，额度状态待核验",
+        Some(ErrorBasis::RiskControl) => "风控重试",
+        Some(ErrorBasis::LimitRetry) => "限流重试",
         Some(ErrorBasis::Unknown) | None => "",
     }
 }
@@ -633,6 +640,13 @@ pub fn derive_long_waits(
                 None => format!("已用 {elapsed} 秒"),
                 Some(rem) => format!("剩余 {} 秒", rem.saturating_sub(delta)),
             };
+            let received_text = r
+                .received_bytes
+                .map(|bytes| format!("已收 {}", format_bytes(bytes)));
+            let rate_text = r.received_bytes.map(|_| match r.silent_seconds {
+                Some(silent) if silent >= 5 => format!("静默 {silent} 秒"),
+                _ => format!("{}/s", format_bytes(r.bytes_per_second.unwrap_or(0))),
+            });
             Some(LongWaitModel {
                 request_id: r.request_id.clone(),
                 provider_name,
@@ -641,9 +655,28 @@ pub fn derive_long_waits(
                 phase_text: wait_phase_label(&r.phase).into(),
                 timing_text,
                 cancelling: cancelling.contains(&r.request_id),
+                received_text,
+                rate_text,
             })
         })
         .collect()
+}
+
+/// 1024 to a step, one decimal from KB up: `718.6 KB`.
+fn format_bytes(n: u64) -> String {
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut value = n as f64 / 1024.0;
+    let mut unit = "KB";
+    for next in ["MB", "GB"] {
+        if value < 1024.0 {
+            break;
+        }
+        value /= 1024.0;
+        unit = next;
+    }
+    format!("{value:.1} {unit}")
 }
 
 // MARK: - Quota Formatting, Validation & Scheduler Math
@@ -718,14 +751,6 @@ pub fn compact_number(n: Option<f64>) -> String {
         value = round_sig_3(value / 1000.0);
     }
     format!("{}{}", format_number(value, 3), units[power])
-}
-
-pub fn compact_number_value(n: f64) -> String {
-    let abs = n.abs();
-    if abs >= 1000.0 {
-        return compact_number(Some(n));
-    }
-    format_number(n, if abs >= 100.0 { 1 } else { 2 })
 }
 
 pub fn is_wallet_placeholder_name(name: Option<&str>) -> bool {
@@ -832,6 +857,29 @@ fn plan_amount(p: &Plan) -> String {
     }
 }
 
+/// What the capsule shows: whole units from 1 up and two decimals below, cut
+/// off rather than rounded so it never overstates the balance.
+fn capsule_amount(p: &Plan) -> String {
+    if p.unlimited {
+        return "无限制".into();
+    }
+    let Some(remaining) = p.remaining else {
+        return "未返回额度".into();
+    };
+    // Micro-units come first: 0.29 * 100 on its own would be cut to 0.28.
+    let micro = (remaining * 1e6).round();
+    let number = if micro.abs() < 1e6 {
+        format!("{:.2}", (micro / 1e4).trunc() / 100.0)
+    } else {
+        format_number((micro / 1e6).trunc(), 0)
+    };
+    if p.unit.is_empty() {
+        number
+    } else {
+        format!("{number} {}", p.unit)
+    }
+}
+
 fn build_plan_rows(plans: &[Plan]) -> (Option<String>, Vec<QuotaPlanRowModel>) {
     if plans.is_empty() {
         return (None, Vec::new());
@@ -915,17 +963,9 @@ pub fn derive_quota_card(quota: Option<&QuotaView>, now_secs: u64) -> QuotaCardM
             _ => "未查询".into(),
         }
     };
-    let compact_value = if let Some(first) = quota.and_then(|q| q.plans.first()) {
-        if first.unlimited {
-            "无限制".into()
-        } else if let Some(rem) = first.remaining {
-            compact_number_value(rem)
-        } else {
-            "未返回额度".into()
-        }
-    } else {
-        key_status.unwrap_or("—").to_owned()
-    };
+    let compact_value = quota
+        .and_then(|q| q.plans.first())
+        .map_or_else(|| key_status.unwrap_or("—").to_owned(), capsule_amount);
 
     let subs: &[Subscription] = quota.map_or(&[], |q| q.subscriptions.as_slice());
     let active_subs: Vec<&Subscription> = subs.iter().filter(|s| s.active == Some(true)).collect();
@@ -1259,12 +1299,6 @@ pub fn derive_gateway_card(
                 priority,
                 selected,
                 select_label: if selected { "已选择" } else { "选择" }.into(),
-                settings_label: if view.client_id == ClientId::Dsh {
-                    "模型映射"
-                } else {
-                    "白名单"
-                }
-                .into(),
                 handoff_status: provider_handoff_status(p, view),
                 runtime_alert: (!runtime_status.is_empty()).then_some(runtime_status),
                 fault_event_id: fault.map(|f| f.event_id.clone()),
@@ -1874,7 +1908,7 @@ impl Host {
                 let cancelled = r.gateway(cid).cancel_wait(&request_id);
                 self.state.lock().cancelling_waits.remove(&request_id);
                 self.set_notice(if cancelled {
-                    "已中止等待".into()
+                    "已打断并重发".into()
                 } else {
                     "等待已结束".into()
                 });
@@ -2769,6 +2803,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         gw.edit(
             gateway::Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -2776,6 +2811,10 @@ mod tests {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 id: None,
                 base_url: "https://api.example.invalid/v1".into(),
                 token: "sk-test-token".into(),
@@ -2874,6 +2913,9 @@ mod tests {
                 elapsed_seconds: 58,
                 remaining_seconds: None,
                 phase: "buffering".into(),
+                received_bytes: Some(735_846),
+                bytes_per_second: Some(1_638),
+                silent_seconds: Some(4),
             },
             PendingRequest {
                 request_id: "r-frozen".into(),
@@ -2883,6 +2925,33 @@ mod tests {
                 elapsed_seconds: 59,
                 remaining_seconds: Some(120),
                 phase: "frozen".into(),
+                received_bytes: None,
+                bytes_per_second: None,
+                silent_seconds: None,
+            },
+            PendingRequest {
+                request_id: "r-silent".into(),
+                provider_id: Some("p1".into()),
+                model: None,
+                started_at: 1_700_000_000,
+                elapsed_seconds: 90,
+                remaining_seconds: None,
+                phase: "buffering".into(),
+                received_bytes: Some(512),
+                bytes_per_second: Some(0),
+                silent_seconds: Some(45),
+            },
+            PendingRequest {
+                request_id: "r-retry".into(),
+                provider_id: Some("p1".into()),
+                model: None,
+                started_at: 1_700_000_000,
+                elapsed_seconds: 90,
+                remaining_seconds: Some(30),
+                phase: "retry".into(),
+                received_bytes: None,
+                bytes_per_second: None,
+                silent_seconds: None,
             },
         ];
 
@@ -2903,10 +2972,27 @@ mod tests {
 
         // r-short reaches 58 + 3 = 61s (>= 60s) with buffering -> "缓冲响应";
         // r-frozen does not advance elapsed while frozen (stays 59s < 60s).
-        assert_eq!(card.long_waits.len(), 1);
-        assert_eq!(card.long_waits[0].request_id, "r-short");
-        assert_eq!(card.long_waits[0].phase_text, "缓冲响应");
-        assert_eq!(card.long_waits[0].timing_text, "已用 61 秒");
+        let waits = &card.long_waits;
+        assert_eq!(
+            waits
+                .iter()
+                .map(|w| w.request_id.as_str())
+                .collect::<Vec<_>>(),
+            ["r-short", "r-silent", "r-retry"]
+        );
+        assert_eq!(waits[0].phase_text, "缓冲响应");
+        assert_eq!(waits[0].timing_text, "已用 61 秒");
+
+        // A transfer adds what it has received and its rate, or its silence
+        // from five seconds on; a request that is not receiving adds nothing.
+        assert_eq!(waits[0].received_text.as_deref(), Some("已收 718.6 KB"));
+        assert_eq!(waits[0].rate_text.as_deref(), Some("1.6 KB/s"));
+        assert_eq!(waits[1].received_text.as_deref(), Some("已收 512 B"));
+        assert_eq!(waits[1].rate_text.as_deref(), Some("静默 45 秒"));
+        assert_eq!(waits[2].received_text, None);
+        assert_eq!(waits[2].rate_text, None);
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
 
         // Model-scoped open circuit surfaces stripped gpt-* model label.
         let mut p2 = sample_provider("p2", "Scoped");
@@ -2923,17 +3009,27 @@ mod tests {
 
     #[test]
     fn quota_card_formats_abbreviations_filters_wallet_placeholders_and_dedups_sub2api() {
-        assert_eq!(compact_number_value(87_500.0), "87.5K");
-        assert_eq!(compact_number_value(1_250_000.0), "1.25M");
-        assert_eq!(compact_number_value(125.67), "125.7");
-        assert_eq!(compact_number_value(42.345), "42.35");
         assert!(is_wallet_placeholder_name(Some("钱包余额")));
         assert!(is_wallet_placeholder_name(Some("Wallet Balance")));
         assert!(!is_wallet_placeholder_name(Some("Pro Team")));
 
+        let amount = |remaining: f64, unit: &str| {
+            capsule_amount(&Plan {
+                remaining: Some(remaining),
+                unit: unit.into(),
+                ..Plan::default()
+            })
+        };
+        // Two decimals below one; cut off, never rounded up, and not by
+        // float error either; no trailing space without a unit.
+        assert_eq!(amount(0.917, "USD"), "0.91 USD");
+        assert_eq!(amount(1.999, "USD"), "1 USD");
+        assert_eq!(amount(0.29, "USD"), "0.29 USD");
+        assert_eq!(amount(87_495.917, ""), "87,495");
+
         let plan = Plan {
             name: "Pro Team".into(),
-            remaining: Some(87_500.0),
+            remaining: Some(87_495.917),
             used: Some(12_500.0),
             total: Some(100_000.0),
             unit: "USD".into(),
@@ -2972,7 +3068,8 @@ mod tests {
         let card = derive_quota_card(Some(&q), 1020);
         assert_eq!(card.tone, "good");
         assert_eq!(card.subscription_label.as_deref(), Some("Pro Team"));
-        assert_eq!(card.compact_value, "87.5K");
+        assert_eq!(card.compact_value, "87,495 USD");
+        assert_eq!(card.headline, "剩余 87,495.917 USD");
         assert!(
             card.refresh_disabled,
             "retryAt > now disables manual refresh"

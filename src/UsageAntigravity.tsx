@@ -34,13 +34,11 @@ function windowRemainingPercent(w: AntigravityTrackWindow): number | null {
 function TrackWindowBlock({
   title,
   window: w,
-  current = true,
 }: {
   title: string;
   window: AntigravityTrackWindow;
-  current?: boolean;
 }) {
-  if (current && !w.period)
+  if (!w.period)
     return (
       <div className="usage-ag-window">
         <div className="usage-ag-window-head">
@@ -49,7 +47,7 @@ function TrackWindowBlock({
         <p className="usage-empty">未获取当前周期</p>
       </div>
     );
-  const remaining = current ? windowRemainingPercent(w) : null;
+  const remaining = windowRemainingPercent(w);
   const tone = remaining != null ? quotaTone(remaining) : null;
   return (
     <div
@@ -84,12 +82,10 @@ function TrackWindowBlock({
           />
         </div>
       )}
-      {w.period && (
-        <p className="usage-ag-period">
-          {date(w.period.start)} — {date(w.period.end)}
-        </p>
-      )}
-      <dl className={`usage-ag-window-stats${current ? "" : " is-three"}`}>
+      <p className="usage-ag-period">
+        {date(w.period.start)} — {date(w.period.end)}
+      </p>
+      <dl className="usage-ag-window-stats">
         <div>
           <dt>请求</dt>
           <dd title={numeric(w.requests)}>{compact(w.requests)}</dd>
@@ -104,14 +100,12 @@ function TrackWindowBlock({
             {compact(w.reasoningTokens)}
           </dd>
         </div>
-        {current && (
-          <div>
-            <dt>速率</dt>
-            <dd title={`${numeric(Math.round(w.tokensPerHour))} Token/h`}>
-              {compact(Math.round(w.tokensPerHour))}/h
-            </dd>
-          </div>
-        )}
+        <div>
+          <dt>速率</dt>
+          <dd title={`${numeric(Math.round(w.tokensPerHour))} Token/h`}>
+            {compact(Math.round(w.tokensPerHour))}/h
+          </dd>
+        </div>
       </dl>
     </div>
   );
@@ -269,12 +263,7 @@ export default function UsageAntigravity({
               </option>
               {stats.accounts.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.name} ·{" "}
-                  {a.kind === "oauth"
-                    ? "OAuth"
-                    : a.kind === "adc"
-                      ? "ADC"
-                      : "Vertex Key"}
+                  {a.name}
                   {a.id === currentAccountId ? "（当前）" : ""}
                 </option>
               ))}
@@ -291,57 +280,47 @@ export default function UsageAntigravity({
               aria-label={account.name}
               className="usage-ag-account"
             >
-              {account.kind === "oauth" ? (
-                <div className="usage-ag-tracks">
-                  {account.tracks.map((track) => {
-                    const trackRemainingCandidates = [
-                      windowRemainingPercent(track.burst5h),
-                      windowRemainingPercent(track.weekly7d),
-                    ].filter((v): v is number => v != null);
-                    const trackRemaining = trackRemainingCandidates.length
-                      ? Math.min(...trackRemainingCandidates)
-                      : null;
-                    const trackTone =
-                      trackRemaining != null ? quotaTone(trackRemaining) : null;
-                    return (
-                      <article
-                        key={track.id}
-                        className="usage-ag-card usage-ag-track-card"
-                        data-track={track.id}
-                      >
-                        <header className="usage-ag-track-head">
-                          <h3>{track.label}</h3>
-                          {trackRemaining != null && trackTone && (
-                            <span
-                              className={`usage-quota-remaining-pill is-${trackTone}`}
-                            >
-                              最低剩余 {formatRemainingPercent(trackRemaining)}
-                            </span>
-                          )}
-                        </header>
-                        <div className="usage-ag-windows">
-                          <TrackWindowBlock
-                            title="当前 5h"
-                            window={track.burst5h}
-                          />
-                          <TrackWindowBlock
-                            title="当前 7d"
-                            window={track.weekly7d}
-                          />
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
-              ) : (
-                <article className="usage-ag-card">
-                  <TrackWindowBlock
-                    title={`${account.kind === "vertex_key" ? "Vertex Key" : "ADC"} · 所选日期`}
-                    window={account.total}
-                    current={false}
-                  />
-                </article>
-              )}
+              <div className="usage-ag-tracks">
+                {account.tracks.map((track) => {
+                  const trackRemainingCandidates = [
+                    windowRemainingPercent(track.burst5h),
+                    windowRemainingPercent(track.weekly7d),
+                  ].filter((v): v is number => v != null);
+                  const trackRemaining = trackRemainingCandidates.length
+                    ? Math.min(...trackRemainingCandidates)
+                    : null;
+                  const trackTone =
+                    trackRemaining != null ? quotaTone(trackRemaining) : null;
+                  return (
+                    <article
+                      key={track.id}
+                      className="usage-ag-card usage-ag-track-card"
+                      data-track={track.id}
+                    >
+                      <header className="usage-ag-track-head">
+                        <h3>{track.label}</h3>
+                        {trackRemaining != null && trackTone && (
+                          <span
+                            className={`usage-quota-remaining-pill is-${trackTone}`}
+                          >
+                            最低剩余 {formatRemainingPercent(trackRemaining)}
+                          </span>
+                        )}
+                      </header>
+                      <div className="usage-ag-windows">
+                        <TrackWindowBlock
+                          title="当前 5h"
+                          window={track.burst5h}
+                        />
+                        <TrackWindowBlock
+                          title="当前 7d"
+                          window={track.weekly7d}
+                        />
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
             </section>
           )}
         </section>
@@ -350,10 +329,10 @@ export default function UsageAntigravity({
       {(stats.providers ?? []).length > 0 && (
         <section
           className="usage-ag-card"
-          aria-label={client === "claude" ? "供应商分布" : "账号与凭据分布"}
+          aria-label={client === "claude" ? "供应商分布" : "账号分布"}
         >
           <h2 className="usage-ag-section-title">
-            {client === "claude" ? "供应商分布" : "账号与凭据分布"}
+            {client === "claude" ? "供应商分布" : "账号分布"}
           </h2>
           <div className="usage-ag-families">
             {(stats.providers ?? []).map((prov) => {

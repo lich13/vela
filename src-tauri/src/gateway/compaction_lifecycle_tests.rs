@@ -40,6 +40,10 @@ fn provider(id: &str, allowed_models: Option<&str>, handoff: bool) -> Provider {
         endless_mode: false,
         upstream_retry_seconds: 5,
         normal_retry_seconds: 3,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     }
 }
 

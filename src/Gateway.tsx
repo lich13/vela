@@ -17,6 +17,7 @@ import type { ClientId } from "./types";
 import { saveGatewayEdit, type EditRevision } from "./gateway-edit";
 import { confirmAction } from "./confirmation";
 import ProviderSettings from "./ProviderSettings";
+import ClaudeModelMapping from "./ClaudeModelMapping";
 import ProviderEndpoints from "./ProviderEndpoints";
 import ProviderControls from "./ProviderControls";
 import ProviderNameEditor from "./ProviderNameEditor";
@@ -35,17 +36,20 @@ import {
   useEffect,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import {
   Plus,
   Power,
-  Pencil,
   Trash2,
   Network,
-  Settings2,
-  MoreHorizontal,
   Check,
   RotateCcw,
+  ListChecks,
+  ArrowLeftRight,
+  SquarePen,
+  PencilLine,
+  Copy,
 } from "lucide-react";
 import { command } from "./bridge";
 import { errorOf, type GatewayState, type Provider } from "./types";
@@ -62,6 +66,7 @@ type Dialog =
   | { kind: "dsh" }
   | { kind: "provider"; item?: Provider }
   | { kind: "settings"; item: Provider }
+  | { kind: "modelMap"; item: Provider }
   | { kind: "endpoints"; item: Provider }
   | { kind: "quota"; item: Provider }
   | null;
@@ -98,8 +103,7 @@ export default function Gateway(props: GatewayProps) {
       {...props}
       clientId={clientId}
       focusProvider={
-        props.focusProvider &&
-        props.focusProvider.clientId === clientId
+        props.focusProvider && props.focusProvider.clientId === clientId
           ? props.focusProvider
           : null
       }
@@ -178,11 +182,7 @@ function GatewayContent({
       const request = ++sequence;
       try {
         const value = await command("get_gateway", { clientId });
-        if (
-          !disposed &&
-          request === sequence &&
-          value.clientId === clientId
-        )
+        if (!disposed && request === sequence && value.clientId === clientId)
           setState(value);
       } catch (e) {
         if (!disposed && request === sequence) setError(errorOf(e).message);
@@ -216,7 +216,11 @@ function GatewayContent({
       focusHandled.current = focusProvider.sequence;
       if (p) {
         setDialogVersion(focusProvider.sequence);
-        setDialog({ kind: focusProvider.action ?? "settings", item: p });
+        setDialog(
+          focusProvider.action === "edit"
+            ? { kind: "provider", item: p }
+            : { kind: focusProvider.action ?? "settings", item: p },
+        );
       } else {
         setError("该供应商已不存在，请刷新后重试");
       }
@@ -308,19 +312,24 @@ function GatewayContent({
       return;
     }
     run(async () => {
-      setState(
-        await command(
-          state.running || state.recoveryPending
-            ? "stop_gateway"
-            : "start_gateway",
-          {
-            clientId,
-            expectedRevision: state.revision,
-            expectedConfigRevision: state.configRevision,
-          },
-        ),
+      const next = await command(
+        state.running || state.recoveryPending
+          ? "stop_gateway"
+          : "start_gateway",
+        {
+          clientId,
+          expectedRevision: state.revision,
+          expectedConfigRevision: state.configRevision,
+        },
       );
-      notify(`配置已切换，请重新打开 ${clientName(clientId)}`);
+      setState(next);
+      notify(
+        clientId !== "agy"
+          ? `配置已切换，请重新打开 ${clientName(clientId)}`
+          : next.running
+            ? "已接入，请打开新的终端运行 agy"
+            : "已停用，新运行的 agy 恢复直连",
+      );
     });
   };
   const choose = (p: Provider) =>
@@ -331,7 +340,9 @@ function GatewayContent({
           ? "已切换供应商，新请求立即生效"
           : clientId === "dsh"
             ? "已选择供应商，可在接入面板启用路由"
-            : `文件已切换，请重新打开 ${clientName(clientId)}`,
+            : clientId === "agy"
+              ? "已选择供应商，启用网关后生效"
+              : `文件已切换，请重新打开 ${clientName(clientId)}`,
       );
     });
   const resetProvider = (p: Provider) =>
@@ -339,12 +350,19 @@ function GatewayContent({
       await edit({ op: "reset", id: p.id });
       notify("已重置熔断");
     });
+  const duplicateProvider = (p: Provider) =>
+    run(async () => {
+      await edit({ op: "duplicateProvider", id: p.id });
+      notify("已创建副本");
+    });
+  const deleteProvider = async (p: Provider) => {
+    if (await confirmAction(`删除供应商“${p.name}”？`, "删除"))
+      run(() => edit({ op: "deleteProvider", id: p.id }));
+  };
   const renameProvider = (
     payload: { op: "renameProvider"; id: string; name: string },
     revision: EditRevision,
   ) => edit(payload, revision);
-  const menuClose = (e: React.MouseEvent) =>
-    e.currentTarget.closest("details")?.removeAttribute("open");
   return (
     <section className="gateway-page">
       <div className="gateway-navigation">
@@ -356,6 +374,22 @@ function GatewayContent({
         <div className="gateway-client-actions">
           {clientId === "claude" && (
             <ClaudeProfile disabled={busy || !!dialog} notify={notify} />
+          )}
+          {clientId === "agy" && (
+            <span
+              className="muted"
+              title={
+                state.agyShell?.command
+                  ? `其他 shell 可手动运行：${state.agyShell.command}`
+                  : "启用后在 shell 启动文件写入 agy 函数；Antigravity app 不经过网关"
+              }
+            >
+              {!state.agyShell
+                ? "仅终端里的 agy 经过网关"
+                : state.agyShell.profiles.length
+                  ? `agy 函数已写入 ${state.agyShell.profiles.join("、")}`
+                  : "未能写入 shell 启动文件，可手动运行"}
+            </span>
           )}
           {clientId === "grok" && !state.running && (
             <button disabled={busy} onClick={importGrok}>
@@ -456,6 +490,80 @@ function GatewayContent({
               const selected =
                 state.mode === "manual" && state.selected === p.id;
               const status = providerRuntimeStatus(p, state);
+              const open = (
+                kind:
+                  | "testing"
+                  | "settings"
+                  | "modelMap"
+                  | "endpoints"
+                  | "provider",
+              ) => setDialog({ kind, item: p });
+              // Left to right in the row's second line.
+              const actions: {
+                name: string;
+                icon: ReactNode;
+                run: () => void;
+                className?: string;
+              }[] = [
+                {
+                  name: "重置熔断",
+                  icon: <RotateCcw size={14} />,
+                  run: () => resetProvider(p),
+                  className: "provider-reset",
+                },
+                {
+                  name: "连接测试",
+                  icon: <ConnectionTestIcon />,
+                  run: () => open("testing"),
+                },
+                // DSH maps its fixed model slots in place of a whitelist.
+                ...(clientId === "dsh"
+                  ? []
+                  : [
+                      {
+                        name: "白名单",
+                        icon: <ListChecks size={14} />,
+                        run: () => open("settings"),
+                      },
+                    ]),
+                ...(clientId === "dsh" || clientId === "claude"
+                  ? [
+                      {
+                        name: "模型映射",
+                        icon: <ArrowLeftRight size={14} />,
+                        run: () =>
+                          open(clientId === "dsh" ? "settings" : "modelMap"),
+                      },
+                    ]
+                  : []),
+                {
+                  name: "端点",
+                  icon: <Network size={14} />,
+                  run: () => open("endpoints"),
+                },
+                {
+                  name: "编辑 API",
+                  icon: <SquarePen size={14} />,
+                  run: () => open("provider"),
+                },
+                {
+                  name: "重命名",
+                  icon: <PencilLine size={14} />,
+                  run: () =>
+                    setRenameRequest({ id: p.id, sequence: Date.now() }),
+                },
+                {
+                  name: "创建副本",
+                  icon: <Copy size={14} />,
+                  run: () => duplicateProvider(p),
+                },
+                {
+                  name: "删除",
+                  icon: <Trash2 size={14} />,
+                  run: () => void deleteProvider(p),
+                  className: "provider-delete",
+                },
+              ];
               return (
                 <>
                   <div className="provider-main">
@@ -475,6 +583,7 @@ function GatewayContent({
                     />
                     <QuotaInfo
                       compact
+                      clientId={clientId}
                       provider={p}
                       quota={quota.quotaFor(p)}
                       refresh={() => void quota.refresh(p.id)}
@@ -516,90 +625,6 @@ function GatewayContent({
                         "选择"
                       )}
                     </button>
-                    <button
-                      type="button"
-                      className="icon-button compact provider-reset"
-                      aria-label={`${p.name} 重置熔断`}
-                      title="重置熔断"
-                      disabled={rowBusy}
-                      onClick={() => resetProvider(p)}
-                    >
-                      <RotateCcw size={14} />
-                    </button>
-                    <details className="row-menu">
-                      <summary
-                        aria-label={`${p.name} 操作`}
-                        aria-disabled={rowBusy}
-                        onClick={(e) => {
-                          if (rowBusy) e.preventDefault();
-                        }}
-                      >
-                        <MoreHorizontal size={17} />
-                      </summary>
-                      <div className="menu-popover" onClick={menuClose}>
-                        <button
-                          onClick={() =>
-                            setDialog({ kind: "testing", item: p })
-                          }
-                        >
-                          <ConnectionTestIcon />
-                          连接测试
-                        </button>
-                        <button
-                          onClick={() =>
-                            setDialog({ kind: "settings", item: p })
-                          }
-                        >
-                          <Settings2 size={14} />
-                          {clientId === "dsh" ? "模型映射" : "白名单"}
-                        </button>
-                        <button
-                          onClick={() =>
-                            setDialog({ kind: "endpoints", item: p })
-                          }
-                        >
-                          <Network size={14} />
-                          端点
-                        </button>
-                        <button
-                          onClick={() =>
-                            setDialog({ kind: "provider", item: p })
-                          }
-                        >
-                          <Pencil size={14} />
-                          编辑 API
-                        </button>
-                        <button
-                          onClick={() =>
-                            setRenameRequest({
-                              id: p.id,
-                              sequence: Date.now(),
-                            })
-                          }
-                        >
-                          <Pencil size={14} />
-                          重命名
-                        </button>
-                        <button
-                          className="danger"
-                          disabled={busy}
-                          onClick={async () => {
-                            if (
-                              await confirmAction(
-                                `删除供应商“${p.name}”？`,
-                                "删除",
-                              )
-                            )
-                              run(() =>
-                                edit({ op: "deleteProvider", id: p.id }),
-                              );
-                          }}
-                        >
-                          <Trash2 size={14} />
-                          删除
-                        </button>
-                      </div>
-                    </details>
                   </div>
                   {providerHandoffStatus(p, state) && (
                     <span className="provider-binding provider-handoff">
@@ -618,6 +643,25 @@ function GatewayContent({
                       commit={providerEdit}
                       report={setError}
                     />
+                    <div
+                      className="provider-actions"
+                      role="group"
+                      aria-label={`${p.name} 操作`}
+                    >
+                      {actions.map((a) => (
+                        <button
+                          key={a.name}
+                          type="button"
+                          className={`icon-button ${a.className ?? ""}`}
+                          aria-label={`${p.name} ${a.name}`}
+                          title={a.name}
+                          disabled={rowBusy}
+                          onClick={a.run}
+                        >
+                          {a.icon}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </>
               );
@@ -704,7 +748,8 @@ function GatewayContent({
                       className="secondary compact"
                       disabled={busy}
                       onClick={() => {
-                        const before = state.modelCatalogOfficialStatus?.version;
+                        const before =
+                          state.modelCatalogOfficialStatus?.version;
                         run(async () => {
                           const next = await command("update_codex_catalog");
                           setState(next);
@@ -823,9 +868,21 @@ function GatewayContent({
           close={() => setDialog(null)}
         />
       )}
+      {dialog?.kind === "modelMap" && (
+        <ClaudeModelMapping
+          provider={dialog.item}
+          revision={state.revision}
+          onDirtyChange={markDialog}
+          close={() => setDialog(null)}
+          save={async (payload, revision) => {
+            await edit(payload, revision);
+            notify("模型映射已保存");
+          }}
+        />
+      )}
       {dialog?.kind === "provider" && (
         <GatewayDialog
-          key={`${clientId}:${dialog.item?.id ?? "new"}`}
+          key={`${clientId}:${dialog.item?.id ?? "new"}:${dialogVersion}`}
           clientId={clientId}
           connectionMode={state.connectionMode}
           dialog={dialog}

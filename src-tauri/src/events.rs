@@ -185,7 +185,7 @@ impl JournalClient {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Active(client) => client.name(),
-            Self::External(ExternalClient::Antigravity) => "Antigravity app",
+            Self::External(ExternalClient::Antigravity) => "Antigravity",
             Self::External(ExternalClient::ClaudeCode) => "Claude Code",
         }
     }
@@ -337,6 +337,9 @@ impl Record {
             || lower.contains("timed out")
         {
             (Reason::RequestInterrupted, None, "STREAM_TIMEOUT")
+        } else if lower.contains("unexpected eof") || lower.contains("stream reading error") {
+            // The connection closed while the reply was still being read.
+            (Reason::RequestInterrupted, None, "STREAM_INTERRUPTED")
         } else if lower.contains("resource_exhausted")
             || lower.contains("quota")
             || lower.contains("rate limit")
@@ -1900,7 +1903,11 @@ mod diagnostic_record_tests {
         assert_eq!(client.active(), None);
         assert_eq!(serde_json::to_string(&client).unwrap(), r#""antigravity""#);
         assert!(serde_json::from_str::<ClientId>(r#""antigravity""#).is_err());
-        assert!(serde_json::from_str::<JournalClient>(r#""agy""#).is_err());
+        // The gateway's Antigravity client is a different identity: the app's
+        // own log lines never read as traffic of the gateway.
+        let gateway: JournalClient = serde_json::from_str(r#""agy""#).unwrap();
+        assert_eq!(gateway.active(), Some(ClientId::Agy));
+        assert_eq!(serde_json::to_string(&gateway).unwrap(), r#""agy""#);
     }
     #[test]
     fn claude_code_session_identity_never_reads_as_the_gateway_client() {
@@ -2504,18 +2511,31 @@ mod routing_visibility_tests {
             timeout_record.details.upstream_code.as_deref(),
             Some("STREAM_TIMEOUT")
         );
+        let interrupted_record = Record::antigravity_error(
+            "transcript:conv-1:5",
+            now(),
+            Some("gemini-2.5-pro"),
+            "stream reading error: unexpected EOF",
+        );
+        assert_eq!(interrupted_record.reason, Reason::RequestInterrupted);
+        assert_eq!(
+            interrupted_record.details.upstream_code.as_deref(),
+            Some("STREAM_INTERRUPTED")
+        );
         let content = format!(
-            "{}\n{}\n",
+            "{}\n{}\n{}\n",
             serde_json::to_string(&log_record).unwrap(),
-            serde_json::to_string(&timeout_record).unwrap()
+            serde_json::to_string(&timeout_record).unwrap(),
+            serde_json::to_string(&interrupted_record).unwrap()
         );
         std::fs::write(&path, content).unwrap();
 
         let loaded = load(&path);
         assert!(!loaded.dirty);
-        assert_eq!(loaded.records.len(), 2);
+        assert_eq!(loaded.records.len(), 3);
         assert_eq!(loaded.records[0].id, log_record.id);
         assert_eq!(loaded.records[1].id, timeout_record.id);
+        assert_eq!(loaded.records[2].id, interrupted_record.id);
         assert!(loaded.records[0].details.upstream_type.is_none());
     }
 }

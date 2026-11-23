@@ -154,7 +154,8 @@ export type FailoverEvidence = {
     | "proactive_handoff"
     | "failure_fallback"
     | "cursor_pinned"
-    | "unknown_owner";
+    | "unknown_owner"
+    | "delegated";
   failure:
     | "rate_limit"
     | "account_rejected"
@@ -293,7 +294,6 @@ export type AntigravityUsageStats = {
   accounts: {
     id: string;
     name: string;
-    kind: "oauth" | "adc" | "vertex_key";
     tracks: AntigravityQuotaTrack[];
     total: AntigravityTrackWindow;
   }[];
@@ -357,7 +357,8 @@ export type UsageState = {
   error: string | null;
 };
 export type ProviderPriceMapping = {
-  client: "codex" | "claude" | "grok" | "dsh";
+  /** Usage names the Antigravity gateway `antigravity`; its gateway id is `agy`. */
+  client: "codex" | "claude" | "antigravity" | "grok" | "dsh";
   provider: string;
   enabled: boolean;
   matchOn: "request" | "response";
@@ -435,12 +436,12 @@ export const tokenTotal = (t: Tokens) =>
         (a, b) => a + (b ?? 0),
         0,
       );
+// The app and the CLI are one platform here; rows an older version stored
+// under the CLI's own client id show the same name.
 export const clientName = (c: string) =>
-  c === "antigravity"
-    ? "Antigravity app"
-    : c === "agy"
-      ? "Antigravity CLI"
-      : c === "dsh"
+  c === "antigravity" || c === "agy"
+    ? "Antigravity"
+    : c === "dsh"
         ? "DSH"
         : c === "codex"
           ? "Codex"

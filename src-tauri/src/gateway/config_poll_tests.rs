@@ -100,6 +100,7 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
     codex
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -107,6 +108,10 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://a.example.invalid/v1".into(),
@@ -121,6 +126,7 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
     let second = codex
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -128,6 +134,10 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://b.example.invalid/v1".into(),
@@ -189,6 +199,7 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
     let claude_v1 = claude
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -196,6 +207,10 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://a.example.invalid".into(),
@@ -408,6 +423,7 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
     let grok_v1 = grok
         .edit(
             Edit::SaveGrokProvider {
+                delegate: Default::default(),
                 quota_access_token: None,
                 id: None,
                 base_url: "https://grok-a.example.invalid/v1".into(),

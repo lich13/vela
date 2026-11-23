@@ -55,6 +55,7 @@ fn codex_identity_is_atomic_success_only_private_and_bound_to_home() {
     gateway
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 id: None,
                 name: None,
                 base_url: "https://example.invalid/v1".into(),
@@ -67,6 +68,10 @@ fn codex_identity_is_atomic_success_only_private_and_bound_to_home() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
             },
             &gateway.view().revision,
             &home,
@@ -197,6 +202,7 @@ fn v02523_search_only_is_excluded_from_model_union_exit_and_generation_routes() 
             store
                 .edit(
                     Edit::SaveProvider {
+                        delegate: Default::default(),
                         search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
@@ -204,6 +210,10 @@ fn v02523_search_only_is_excluded_from_model_union_exit_and_generation_routes() 
                         endless_mode: None,
                         upstream_retry_seconds: None,
                         normal_retry_seconds: None,
+                        risk_codes: None,
+                        retry_intensity: None,
+                        limit_retry_seconds: None,
+                        limit_rest_seconds: None,
                         id: None,
                         name: Some(name.into()),
                         base_url: format!("https://{name}.example.invalid/v1"),

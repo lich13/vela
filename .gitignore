@@ -9,6 +9,7 @@ artifacts/
 *.sqlite-*
 *.jsonl
 !src-tauri/src/usage/fixtures/v015/*.jsonl
+!src-tauri/src/gateway/fixtures/*.jsonl
 __pycache__/
 auth.json
 config.toml

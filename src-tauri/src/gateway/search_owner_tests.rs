@@ -1360,6 +1360,7 @@ fn search_only_edit(gateway: &Gateway, id: &str) -> Edit {
         .find(|p| p.id == id)
         .unwrap();
     Edit::SaveProvider {
+        delegate: Default::default(),
         id: Some(id.to_owned()),
         base_url: provider.base_url,
         token: String::new(),
@@ -1372,5 +1373,9 @@ fn search_only_edit(gateway: &Gateway, id: &str) -> Edit {
         endless_mode: None,
         upstream_retry_seconds: None,
         normal_retry_seconds: None,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     }
 }

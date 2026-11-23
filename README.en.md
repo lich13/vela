@@ -19,7 +19,7 @@
 
 **Vela** is a native, local-first AI client manager and high-availability API gateway for **macOS** and **Windows** (built with **Tauri 2 + Rust + React 19**).
 
-Designed for developers working across **Codex**, **Claude Code**, **Grok Build**, **DSH**, and **Antigravity app**, Vela provides a unified local workbench to manage multi-platform credentials, route local traffic with automatic failover, safely edit client configurations, and track real-time quotas and granular token usage.
+Designed for developers working across **Codex**, **Claude Code**, **Grok Build**, **DSH**, and **Antigravity** (the app and the `agy` CLI), Vela provides a unified local workbench to manage multi-platform credentials, route local traffic with automatic failover, safely edit client configurations, and track real-time quotas and granular token usage.
 
 > **Security & Privacy Commitment**: All account credentials, provider API keys, and configuration files are stored strictly inside your local user directory (`~/.vela` with `0700`/`0600` permissions). **Zero telemetry, zero cloud sync, and no data is ever uploaded to any third-party or project server.** Official vs. third-party API profile isolation operates strictly on local files and does not guarantee bypassing upstream platform risk controls.
 
@@ -30,26 +30,27 @@ Designed for developers working across **Codex**, **Claude Code**, **Grok Build*
 ### 1. Real-Time Quota Tracking & Cache Savings Analytics (Claude Code & Antigravity)
 - **Remaining Quota Indicators**: Displays real-time remaining quota percentages across **Claude Code** windows (`5h`, `7d`, `Sonnet`, `Opus`) and **Antigravity** dual-track windows (`Gemini` & `Claude / GPT` `5h` / `7d`), complete with status color coding and a header ring indicator highlighting the most constrained window.
 - **Token Breakdown & Cache Savings (USD)**: Automatically separates fresh input, cache reads, cache writes, visible output, and reasoning tokens. Visual meters display **cache hit rates** and **reasoning token ratios**, while calculating exact **estimated cache savings in USD** from historical pricing snapshots.
-- **Bidirectional Deduplication & Bill Export**: Correlates live gateway streaming metrics (TTFT, generation TPS, cache TTL tiers, reasoning tokens, and web search billing) with incremental local session file cursors across all four clients to prevent double-counting. Supports exporting second-accurate bills for **Claude Code** and **Antigravity app**, with optional atomic pruning of settled history.
+- **Bidirectional Deduplication & Bill Export**: Correlates live gateway streaming metrics (TTFT, generation TPS, cache TTL tiers, reasoning tokens, and web search billing) with incremental local session file cursors across all clients to prevent double-counting. Supports exporting second-accurate bills for **Claude Code** and **Antigravity app**, with optional atomic pruning of settled history.
 
 ### 2. Menu Bar Quick Panel & System Sleep Control
 - **Lightweight Tray Access**: Left-click the menu bar / system tray icon to open the code-split Quick Panel, allowing instant switching between **`Codex` · `Claude` · `Grok` · `DSH`** (unused platforms can be hidden in Settings) with independent state memory and real-time synchronization.
-- **In-Place Queue & Rate Management**: Reorder provider priority via drag-and-drop, inspect account balances, adjust concurrency caps and RPM limits inline, reset circuit breakers, cancel individual requests pending for over 60 seconds, or cleanly terminate background CLI processes per platform—all without opening the main window.
+- **In-Place Queue & Rate Management**: Reorder provider priority via drag-and-drop, inspect account balances, adjust concurrency caps and RPM limits inline, reset circuit breakers, resend individual requests pending for over 60 seconds, or cleanly terminate background CLI processes per platform—all without opening the main window.
 - **Global Freeze & Clamshell Sleep Guard**: Engage **Global Freeze** with one click to allow in-flight requests to finish safely before pausing traffic (resuming remaining timeout budgets upon wake), backed by a native macOS clamshell power helper to prevent system sleep from interrupting long-running tasks.
 
 ### 3. Single-Port Multi-Client Gateway & Zero-Downtime Failover
 - **Single-Port Token Multiplexing**: Listens on `127.0.0.1:43721` by default, authenticating and routing each client via dedicated local bearer tokens on `/` and `/v1`. Passes HTTP, SSE, and native WebSocket streams through with zero lossy protocol conversion.
 - **Codex Thread Affinity & Compaction Handoff**: Accurately distinguishes true Codex `thread-id`s from cache `session-id`s and empty warmups. Supports per-provider **New Thread Takeover** and **Post-Compaction Takeover** with atomic epoch handoffs that never replay already-streamed output.
 - **Multi-Endpoint Probing & Fault Policies**: Supports 1 primary address and up to 8 auxiliary `base_url`s per provider with credential-free header latency probing to automatically select the fastest healthy endpoint. Includes a structured error classifier, and an upstream error in the log can be added as a custom fault rule directly.
+- **Compaction & Auxiliary Request Routing, Endless Mode**: Codex and Claude providers can each take over compaction requests and auxiliary requests (auto-approval, titles, summaries, memory) on a model and reasoning effort you name. The compaction, auxiliary, and ordinary queues are each tried in list order, and a request nobody finished falls back to the ordinary queue. Endless mode keeps transient failures inside the gateway, retrying on the same provider at separate risk-control, rate-limit, and ordinary intervals that scale with provider load. See [Gateway Routing & Failover](docs/gateway.md).
 
 ### 4. Multi-Platform Account Vault & Dual-Mode Configuration Center
 - **Centralized Account Vault**:
   - **Codex**: Supports browser OAuth, device-code login, lossless token refresh, official direct mode, and batch import/export for Codex / Sub2API / CLIProxyAPI / CC Switch formats.
   - **Claude Code**: Supports isolated **Official vs. API** profile switching without configuration collisions.
-  - **Antigravity**: Manages OAuth, ADC, and Vertex API Key accounts in one place.
+  - **Antigravity**: Automatically picks up OAuth accounts signed in inside the app, with one-click switching, rename, and delete across multiple accounts. The `agy` CLI shares the same sign-in, and Vela warns when `agy` sessions are still running.
 - **Visual Form + Code Dual-Mode Editor**:
-  - **Claude Code** (`settings.json`) and **Antigravity app** (`config.json`) offer synchronized grouped forms and JSON tree editors that **losslessly preserve unknown custom fields and plugin settings**, complete with secret masking, redacted diff previews, and one-click backup restore.
-  - **Codex / Grok Build** (`config.toml`) and **DSH** (YAML patches) provide syntax highlighting, live validation, and external-edit conflict protection.
+  - **Claude Code** (`settings.json`) and **Antigravity** (the app's `config.json` and the CLI's `settings.json`) offer synchronized grouped forms and JSON tree editors that **losslessly preserve unknown custom fields and plugin settings**, complete with secret masking, redacted diff previews, and one-click backup restore.
+  - **Codex / Grok Build** (`config.toml`) and **DSH** (YAML patches) add visual settings on top of syntax highlighting, live validation, and external-edit conflict protection: common options are grouped into forms, every other key appears in a structure tree, `true` / `false` and `0` / `1` values become switches, and saving only touches the keys you edited.
 
 ### 5. Provider Connectivity Testing & Model Fingerprint Attribution
 - **Streaming Tests & Offline Fingerprint Attribution**: Run per-provider streaming chat tests, [ModelTrace](https://github.com/Hanmo123/ModelTrace) and [LM Detector](https://github.com/Ikaleio/lm-detector) (`lmfpd`) model fingerprint challenges, and optional tokenizer probes. All reference comparisons and closed-set statistical attribution scoring are executed offline locally without routing through upstream proxy services.
@@ -66,10 +67,10 @@ Designed for developers working across **Codex**, **Claude Code**, **Grok Build*
 | Client | Quick Panel | Default Local Gateway | Auth & Integration | Configuration Editor | Usage & Quota Analytics |
 | --- | --- | --- | --- | --- | --- |
 | **Codex** | `Codex` | `127.0.0.1:43721/v1` | Cross-file Bearer or API Key transactions; ChatGPT OAuth vault & official direct mode; one-switch model list takeover | `config.toml` validation, managed field guards & backup restore | Live gateway metering + active/archived local session deduplication |
-| **Claude Code** | `Claude` | `127.0.0.1:43721` | `settings.json` env integration; isolated Official / API profile switching | `settings.json` **Visual (5 groups) + JSON** dual-mode editor | **Official 5h/7d/Sonnet remaining %** + main/subagent deduplication + **Bill export** |
+| **Claude Code** | `Claude` | `127.0.0.1:43721` | `settings.json` env integration; isolated Official / API profile switching; providers may use a Vertex AI Key | `settings.json` **Visual (5 groups) + JSON** dual-mode editor | **Official 5h/7d/Sonnet remaining %** + main/subagent deduplication + **Bill export** |
+| **Antigravity** | `agy` | `127.0.0.1:43721` (`agy` CLI only; the app connects directly) | An `agy` shell function written to your shell startup file routes the CLI through the gateway, with Gemini API Key or Vertex AI Key providers; the app's OAuth accounts are auto-detected with multi-account switching | App `config.json` and CLI `settings.json` **Visual + JSON** dual-mode editor | **Gemini & Claude/GPT dual-track remaining %** + gateway metering deduplicated against app / CLI sessions + **Bill export** |
 | **Grok Build** | `Grok` | `127.0.0.1:43721/v1` | Dedicated managed API model coexisting with native official OAuth models; one-switch model list takeover | `config.toml` validation & `endpoint.env` import preview | Live gateway metering + per-turn multi-model session stats |
 | **DSH** | `DSH` | `127.0.0.1:43721/v1` | Chat Completions protocol; multi-profile sync & official model catalog mapping | `desktop` / per-profile YAML patch editor & recovery | Live gateway request & model invocation metering |
-| **Antigravity app** | — | Vertex Key: `127.0.0.1:43721/antigravity` | Direct OAuth/ADC in app; Vertex API Key forwarded to Google via Vela | `config.json` **Visual (4 groups) + JSON** dual-mode editor | **Gemini & Claude/GPT dual-track remaining %** + incremental session sync + **Bill export** |
 
 ---
 
@@ -82,7 +83,7 @@ flowchart LR
     Claude["Claude Code"]
     Grok["Grok Build"]
     DSH["DSH"]
-    AG["Antigravity app"]
+    AG["Antigravity\n(App / agy CLI)"]
   end
 
   subgraph Core["Vela Core (Tauri 2 / Rust)"]
@@ -94,16 +95,13 @@ flowchart LR
 
   subgraph UI["Code-Split Frontend (React 19)"]
     Main["Main Window (AppEntry)\nAccounts / Config / Gateway / Usage / Logs"]
-    Quick["Tray Quick Panel (QuickEntry)\nCodex · Claude · Grok · DSH"]
+    Quick["Tray Quick Panel (QuickEntry)\nCodex · Claude · agy · Grok · DSH"]
   end
 
   Upstreams["Upstream API Providers"]
-  Vertex["Google Vertex AI"]
 
   Codex & Claude & Grok & DSH -->|"Per-Client Local Token (HTTP / SSE / WS)"| GW
   GW -->|"Fault Policy / Thread Affinity / Endpoint Probing"| Upstreams
-  AG -->|"Dedicated Vertex Key Route & Local Token"| GW
-  GW -->|"Direct Vertex Forwarding"| Vertex
   Codex & Claude & Grok & DSH & AG <-->|"Atomic Writes / File Events / Read-Only Sync"| Watch & Sync
   GW & Sync --> DB
   Main & Quick <-->|"On-Demand Visible Window IPC"| Core
@@ -137,7 +135,7 @@ See [RELEASE.md](./RELEASE.md) for the full release history.
 ## Quick Start
 
 1. **Configure & Enable the Gateway**: Open the **Gateway** tab in the main window, select your target client (Codex / Claude Code / Grok Build / DSH), add upstream providers, and configure queue order, concurrency, and RPM limits. Toggle the gateway switch on and restart the corresponding client to apply (switching providers while running only affects new requests without interrupting active streams).
-2. **Control from the Quick Panel**: Click the menu bar / system tray icon to open the Quick Panel. Switch between **`Codex` / `Claude` / `Grok` / `DSH`** in one click to reorder providers, check balances, cancel long-waiting requests, or engage **Global Freeze**.
+2. **Control from the Quick Panel**: Click the menu bar / system tray icon to open the Quick Panel. Switch between **`Codex` / `Claude` / `Grok` / `DSH`** in one click to reorder providers, check balances, resend long-waiting requests, or engage **Global Freeze**.
 3. **Monitor Quotas & Export Bills**: Switch to the **Claude Code** or **Antigravity** view under the **Usage** tab to inspect remaining quota percentages, token mix breakdowns, estimated cache savings, and session rankings, or click **Export Bill** to generate an itemized statement.
 4. **Edit Configs Safely**: Use the visual form or code editor under the **Config** tab to maintain client configurations. Preview redacted diffs before saving, and restore the previous backup with one click if needed.
 

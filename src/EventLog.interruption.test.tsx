@@ -140,7 +140,7 @@ it("renders an explicit cancellation as a status record", async () => {
       details: {
         healthScope: "request",
         localCode: "CANCELLED",
-        message: "收到明确取消指令，已结束转发",
+        message: "收到明确取消指令，已结束本次尝试",
         countedFailure: false,
       },
     },
@@ -165,7 +165,7 @@ it("renders an explicit cancellation as a status record", async () => {
   ).toHaveTextContent("CANCELLED");
   expect(
     within(dialog).getByText("错误摘要").nextElementSibling,
-  ).toHaveTextContent("收到明确取消指令，已结束转发");
+  ).toHaveTextContent("收到明确取消指令，已结束本次尝试");
 });
 
 it("keeps legacy interruption records readable when delivery details are absent", async () => {

@@ -234,9 +234,18 @@ describe("gateway advanced settings", () => {
     expect(attempts).toHaveValue(3);
     await user.clear(attempts);
     await user.type(attempts, "5");
+    const held = screen.getByRole("spinbutton", { name: "断网时静默 / 秒" });
+    expect(held).toHaveValue(60);
+    expect(held).toHaveAttribute("min", "1");
+    expect(held).toHaveAttribute("max", "86400");
+    await user.clear(held);
+    await user.type(held, "45");
     await user.click(probe);
     expect(
       screen.queryByRole("spinbutton", { name: "探测次数" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("spinbutton", { name: "断网时静默 / 秒" }),
     ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存参数" }));
     await waitFor(() =>
@@ -249,12 +258,52 @@ describe("gateway advanced settings", () => {
             settings: expect.objectContaining({
               networkProbe: false,
               networkProbeAttempts: 5,
+              holdIdleSeconds: 45,
             }),
           }),
         }),
       ),
     );
   });
+
+  it.each(["codex", "claude"] as const)(
+    "offers the mid-transfer silence limit to Claude only (%s)",
+    async (clientId) => {
+      localStorage.setItem("vela.main.client", clientId);
+      const user = userEvent.setup();
+      render(<Gateway notify={() => {}} />);
+      await screen.findByRole("button", { name: "添加" });
+      await user.click(screen.getByText("故障策略"));
+      expect(
+        screen.getByRole("spinbutton", { name: "流静默 / 秒" }),
+      ).toBeInTheDocument();
+      const stall = screen.queryByRole("spinbutton", {
+        name: "传输中静默 / 秒",
+      });
+      if (clientId === "codex") {
+        expect(stall).not.toBeInTheDocument();
+        return;
+      }
+      expect(stall).toHaveValue(120);
+      expect(stall).toHaveAttribute("min", "1");
+      expect(stall).toHaveAttribute("max", "86400");
+      await user.clear(stall!);
+      await user.type(stall!, "90");
+      await user.click(screen.getByRole("button", { name: "保存参数" }));
+      await waitFor(() =>
+        expect(mock.command).toHaveBeenCalledWith(
+          "update_gateway",
+          expect.objectContaining({
+            clientId: "claude",
+            edit: expect.objectContaining({
+              op: "settings",
+              settings: expect.objectContaining({ stallSeconds: 90 }),
+            }),
+          }),
+        ),
+      );
+    },
+  );
 });
 
 describe("quota refresh settings", () => {

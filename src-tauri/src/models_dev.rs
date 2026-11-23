@@ -1,4 +1,5 @@
-//! Public, optional model metadata. No credentials and no scheduled refreshes.
+//! Public, optional model metadata. No credentials; the scheduled refresh only
+//! replaces an index that has gone stale.
 use crate::{
     storage::{self, Result},
     usage::model::{decimal, failure, now},
@@ -19,14 +20,6 @@ const DOWNLOAD_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Model {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release_date: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub modalities: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,16 +82,6 @@ pub struct SearchHit {
 #[derive(Serialize)]
 pub struct Search {
     pub hits: Vec<SearchHit>,
-    pub error: Option<String>,
-}
-#[derive(Clone, Serialize)]
-pub struct VertexModel {
-    pub id: String,
-    pub preview: bool,
-}
-#[derive(Serialize)]
-pub struct VertexModels {
-    pub models: Vec<VertexModel>,
     pub error: Option<String>,
 }
 #[derive(Clone, Default)]
@@ -258,6 +241,28 @@ impl Catalog {
     pub async fn refresh(&self, force: bool) -> Result<View> {
         self.refresh_from(force, SOURCE).await
     }
+    /// Scheduled refresh. Stays offline while the last attempt of this process,
+    /// or before the first one the cached index itself, is younger than `max_age`.
+    pub async fn refresh_stale(&self, max_age: Duration) -> Result<View> {
+        self.refresh_stale_from(max_age, SOURCE).await
+    }
+    async fn refresh_stale_from(&self, max_age: Duration, source: &str) -> Result<View> {
+        self.ensure_loaded();
+        let fresh = {
+            let state = self.state.read();
+            match state.attempted {
+                Some(at) => at.elapsed() < max_age,
+                None => state.index.as_ref().is_some_and(|index| {
+                    u128::try_from(now().saturating_sub(index.updated_at))
+                        .is_ok_and(|age| age < max_age.as_millis())
+                }),
+            }
+        };
+        if fresh {
+            return Ok(self.view());
+        }
+        self.refresh_from(true, source).await
+    }
     async fn refresh_from(&self, force: bool, source: &str) -> Result<View> {
         let began = Instant::now();
         let _guard = self.sync.lock().await;
@@ -369,61 +374,6 @@ impl Catalog {
             }}),
             state.version.clone()?,
         ))
-    }
-    pub async fn vertex_models(&self, force: bool) -> Result<VertexModels> {
-        self.vertex_models_from(force, SOURCE).await
-    }
-    async fn vertex_models_from(&self, force: bool, source: &str) -> Result<VertexModels> {
-        self.ensure_loaded();
-        self.refresh_from(force, source).await?;
-        Ok(self.vertex_choices())
-    }
-    fn vertex_choices(&self) -> VertexModels {
-        let state = self.state.read();
-        let Some(index) = state.index.as_ref() else {
-            return VertexModels {
-                models: vec![],
-                error: state.error.clone(),
-            };
-        };
-        let mut models: Vec<_> = index
-            .providers
-            .get("google-vertex")
-            .into_iter()
-            .flat_map(|p| p.models.iter())
-            .filter(|(id, m)| {
-                id.starts_with("gemini-")
-                    && m.tool_call == Some(true)
-                    && m.status.as_deref() != Some("deprecated")
-                    && m.modalities.as_ref().is_some_and(|v| {
-                        v["output"] == json!(["text"])
-                            && v["input"]
-                                .as_array()
-                                .is_some_and(|items| items.iter().any(|x| x == "text"))
-                    })
-            })
-            .collect();
-        let preview = |id: &str, m: &Model| {
-            matches!(m.status.as_deref(), Some("alpha" | "beta" | "preview"))
-                || id.contains("-preview")
-                || id.contains("-exp")
-        };
-        models.sort_by(|(a_id, a), (b_id, b)| {
-            preview(a_id, a)
-                .cmp(&preview(b_id, b))
-                .then_with(|| b.release_date.cmp(&a.release_date))
-                .then_with(|| a_id.cmp(b_id))
-        });
-        VertexModels {
-            models: models
-                .into_iter()
-                .map(|(id, m)| VertexModel {
-                    id: id.clone(),
-                    preview: preview(id, m),
-                })
-                .collect(),
-            error: state.error.clone(),
-        }
     }
     pub fn has_source(&self, source: &str) -> bool {
         self.ensure_loaded();
@@ -830,57 +780,6 @@ mod tests {
         .unwrap();
         Catalog::new(dir)
     }
-    #[tokio::test]
-    async fn vertex_catalog_filters_candidates_and_retains_them_on_failure() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let model = |status: &str, date: &str, tool: bool, output: Value| json!({"status":status,"release_date":date,"tool_call":tool,"modalities":{"input":["text","image"],"output":output}});
-        let source = json!({"google-vertex":{"models":{
-            "gemini-old":model("deprecated","2026-11-01",true,json!(["text"])),
-            "gemini-new":model("stable","2026-10-01",true,json!(["text"])),
-            "gemini-stable":model("stable","2026-09-01",true,json!(["text"])),
-            "gemini-preview":model("preview","2026-11-01",true,json!(["text"])),
-            "gemini-image":model("stable","2026-11-01",true,json!(["text","image"])),
-            "gemini-no-tools":model("stable","2026-11-01",false,json!(["text"])),
-            "other-model":model("stable","2026-11-01",true,json!(["text"]))
-        }},"google":{"models":{"gemini-other":model("stable","2026-11-01",true,json!(["text"]))}}});
-        let dir = tempfile::tempdir().unwrap();
-        let cat = Catalog::new(dir.path());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/api.json", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            for (status, body) in [(200, source.to_string()), (500, "failed".into())] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = [0; 4096];
-                let _ = socket.read(&mut request).await.unwrap();
-                socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
-            }
-        });
-        let upgraded = cat.vertex_models_from(false, &url).await.unwrap();
-        let ids = |v: &VertexModels| v.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
-        assert_eq!(
-            ids(&upgraded),
-            ["gemini-new", "gemini-stable", "gemini-preview"]
-        );
-        assert!(!upgraded.models[0].preview && upgraded.models[2].preview);
-        let bytes = std::fs::read(&cat.path).unwrap();
-        let cached: Index = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            cached.providers["google-vertex"].models["gemini-new"]
-                .modalities
-                .as_ref()
-                .unwrap()["input"],
-            json!(["text", "image"])
-        );
-        assert_eq!(
-            ids(&cat.vertex_models_from(false, &url).await.unwrap()),
-            ids(&upgraded)
-        );
-        let failed = cat.vertex_models_from(true, &url).await.unwrap();
-        assert!(failed.error.is_some());
-        assert_eq!(ids(&failed), ids(&upgraded));
-        assert_eq!(std::fs::read(&cat.path).unwrap(), bytes);
-        server.await.unwrap();
-    }
     #[test]
     fn frozen_prices_share_the_index_and_survive_catalog_replacement() {
         let dir = tempfile::tempdir().unwrap();
@@ -1067,6 +966,147 @@ mod tests {
             std::fs::read(dir.path().join("models-dev-index.json")).unwrap(),
             b"broken"
         );
+    }
+    #[tokio::test]
+    async fn stale_refresh_stays_offline_within_its_age_and_keeps_the_index_on_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api.json", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let count = hits.clone();
+        let server = tokio::spawn(async move {
+            for status in [200, 500] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let _ = socket.read(&mut request).await.unwrap();
+                count.fetch_add(1, Ordering::SeqCst);
+                let body =
+                    json!({"fixture":{"models":{"fixture-model":{"cost":{"input":9,"output":2}}}}})
+                        .to_string();
+                socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let hour = Duration::from_secs(3600);
+        let source =
+            json!({"fixture":{"models":{"fixture-model":{"cost":{"input":1,"output":2}}}}});
+        // Before the first attempt the cached index's own timestamp decides.
+        let recent = tempfile::tempdir().unwrap();
+        let cat = catalog(recent.path(), source.clone());
+        cat.refresh_stale_from(hour, &url).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        let dir = tempfile::tempdir().unwrap();
+        let mut old = crop(source).unwrap();
+        old.updated_at -= 2 * 3_600_000;
+        std::fs::write(
+            dir.path().join("models-dev-index.json"),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        let cat = Catalog::new(dir.path());
+        let cached = cat.view().version;
+        let refreshed = cat.refresh_stale_from(hour, &url).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(refreshed.error.is_none());
+        assert_ne!(refreshed.version, cached);
+        // The attempt just made keeps the next one offline.
+        cat.refresh_stale_from(hour, &url).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let bytes = std::fs::read(&cat.path).unwrap();
+        let failed = cat.refresh_stale_from(Duration::ZERO, &url).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(failed.error.is_some());
+        assert_eq!(failed.version, refreshed.version);
+        assert_eq!(std::fs::read(&cat.path).unwrap(), bytes);
+        assert_eq!(
+            cat.price("fixture-model").unwrap().0["models_dev_cost"]["input"],
+            9
+        );
+        // A failed attempt is still the last attempt.
+        cat.refresh_stale_from(hour, &url).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_refreshed_index_backfills_stored_gemini_rows_by_their_base_name() {
+        use crate::usage::{
+            model::{Attempt, Record, Tokens},
+            Service,
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api.json", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body =
+                json!({"google":{"models":{"gemini-4-neon":{"cost":{"input":3,"output":15}}}}})
+                    .to_string();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let prices = service.prices().unwrap();
+        let at = now();
+        let attempt = |id: &str, model: &str| Attempt {
+            id: id.into(),
+            started_at: at,
+            pricing_model: Some(model.into()),
+            tokens: Tokens {
+                input: Some(1000),
+                output: Some(100),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut record = Record {
+            id: "fixture-unpriced".into(),
+            client: "antigravity".into(),
+            source: "antigravity".into(),
+            started_at: at,
+            completed: true,
+            attempts: vec![
+                attempt("fixture-effort", "gemini-4-neon-xhigh"),
+                attempt("fixture-tiered", "gemini-4-neon-tiered-high"),
+            ],
+            ..Default::default()
+        };
+        for attempt in &mut record.attempts {
+            attempt.price = attempt.calculate_price(prices);
+            assert!(attempt.price.is_none());
+        }
+        service
+            .query(|store| store.write_batch(&[record], None))
+            .unwrap();
+        let before = prices.models_dev.view().version;
+        let view = prices
+            .models_dev
+            .refresh_stale_from(Duration::from_secs(3600), &url)
+            .await
+            .unwrap();
+        assert!(view.error.is_none() && view.version != before);
+        service.backfill_prices().unwrap();
+        assert_eq!(
+            service
+                .read(|store| store.detail("fixture-unpriced"))
+                .unwrap()
+                .cost()
+                .unwrap()
+                .normalize()
+                .to_string(),
+            "0.009"
+        );
+        server.await.unwrap();
     }
     #[tokio::test]
     async fn unchanged_refresh_keeps_cache_bytes_and_changed_prices_backfill_only_missing_costs() {

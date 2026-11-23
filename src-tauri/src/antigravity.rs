@@ -48,6 +48,9 @@ const BOOL_SETTINGS: &[&str] = &[
 #[path = "antigravity_auth.rs"]
 pub mod auth;
 
+#[path = "antigravity_cli.rs"]
+pub mod cli;
+
 pub fn home() -> Result<PathBuf> {
     dirs::home_dir()
         .map(|p| p.join(".gemini"))

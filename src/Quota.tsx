@@ -221,12 +221,20 @@ function emptyQuota(p: Provider): ProviderQuota {
 }
 const number = (n: number) =>
   n.toLocaleString(undefined, { maximumFractionDigits: 3 });
-const compactNumberValue = (n: number) => {
-  const abs = Math.abs(n);
-  if (abs >= 1000) return compactNumber(n);
-  return n.toLocaleString(undefined, {
-    maximumFractionDigits: abs >= 100 ? 1 : 2,
-  });
+// A capsule shows whole units from 1 up and two decimals below, cut off rather
+// than rounded so it never overstates the balance. Micro-units come first:
+// 0.29 * 100 on its own would be cut to 0.28.
+const capsuleNumber = (n: number) => {
+  const micro = Math.round(n * 1e6);
+  const fine = Math.abs(micro) < 1e6;
+  return (
+    fine ? Math.trunc(micro / 1e4) / 100 : Math.trunc(micro / 1e6)
+  ).toLocaleString(
+    undefined,
+    fine
+      ? { minimumFractionDigits: 2, maximumFractionDigits: 2 }
+      : { maximumFractionDigits: 0 },
+  );
 };
 const amount = (p: QuotaPlan) =>
   p.unlimited
@@ -234,12 +242,12 @@ const amount = (p: QuotaPlan) =>
     : p.remaining == null
       ? "未返回剩余额度"
       : `${number(p.remaining)} ${p.unit}`;
-const compactAmount = (p: QuotaPlan) =>
+const capsuleAmount = (p: QuotaPlan, missing = "未返回剩余额度") =>
   p.unlimited
     ? "无限制"
     : p.remaining == null
-      ? "未返回剩余额度"
-      : `${compactNumberValue(p.remaining)} ${p.unit}`;
+      ? missing
+      : `${capsuleNumber(p.remaining)} ${p.unit}`;
 const isWalletPlaceholderName = (name?: string | null) =>
   !name ||
   /^(钱包余额|账户余额|余额|钱包|未识别套餐|订阅|wallet(\s*balance)?|account\s*balance|balance)$/i.test(
@@ -325,6 +333,7 @@ export function QuotaInfo({
   compact = false,
   terse = false,
   details,
+  clientId,
 }: {
   provider: Provider;
   quota?: ProviderQuota;
@@ -332,6 +341,8 @@ export function QuotaInfo({
   compact?: boolean;
   terse?: boolean;
   details?: () => void;
+  // Colours a healthy capsule with its client's accent.
+  clientId?: ClientId;
 }) {
   const [showDetails, setShowDetails] = useState(false);
   const [, updateRetry] = useState(0);
@@ -364,12 +375,8 @@ export function QuotaInfo({
               : "未查询"));
   const headline = formatHeadline(amount);
   const compactHeadline = terse && quota?.plans[0]
-    ? quota.plans[0].unlimited
-      ? "无限制"
-      : quota.plans[0].remaining == null
-        ? "未返回额度"
-        : compactNumberValue(quota.plans[0].remaining)
-    : formatHeadline(compactAmount);
+    ? capsuleAmount(quota.plans[0], "未返回额度")
+    : formatHeadline(capsuleAmount);
   const source =
     quota?.source === "sub2api"
       ? "Sub2API"
@@ -405,6 +412,7 @@ export function QuotaInfo({
       <div
         className="quota-compact"
         data-tone={tone}
+        data-client={clientId}
         aria-label={`${provider.name} 额度`}
       >
         {subscriptionLabel && <span className="quota-subscription" title={subscriptionLabel}>{subscriptionLabel}</span>}

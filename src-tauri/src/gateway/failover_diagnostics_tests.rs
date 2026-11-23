@@ -884,6 +884,7 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
         &gateway,
         &dir,
         Edit::SaveProvider {
+            delegate: Default::default(),
             search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
@@ -891,6 +892,10 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
             quota_access_token: None,
             id: Some(backup_id.clone()),
             base_url: providers[1].base_url.clone(),

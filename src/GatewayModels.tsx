@@ -87,7 +87,7 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
     }
   }
   const edit = (
-    op: "add" | "remove" | "pin" | "unpin",
+    op: "add" | "remove" | "pin" | "unpin" | "first",
     id: string,
     source?: string,
   ) => run(() => command("edit_model_list", { clientId, op, id, source }));
@@ -271,6 +271,16 @@ export default function GatewayModels({ clientId }: { clientId: ClientId }) {
                         >
                           {model.custom ? "已改参数" : "编辑参数"}
                         </button>
+                        {clientId === "agy" && (
+                          <button
+                            disabled={busy}
+                            aria-pressed={!!model.first}
+                            title="agy 启动时使用列表中的第一个模型"
+                            onClick={() => void edit("first", model.id)}
+                          >
+                            {model.first ? "取消默认" : "设为默认"}
+                          </button>
+                        )}
                         {!view.passthrough && (
                           <button
                             disabled={busy}

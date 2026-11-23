@@ -607,6 +607,9 @@ impl Collector {
 #[derive(Clone)]
 pub struct Target {
     pub url: String,
+    /// The provider's address when it is Claude on Vertex AI, where a
+    /// request goes to an address made from its own body instead.
+    pub vertex: Option<String>,
     pub headers: reqwest::header::HeaderMap,
     pub model: String,
     pub protocol: String,
@@ -785,10 +788,20 @@ pub async fn execute_body(
         }
     }
     let result = async {
+        let mut body = std::borrow::Cow::Borrowed(body);
+        let mut url = std::borrow::Cow::Borrowed(target.url.as_str());
+        if let Some(base) = &target.vertex {
+            url = body
+                .to_mut()
+                .as_object_mut()
+                .and_then(|body| crate::gateway::vertex::request(base, "/v1/messages", body))
+                .ok_or_else(|| Failure::new("invalid_model_or_request", false))?
+                .into();
+        }
         let response = client
-            .post(&target.url)
+            .post(url.as_ref())
             .headers(target.headers.clone())
-            .json(body)
+            .json(&body)
             .send()
             .await
             .map_err(network_failure)?;

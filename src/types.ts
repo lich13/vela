@@ -1,4 +1,5 @@
-export type ClientId = "codex" | "claude" | "grok" | "dsh";
+/** `agy` is the Antigravity CLI on the gateway; `antigravity` names the app's own files and usage. */
+export type ClientId = "codex" | "claude" | "agy" | "grok" | "dsh";
 export type Preferences = {
   codexHome: string;
   claudeHome: string;
@@ -71,11 +72,24 @@ export type UpdateInfo = {
   hasUpdate: boolean;
   latestVersion: string | null;
 };
-/** Seconds between upstream retries when a provider has no saved value. */
-/** Endless mode: wait after a 429 or 520. */
+/** Endless mode: wait after a status listed in the provider's risk codes. */
 export const DEFAULT_UPSTREAM_RETRY_SECONDS = 33;
+/** Endless mode: wait after a rate limit. */
+export const DEFAULT_LIMIT_RETRY_SECONDS = 33;
 /** Endless mode: wait after any other retried failure. */
 export const DEFAULT_NORMAL_RETRY_SECONDS = 3;
+/** Endless mode: 0–10, how far load stretches the risk and limit waits. */
+export const DEFAULT_RETRY_INTENSITY = 5;
+/** Seconds an endless provider is sent nothing after a rate limit. */
+export const DEFAULT_LIMIT_REST_SECONDS = 8;
+/** Endless mode: the risk codes of a provider that has no saved list. */
+export const DEFAULT_RISK_CODES: Record<ClientId, number[]> = {
+  codex: [],
+  claude: [520],
+  agy: [],
+  grok: [],
+  dsh: [524],
+};
 export const errorOf = (e: unknown): AppError =>
   typeof e === "object" && e !== null && "message" in e
     ? (e as AppError)
@@ -106,6 +120,10 @@ export type GatewaySettings = {
   maxWaiting: number;
   networkProbe: boolean;
   networkProbeAttempts: number;
+  /** Claude only: longest silence once a stream has carried model output. */
+  stallSeconds: number;
+  /** Longest silence of a started response while its endpoint is held offline. */
+  holdIdleSeconds: number;
 };
 export type Health = {
   state: "closed" | "open" | "half_open";
@@ -162,19 +180,44 @@ export type Provider = {
   dshModels: Record<string, string | null> | null;
   handoffAfterCompaction: boolean;
   takeNewThreads: boolean;
+  /** Codex and Claude: this provider serves the compaction requests. */
+  takeCompaction: boolean;
+  /** Replaces the model a compaction request asked for; "" keeps it. */
+  compactionModel: string;
+  /** Replaces the reasoning effort a compaction request asked for; "" keeps it. */
+  compactionEffort: string;
+  /** Codex and Claude: this provider serves approvals, titles, summaries and memories. */
+  takeAuxiliary: boolean;
+  /** Replaces the model an auxiliary request asked for; "" keeps it. */
+  auxiliaryModel: string;
+  /** Replaces the reasoning effort an auxiliary request asked for; "" keeps it. */
+  auxiliaryEffort: string;
+  /** Claude and Grok: this provider serves the searches the client's web search tool sends. */
+  takeWebSearch: boolean;
+  /** Replaces the model a web search request asked for; "" keeps it. */
+  webSearchModel: string;
+  /** Replaces the reasoning effort a web search request asked for; "" keeps it. */
+  webSearchEffort: string;
   searchOnly: boolean;
   endOnMessageStop: boolean;
   filterCountTokens: boolean;
   bufferCompleteResponse: boolean;
   endlessMode: boolean;
   upstreamRetrySeconds: number;
+  limitRetrySeconds: number;
+  /** Endless mode: seconds nothing is sent after a rate limit; 0 for none. */
+  limitRestSeconds: number;
   normalRetrySeconds: number;
+  /** Endless mode: upstream statuses retried at the risk-control interval. */
+  riskCodes: number[];
+  retryIntensity: number;
+  /** Claude only: request model to the upstream model sent in its place. */
+  modelMap: Record<string, string>;
 };
 export type GatewayListener = {
   port: number;
   revision: string;
   runningClients: ClientId[];
-  antigravityActive: boolean;
 };
 export type GrokModel = {
   key: string;
@@ -200,6 +243,8 @@ export type CurrentConnection = {
 export type DshProfileCurrent = { profile: string; current: CurrentConnection };
 export type GatewayState = {
   listener: GatewayListener;
+  /** Antigravity, while its gateway runs: where the `agy` function was written. */
+  agyShell?: { profiles: string[]; command: string | null } | null;
   grokManaged: boolean;
   dshProfile: {
     profile: string;
@@ -232,6 +277,9 @@ export type GatewayState = {
     elapsedSeconds: number;
     remainingSeconds: number | null;
     phase: string;
+    receivedBytes?: number | null;
+    bytesPerSecond?: number | null;
+    silentSeconds?: number | null;
   }[];
   capacityRetries: {
     providerId: string;
@@ -327,7 +375,7 @@ export type ModelMetadata = {
   reasoningEfforts: Record<string, string | null> | null;
 };
 /** Reasoning efforts weakest first; matches Rust `CODEX_EFFORTS`. */
-const EFFORT_ORDER = [
+export const EFFORT_ORDER = [
   "none",
   "minimal",
   "low",

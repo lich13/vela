@@ -30,6 +30,21 @@ pub(super) fn hard_rejection(d: &Details) -> bool {
 pub(super) fn temporary(d: &Details) -> bool {
     temporary_basis(d.error_basis)
 }
+/// The rejection names the limit it hit, such as requests or tokens a minute
+/// or the quota of a day.
+pub(super) fn dimensioned(d: &Details) -> bool {
+    d.error_basis == Some(ErrorBasis::QuotaExhausted)
+        || (temporary(d)
+            && !matches!(
+                d.error_basis,
+                Some(
+                    ErrorBasis::Capacity
+                        | ErrorBasis::UnknownRateLimit
+                        | ErrorBasis::RiskControl
+                        | ErrorBasis::LimitRetry
+                )
+            ))
+}
 fn temporary_basis(basis: Option<ErrorBasis>) -> bool {
     matches!(
         basis,
@@ -45,6 +60,8 @@ fn temporary_basis(basis: Option<ErrorBasis>) -> bool {
                 | ErrorBasis::UnknownRateLimit
                 | ErrorBasis::Capacity
                 | ErrorBasis::UsageLimit
+                | ErrorBasis::RiskControl
+                | ErrorBasis::LimitRetry
         )
     )
 }
@@ -170,18 +187,80 @@ fn code_kind(code: &str) -> Option<ErrorBasis> {
         .find(|r| r.value == code)
         .map(|r| r.category)
         .or_else(|| is_permanent_reason(Some(&code)).then_some(ErrorBasis::QuotaExhausted))
+        // What new-api charges for content its upstream refused.
+        .or_else(|| {
+            code.starts_with("violation_fee.")
+                .then_some(ErrorBasis::SafetyRejection)
+        })
         .or_else(|| model_message(&code).then_some(ErrorBasis::ModelUnavailable))
 }
 
-/// Generic wrappers only say that the upstream failed. They never outrank a
-/// concrete message, quota detail or user rule in the same envelope.
+/// Generic wrappers only say that the upstream failed or that the request was
+/// refused. They never outrank a concrete message, quota detail or user rule
+/// in the same envelope.
 fn specific_code_kind(code: &str) -> Option<ErrorBasis> {
     (!matches!(
         code.to_ascii_lowercase().as_str(),
-        "api_error" | "server_error" | "internal_error" | "internal_server_error"
+        "api_error"
+            | "server_error"
+            | "internal_error"
+            | "internal_server_error"
+            | "upstream_error"
+            | "invalid_request_error"
+            | "not_found_error"
     ))
     .then(|| code_kind(code))
     .flatten()
+}
+
+/// The basis an envelope states in a code, a type or a quota detail of its own.
+fn structured_kind(error: &Value) -> Option<ErrorBasis> {
+    cloudflare(error)
+        .or_else(|| structured_codes(error).find_map(specific_code_kind))
+        .or_else(|| explicit_type(error))
+        .or_else(|| quota_details(error).map(|q| q.0))
+}
+
+/// The code of an error Cloudflare answers itself: its plain body, the page
+/// it shows a browser or the problem document it sends an agent.
+fn cloudflare_code(error: &Value) -> Option<u64> {
+    let Some(text) = error.as_str() else {
+        return (error.get("cloudflare_error") == Some(&Value::Bool(true)))
+            .then(|| error.get("error_code").and_then(Value::as_u64))
+            .flatten();
+    };
+    let text = text.trim();
+    let code = text.strip_prefix("error code: ").or_else(|| {
+        let (_, rest) = text.split_once("class=\"cf-error-code\">")?;
+        rest.split('<').next()
+    })?;
+    code.trim().parse().ok()
+}
+
+/// Cloudflare bans the caller or the site behind it is at fault. Its rate
+/// limits are left to the status and the words beside the code.
+fn cloudflare(error: &Value) -> Option<ErrorBasis> {
+    let code = cloudflare_code(error)?;
+    if super::failure_rules::CLOUDFLARE_BLOCKS.contains(&code) {
+        Some(ErrorBasis::Permission)
+    } else if super::failure_rules::CLOUDFLARE_LIMITS.contains(&code) {
+        None
+    } else {
+        matches!(code, 500..=599 | 1000..=1999).then_some(ErrorBasis::ServiceError)
+    }
+}
+
+/// new-api appends its request id to every message it relays, once a hop.
+fn without_request_id(text: &str) -> &str {
+    let mut text = text.trim_end();
+    while let Some(at) = text.rfind(" (request id: ") {
+        let id = &text[at + 14..];
+        if !id.ends_with(')') || id[..id.len() - 1].contains(['(', ')']) {
+            break;
+        }
+        text = text[..at].trim_end();
+    }
+    text
 }
 
 fn positive_message(text: &str) -> bool {
@@ -199,7 +278,7 @@ pub(super) fn bare_capacity(text: &str) -> bool {
         .join(" ")
         .to_lowercase();
     matches!(
-        normalized.trim_end_matches('.'),
+        without_request_id(&normalized).trim_end_matches('.'),
         "selected model is at capacity"
             | "selected model is at capacity. please try a different model"
     )
@@ -214,7 +293,7 @@ fn bare_unavailable(text: &str) -> bool {
         .join(" ")
         .to_lowercase();
     matches!(
-        normalized.trim_end_matches(['.', '。']),
+        without_request_id(&normalized).trim_end_matches(['.', '。']),
         "service unavailable"
             | "service temporarily unavailable"
             | "server overloaded"
@@ -242,6 +321,9 @@ fn message_kind(text: &str) -> Option<ErrorBasis> {
     }
     let s = text.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| s.contains(w));
+    if has(super::failure_rules::REQUEST_WORDS) {
+        return Some(InvalidRequest);
+    }
     if has(super::failure_rules::MSG_0)
         || (has(super::failure_rules::MSG_1) && has(super::failure_rules::MSG_2))
     {
@@ -249,6 +331,9 @@ fn message_kind(text: &str) -> Option<ErrorBasis> {
     }
     if has(super::failure_rules::MSG_3) {
         return Some(SafetyRejection);
+    }
+    if let Some(pool) = pool_kind(&s) {
+        return Some(pool);
     }
     if model_message(text) {
         return Some(ModelUnavailable);
@@ -271,6 +356,10 @@ fn message_kind(text: &str) -> Option<ErrorBasis> {
     if has(super::failure_rules::MSG_7) {
         return Some(Permission);
     }
+    // A ramp names the tokens or requests it limits: read it before those.
+    if has(super::failure_rules::MSG_13) {
+        return Some(Acceleration);
+    }
     if has(super::failure_rules::MSG_8) {
         return Some(InputTokens);
     }
@@ -289,9 +378,6 @@ fn message_kind(text: &str) -> Option<ErrorBasis> {
     if rpm_message(text) {
         return Some(Rpm);
     }
-    if has(super::failure_rules::MSG_13) {
-        return Some(Acceleration);
-    }
     if s.trim() == "capacity" || has(super::failure_rules::MSG_14) {
         return Some(Capacity);
     }
@@ -304,7 +390,54 @@ fn message_kind(text: &str) -> Option<ErrorBasis> {
     None
 }
 
+/// A message that is nothing but a builtin code reads as that code.
+fn bare_code(text: &str) -> Option<ErrorBasis> {
+    let text = text.to_lowercase();
+    let code = without_request_id(text.trim());
+    super::failure_rules::CODES
+        .iter()
+        .find(|known| known.value == code)
+        .map(|known| known.category)
+}
+
+fn messages(error: &Value) -> impl Iterator<Item = &str> {
+    ["message", "detail", "errorMessage"]
+        .into_iter()
+        .filter_map(|key| error.get(key).and_then(Value::as_str))
+}
+
+/// What the words of an envelope say, apart from its codes and types.
+fn told(error: &Value) -> Option<ErrorBasis> {
+    error
+        .as_str()
+        .into_iter()
+        .chain(messages(error))
+        .find_map(|text| bare_code(text).or_else(|| message_kind(text)))
+}
+
+/// What the message adds to a code or type that names only a broad class.
+fn refined(explicit: ErrorBasis, error: &Value) -> ErrorBasis {
+    use ErrorBasis::*;
+    match (explicit, messages(error).find_map(message_kind)) {
+        // A relay may refuse for its load in the envelope of a missing model.
+        (ModelUnavailable, Some(load)) if temporary_basis(Some(load)) => load,
+        // The day, week or month a message names is that quota running out.
+        (UsageLimit | Billing, Some(QuotaExhausted)) => QuotaExhausted,
+        // A refusal of the content is about the request, not the account.
+        (Permission | InvalidRequest, Some(SafetyRejection)) => SafetyRejection,
+        _ => explicit,
+    }
+}
+
+/// Gemini states a limit of zero only in the line its message has for the metric.
+fn zero_limit(message: &str, metric: &str) -> bool {
+    message
+        .split_once(&format!("metric: {metric}, limit: 0"))
+        .is_some_and(|(_, rest)| !rest.starts_with(|c: char| c.is_ascii_digit() || c == '.'))
+}
+
 fn quota_details(error: &Value) -> Option<(ErrorBasis, Option<HealthScope>)> {
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
     let mut found = None;
     for d in error
         .get("details")
@@ -340,7 +473,10 @@ fn quota_details(error: &Value) -> Option<(ErrorBasis, Option<HealthScope>)> {
                 } else {
                     HealthScope::Provider
                 };
-            let zero = v.get("quotaValue").is_some_and(|v| v == 0 || v == "0");
+            let zero = v.get("quotaValue").is_some_and(|v| v == 0 || v == "0")
+                || v.get("quotaMetric")
+                    .and_then(Value::as_str)
+                    .is_some_and(|metric| zero_limit(message, metric));
             let basis = if zero
                 || ["perday", "perweek", "permonth"]
                     .iter()
@@ -376,8 +512,8 @@ fn quota_details(error: &Value) -> Option<(ErrorBasis, Option<HealthScope>)> {
 }
 
 fn classification(error: &Value) -> (Option<ErrorBasis>, Option<HealthScope>) {
-    let explicit = structured_codes(error)
-        .find_map(specific_code_kind)
+    let explicit = cloudflare(error)
+        .or_else(|| structured_codes(error).find_map(specific_code_kind))
         .or_else(|| {
             error
                 .as_str()
@@ -386,20 +522,12 @@ fn classification(error: &Value) -> (Option<ErrorBasis>, Option<HealthScope>) {
                 .and_then(code_kind)
         });
     let quota = quota_details(error);
-    let explicit = explicit.or_else(|| explicit_type(error));
+    let explicit = explicit
+        .or_else(|| explicit_type(error))
+        .map(|basis| refined(basis, error));
     let matched = explicit
         .or_else(|| quota.map(|q| q.0))
-        .or_else(|| {
-            error
-                .as_str()
-                .into_iter()
-                .chain(
-                    ["message", "detail", "errorMessage"]
-                        .into_iter()
-                        .filter_map(|k| error.get(k).and_then(Value::as_str)),
-                )
-                .find_map(message_kind)
-        })
+        .or_else(|| told(error))
         .or_else(|| is_model(error).then_some(ErrorBasis::ModelUnavailable))
         .or_else(|| {
             error
@@ -430,16 +558,26 @@ fn classification(error: &Value) -> (Option<ErrorBasis>, Option<HealthScope>) {
                 })
         })
         .or_else(|| structured_codes(error).find_map(code_kind));
-    let basis = matched;
+    // `upstream_error` reports the account a relay used, which the relay
+    // replaces: what the message says about that account is a fault here.
+    let relayed = ["type", "code"]
+        .into_iter()
+        .filter_map(|key| error.get(key).and_then(Value::as_str))
+        .any(|kind| kind.eq_ignore_ascii_case("upstream_error"));
+    let basis = match matched {
+        Some(
+            ErrorBasis::Billing
+            | ErrorBasis::Authentication
+            | ErrorBasis::Permission
+            | ErrorBasis::QuotaExhausted,
+        ) if relayed && explicit.is_none() => Some(ErrorBasis::ServiceError),
+        matched => matched,
+    };
     let scope = if quota.is_some() && (explicit.is_none() || quota.map(|q| q.0) == explicit) {
         quota.and_then(|q| q.1)
     } else if matches!(basis, Some(ErrorBasis::ModelUnavailable))
-        || (basis == Some(ErrorBasis::Permission)
-            && (error.get("param").and_then(Value::as_str) == Some("model")
-                || error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .is_some_and(model_message)))
+        || (basis == Some(ErrorBasis::Permission) && about_model(error))
+        || (basis == Some(ErrorBasis::QuotaExhausted) && metered_model(error))
     {
         Some(HealthScope::Model)
     } else if matches!(
@@ -465,6 +603,7 @@ fn classification(error: &Value) -> (Option<ErrorBasis>, Option<HealthScope>) {
             .and_then(Value::as_str)
             .is_some_and(|message| {
                 positive_message(message)
+                    && pool_kind(&message.to_lowercase()).is_none()
                     && [
                         "organization",
                         "project",
@@ -525,22 +664,29 @@ pub(super) fn http_value_with_rules(
     rules: &[super::failure_rules::Rule],
 ) -> (Details, Option<Duration>) {
     let mut d = details_value(value, status >= 400);
-    let structured = envelope(value, true, 0).and_then(|e| {
-        structured_codes(e)
-            .find_map(specific_code_kind)
-            .or_else(|| explicit_type(e))
-            .or_else(|| quota_details(e).map(|q| q.0))
-    });
+    let structured = envelope(value, true, 0).and_then(structured_kind);
     let allow_temporary_text = retryable_status(status) || status < 400 || structured.is_some();
     if !allow_temporary_text && temporary(&d) {
         d.error_basis = Some(ErrorBasis::InvalidRequest);
         d.health_scope = Some(HealthScope::Request);
     }
     unavailable_429(Some(status), &mut d);
-    if d.error_basis.is_none() {
-        d.error_basis = status_error_basis(status);
-        if hard_rejection(&d) {
-            d.health_scope = Some(HealthScope::Provider);
+    // A wrapper that says no more than "bad request" or "upstream failed"
+    // yields to a status that says which. A 401 to 403 beside "upstream
+    // failed" is about the account a relay used, so that stays a fault, and
+    // so does a message that was read as one.
+    let said = envelope(value, true, 0).and_then(told);
+    let wrapper = structured.is_none()
+        && said.is_none_or(|said| Some(said) == d.error_basis)
+        && match d.error_basis {
+            Some(ErrorBasis::InvalidRequest) => matches!(status, 401 | 402 | 408 | 413 | 414),
+            Some(ErrorBasis::ServiceError) => !matches!(status, 401..=403),
+            _ => false,
+        };
+    if d.error_basis.is_none() || wrapper {
+        if let Some(basis) = status_error_basis(status) {
+            d.error_basis = Some(basis);
+            d.health_scope = hard_rejection(&d).then_some(HealthScope::Provider);
         }
     }
     refine_headers(&mut d, headers, structured.is_some());
@@ -550,6 +696,12 @@ pub(super) fn http_value_with_rules(
             if let Some(window) = window {
                 d.upstream_reason = Some(window.into());
             }
+        }
+    }
+    if d.error_basis == Some(ErrorBasis::UsageLimit) {
+        if let Some(basis) = workspace_stop(headers) {
+            d.error_basis = Some(basis);
+            d.health_scope = Some(HealthScope::Provider);
         }
     }
     if let Some(error) = envelope(value, status >= 400, 0) {
@@ -589,6 +741,24 @@ fn refine_headers(d: &mut Details, headers: &hyper::HeaderMap, structured: bool)
         }
     }
 }
+
+/// ChatGPT words a workspace out of credits, or past the cap its owner set,
+/// as any usage limit and names which only in a header.
+fn workspace_stop(headers: &hyper::HeaderMap) -> Option<ErrorBasis> {
+    match headers
+        .get(WORKSPACE_STOP)
+        .and_then(|value| value.to_str().ok())?
+    {
+        "workspace_owner_credits_depleted" | "workspace_member_credits_depleted" => {
+            Some(ErrorBasis::Billing)
+        }
+        "workspace_owner_usage_limit_reached" | "workspace_member_usage_limit_reached" => {
+            Some(ErrorBasis::QuotaExhausted)
+        }
+        _ => None,
+    }
+}
+const WORKSPACE_STOP: &str = "x-codex-rate-limit-reached-type";
 
 /// Subscription windows report a rejection in the unified headers. The outer
 /// `Some` means a window rejected the request; the inner value names it.
@@ -636,12 +806,7 @@ pub(super) fn details_with_headers(
     let Some(error) = envelope(value, false, 0) else {
         return (details, None);
     };
-    let structured = structured_codes(error)
-        .find_map(specific_code_kind)
-        .or_else(|| explicit_type(error))
-        .is_some()
-        || quota_details(error).is_some();
-    refine_headers(&mut details, headers, structured);
+    refine_headers(&mut details, headers, structured_kind(error).is_some());
     apply_custom(&mut details, error, headers, rules, true);
     details.error_basis.get_or_insert(ErrorBasis::ServiceError);
     let wait = retry_after_fields(error).max(retry_headers(headers, &details));
@@ -654,6 +819,7 @@ pub(super) fn limit_headers(headers: &hyper::HeaderMap) -> hyper::HeaderMap {
         .filter(|(name, value)| {
             value.len() <= 80
                 && (name.as_str() == "retry-after"
+                    || name.as_str() == WORKSPACE_STOP
                     || name.as_str().starts_with("x-ratelimit-")
                     || name.as_str().starts_with("anthropic-ratelimit-"))
         })
@@ -845,6 +1011,7 @@ pub fn capacity_message(message: &str) -> bool {
     let s = message.to_lowercase();
     [
         "at capacity",
+        "capacity is exhausted",
         "too many requests",
         "rate limit",
         "rate_limit",
@@ -860,14 +1027,82 @@ pub fn capacity_message(message: &str) -> bool {
     .iter()
     .any(|p| s.contains(p))
 }
+/// Why sub2api found no upstream account for the request, from a lowercased
+/// message. The pool is busy or cooling down unless the message names another
+/// cause; the counts are the ones it reports beside a model.
+fn pool_kind(s: &str) -> Option<ErrorBasis> {
+    if !((s.contains("no available") || s.contains("no healthy")) && s.contains("account"))
+        && !s.contains("failover budget exhausted")
+    {
+        return None;
+    }
+    let count = |name: &str| {
+        s.split_once(name)
+            .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    Some(if s.contains("only allows claude code clients") {
+        // It refuses this client, not the provider.
+        ErrorBasis::InvalidRequest
+    } else if s.contains("channel pricing restriction")
+        || s.contains("composite target platform unknown")
+        || (count("model_unsupported=") > 0
+            && count("model_unsupported=") + count("platform_filtered=") >= count("total="))
+    {
+        ErrorBasis::ModelUnavailable
+    } else if count("model_rate_limited=") > 0 {
+        // The same refusal is a 429 on its OpenAI routes.
+        ErrorBasis::UnknownRateLimit
+    } else {
+        ErrorBasis::Capacity
+    })
+}
 pub fn model_message(message: &str) -> bool {
     if !positive_message(message) || capacity_message(message) {
         return false;
     }
     let s = message.trim().to_lowercase();
+    if super::failure_rules::PARAMETER_PREFIXES
+        .iter()
+        .any(|p| s.starts_with(p))
+        || super::failure_rules::PARAMETER_PHRASES
+            .iter()
+            .any(|p| s.contains(p))
+    {
+        return false;
+    }
     super::failure_rules::MODEL_CODES.contains(&s.as_str())
         || (s.contains("model") && super::failure_rules::MODEL_EN.iter().any(|p| s.contains(p)))
         || (s.contains("模型") && super::failure_rules::MODEL_ZH.iter().any(|p| s.contains(p)))
+        || super::failure_rules::MODEL_PHRASES
+            .iter()
+            .any(|p| s.contains(p))
+}
+/// Anthropic answers for a model an account may not use with only its name.
+fn model_prefix(message: &str) -> bool {
+    message.trim_start().to_lowercase().starts_with("model:")
+}
+/// The envelope refuses the model it names rather than the account.
+fn about_model(error: &Value) -> bool {
+    error.get("param").and_then(Value::as_str) == Some("model")
+        || error
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| model_message(message) || model_prefix(message))
+}
+/// Google names beside its reason the model whose quota ran out.
+fn metered_model(error: &Value) -> bool {
+    error
+        .get("details")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|d| {
+            d.get("@type").and_then(Value::as_str)
+                == Some("type.googleapis.com/google.rpc.ErrorInfo")
+                && d.pointer("/metadata/model").is_some()
+        })
 }
 // Explicit wrappers only: never recurse into arbitrary user content.
 pub(super) fn has_error(value: &Value) -> bool {
@@ -979,7 +1214,7 @@ fn text_field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
             return rest[1..].split_once(quote).map(|(value, _)| value);
         }
         return rest
-            .split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '}'))
+            .split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '}' | ')'))
             .next();
     }
     None
@@ -1038,7 +1273,7 @@ fn is_model(error: &Value) -> bool {
         && error
             .get("message")
             .and_then(Value::as_str)
-            .is_some_and(|m| m.trim_start().to_lowercase().starts_with("model:"))
+            .is_some_and(model_prefix)
     {
         return true;
     }
@@ -1183,7 +1418,7 @@ fn rpm_message(text: &str) -> bool {
     super::failure_rules::RPM_WORDS
         .iter()
         .any(|m| s.contains(m))
-        || minute_limit_message(s.trim())
+        || minute_limit_message(without_request_id(s.trim()))
 }
 
 // Explicit new-api total/success request-limit messages. Require the whole

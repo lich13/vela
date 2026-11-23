@@ -615,6 +615,20 @@ struct SessionStore {
     reader: store::Store,
     client: String,
 }
+/// An attempt a newer price list could still price. Grok prompt totals span
+/// several calls and are never priced, so they do not ask for one.
+fn awaits_price(attempts: &[Attempt]) -> bool {
+    attempts
+        .iter()
+        .any(|a| a.price.is_none() && a.tokens.total().is_some() && a.transport != "session_prompt")
+}
+impl SessionStore {
+    fn hint_unpriced(&self, rows: &[Record]) {
+        if rows.iter().any(|r| awaits_price(&r.attempts)) {
+            self.service.0.price_hint.notify_one();
+        }
+    }
+}
 impl sessions::Repository for SessionStore {
     fn save_antigravity_quota(
         &mut self,
@@ -623,6 +637,12 @@ impl sessions::Repository for SessionStore {
     ) -> Result<()> {
         self.service
             .query(|db| db.save_antigravity_quota(id, periods))
+    }
+    fn antigravity_models(&self) -> Result<Option<String>> {
+        self.reader.antigravity_models()
+    }
+    fn save_antigravity_models(&mut self, models: &str) -> Result<()> {
+        self.service.query(|db| db.save_antigravity_models(models))
     }
     fn data_dir(&self) -> Option<&Path> {
         Some(&self.service.0.data_dir)
@@ -634,6 +654,7 @@ impl sessions::Repository for SessionStore {
         self.reader.source_generation(source)
     }
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
+        self.hint_unpriced(rows);
         self.service.query(|db| db.write_batch(rows, cursor))
     }
     fn write_batch_with_superseded(
@@ -642,6 +663,7 @@ impl sessions::Repository for SessionStore {
         superseded_ids: &[String],
         cursor: Option<(&str, &str)>,
     ) -> Result<()> {
+        self.hint_unpriced(rows);
         self.service
             .query(|db| db.write_batch_with_superseded(rows, superseded_ids, cursor))
     }
@@ -654,6 +676,7 @@ impl sessions::Repository for SessionStore {
         rows: &[Record],
         cursor: Option<(&str, &str)>,
     ) -> Result<()> {
+        self.hint_unpriced(rows);
         self.service
             .query(|db| db.stage_rebuild(source, rows, cursor))
     }
@@ -697,10 +720,7 @@ impl Drop for TraceInner {
         let completed = attempts
             .last()
             .is_some_and(|a| matches!(a.outcome.as_str(), "success" | "limited"));
-        if attempts
-            .iter()
-            .any(|a| a.price.is_none() && a.tokens.total().is_some())
-        {
+        if awaits_price(attempts) {
             self.service.0.price_hint.notify_one();
         }
         let record = Record {

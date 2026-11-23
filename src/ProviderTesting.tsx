@@ -25,6 +25,12 @@ import "./provider-testing.css";
 
 const DEFAULT_DEGRADED_MODEL = "gpt-5.6-luna";
 const engineNames = { modelTrace: "ModelTrace", lmDetector: "LM Detector" };
+const bankEngines: DetectionEngine[] = ["modelTrace", "lmDetector"];
+type BankRun = {
+  busy: boolean;
+  result?: "updated" | "up-to-date";
+  error?: string;
+};
 const bankResults: Record<string, string> = {
   updated: "已更新",
   "up-to-date": "已是最新",
@@ -100,13 +106,14 @@ export default function ProviderTesting({
   const [tab, setTab] = useState<Tab>("connection");
   const [endpoint, setEndpoint] = useState(provider.baseUrl);
   const [chosen, setChosen] = useState({ connection: "", fingerprint: "" });
+  const remembered = useRef(false);
   const [concurrency, setConcurrency] = useState(1);
   const promptState = useTestPrompt(state?.connectionPrompt);
   const { prompt } = promptState;
   const [tokenizer, setTokenizer] = useState(false);
-  const [bankEngine, setBankEngine] = useState<DetectionEngine>(
-    gateway.clientId === "codex" ? "modelTrace" : "lmDetector",
-  );
+  const [bankRuns, setBankRuns] = useState<
+    Partial<Record<DetectionEngine, BankRun>>
+  >({});
   const [catalog, setCatalog] = useState<{
     endpoint: string;
     value: ProviderTestModels;
@@ -143,7 +150,6 @@ export default function ProviderTesting({
     platform?.engine === "lmDetector"
       ? platform.lmDetectorSamples
       : (platform?.modelTraceSamples ?? 3);
-  const selectedBank = state?.banks[bankEngine];
   const activeBankModels = (
     state?.banks[platform?.engine ?? "modelTrace"]?.models ?? []
   ).filter((item) => !item.name.includes("/"));
@@ -208,6 +214,15 @@ export default function ProviderTesting({
     setDetectionSaved(JSON.stringify(state.detection));
     setDetectionRevision(state.revision);
   }, [state, detection]);
+  useEffect(() => {
+    if (!state || remembered.current) return;
+    remembered.current = true;
+    // The catalog default may already be in place; the remembered model replaces it.
+    setChosen((current) => ({
+      connection: current.connection || state.lastModels.connection,
+      fingerprint: state.lastModels.fingerprint || current.fingerprint,
+    }));
+  }, [state]);
   useEffect(() => {
     if (!state || !testing) return;
     const jobs = state.jobs.filter(
@@ -373,6 +388,34 @@ export default function ProviderTesting({
   const readDetection = async () => {
     await refresh(true);
   };
+  const updateBanks = () =>
+    perform(async () => {
+      const revision = state?.banks.modelTrace.version?.revision;
+      setBankRuns({ modelTrace: { busy: true }, lmDetector: { busy: true } });
+      // Sources update side by side, so one failing or stalling never holds the other back.
+      await Promise.all(
+        bankEngines.map(async (engine) => {
+          const run: BankRun = { busy: false };
+          try {
+            const bank = await command("provider_test_update_bank", { engine });
+            setState(
+              (current) =>
+                current && {
+                  ...current,
+                  banks: { ...current.banks, [engine]: bank },
+                },
+            );
+            // ModelTrace reports no result of its own; an unchanged revision was already current.
+            if (engine === "modelTrace" && !bank.error)
+              run.result =
+                bank.version?.revision === revision ? "up-to-date" : "updated";
+          } catch (e) {
+            run.error = errorOf(e).message;
+          }
+          setBankRuns((current) => ({ ...current, [engine]: run }));
+        }),
+      );
+    });
   const tabs: [Tab, string][] = [
     ["connection", "连接测试"],
     ...(fingerprint ? [["fingerprint", "模型指纹"] as [Tab, string]] : []),
@@ -1009,84 +1052,87 @@ export default function ProviderTesting({
             )}
           </>
         )}
-        {tab === "bank" && selectedBank && (
-          <>
-            <label className="provider-test-field provider-test-bank-source">
-              <span>检测源</span>
-              <select
-                aria-label="指纹库检测源"
-                value={bankEngine}
-                disabled={busy || selectedBank.updating}
-                onChange={(e) =>
-                  setBankEngine(e.target.value as DetectionEngine)
-                }
-              >
-                <option value="modelTrace">ModelTrace</option>
-                <option value="lmDetector">LM Detector</option>
-              </select>
-            </label>
-            <dl className="provider-test-summary">
-              <div>
-                <dt>来源</dt>
-                <dd>
-                  {selectedBank.source === "builtin" ||
-                  selectedBank.source === "bundled"
-                    ? "内置"
-                    : selectedBank.source === "cache"
-                      ? "已更新"
-                      : "—"}
-                </dd>
-              </div>
-              <div>
-                <dt>版本</dt>
-                <dd>
-                  {typeof selectedBank.version?.revision === "string" &&
-                  selectedBank.version.revision
-                    ? selectedBank.version.revision.slice(0, 7)
-                    : "—"}
-                </dd>
-              </div>
-              <div>
-                <dt>检查时间</dt>
-                <dd>{date(selectedBank.checkedAt)}</dd>
-              </div>
-              {bankEngine === "lmDetector" && (
-                <>
-                  <div>
-                    <dt>更新时间</dt>
-                    <dd>{date(selectedBank.updatedAt)}</dd>
+        {tab === "bank" && state && (
+          <div className="provider-test-banks">
+            {bankEngines.map((engine) => {
+              const bank = state.banks[engine];
+              const run = bankRuns[engine];
+              const updating = run?.busy || bank.updating;
+              const failure = run?.error ?? bank.error;
+              return (
+                <section
+                  key={engine}
+                  className="provider-test-bank-source"
+                  aria-label={engineNames[engine]}
+                >
+                  <div className="provider-test-bank-status">
+                    <h3>{engineNames[engine]}</h3>
+                    <dl className="provider-test-summary">
+                      <div>
+                        <dt>来源</dt>
+                        <dd>
+                          {bank.source === "builtin" ||
+                          bank.source === "bundled"
+                            ? "内置"
+                            : bank.source === "cache"
+                              ? "已更新"
+                              : "—"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>版本</dt>
+                        <dd>
+                          {typeof bank.version?.revision === "string" &&
+                          bank.version.revision
+                            ? bank.version.revision.slice(0, 7)
+                            : "—"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>检查时间</dt>
+                        <dd>{date(bank.checkedAt)}</dd>
+                      </div>
+                      <div>
+                        <dt>更新结果</dt>
+                        <dd role="status">
+                          {updating
+                            ? "检查中"
+                            : failure
+                              ? "检查失败"
+                              : (bankResults[
+                                  bank.result ?? run?.result ?? ""
+                                ] ?? "—")}
+                        </dd>
+                      </div>
+                      {engine === "lmDetector" && (
+                        <div>
+                          <dt>更新时间</dt>
+                          <dd>{date(bank.updatedAt)}</dd>
+                        </div>
+                      )}
+                    </dl>
+                    {!updating && failure && (
+                      <p className="provider-test-error" role="alert">
+                        {failure}
+                      </p>
+                    )}
                   </div>
-                  <div>
-                    <dt>更新结果</dt>
-                    <dd role="status">
-                      {busy || selectedBank.updating
-                        ? "检查中"
-                        : selectedBank.error
-                          ? "检查失败"
-                          : (bankResults[selectedBank.result ?? ""] ?? "—")}
-                    </dd>
+                  <div className="provider-test-bank">
+                    <div className="provider-test-bank-head">
+                      <span>模型</span>
+                      <span>标识</span>
+                    </div>
+                    {bank.models.map((model) => (
+                      <div key={model.id}>
+                        <span>{model.name}</span>
+                        <span>{model.id}</span>
+                      </div>
+                    ))}
                   </div>
-                </>
-              )}
-            </dl>
-            <div className="provider-test-bank">
-              <div className="provider-test-bank-head">
-                <span>模型</span>
-                <span>标识</span>
-              </div>
-              {selectedBank.models.map((model) => (
-                <div key={model.id}>
-                  <span>{model.name}</span>
-                  <span>{model.id}</span>
-                </div>
-              ))}
-            </div>
-            {selectedBank.error && (
-              <p className="provider-test-error" role="alert">
-                {selectedBank.error}
-              </p>
-            )}
-          </>
+                </section>
+              );
+            })}
+          </div>
         )}
       </div>
       <footer className="provider-test-footer">
@@ -1176,21 +1222,13 @@ export default function ProviderTesting({
           {tab === "bank" && (
             <button
               className="primary"
-              disabled={busy || selectedBank?.updating}
-              onClick={() =>
-                void perform(async () => {
-                  const updated = await command("provider_test_update_bank", {
-                    engine: bankEngine,
-                  });
-                  if (bankEngine === "lmDetector") {
-                    return;
-                  }
-                  if (updated.error) throw new Error(updated.error);
-                  setNotice(`${engineNames[bankEngine]} 指纹库已更新`);
-                })
+              disabled={
+                busy ||
+                bankEngines.some((engine) => state?.banks[engine].updating)
               }
+              onClick={() => void updateBanks()}
             >
-              {bankEngine === "lmDetector" ? "检查更新" : "更新指纹库"}
+              一键更新
             </button>
           )}
         </div>

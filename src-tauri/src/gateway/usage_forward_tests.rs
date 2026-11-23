@@ -122,6 +122,7 @@ impl Fixture {
         let data = dir.path().join("gateway-data");
         let gateway = match client {
             ClientId::Dsh => panic!("DSH profile path is covered separately"),
+            ClientId::Agy => panic!("Antigravity has its own tests beside agy.rs"),
             ClientId::Grok => {
                 let config = format!("[models]\ndefault='fixture'\n[model.fixture]\nmodel='fixture-model'\napi_backend='responses'\nbase_url={}\napi_key={}\n", serde_json::to_string(&urls[0]).unwrap(), serde_json::to_string(FIXTURE_KEY).unwrap());
                 std::fs::write(home.join("config.toml"), config).unwrap();
@@ -171,6 +172,7 @@ impl Fixture {
         });
         for (index, url) in urls.iter().enumerate() {
             fixture.edit(Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -178,6 +180,10 @@ impl Fixture {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url.clone(),
@@ -1349,6 +1355,7 @@ async fn lingering(
     let fixture = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
     let provider = &fixture.gateway.view().providers[0];
     fixture.edit(Edit::SaveProvider {
+        delegate: Default::default(),
         id: Some(provider.id.clone()),
         base_url: provider.base_url.clone(),
         token: String::new(),
@@ -1361,6 +1368,10 @@ async fn lingering(
         endless_mode: None,
         upstream_retry_seconds: None,
         normal_retry_seconds: None,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     });
     fixture.start().await;
     (fixture, release, closed, sent, upstream)
@@ -1457,6 +1468,7 @@ async fn message_stop_uses_the_failover_target_provider_setting() {
         })
         .await;
         fixture.edit(Edit::SaveProvider {
+            delegate: Default::default(),
             id: None,
             name: Some("Failing provider".into()),
             base_url: failed.url("/v1"),
@@ -1469,6 +1481,10 @@ async fn message_stop_uses_the_failover_target_provider_setting() {
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
         });
         let providers = fixture.gateway.view().providers;
         let target_id = providers[0].id.clone();
@@ -1530,3 +1546,6 @@ mod claude_resilience_tests;
 
 #[path = "connectivity_tests.rs"]
 mod connectivity_tests;
+
+#[path = "delegation_tests.rs"]
+mod delegation_tests;

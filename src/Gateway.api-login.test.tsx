@@ -83,11 +83,9 @@ async function openProviderEditor(
     return screen.getByRole("dialog", { name: "添加供应商" });
   }
   const provider = codexState.providers[0];
-  const operations = screen.getByLabelText(`${provider.name} 操作`);
-  await user.click(operations);
   await user.click(
-    within(operations.closest("details")!).getByRole("button", {
-      name: "编辑 API",
+    within(screen.getByLabelText(`${provider.name} 操作`)).getByRole("button", {
+      name: `${provider.name} 编辑 API`,
     }),
   );
   return screen.getByRole("dialog", { name: "编辑供应商" });
@@ -255,6 +253,19 @@ describe("Codex API login gateway controls", () => {
         name: "",
         baseUrl: "https://api.fixture.invalid/v1",
         token: "fixture-api-key",
+        endlessMode: false,
+        upstreamRetrySeconds: 33,
+        limitRetrySeconds: 33,
+        limitRestSeconds: 8,
+        normalRetrySeconds: 3,
+        riskCodes: [],
+        retryIntensity: 5,
+        takeCompaction: false,
+        compactionModel: "",
+        compactionEffort: "",
+        takeAuxiliary: false,
+        auxiliaryModel: "",
+        auxiliaryEffort: "",
       },
       expectedRevision: original.revision,
     });

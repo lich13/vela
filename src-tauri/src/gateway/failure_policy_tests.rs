@@ -577,7 +577,7 @@ fn every_builtin_code_uses_the_same_classifier() {
     for entry in super::failure_rules::CODES {
         let value = json!({"error":{"code":entry.value}});
         assert_eq!(
-            classify(429, value).error_basis,
+            classify(500, value).error_basis,
             Some(entry.category),
             "{}",
             entry.value

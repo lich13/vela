@@ -51,6 +51,8 @@ export function limitLabel(e?: LimitEvidence | null): string {
         model_unavailable: "模型不可用",
         capacity: "临时容量限制",
         usage_limit: "用量限制，额度状态待核验",
+        risk_control: "风控重试",
+        limit_retry: "限流重试",
       } as Record<string, string>
     )[e?.errorBasis ?? ""] ?? ""
   );

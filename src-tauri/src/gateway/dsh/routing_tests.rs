@@ -1,5 +1,9 @@
 use super::*;
-use crate::gateway::{grok_protocol_tests::server, model::Store, replay, Edit};
+use crate::gateway::{
+    grok_protocol_tests::server,
+    model::{RetryClass, Store},
+    replay, Edit,
+};
 use http_body_util::BodyExt;
 use hyper::Response;
 use parking_lot::Mutex;
@@ -108,6 +112,13 @@ fn incompatible_protocol_is_explained_and_ambiguous_mapping_is_left_empty() {
     assert!(Store::default()
         .edit(
             Edit::SaveDshProvider {
+                endless_mode: None,
+                upstream_retry_seconds: None,
+                normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 name: None,
@@ -151,6 +162,13 @@ impl Fixture {
             store
                 .edit(
                     Edit::SaveDshProvider {
+                        endless_mode: None,
+                        upstream_retry_seconds: None,
+                        normal_retry_seconds: None,
+                        risk_codes: None,
+                        retry_intensity: None,
+                        limit_retry_seconds: None,
+                        limit_rest_seconds: None,
                         quota_access_token: None,
                         id: None,
                         name: Some(format!("Fixture {index}")),
@@ -1000,6 +1018,111 @@ async fn dsh_failure_reaching_breaker_threshold_does_not_schedule_short_wait() {
         })
         .await
         .unwrap();
+        fixture.gateway.stop().await.unwrap();
+    }
+}
+
+/// Runs the first provider in endless mode with a second between retries of
+/// `class` and a minute for the other two, more than a request waits here.
+fn endless_settings(fixture: &Fixture, class: RetryClass, codes: Option<Vec<u16>>) {
+    let seconds = |own| Some(if class == own { 1 } else { 60 });
+    let view = fixture.gateway.view();
+    let provider = &view.providers[0];
+    fixture
+        .gateway
+        .edit(
+            Edit::SaveDshProvider {
+                endless_mode: Some(true),
+                upstream_retry_seconds: seconds(RetryClass::Risk),
+                limit_retry_seconds: seconds(RetryClass::Limit),
+                limit_rest_seconds: Some(0),
+                normal_retry_seconds: seconds(RetryClass::Normal),
+                risk_codes: codes,
+                retry_intensity: None,
+                quota_access_token: None,
+                id: Some(provider.id.clone()),
+                name: None,
+                base_url: provider.base_url.clone(),
+                token: String::new(),
+                protocol: Protocol::ChatCompletions,
+            },
+            &view.revision,
+            fixture.home.path(),
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn endless_mode_sorts_a_dsh_failure_and_retries_it_past_the_limit() {
+    use crate::events::ErrorBasis;
+    // DSH lists 524 as its risk-control status until the list is edited.
+    for (status, codes, class, basis) in [
+        (524, None, RetryClass::Risk, Some(ErrorBasis::RiskControl)),
+        (429, None, RetryClass::Limit, Some(ErrorBasis::LimitRetry)),
+        (502, None, RetryClass::Normal, None),
+        (524, Some(vec![]), RetryClass::Normal, None),
+        (
+            502,
+            Some(vec![502]),
+            RetryClass::Risk,
+            Some(ErrorBasis::RiskControl),
+        ),
+    ] {
+        let calls = Arc::new(Mutex::new(0));
+        let seen = calls.clone();
+        let upstream = server(move |_| {
+            let seen = seen.clone();
+            async move {
+                let count = {
+                    let mut count = seen.lock();
+                    *count += 1;
+                    *count
+                };
+                if count == 1 {
+                    Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(replay::full(
+                            json!({"error": {"message": "upstream failure"}}).to_string(),
+                        ))
+                        .unwrap()
+                } else {
+                    success()
+                }
+            }
+        })
+        .await;
+        let fixture = Fixture::new(&[upstream.url("/v1")], false).await;
+        // An ordinary provider would not get a single retry.
+        retry_settings(&fixture, 0);
+        endless_settings(&fixture, class, codes);
+        let request = fixture.request(models::FLASH, false);
+        let waiting = async {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let view = fixture.gateway.view();
+                    if let (false, Some(cause)) = (
+                        view.transient_retries.is_empty(),
+                        view.providers[0].health.cause.clone(),
+                    ) {
+                        // The retry is the provider's whole reaction.
+                        assert!(view.providers[0].health.available);
+                        assert_eq!(view.providers[0].health.cooldown_reason, None);
+                        break cause.error_basis;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap()
+        };
+        let (response, waited_out) = tokio::join!(request, waiting);
+        assert_eq!(response.status(), 200, "{status} {class:?}");
+        assert!(response.text().await.unwrap().contains("fixture"));
+        assert_eq!(*calls.lock(), 2, "{status} {class:?}");
+        if basis.is_some() {
+            assert_eq!(waited_out, basis, "{status} {class:?}");
+        }
         fixture.gateway.stop().await.unwrap();
     }
 }

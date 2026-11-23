@@ -282,6 +282,67 @@ pub(super) fn local_list(
             .expect("model list response"),
     )
 }
+/// Antigravity asks its gateway which models there are and starts on the
+/// first of them, so the queue's own list answers, in the order the user set.
+pub(super) fn gemini_list(
+    gateway: &super::Gateway,
+    uri: &hyper::Uri,
+) -> Option<hyper::Response<replay::WireBody>> {
+    if gateway.client_id() != super::ClientId::Agy || !super::gemini::listing(uri.path()) {
+        return None;
+    }
+    let ids = match gateway.model_union(None) {
+        Ok(ids) => ids,
+        Err(e) => {
+            return Some(super::forward::error(
+                hyper::StatusCode::SERVICE_UNAVAILABLE,
+                e.code.as_str(),
+                &e.message,
+            ))
+        }
+    };
+    let usage = gateway.0.usage.lock().clone();
+    let prices = usage.as_ref().and_then(|u| u.prices().ok());
+    let (choices, _) = gateway.0.model_list.snapshot();
+    let models: Vec<_> = ids
+        .iter()
+        // A model is named in the address of every request for it.
+        .filter(|id| super::gemini::valid_model(id))
+        .map(|id| {
+            let known = choices.describe(
+                id,
+                prices
+                    .as_ref()
+                    .and_then(|p| p.models_dev.metadata_from(id, choices.source(id))),
+            );
+            let mut model = serde_json::json!({
+                "name": format!("models/{id}"),
+                "displayName": known.as_ref().and_then(|m| m.name.as_deref()).unwrap_or(id),
+                "supportedGenerationMethods": ["generateContent", "countTokens"],
+            });
+            if let Some(context) = known.as_ref().and_then(|m| m.context) {
+                model["inputTokenLimit"] = context.into();
+            }
+            if let Some(output) = known.as_ref().and_then(|m| m.output) {
+                model["outputTokenLimit"] = output.into();
+            }
+            model
+        })
+        .collect();
+    if models.is_empty() {
+        // Nothing is known here yet: the provider's own list goes through.
+        return None;
+    }
+    Some(
+        hyper::Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(replay::full(
+                serde_json::to_vec(&serde_json::json!({ "models": models }))
+                    .expect("model list JSON"),
+            ))
+            .expect("model list response"),
+    )
+}
 fn anthropic_list(
     models: &[String],
     pairs: &[(std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>)],
@@ -712,10 +773,26 @@ async fn fetch(
     let fail = |message: &str| (message.to_owned(), None);
     let claude = input.client_id == super::ClientId::Claude
         || connection.is_some_and(|c| c.protocol == super::grok_config::Protocol::Messages);
-    let target = super::forward::target(
-        &input.base,
-        &"/v1/models".parse().expect("static model path"),
-    )
+    // Gemini lists models under their own name, a page at a time.
+    let gemini = input.client_id == super::ClientId::Agy;
+    if (gemini && super::gemini::vertex(&input.base))
+        || (input.client_id == super::ClientId::Claude && super::vertex::anthropic(&input.base))
+    {
+        return Err(fail("Vertex AI 没有模型列表接口，请在白名单填写模型 ID"));
+    }
+    let target = if gemini {
+        super::gemini::target(
+            &input.base,
+            &"/v1beta/models?pageSize=1000"
+                .parse()
+                .expect("static model path"),
+        )
+    } else {
+        super::forward::target(
+            &input.base,
+            &"/v1/models".parse().expect("static model path"),
+        )
+    }
     .map_err(|_| fail("模型接口地址无效"))?;
     let target = if let Some(connection) = connection {
         connection
@@ -787,12 +864,24 @@ async fn fetch(
         let value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| fail("模型接口没有返回有效 JSON"))?;
         let data = value
-            .get("data")
+            .get(if gemini { "models" } else { "data" })
             .and_then(|v| v.as_array())
             .ok_or_else(|| fail("无法识别模型列表，可手动添加模型 ID"))?;
         let page: Vec<String> = data
             .iter()
-            .filter_map(|v| v.get("id").and_then(|v| v.as_str()))
+            .filter_map(|v| {
+                if !gemini {
+                    return v.get("id").and_then(|v| v.as_str());
+                }
+                // Embedding and image models answer no chat request.
+                v["supportedGenerationMethods"]
+                    .as_array()
+                    .is_none_or(|methods| methods.iter().any(|m| m == "generateContent"))
+                    .then(|| v["name"].as_str())
+                    .flatten()
+                    .map(|name| name.strip_prefix("models/").unwrap_or(name))
+                    .filter(|id| super::gemini::valid_model(id))
+            })
             .filter(|id| {
                 !id.is_empty()
                     && id.len() <= 256
@@ -805,11 +894,26 @@ async fn fetch(
         if models.len() > 4096 {
             return Err(fail("单供应商模型列表超过 4,096 个"));
         }
-        if !claude || value.get("has_more").and_then(|v| v.as_bool()) != Some(true) {
+        let (more, last, after) = if gemini {
+            (
+                value["nextPageToken"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty()),
+                "nextPageToken",
+                "pageToken",
+            )
+        } else {
+            (
+                claude && value.get("has_more").and_then(|v| v.as_bool()) == Some(true),
+                "last_id",
+                "after_id",
+            )
+        };
+        if !more {
             break;
         }
         let cursor = value
-            .get("last_id")
+            .get(last)
             .and_then(|v| v.as_str())
             .filter(|v| !v.is_empty() && v.len() <= 256)
             .ok_or_else(|| fail("模型分页标记无效"))?;
@@ -818,13 +922,13 @@ async fn fetch(
         }
         let pairs: Vec<_> = url
             .query_pairs()
-            .filter(|(key, _)| key != "after_id")
+            .filter(|(key, _)| key != after)
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
             .collect();
         url.query_pairs_mut()
             .clear()
             .extend_pairs(pairs)
-            .append_pair("after_id", cursor);
+            .append_pair(after, cursor);
     }
     models.sort();
     models.dedup();
@@ -1152,6 +1256,7 @@ mod tests {
             store
                 .edit(
                     Edit::SaveProvider {
+                        delegate: Default::default(),
                         search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
@@ -1159,6 +1264,10 @@ mod tests {
                         endless_mode: None,
                         upstream_retry_seconds: None,
                         normal_retry_seconds: None,
+                        risk_codes: None,
+                        retry_intensity: None,
+                        limit_retry_seconds: None,
+                        limit_rest_seconds: None,
                         quota_access_token: None,
                         id: None,
                         base_url: format!("https://p{n}.example.invalid"),

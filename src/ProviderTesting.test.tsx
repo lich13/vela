@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { gatewayDemo } from "./gateway-preview";
 import type {
+  FingerprintBankState,
   ProviderTestingState,
   ProviderTestJob,
   ProviderTestRequest,
@@ -99,6 +100,7 @@ beforeEach(() => {
           lmDetector: { models: [], updating: false, error: null },
         },
         jobs: [],
+        lastModels: { connection: "", fingerprint: "" },
         degraded: {},
         detectionStatus: [],
         error: null,
@@ -149,6 +151,7 @@ beforeEach(() => {
         const request = args.request as ProviderTestRequest;
         const job = makeJob(request);
         states[job.providerId].jobs.unshift(job);
+        states[job.providerId].lastModels[request.kind] = request.model;
         return job;
       }
       if (name === "provider_test_query")
@@ -360,19 +363,22 @@ it("renders compact fingerprint revisions and readable sources", async () => {
   };
   open();
   await user.click(screen.getByRole("tab", { name: "指纹库" }));
-  await screen.findByText("1234567");
-  expect(screen.getByText("内置")).toBeInTheDocument();
+  const source = within(
+    await screen.findByRole("region", { name: "ModelTrace" }),
+  );
+  expect(source.getByText("1234567")).toBeInTheDocument();
+  expect(source.getByText("内置")).toBeInTheDocument();
   expect(
     screen.queryByText(/fixture-digest|analyzer_version/),
   ).not.toBeInTheDocument();
   bank.source = "cache";
   await emit();
-  expect(screen.getByText("已更新")).toBeInTheDocument();
+  expect(source.getByText("已更新")).toBeInTheDocument();
   bank.source = undefined;
   bank.version = undefined;
   await emit();
   expect(screen.queryByText("1234567")).not.toBeInTheDocument();
-  expect(screen.getByText("版本").nextElementSibling).toHaveTextContent("—");
+  expect(source.getByText("版本").nextElementSibling).toHaveTextContent("—");
 });
 
 it.each([
@@ -388,38 +394,37 @@ it.each([
     const delegate = mock.command.getMockImplementation()!;
     let resolveUpdate: (value: typeof bank) => void = () => {};
     mock.command.mockImplementation((name, args) =>
-      name === "provider_test_update_bank"
-        ? new Promise((resolve) => {
-            resolveUpdate = resolve;
-          })
-        : delegate(name, args),
+      name !== "provider_test_update_bank"
+        ? delegate(name, args)
+        : args.engine === "lmDetector"
+          ? new Promise((resolve) => {
+              resolveUpdate = resolve;
+            })
+          : Promise.resolve(structuredClone(state.banks.modelTrace)),
     );
     const showBank = async () => {
       await user.click(await screen.findByRole("tab", { name: "指纹库" }));
-      await user.selectOptions(
-        screen.getByRole("combobox", { name: "指纹库检测源" }),
-        "lmDetector",
-      );
+      return within(await screen.findByRole("region", { name: "LM Detector" }));
     };
     const view = open();
-    await showBank();
-    expect(screen.getByText("检查时间").nextElementSibling).toHaveTextContent(
+    let source = await showBank();
+    expect(source.getByText("检查时间").nextElementSibling).toHaveTextContent(
       "—",
     );
-    expect(screen.getByText("更新时间").nextElementSibling).toHaveTextContent(
+    expect(source.getByText("更新时间").nextElementSibling).toHaveTextContent(
       "—",
     );
-    const button = screen.getByRole("button", { name: "检查更新" });
+    const button = screen.getByRole("button", { name: "一键更新" });
     await user.dblClick(button);
     expect(button).toBeDisabled();
-    expect(screen.getByText("更新结果").nextElementSibling).toHaveTextContent(
+    expect(source.getByText("更新结果").nextElementSibling).toHaveTextContent(
       "检查中",
     );
     expect(
-      mock.command.mock.calls.filter(
-        ([name]) => name === "provider_test_update_bank",
-      ),
-    ).toHaveLength(1);
+      mock.command.mock.calls
+        .filter(([name]) => name === "provider_test_update_bank")
+        .map(([, args]) => args.engine),
+    ).toEqual(["modelTrace", "lmDetector"]);
     bank.checkedAt = 1_760_000_000_000;
     bank.updatedAt = result === "updated" ? bank.checkedAt : 1_750_000_000_000;
     bank.result = result;
@@ -432,26 +437,105 @@ it.each([
         hour12: false,
       });
     const verify = () => {
-      expect(screen.getByText("更新结果").nextElementSibling).toHaveTextContent(
+      expect(source.getByText("更新结果").nextElementSibling).toHaveTextContent(
         label,
       );
-      expect(screen.getByText("检查时间").nextElementSibling).toHaveTextContent(
+      expect(source.getByText("检查时间").nextElementSibling).toHaveTextContent(
         formatted(bank.checkedAt!),
       );
-      expect(screen.getByText("更新时间").nextElementSibling).toHaveTextContent(
+      expect(source.getByText("更新时间").nextElementSibling).toHaveTextContent(
         formatted(bank.updatedAt!),
       );
       if (bank.error)
-        expect(screen.getByRole("alert")).toHaveTextContent(bank.error);
+        expect(source.getByRole("alert")).toHaveTextContent(bank.error);
+      else expect(source.queryByRole("alert")).not.toBeInTheDocument();
     };
     verify();
-    expect(state.banks.modelTrace.checkedAt).toBeUndefined();
     view.unmount();
     open();
-    await showBank();
+    source = await showBank();
     verify();
   },
 );
+
+it("updates both sources with one click and reports each result on its own", async () => {
+  const user = userEvent.setup();
+  const banks = states[gateway.providers[0].id].banks;
+  banks.modelTrace.version = { revision: "1111111fixture" };
+  const delegate = mock.command.getMockImplementation()!;
+  const settle: Record<
+    string,
+    {
+      resolve: (value: FingerprintBankState) => void;
+      reject: (error: Error) => void;
+    }
+  > = {};
+  mock.command.mockImplementation((name, args) =>
+    name === "provider_test_update_bank"
+      ? new Promise((resolve, reject) => {
+          settle[args.engine] = { resolve, reject };
+        })
+      : delegate(name, args),
+  );
+  open();
+  await user.click(screen.getByRole("tab", { name: "指纹库" }));
+  const modelTrace = within(
+    await screen.findByRole("region", { name: "ModelTrace" }),
+  );
+  const lmDetector = within(
+    screen.getByRole("region", { name: "LM Detector" }),
+  );
+  expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  const outcome = (source: typeof modelTrace) =>
+    source.getByText("更新结果").nextElementSibling;
+  const button = screen.getByRole("button", { name: "一键更新" });
+
+  await user.click(button);
+  expect(outcome(modelTrace)).toHaveTextContent("检查中");
+  expect(outcome(lmDetector)).toHaveTextContent("检查中");
+  await act(async () =>
+    settle.modelTrace.reject(new Error("请稍后再更新指纹库")),
+  );
+  expect(outcome(modelTrace)).toHaveTextContent("检查失败");
+  expect(modelTrace.getByRole("alert")).toHaveTextContent("请稍后再更新指纹库");
+  expect(outcome(lmDetector)).toHaveTextContent("检查中");
+  expect(button).toBeDisabled();
+  banks.lmDetector.result = "up-to-date";
+  await act(async () =>
+    settle.lmDetector.resolve(structuredClone(banks.lmDetector)),
+  );
+  await waitFor(() => expect(button).toBeEnabled());
+  expect(outcome(lmDetector)).toHaveTextContent("已是最新");
+  expect(lmDetector.queryByRole("alert")).not.toBeInTheDocument();
+  expect(outcome(modelTrace)).toHaveTextContent("检查失败");
+
+  await user.click(button);
+  expect(modelTrace.queryByRole("alert")).not.toBeInTheDocument();
+  banks.lmDetector.result = "failed";
+  banks.lmDetector.error = "指纹库更新连接失败";
+  await act(async () =>
+    settle.lmDetector.resolve(structuredClone(banks.lmDetector)),
+  );
+  expect(outcome(lmDetector)).toHaveTextContent("检查失败");
+  expect(lmDetector.getByRole("alert")).toHaveTextContent("指纹库更新连接失败");
+  expect(outcome(modelTrace)).toHaveTextContent("检查中");
+  banks.modelTrace.version = { revision: "2222222fixture" };
+  await act(async () =>
+    settle.modelTrace.resolve(structuredClone(banks.modelTrace)),
+  );
+  await waitFor(() => expect(button).toBeEnabled());
+  expect(outcome(modelTrace)).toHaveTextContent("已更新");
+  expect(modelTrace.getByText("2222222")).toBeInTheDocument();
+  expect(outcome(lmDetector)).toHaveTextContent("检查失败");
+
+  await user.click(button);
+  await act(async () => {
+    settle.modelTrace.resolve(structuredClone(banks.modelTrace));
+    settle.lmDetector.resolve(structuredClone(banks.lmDetector));
+  });
+  await waitFor(() => expect(button).toBeEnabled());
+  expect(outcome(modelTrace)).toHaveTextContent("已是最新");
+});
 
 it("shows mixed-family evidence separately from a normal aggregate prediction", async () => {
   const user = userEvent.setup();
@@ -628,6 +712,67 @@ it("allows default chat without a directory but requires a cached fingerprint mo
       providerId: gateway.providers[0].id,
     }),
   });
+});
+it("reopens each test tab with the model its last manual test used", async () => {
+  seed();
+  const user = userEvent.setup();
+  const first = open();
+  await user.click(screen.getByRole("tab", { name: "模型指纹" }));
+  await screen.findByRole("option", { name: "Alternate (fixture-alt)" });
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "测试模型" }),
+    "fixture-alt",
+  );
+  await user.click(screen.getByRole("button", { name: "开始测试" }));
+  await screen.findByRole("button", { name: "停止测试" });
+  first.unmount();
+  open();
+  await user.click(screen.getByRole("tab", { name: "模型指纹" }));
+  await waitFor(() =>
+    expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveValue(
+      "fixture-alt",
+    ),
+  );
+  await user.click(screen.getByRole("tab", { name: "连接测试" }));
+  expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveValue("");
+  await user.click(screen.getByRole("tab", { name: "定时检测" }));
+  expect(screen.getByRole("combobox", { name: "检测模型" })).toHaveValue(
+    "fixture-model",
+  );
+});
+it("prefers remembered models over an earlier catalog default and keeps a retired one unavailable", async () => {
+  seed();
+  const user = userEvent.setup();
+  states[gateway.providers[0].id].lastModels = {
+    connection: "fixture-alt",
+    fingerprint: "fixture-retired",
+  };
+  const delegate = mock.command.getMockImplementation()!;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  mock.command.mockImplementation(async (name, args) => {
+    if (name === "provider_test_state") await held;
+    return delegate(name, args);
+  });
+  open();
+  await user.click(screen.getByRole("tab", { name: "模型指纹" }));
+  await waitFor(() =>
+    expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveValue(
+      "fixture-model",
+    ),
+  );
+  await act(async () => release());
+  await screen.findByRole("option", { name: "fixture-retired（当前不可用）" });
+  expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveValue(
+    "fixture-retired",
+  );
+  expect(screen.getByRole("button", { name: "开始测试" })).toBeDisabled();
+  await user.click(screen.getByRole("tab", { name: "连接测试" }));
+  expect(screen.getByRole("combobox", { name: "测试模型" })).toHaveValue(
+    "fixture-alt",
+  );
 });
 it("preserves the selected cached model and keeps testing available after refresh failure", async () => {
   seed();

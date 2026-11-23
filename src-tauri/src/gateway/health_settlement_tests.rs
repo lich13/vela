@@ -19,6 +19,7 @@ fn fixture() -> (tempfile::TempDir, Gateway, Route) {
     let view = gateway
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -26,6 +27,10 @@ fn fixture() -> (tempfile::TempDir, Gateway, Route) {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://example.invalid/v1".into(),
@@ -73,6 +78,8 @@ fn default_settings_match_current_serialization() {
             "firstByteSeconds": 300,
             "compactionSeconds": 400,
             "idleSeconds": 300,
+            "stallSeconds": 120,
+            "holdIdleSeconds": 60,
             "retryBudgetSeconds": 300,
             "connectSeconds": 300,
             "queueSeconds": 300,

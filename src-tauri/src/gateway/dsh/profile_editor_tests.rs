@@ -51,6 +51,13 @@ fn gateway(home: &Path) -> Gateway {
         .store
         .edit(
             Edit::SaveDshProvider {
+                endless_mode: None,
+                upstream_retry_seconds: None,
+                normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://relay.example.invalid/v1".into(),
@@ -140,6 +147,7 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
     store
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -147,6 +155,10 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 name: None,
@@ -529,6 +541,13 @@ fn official_api_key_route_is_discoverable_and_matched_as_provider() {
     store
         .edit(
             Edit::SaveDshProvider {
+                endless_mode: None,
+                upstream_retry_seconds: None,
+                normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: official_url,

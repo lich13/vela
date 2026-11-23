@@ -90,6 +90,7 @@ async fn dual_fixture(codex_urls: Vec<String>, claude_urls: Vec<String>) -> Dual
                 gateway,
                 home,
                 Edit::SaveProvider {
+                    delegate: Default::default(),
                     search_only: None,
                     end_on_message_stop: None,
                     filter_count_tokens: None,
@@ -97,6 +98,10 @@ async fn dual_fixture(codex_urls: Vec<String>, claude_urls: Vec<String>) -> Dual
                     endless_mode: None,
                     upstream_retry_seconds: None,
                     normal_retry_seconds: None,
+                    risk_codes: None,
+                    retry_intensity: None,
+                    limit_retry_seconds: None,
+                    limit_rest_seconds: None,
                     quota_access_token: None,
                     id: None,
                     base_url,
@@ -503,6 +508,143 @@ async fn claude_messages_preserve_deployment_path_query_payload_and_anthropic_he
 }
 
 #[tokio::test]
+async fn claude_on_vertex_goes_to_the_model_address_with_a_google_key() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let captured = seen.clone();
+    let message = br#"{"id":"msg_fixture","type":"message","model":"claude-fixture","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}"#;
+    let upstream = server(move |request| {
+        let captured = captured.clone();
+        async move {
+            let (parts, body) = request.into_parts();
+            let payload = body.collect().await.unwrap().to_bytes();
+            let counting = parts.uri.path().ends_with("/count-tokens:rawPredict");
+            captured.lock().push((
+                parts.uri.path_and_query().unwrap().to_string(),
+                parts.headers,
+                serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            ));
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(if counting {
+                    full(br#"{"input_tokens":14}"#.as_slice())
+                } else {
+                    full(message.as_slice())
+                })
+                .unwrap()
+        }
+    })
+    .await;
+    let publisher = "/v1/projects/fixture/locations/global/publishers/anthropic";
+    let f = dual_fixture(
+        vec![],
+        vec![format!("http://127.0.0.1:{upstream}{publisher}/")],
+    )
+    .await;
+    let id = f.claude.view().providers[0].id.clone();
+    edit_client(
+        &f.claude,
+        &f.claude_home,
+        Edit::ModelMapProvider {
+            id: id.clone(),
+            mapping: [("claude-asked".into(), "claude-fixture-4-5-20251001".into())].into(),
+        },
+    );
+    start_client(&f.claude, &f.claude_home).await;
+    let local = f.claude.0.inner.lock().store.local_token.clone();
+    let send = |path: &'static str, payload: serde_json::Value| {
+        let (gateway, local) = (f.claude.clone(), local.clone());
+        async move {
+            let response = request(
+                &gateway,
+                path,
+                serde_json::to_vec(&payload).unwrap(),
+                vec![
+                    ("content-type", "application/json"),
+                    ("anthropic-version", "2023-06-01"),
+                    ("anthropic-beta", "fixture-beta"),
+                    ("anthropic-beta", "fixture-other"),
+                    ("x-api-key", local.as_str()),
+                ],
+            )
+            .await;
+            assert_eq!(response.status(), 200);
+            response.into_body().collect().await.unwrap().to_bytes()
+        }
+    };
+    let messages = serde_json::json!([{"role":"user","content":"unchanged"}]);
+    let reply = send(
+        "/v1/messages?beta=true",
+        serde_json::json!({"model":"claude-fixture","max_tokens":17,"messages":messages}),
+    )
+    .await;
+    assert_eq!(reply.as_ref(), message);
+    // The provider's own name for a model is what Vertex AI is asked for.
+    send(
+        "/v1/messages",
+        serde_json::json!({"model":"claude-asked","max_tokens":17,"messages":messages}),
+    )
+    .await;
+    let counted = send(
+        "/v1/messages/count_tokens?beta=true",
+        serde_json::json!({"model":"claude-asked","messages":messages}),
+    )
+    .await;
+    assert_eq!(counted.as_ref(), br#"{"input_tokens":14}"#);
+    {
+        let captured = seen.lock();
+        let version = "vertex-2023-10-16";
+        assert_eq!(
+            captured
+                .iter()
+                .map(|(path, _, body)| (path.as_str(), body.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    format!("{publisher}/models/claude-fixture:rawPredict").as_str(),
+                    serde_json::json!({"max_tokens":17,"messages":messages,"anthropic_version":version}),
+                ),
+                (
+                    format!("{publisher}/models/claude-fixture-4-5@20251001:rawPredict").as_str(),
+                    serde_json::json!({"max_tokens":17,"messages":messages,"anthropic_version":version}),
+                ),
+                (
+                    format!("{publisher}/models/count-tokens:rawPredict").as_str(),
+                    serde_json::json!({"model":"claude-fixture-4-5@20251001","messages":messages,"anthropic_version":version}),
+                ),
+            ]
+        );
+        for (_, headers, _) in captured.iter() {
+            assert_eq!(headers["x-goog-api-key"], CLAUDE_TOKEN);
+            assert!(!headers.contains_key("authorization"));
+            assert!(!headers.contains_key("x-api-key"));
+            assert!(!headers.contains_key("anthropic-version"));
+            assert_eq!(
+                headers.get_all("anthropic-beta").iter().collect::<Vec<_>>(),
+                ["fixture-beta,fixture-other"]
+            );
+        }
+    }
+    // Anything but a message has no address on Vertex AI: it is not sent.
+    let models = request(
+        &f.claude,
+        "/v1/models/claude-fixture",
+        Vec::new(),
+        vec![("x-api-key", local.as_str())],
+    )
+    .await;
+    assert!(models.status().is_client_error() || models.status().is_server_error());
+    // Vertex AI lists no models to a key.
+    let listed = f.claude.list_models(&id, true).await.unwrap();
+    assert!(listed.models.is_empty());
+    assert_eq!(
+        listed.error.as_deref(),
+        Some("Vertex AI 没有模型列表接口，请在白名单填写模型 ID")
+    );
+    assert_eq!(seen.lock().len(), 3);
+    f.claude.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconnect_fail() {
     const START: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\",\"type\":\"message\",\"model\":\"claude-fixture\",\"stop_reason\":null}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"fixture\"}}\n\n";
     const STOP: &[u8] = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
@@ -627,6 +769,7 @@ async fn peer_gateway_urls_are_rejected_when_saved() {
             let error = gateway
                 .edit(
                     Edit::SaveProvider {
+                        delegate: Default::default(),
                         search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
@@ -634,6 +777,10 @@ async fn peer_gateway_urls_are_rejected_when_saved() {
                         endless_mode: None,
                         upstream_retry_seconds: None,
                         normal_retry_seconds: None,
+                        risk_codes: None,
+                        retry_intensity: None,
+                        limit_retry_seconds: None,
+                        limit_rest_seconds: None,
                         quota_access_token: None,
                         id: None,
                         base_url: format!("http://{host}:{}/loop", peer.view().settings.port),

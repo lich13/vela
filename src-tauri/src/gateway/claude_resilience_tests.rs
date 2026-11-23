@@ -10,6 +10,7 @@ const PARTIAL: &[u8] = b"event: content_block_delta\ndata: {\"type\":\"content_b
 fn options(f: &Fixture, buffer: bool, endless: bool, filter: bool) {
     let provider = &f.gateway.view().providers[0];
     f.edit(Edit::SaveProvider {
+        delegate: Default::default(),
         id: Some(provider.id.clone()),
         base_url: provider.base_url.clone(),
         token: String::new(),
@@ -22,6 +23,10 @@ fn options(f: &Fixture, buffer: bool, endless: bool, filter: bool) {
         endless_mode: Some(endless),
         upstream_retry_seconds: Some(1),
         normal_retry_seconds: Some(1),
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: Some(0),
     });
     let mut settings = f.gateway.view().settings;
     settings.max_retries = 1;
@@ -29,6 +34,38 @@ fn options(f: &Fixture, buffer: bool, endless: bool, filter: bool) {
     settings.retry_budget_seconds = 10;
     settings.network_probe = false;
     f.edit(Edit::Settings { settings });
+}
+/// Endless retry timing of the fixture's first provider; `None` keeps a value.
+#[derive(Default)]
+struct Pacing {
+    codes: Option<Vec<u16>>,
+    risk: Option<u64>,
+    limit: Option<u64>,
+    normal: Option<u64>,
+    intensity: Option<u8>,
+    rest: Option<u64>,
+}
+fn pacing(f: &Fixture, pacing: Pacing) {
+    let provider = &f.gateway.view().providers[0];
+    f.edit(Edit::SaveProvider {
+        delegate: Default::default(),
+        id: Some(provider.id.clone()),
+        base_url: provider.base_url.clone(),
+        token: String::new(),
+        name: None,
+        quota_access_token: None,
+        search_only: None,
+        end_on_message_stop: None,
+        filter_count_tokens: None,
+        buffer_complete_response: None,
+        endless_mode: None,
+        upstream_retry_seconds: pacing.risk,
+        normal_retry_seconds: pacing.normal,
+        risk_codes: pacing.codes,
+        retry_intensity: pacing.intensity,
+        limit_retry_seconds: pacing.limit,
+        limit_rest_seconds: pacing.rest,
+    });
 }
 fn sse(bytes: impl Into<Bytes>) -> Response<WireBody> {
     Response::builder()
@@ -44,6 +81,28 @@ fn json(bytes: impl Into<Bytes>) -> Response<WireBody> {
 }
 async fn settled(f: &Fixture) {
     super::super::test_support::settled(&f.gateway).await;
+}
+/// A stream that sends `head`, stays silent for `silence`, then sends `tail`.
+fn pausing(head: &'static [u8], silence: Duration, tail: &'static [u8]) -> Response<WireBody> {
+    let frames = async_stream::stream! {
+        yield Ok::<_, BoxError>(Frame::data(Bytes::from_static(head)));
+        tokio::time::sleep(silence).await;
+        if !tail.is_empty() {
+            yield Ok::<_, BoxError>(Frame::data(Bytes::from_static(tail)));
+        }
+    };
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(StreamBody::new(frames).boxed_unsync())
+        .unwrap()
+}
+/// How long a stream may stay silent: `stall` once the model writes, `idle`
+/// before that.
+fn silence_limits(f: &Fixture, stall: u64, idle: u64) {
+    let mut settings = f.gateway.view().settings;
+    settings.stall_seconds = stall;
+    settings.idle_seconds = idle;
+    f.edit(Edit::Settings { settings });
 }
 
 #[tokio::test]
@@ -454,7 +513,7 @@ async fn endless_permanent_rejections_stop_and_consumed_usage_is_kept() {
 }
 
 #[tokio::test]
-async fn endless_wait_releases_slots_and_stops_on_cancel_disconnect_or_shutdown() {
+async fn endless_wait_releases_slots_resends_on_cancel_and_stops_on_disconnect_or_shutdown() {
     for end in ["cancel", "disconnect", "shutdown"] {
         let hits = Arc::new(AtomicUsize::new(0));
         let seen = hits.clone();
@@ -475,6 +534,14 @@ async fn endless_wait_releases_slots_and_stops_on_cancel_disconnect_or_shutdown(
         .await;
         let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
         options(&f, false, true, false);
+        // The provider's own interval holds the retry, not the Retry-After.
+        pacing(
+            &f,
+            Pacing {
+                limit: Some(60),
+                ..Default::default()
+            },
+        );
         f.start().await;
         let mut response = request(&f.gateway, "/v1/messages", STREAM_REQUEST).await;
         let ping = response.body_mut().frame().await.unwrap().unwrap();
@@ -489,8 +556,13 @@ async fn endless_wait_releases_slots_and_stops_on_cancel_disconnect_or_shutdown(
                 assert_eq!(pending.len(), 1);
                 assert_eq!(pending[0].remaining_seconds, None);
                 assert!(f.gateway.cancel_wait(&pending[0].request_id));
-                assert!(String::from_utf8_lossy(&response_bytes(response).await)
-                    .contains("event: error"));
+                // The wait is cut short and the provider gets the request
+                // again; the client is not answered until it leaves.
+                super::super::test_support::until(|| hits.load(Ordering::SeqCst) == 2).await;
+                let pending = f.gateway.view().pending_requests;
+                assert_eq!(pending.len(), 1);
+                assert_eq!(pending[0].remaining_seconds, None);
+                drop(response);
             }
             "disconnect" => drop(response),
             _ => {
@@ -508,7 +580,10 @@ async fn endless_wait_releases_slots_and_stops_on_cancel_disconnect_or_shutdown(
         .await
         .unwrap_or_else(|_| panic!("{end} left a pending request"));
         settled(&f).await;
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1 + usize::from(end == "cancel")
+        );
         no_new_records(&f.usage, 0).await;
         if end != "shutdown" {
             f.stop().await;
@@ -549,13 +624,12 @@ async fn endless_retries_a_failed_tls_handshake_instead_of_answering_the_client(
     assert_eq!(view.pending_requests.len(), 1);
     assert!(view.providers[0].health.available);
     assert_eq!(view.providers[0].health.failures, 0);
-    assert!(f.gateway.cancel_wait(&view.pending_requests[0].request_id));
+    f.stop().await;
     assert!(String::from_utf8_lossy(&response_bytes(response).await).contains("event: error"));
     settled(&f).await;
     // One request with every handshake as an attempt, as for a refused connection.
     let rows = recorded(&f.usage, 1).await;
     assert!(rows[0].attempts.len() >= 3);
-    f.stop().await;
 }
 
 #[tokio::test]
@@ -953,6 +1027,7 @@ async fn buffered_declared_length_must_finish_even_after_message_stop() {
     options(&f, true, false, false);
     let provider = f.gateway.view().providers[0].clone();
     f.edit(Edit::SaveProvider {
+        delegate: Default::default(),
         id: Some(provider.id),
         base_url: provider.base_url,
         token: String::new(),
@@ -965,6 +1040,10 @@ async fn buffered_declared_length_must_finish_even_after_message_stop() {
         endless_mode: None,
         upstream_retry_seconds: None,
         normal_retry_seconds: None,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     });
     f.start().await;
     let body = response_bytes(request(&f.gateway, "/v1/messages", STREAM_REQUEST).await).await;
@@ -1101,3 +1180,234 @@ async fn terminal_gateway_and_claude_rejections_disable_client_sdk_blind_retries
     );
     f.stop().await;
 }
+
+#[tokio::test]
+async fn a_stalled_stream_is_dropped_and_sent_again_before_anything_is_delivered() {
+    for endless in [false, true] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let upstream = server(move |_, _| {
+            let seen = seen.clone();
+            async move {
+                if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    pausing(PARTIAL, Duration::from_secs(8), b"")
+                } else {
+                    sse(COMPLETE)
+                }
+            }
+        })
+        .await;
+        let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
+        options(&f, true, endless, false);
+        silence_limits(&f, 1, 30);
+        f.start().await;
+        let body = String::from_utf8(
+            response_bytes(request(&f.gateway, "/v1/messages", STREAM_REQUEST).await)
+                .await
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!body.contains("discard-partial"), "{endless}");
+        assert_eq!(body.matches("event: message_stop").count(), 1, "{endless}");
+        assert!(!body.contains("event: error"), "{endless}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "{endless}");
+        if !endless {
+            // An endless retry leaves no attempt of its own in the usage.
+            let rows = recorded(&f.usage, 1).await;
+            assert_eq!(rows[0].attempts.len(), 2);
+            let stalled = rows[0].attempts[0].transfer.as_ref().unwrap();
+            assert_eq!(stalled.timeout_phase.as_deref(), Some("stream_stall"));
+            assert_eq!(stalled.timeout_seconds, Some(1));
+            assert_eq!(rows[0].attempts[1].outcome, "success");
+        }
+        f.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_stream_without_model_content_keeps_the_ordinary_idle_limit() {
+    const OPENED: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\",\"type\":\"message\",\"model\":\"claude-fixture\",\"usage\":{\"input_tokens\":5}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n";
+    const REST: &[u8] = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"complete\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    for buffer in [true, false] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let upstream = server(move |_, _| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { pausing(OPENED, Duration::from_millis(2500), REST) }
+        })
+        .await;
+        let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
+        options(&f, buffer, false, false);
+        silence_limits(&f, 1, 10);
+        f.start().await;
+        let body = String::from_utf8(
+            response_bytes(request(&f.gateway, "/v1/messages", STREAM_REQUEST).await)
+                .await
+                .to_vec(),
+        )
+        .unwrap();
+        // An opened block is not content: the stall limit has not started.
+        assert_eq!(body.matches("event: message_stop").count(), 1, "{buffer}");
+        assert!(!body.contains("event: error"), "{buffer}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "{buffer}");
+        f.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_stream_already_delivered_is_ended_and_not_sent_again() {
+    for endless in [false, true] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let upstream = server(move |_, _| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move { pausing(PARTIAL, Duration::from_secs(8), b"") }
+        })
+        .await;
+        let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
+        options(&f, false, endless, false);
+        silence_limits(&f, 1, 30);
+        f.start().await;
+        let mut body = request(&f.gateway, "/v1/messages", STREAM_REQUEST)
+            .await
+            .into_body();
+        let mut delivered = Vec::new();
+        let broken = loop {
+            match tokio::time::timeout(WAIT, body.frame()).await.unwrap() {
+                Some(Ok(frame)) => delivered.extend_from_slice(frame.data_ref().unwrap()),
+                Some(Err(_)) => break true,
+                None => break false,
+            }
+        };
+        let text = String::from_utf8_lossy(&delivered);
+        assert!(text.contains("discard-partial"), "{endless}");
+        // A managed stream closes with an error event, a plain relay breaks off.
+        assert_eq!(text.contains("event: error"), endless);
+        assert_eq!(broken, !endless);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "{endless}");
+        drop(body);
+        if !endless {
+            // An endless provider's unbilled timeouts are left out of the usage.
+            let rows = recorded(&f.usage, 1).await;
+            assert_eq!(rows[0].attempts.len(), 1);
+            let attempt = &rows[0].attempts[0];
+            assert_eq!(
+                attempt.end.as_ref().map(|end| end.cause),
+                Some(crate::usage::model::EndCause::StreamTimeout)
+            );
+            let transfer = attempt.transfer.as_ref().unwrap();
+            assert_eq!(transfer.timeout_phase.as_deref(), Some("stream_stall"));
+            assert_eq!(transfer.timeout_seconds, Some(1));
+        }
+        f.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_codex_stream_is_not_held_to_the_stall_limit() {
+    const HEAD: &[u8] = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_fixture\",\"status\":\"in_progress\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"fixture\"}\n\n";
+    const TAIL: &[u8] = b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fixture\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n";
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    let upstream = server(move |_, _| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        async move { pausing(HEAD, Duration::from_millis(2500), TAIL) }
+    })
+    .await;
+    let f = Fixture::new(ClientId::Codex, &[upstream.url("/v1")]).await;
+    silence_limits(&f, 1, 10);
+    f.start().await;
+    let body = response_bytes(
+        request(
+            &f.gateway,
+            "/v1/responses",
+            br#"{"model":"gpt-request-fixture","stream":true,"input":[{"role":"user","content":"fixture"}]}"#,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(body.as_ref(), [HEAD, TAIL].concat());
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_mapped_model_is_rewritten_for_its_provider_and_others_pass_untouched() {
+    const OTHER: &[u8] = br#" { "model" : "claude-other", "stream": false,
+  "max_tokens": 32, "messages":[{"role":"user","content":"fixture"}], "unknown":9007199254740993 } "#;
+    // Each answer is its own message, so each is its own usage record.
+    let message =
+        |n: usize| String::from_utf8_lossy(MESSAGE).replace("msg_fixture", &format!("msg_{n}"));
+    let seen = Arc::new(Mutex::new(Vec::<Bytes>::new()));
+    let bodies = seen.clone();
+    let upstream = server(move |request, _| {
+        let bodies = bodies.clone();
+        async move {
+            let body = request.into_body().collect().await.unwrap().to_bytes();
+            let mut bodies = bodies.lock();
+            bodies.push(body);
+            json(message(bodies.len()))
+        }
+    })
+    .await;
+    let f = Fixture::new(ClientId::Claude, &[upstream.url("")]).await;
+    let id = f.gateway.view().providers[0].id.clone();
+    let version = f.gateway.view().providers[0].quota_version.clone();
+    f.edit(Edit::ModelMapProvider {
+        id: id.clone(),
+        mapping: [(" claude-fixture ".into(), "upstream-fixture".into())].into(),
+    });
+    // The whitelist judges what the client asked for, not what is sent.
+    f.edit(Edit::ModelsProvider {
+        id: id.clone(),
+        allowed_models: Some(vec!["claude-fixture".into(), "claude-other".into()]),
+    });
+    let view = f.gateway.view();
+    assert_eq!(
+        serde_json::to_value(&view.providers[0]).unwrap()["modelMap"],
+        json!({"claude-fixture": "upstream-fixture"})
+    );
+    assert_eq!(view.providers[0].quota_version, version);
+    f.start().await;
+
+    for (n, body) in [JSON_REQUEST, OTHER].into_iter().enumerate() {
+        let response = request(&f.gateway, "/v1/messages", body).await;
+        assert_eq!(response.status(), 200);
+        // The answer is the upstream's own, model name included.
+        assert_eq!(response_bytes(response).await, message(n + 1));
+    }
+    let sent = seen.lock().clone();
+    let mapped: serde_json::Value = serde_json::from_slice(&sent[0]).unwrap();
+    let mut expected: serde_json::Value = serde_json::from_slice(JSON_REQUEST).unwrap();
+    expected["model"] = "upstream-fixture".into();
+    assert_eq!(mapped, expected);
+    assert_eq!(sent[1].as_ref(), OTHER);
+
+    let rows = recorded(&f.usage, 2).await;
+    let attempt = |model: &str| {
+        rows.iter()
+            .flat_map(|row| &row.attempts)
+            .find(|attempt| attempt.requested_model.as_deref() == Some(model))
+            .unwrap()
+    };
+    assert_eq!(
+        attempt("claude-fixture").upstream_model.as_deref(),
+        Some("upstream-fixture")
+    );
+    assert_eq!(attempt("claude-other").upstream_model, None);
+
+    // An empty mapping clears it.
+    f.edit(Edit::ModelMapProvider {
+        id,
+        mapping: Default::default(),
+    });
+    assert!(f.gateway.view().providers[0].model_map.is_empty());
+    let response = request(&f.gateway, "/v1/messages", JSON_REQUEST).await;
+    assert_eq!(response.status(), 200);
+    response_bytes(response).await;
+    assert_eq!(seen.lock()[2].as_ref(), JSON_REQUEST);
+    f.stop().await;
+}
+
+#[path = "endless_retry_tests.rs"]
+mod endless_retry;

@@ -15,11 +15,50 @@ export type Json =
 export type Path = (string | number)[];
 export type Field = {
   label: string;
-  path: string[];
-  kind: "text" | "model" | "boolean" | "select" | "integer";
+  path: Path;
+  /**
+   * `integer` keeps digits as text (environment values), `number` writes a
+   * whole number, and `list` is a list of strings.
+   */
+  kind: "text" | "model" | "boolean" | "select" | "integer" | "number" | "list";
   options?: [string, string][];
   override?: string[];
+  /** What the client uses while the key is absent; shown beside "默认". */
+  initial?: boolean | number | string;
+  hint?: string;
+  min?: number;
+  max?: number;
+  /** Heading above the first field of a run; it also prefixes the accessible name. */
+  section?: string;
 };
+const spellings: [Json, Json][] = [
+  [true, false],
+  [1, 0],
+  ["1", "0"],
+  ["true", "false"],
+];
+/** An on/off value in the spelling its file uses; a switch writes the same spelling back. */
+export function flag(value: Json | undefined) {
+  for (const [on, off] of spellings)
+    if (value === on || value === off)
+      return {
+        on: value === on,
+        write: (next: boolean): Json => (next ? on : off),
+      };
+  return undefined;
+}
+const amounts = new Set(
+  "max min count size limit timeout depth padding port index version level ms sec secs seconds minutes hours days bytes tokens percent lines speed width height retries attempts interval ttl threshold delay length num number window".split(
+    " ",
+  ),
+);
+/** Keys that hold an amount, where 0 and 1 are numbers rather than off and on. */
+export const countable = (key: string) =>
+  key
+    .replace(/([a-z\d])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z\d]+/)
+    .some((word) => amounts.has(word));
 export const groups = ["模型", "权限", "偏好", "环境变量", "高级"] as const;
 export const fields: Record<string, Field[]> = {
   模型: [

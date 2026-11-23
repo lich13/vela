@@ -398,6 +398,19 @@ describe("gateway controls", () => {
           name: "主力供应商",
           baseUrl: "https://new.example.com/sub/v1",
           token: "fixture-token",
+          endlessMode: false,
+          upstreamRetrySeconds: 33,
+          limitRetrySeconds: 33,
+          limitRestSeconds: 8,
+          normalRetrySeconds: 3,
+          riskCodes: [],
+          retryIntensity: 5,
+          takeCompaction: false,
+          compactionModel: "",
+          compactionEffort: "",
+          takeAuxiliary: false,
+          auxiliaryModel: "",
+          auxiliaryEffort: "",
         },
         expectedRevision: state.revision,
       }),
@@ -456,12 +469,11 @@ it("keeps model choices and manual entries when discovery fails and events refre
       throw { code: "CONFLICT", message: "设置已变化" };
   });
   render(<Gateway notify={() => {}} />);
-  const operations = await screen.findByLabelText("api.example.com 操作");
-  await user.click(operations);
   await user.click(
-    within(operations.closest("details")!).getByRole("button", {
-      name: "白名单",
-    }),
+    within(await screen.findByLabelText("api.example.com 操作")).getByRole(
+      "button",
+      { name: "api.example.com 白名单" },
+    ),
   );
   await user.click(await screen.findByRole("checkbox", { name: "gpt-A" }));
   await user.type(
@@ -769,7 +781,20 @@ describe("client isolation", () => {
         bufferCompleteResponse: false,
         endlessMode: false,
         upstreamRetrySeconds: 33,
+        limitRetrySeconds: 33,
+        limitRestSeconds: 8,
         normalRetrySeconds: 3,
+        riskCodes: [520],
+        retryIntensity: 5,
+        takeCompaction: false,
+        compactionModel: "",
+        compactionEffort: "",
+        takeAuxiliary: false,
+        auxiliaryModel: "",
+        auxiliaryEffort: "",
+        takeWebSearch: false,
+        webSearchModel: "",
+        webSearchEffort: "",
       },
       expectedRevision: claudeState.revision,
     });
@@ -777,20 +802,172 @@ describe("client isolation", () => {
 });
 
 it("keeps one icon-bearing testing entry per provider and removes global testing", async () => {
-  const user = userEvent.setup();
   render(<Gateway notify={() => {}} />);
   await screen.findByRole("button", { name: "添加" });
   expect(
     screen.queryByRole("button", { name: "测试与检测" }),
   ).not.toBeInTheDocument();
-  const operations = screen.getByLabelText(`${state.providers[0].name} 操作`);
-  await user.click(operations);
-  const menu = within(operations.closest("details")!);
-  const entry = menu.getByRole("button", { name: "连接测试" });
+  const name = state.providers[0].name;
+  const actions = within(screen.getByLabelText(`${name} 操作`));
+  const entry = actions.getByRole("button", { name: `${name} 连接测试` });
   expect(entry.querySelector("svg")).not.toBeNull();
   expect(
-    menu.queryByRole("button", { name: "模型指纹测试" }),
+    actions.queryByRole("button", { name: /模型指纹测试/ }),
   ).not.toBeInTheDocument();
+});
+
+it.each([
+  ["codex", ["白名单"]],
+  ["claude", ["白名单", "模型映射"]],
+  ["grok", ["白名单"]],
+  ["dsh", ["模型映射"]],
+] as const)(
+  "%s lays every provider operation out on the row",
+  async (clientId, models) => {
+    localStorage.setItem("vela.main.client", clientId);
+    state.clientId = clientId;
+    mock.command.mockImplementation(async (name) =>
+      name === "get_gateway" ? structuredClone(state) : null,
+    );
+    render(<Gateway notify={() => {}} quotaRefreshSeconds={0} />);
+    const name = state.providers[0].name;
+    const group = await screen.findByRole("group", { name: `${name} 操作` });
+    const buttons = within(group).getAllByRole("button");
+    expect(buttons.map((button) => button.getAttribute("title"))).toEqual([
+      "重置熔断",
+      "连接测试",
+      ...models,
+      "端点",
+      "编辑 API",
+      "重命名",
+      "创建副本",
+      "删除",
+    ]);
+    for (const button of buttons) {
+      expect(button).toHaveAccessibleName(`${name} ${button.title}`);
+      expect(button.querySelector("svg")).not.toBeNull();
+    }
+    expect(document.querySelector(".row-menu")).toBeNull();
+  },
+);
+
+it("copies a provider from its row and asks before deleting one", async () => {
+  const user = userEvent.setup();
+  const notify = vi.fn();
+  render(<Gateway notify={notify} />);
+  const { id, name } = state.providers[0];
+  const actions = within(await screen.findByLabelText(`${name} 操作`));
+  await user.click(actions.getByRole("button", { name: `${name} 创建副本` }));
+  await waitFor(() => expect(notify).toHaveBeenCalledWith("已创建副本"));
+  expect(mock.command).toHaveBeenCalledWith("update_gateway", {
+    clientId: "codex",
+    edit: { op: "duplicateProvider", id },
+    expectedRevision: state.revision,
+  });
+
+  const sent = () =>
+    mock.command.mock.calls.filter(
+      ([command, args]) =>
+        command === "update_gateway" && args.edit.op === "deleteProvider",
+    );
+  await user.click(actions.getByRole("button", { name: `${name} 删除` }));
+  const confirmation = await screen.findByRole("dialog", { name: "确认操作" });
+  expect(confirmation).toHaveTextContent(`删除供应商“${name}”？`);
+  await user.click(within(confirmation).getByRole("button", { name: "取消" }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "确认操作" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(sent()).toHaveLength(0);
+
+  await user.click(actions.getByRole("button", { name: `${name} 删除` }));
+  await user.click(
+    within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+      "button",
+      { name: "删除" },
+    ),
+  );
+  await waitFor(() => expect(sent()).toHaveLength(1));
+  expect(sent()[0][1].edit).toEqual({ op: "deleteProvider", id });
+});
+
+it("maps a Claude provider's models from its row", async () => {
+  localStorage.setItem("vela.main.client", "claude");
+  const user = userEvent.setup();
+  const notify = vi.fn();
+  const { id, name } = claudeState.providers[0];
+  mock.command.mockImplementation(async (command: string) =>
+    command === "list_provider_models"
+      ? { models: ["upstream-opus"], error: null, stale: false }
+      : command === "get_gateway_models"
+        ? { models: [] }
+        : command === "get_gateway" || command === "update_gateway"
+          ? structuredClone(claudeState)
+          : undefined,
+  );
+  render(<Gateway notify={notify} />);
+  await user.click(
+    within(await screen.findByLabelText(`${name} 操作`)).getByRole("button", {
+      name: `${name} 模型映射`,
+    }),
+  );
+  const dialog = within(
+    await screen.findByRole("dialog", { name: `${name} 模型映射` }),
+  );
+  await user.click(dialog.getByRole("button", { name: "添加映射" }));
+  await user.type(
+    dialog.getByRole("combobox", { name: "映射 1 请求模型" }),
+    "claude-opus",
+  );
+  await user.selectOptions(
+    await dialog.findByRole("combobox", { name: "映射 1 上游模型" }),
+    await dialog.findByRole("option", { name: "upstream-opus" }),
+  );
+  await user.click(dialog.getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(notify).toHaveBeenCalledWith("模型映射已保存"));
+  expect(mock.command).toHaveBeenCalledWith("update_gateway", {
+    clientId: "claude",
+    edit: {
+      op: "modelMapProvider",
+      id,
+      mapping: { "claude-opus": "upstream-opus" },
+    },
+    expectedRevision: claudeState.revision,
+  });
+  expect(
+    screen.queryByRole("dialog", { name: `${name} 模型映射` }),
+  ).not.toBeInTheDocument();
+});
+
+it("opens the API editor on request and starts it afresh for each request", async () => {
+  const user = userEvent.setup();
+  const handled = vi.fn();
+  const { id, baseUrl } = state.providers[0];
+  const focus = (sequence: number) => (
+    <Gateway
+      notify={() => {}}
+      focusProvider={{ id, clientId: "codex", action: "edit", sequence }}
+      onFocusHandled={handled}
+    />
+  );
+  const { rerender } = render(focus(1));
+  const address = () =>
+    within(screen.getByRole("dialog", { name: "编辑供应商" })).getByRole(
+      "textbox",
+      { name: "base_url" },
+    );
+  await screen.findByRole("dialog", { name: "编辑供应商" });
+  expect(address()).toHaveValue(baseUrl);
+  expect(handled).toHaveBeenCalledTimes(1);
+  await user.clear(address());
+  await user.type(address(), "https://draft.example.invalid/v1");
+  // App confirms discarding before emitting this new navigation sequence.
+  rerender(focus(2));
+  await waitFor(() => expect(address()).toHaveValue(baseUrl));
+  expect(
+    mock.command.mock.calls.some(([name]) => name === "update_gateway"),
+  ).toBe(false);
 });
 
 it.each(["codex", "claude", "grok", "dsh"] as const)(

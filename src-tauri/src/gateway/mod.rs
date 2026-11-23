@@ -1,6 +1,9 @@
+mod agy;
+mod agy_shell;
 mod claude_stream;
 pub mod gemini;
 mod response_decoder;
+pub mod vertex;
 use crate::errors::code;
 #[cfg(test)]
 mod api_login_tests;
@@ -24,7 +27,6 @@ mod shared_listener_tests;
 #[cfg(test)]
 mod shared_transport_tests;
 pub(crate) use takeover::manages_auth;
-pub(crate) mod antigravity;
 mod client;
 #[cfg(test)]
 mod client_cancel_tests;
@@ -48,11 +50,14 @@ pub(crate) use compaction::HandoffWaiting;
 #[cfg(test)]
 mod config_poll_tests;
 mod connector;
+mod delegation;
 #[cfg(test)]
 mod diagnostic_test_support;
 #[cfg(test)]
 mod downstream_delivery_tests;
 mod endpoints;
+#[cfg(test)]
+mod error_corpus_tests;
 #[cfg(test)]
 mod event_policy_tests;
 pub(crate) mod failover;
@@ -131,7 +136,7 @@ use parking_lot::Mutex;
 use replay::WireBody;
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -168,8 +173,18 @@ pub struct ProviderView {
     pub rpm_wait_reason: Option<crate::events::RpmWaitReason>,
     pub allowed_models: Option<Vec<String>>,
     pub dsh_models: Option<dsh::ModelMapping>,
+    pub model_map: BTreeMap<String, String>,
     pub handoff_after_compaction: bool,
     pub take_new_threads: bool,
+    pub take_compaction: bool,
+    pub compaction_model: String,
+    pub compaction_effort: String,
+    pub take_auxiliary: bool,
+    pub auxiliary_model: String,
+    pub auxiliary_effort: String,
+    pub take_web_search: bool,
+    pub web_search_model: String,
+    pub web_search_effort: String,
     pub search_only: bool,
     pub end_on_message_stop: bool,
     pub filter_count_tokens: bool,
@@ -177,6 +192,10 @@ pub struct ProviderView {
     pub endless_mode: bool,
     pub upstream_retry_seconds: u64,
     pub normal_retry_seconds: u64,
+    pub risk_codes: Vec<u16>,
+    pub retry_intensity: u8,
+    pub limit_retry_seconds: u64,
+    pub limit_rest_seconds: u64,
 }
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -184,6 +203,8 @@ pub struct View {
     pub listener: ListenerView,
     pub grok_managed: bool,
     pub dsh_profile: Option<dsh::Options>,
+    /// How a terminal's `agy` reaches the gateway; only Antigravity's, while it runs.
+    pub agy_shell: Option<agy::ShellView>,
     pub client_id: ClientId,
     pub revision: String,
     pub running: bool,
@@ -390,6 +411,8 @@ struct Shared {
     admission: admission::Scheduler,
     compaction: Arc<compaction::Registry>,
     links: connectivity::Links,
+    /// Startup files that took the `agy` function at the last start.
+    agy_profiles: Mutex<Vec<String>>,
 }
 impl Drop for Shared {
     fn drop(&mut self) {
@@ -401,6 +424,10 @@ pub struct Gateway(Arc<Shared>);
 #[derive(Clone)]
 struct Route {
     dsh_models: Option<dsh::ModelMapping>,
+    /// The upstream model this provider is sent in place of a requested one.
+    model_map: BTreeMap<String, String>,
+    /// The kinds of request this provider takes over from the others.
+    delegate: model::Delegate,
     grok: Option<grok_config::Connection>,
     client_id: ClientId,
     provider: Provider,
@@ -410,13 +437,20 @@ struct Route {
 }
 impl Route {
     fn accepts_protocol(&self, path: &str) -> bool {
+        if self.client_id == ClientId::Claude && vertex::anthropic(&self.provider.base_url) {
+            return vertex::accepts(path);
+        }
         self.grok.as_ref().is_none_or(|c| c.protocol.accepts(path))
     }
     fn target(
         &self,
         incoming: &hyper::Uri,
     ) -> std::result::Result<hyper::Uri, Box<dyn std::error::Error + Send + Sync>> {
-        let uri = forward::target(&self.provider.base_url, incoming)?;
+        let uri = if self.client_id == ClientId::Agy {
+            gemini::target(&self.provider.base_url, incoming)?
+        } else {
+            forward::target(&self.provider.base_url, incoming)?
+        };
         if let Some(c) = &self.grok {
             c.query_uri(uri).map_err(|e| e.message.into())
         } else {
@@ -434,6 +468,13 @@ impl Route {
     }
     fn endless(&self) -> bool {
         self.provider.endless_mode
+    }
+    /// The statuses this provider's endless mode treats as risk control.
+    fn risk_codes(&self) -> &[u16] {
+        self.provider
+            .risk_codes
+            .as_deref()
+            .unwrap_or_else(|| self.client_id.default_risk_codes())
     }
     fn health_for(&self, requirement: &routing::Requirement) -> Health {
         let available = |mut health: Health| {
@@ -455,9 +496,6 @@ fn pkey(p: &Provider) -> String {
     format!("provider:{}:{}", p.id, p.version)
 }
 impl Gateway {
-    pub(crate) fn registry(&self) -> Arc<registry::Registry> {
-        self.0.registry.clone()
-    }
     pub fn freeze_gate(&self) -> freeze::Gate {
         self.0.registry.freeze.clone()
     }
@@ -488,18 +526,11 @@ impl Gateway {
         model: Option<&str>,
         operation: crate::usage::model::Operation,
     ) -> Option<crate::usage::Trace> {
-        self.0.usage.lock().as_ref().map(|s| {
-            s.begin_operation(
-                match self.0.client {
-                    ClientId::Codex => "codex",
-                    ClientId::Claude => "claude",
-                    ClientId::Grok => "grok",
-                    ClientId::Dsh => "dsh",
-                },
-                model,
-                operation,
-            )
-        })
+        self.0
+            .usage
+            .lock()
+            .as_ref()
+            .map(|s| s.begin_operation(self.0.client.usage_name(), model, operation))
     }
 
     pub fn report_diagnostics(&self) {
@@ -688,6 +719,7 @@ impl Gateway {
             clients: Mutex::new(HashMap::new()),
             compaction: compaction::Registry::new(data.join("conversation-owners.json")),
             links: connectivity::Links::default(),
+            agy_profiles: Mutex::new(Vec::new()),
             endpoints: endpoints::Service::new(data.join("endpoint-owners.json")),
             catalog: catalog::Service::new(data.join("provider-models.json")),
             model_list: model_list::Service::new(data.join("model-list.json")),
@@ -748,7 +780,10 @@ impl Gateway {
         let mut s = self.0.inner.lock();
         s.editable_mut().home = Some(home.to_owned());
         // Grok discovery is read-only. Its explicit import preview owns migration.
-        if matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
+        if matches!(
+            self.0.client,
+            ClientId::Agy | ClientId::Grok | ClientId::Dsh
+        ) {
             return Ok(());
         }
         if let Some(error) = &s.recovery_error {
@@ -790,6 +825,7 @@ impl Gateway {
             )?;
             next.edit(
                 Edit::SaveProvider {
+                    delegate: Default::default(),
                     search_only: None,
                     end_on_message_stop: None,
                     filter_count_tokens: None,
@@ -797,6 +833,10 @@ impl Gateway {
                     endless_mode: None,
                     upstream_retry_seconds: None,
                     normal_retry_seconds: None,
+                    risk_codes: None,
+                    retry_intensity: None,
+                    limit_retry_seconds: None,
+                    limit_rest_seconds: None,
                     quota_access_token: None,
                     id: None,
                     base_url,
@@ -909,6 +949,7 @@ impl Gateway {
             listener: listener.clone(),
             grok_managed: s.store.grok_api_model.is_some(),
             dsh_profile: s.store.dsh.as_ref().map(|d| d.options.clone()),
+            agy_shell: self.agy_shell(s.running),
             client_id: self.0.client,
             config_revision: None,
             config_provider: None,
@@ -952,16 +993,19 @@ impl Gateway {
                     let (quota_checking, quota_check) =
                         self.0.quota.probe_view(&p.id, &quota_version);
                     let quota = self.0.quota.cached(&p.id, &quota_version);
+                    let delegate = s.store.delegates.get(&p.id).cloned().unwrap_or_default();
                     ProviderView {
-                        protocol: (matches!(self.0.client, ClientId::Grok | ClientId::Dsh)).then(
-                            || {
-                                s.store
-                                    .grok_connections
-                                    .get(&p.id)
-                                    .map(|c| c.protocol)
-                                    .unwrap_or_else(|| self.0.client.default_protocol())
-                            },
-                        ),
+                        protocol: (matches!(
+                            self.0.client,
+                            ClientId::Agy | ClientId::Grok | ClientId::Dsh
+                        ))
+                        .then(|| {
+                            s.store
+                                .grok_connections
+                                .get(&p.id)
+                                .map(|c| c.protocol)
+                                .unwrap_or_else(|| self.0.client.default_protocol())
+                        }),
                         id: p.id.clone(),
                         has_quota_access_token: s.store.quota_access_tokens.contains_key(&p.id),
                         name: p.name.clone(),
@@ -987,8 +1031,18 @@ impl Gateway {
                         allowed_models: p.allowed_models.clone(),
                         dsh_models: (self.0.client == ClientId::Dsh)
                             .then(|| s.store.dsh_models.get(&p.id).cloned().unwrap_or_default()),
+                        model_map: s.store.model_maps.get(&p.id).cloned().unwrap_or_default(),
                         handoff_after_compaction: p.handoff_after_compaction,
                         take_new_threads: p.take_new_threads,
+                        take_compaction: delegate.compaction,
+                        compaction_model: delegate.compaction_model.unwrap_or_default(),
+                        compaction_effort: delegate.compaction_effort.unwrap_or_default(),
+                        take_auxiliary: delegate.auxiliary,
+                        auxiliary_model: delegate.auxiliary_model.unwrap_or_default(),
+                        auxiliary_effort: delegate.auxiliary_effort.unwrap_or_default(),
+                        take_web_search: delegate.web_search,
+                        web_search_model: delegate.web_search_model.unwrap_or_default(),
+                        web_search_effort: delegate.web_search_effort.unwrap_or_default(),
                         search_only: p.search_only,
                         end_on_message_stop: p.end_on_message_stop,
                         filter_count_tokens: p.filter_count_tokens,
@@ -996,6 +1050,13 @@ impl Gateway {
                         endless_mode: p.endless_mode,
                         upstream_retry_seconds: p.upstream_retry_seconds,
                         normal_retry_seconds: p.normal_retry_seconds,
+                        risk_codes: p
+                            .risk_codes
+                            .clone()
+                            .unwrap_or_else(|| self.0.client.default_risk_codes().to_vec()),
+                        retry_intensity: p.retry_intensity(),
+                        limit_retry_seconds: p.limit_retry_seconds(),
+                        limit_rest_seconds: p.limit_rest_seconds(),
                         active_requests: occupied.get(&p.id).copied().unwrap_or(0),
                         quota_checking,
                         quota_check,
@@ -1103,6 +1164,7 @@ impl Gateway {
             .map(|(r, _)| r.clone());
         let ports = [view.listener.port, store.settings.port];
         let mut current = match (self.0.client, home) {
+            (ClientId::Agy, _) => agy::current(view.running),
             (ClientId::Grok, Some(home)) => {
                 let effective = grok_raw
                     .as_ref()
@@ -1183,10 +1245,19 @@ impl Gateway {
         self.0.inner.lock().running
     }
     pub fn read_config(&self, home: &Path) -> Result<crate::configuration::Document> {
-        if self.0.client == ClientId::Dsh {
-            return Err(AppError::new(code::CONFIG, "请在 DSH 接入面板选择 profile"));
-        }
+        self.client_file()?;
         crate::configuration::read(self.0.client, home, &self.0.data, self.config_guarded())
+    }
+    /// Whether the client has one file that the gateway page edits as text.
+    fn client_file(&self) -> Result<()> {
+        match self.0.client {
+            ClientId::Dsh => Err(AppError::new(code::CONFIG, "请在 DSH 接入面板选择 profile")),
+            ClientId::Agy => Err(AppError::new(
+                code::CONFIG,
+                "Antigravity 的配置文件请在配置页编辑",
+            )),
+            ClientId::Codex | ClientId::Claude | ClientId::Grok => Ok(()),
+        }
     }
     fn config_guarded(&self) -> bool {
         let running = self.0.inner.lock().running;
@@ -1197,9 +1268,7 @@ impl Gateway {
         home: &Path,
         cache: &mut crate::auth_cache::Cache<Result<String>>,
     ) -> Result<(String, String, bool)> {
-        if self.0.client == ClientId::Dsh {
-            return Err(AppError::new(code::CONFIG, "请在 DSH 接入面板选择 profile"));
-        }
+        self.client_file()?;
         let path = self.0.client.config(home);
         let revision = cache.read_user(&path, |raw| {
             if let Some(bytes) = &raw {
@@ -1224,9 +1293,7 @@ impl Gateway {
         expected: &str,
     ) -> Result<crate::configuration::Document> {
         let s = self.0.inner.lock();
-        if self.0.client == ClientId::Dsh {
-            return Err(AppError::new(code::CONFIG, "请使用 DSH 接入面板"));
-        }
+        self.client_file()?;
         crate::configuration::validate(self.0.client, text)?;
         if self.0.client == ClientId::Claude {
             if let Some(data) = self.0.data.parent() {
@@ -1375,6 +1442,31 @@ impl Gateway {
         {
             return Err(AppError::new(code::CLIENT, "此操作仅适用于 DSH"));
         }
+        if self.0.client != ClientId::Claude && matches!(&edit, Edit::ModelMapProvider { .. }) {
+            return Err(AppError::new(code::CLIENT, "此操作仅适用于 Claude Code"));
+        }
+        if let Edit::SaveProvider { delegate, .. } | Edit::SaveGrokProvider { delegate, .. } = &edit
+        {
+            use model::Delegated;
+            if !matches!(self.0.client, ClientId::Codex | ClientId::Claude)
+                && (delegate.enables(Delegated::Compaction)
+                    || delegate.enables(Delegated::Auxiliary))
+            {
+                return Err(AppError::new(
+                    code::CLIENT,
+                    "压缩与辅助请求接管仅适用于 Codex 和 Claude Code",
+                ));
+            }
+            // Codex searches go to its search-only providers instead.
+            if !matches!(self.0.client, ClientId::Claude | ClientId::Grok)
+                && delegate.enables(Delegated::WebSearch)
+            {
+                return Err(AppError::new(
+                    code::CLIENT,
+                    "网络搜索请求接管仅适用于 Claude Code 和 Grok Build",
+                ));
+            }
+        }
         if self.0.client == ClientId::Dsh
             && matches!(&edit, Edit::SaveProvider { .. } | Edit::Import)
         {
@@ -1382,6 +1474,10 @@ impl Gateway {
                 code::CLIENT,
                 "请在 DSH 供应商表单添加 Chat Completions 连接",
             ));
+        }
+        // Antigravity has no connection of its own to take a provider from.
+        if self.0.client == ClientId::Agy && matches!(&edit, Edit::Import) {
+            return Err(AppError::new(code::CLIENT, "请添加 Antigravity API 供应商"));
         }
         if let Edit::Reset { id } = &edit {
             if !s.store.providers.iter().any(|p| &p.id == id) {
@@ -1485,6 +1581,7 @@ impl Gateway {
                 let (base_url, token) = Self::import_pair(self.0.client, home, &next.connection)?;
                 next.edit(
                     Edit::SaveProvider {
+                        delegate: Default::default(),
                         search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
@@ -1492,6 +1589,10 @@ impl Gateway {
                         endless_mode: None,
                         upstream_retry_seconds: None,
                         normal_retry_seconds: None,
+                        risk_codes: None,
+                        retry_intensity: None,
+                        limit_retry_seconds: None,
+                        limit_rest_seconds: None,
                         quota_access_token: None,
                         id: None,
                         base_url,
@@ -1527,7 +1628,10 @@ impl Gateway {
                 .listener
                 .set_port(port, &self.try_listener_view()?.revision)?;
         }
-        let revision = if !matches!(self.0.client, ClientId::Dsh) && (s.running || direct_select) {
+        // DSH and Antigravity keep no connection in a client file to follow the choice.
+        let revision = if !matches!(self.0.client, ClientId::Agy | ClientId::Dsh)
+            && (s.running || direct_select)
+        {
             let p = Self::exit_provider(&next, s.last_successful.as_deref())?;
             let target = takeover::Pair::new(&p.base_url, &p.token);
             let resume_target = if self.0.client == ClientId::Grok && s.running {
@@ -1606,6 +1710,9 @@ impl Gateway {
         home: &Path,
         config_revision: Option<&str>,
     ) -> Result<View> {
+        if self.0.client == ClientId::Agy {
+            return self.start_agy(home, expected).await;
+        }
         if self.0.client == ClientId::Dsh {
             return self.restart_dsh(home, expected).await;
         }
@@ -1760,7 +1867,7 @@ impl Gateway {
         let Some(intent) = intent.filter(|i| i.desired) else {
             return Ok(());
         };
-        if matches!(self.0.client, ClientId::Dsh) {
+        if matches!(self.0.client, ClientId::Agy | ClientId::Dsh) {
             if intent.home != home {
                 return Err(AppError::new(
                     code::RESUME_CONFLICT,
@@ -1824,6 +1931,9 @@ impl Gateway {
         expected_config: Option<&str>,
         preserve_intent: bool,
     ) -> Result<View> {
+        if self.0.client == ClientId::Agy {
+            return self.stop_agy(preserve_intent).await;
+        }
         if self.0.client == ClientId::Dsh {
             return self.stop_dsh(preserve_intent).await;
         }
@@ -1958,7 +2068,12 @@ impl Gateway {
         {
             return;
         }
-        if s.store.mode == "auto" && !matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
+        if s.store.mode == "auto"
+            && !matches!(
+                self.0.client,
+                ClientId::Agy | ClientId::Grok | ClientId::Dsh
+            )
+        {
             // Routes may use an auxiliary URL. Client configuration and recovery
             // always restore the canonical primary URL saved by the user.
             let canonical = s
@@ -2070,17 +2185,20 @@ impl Gateway {
                 .iter()
                 .find(|p| p.id == id)
                 .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))?;
-            let connection =
-                (matches!(self.client_id(), ClientId::Grok | ClientId::Dsh)).then(|| {
-                    s.store
-                        .grok_connections
-                        .get(id)
-                        .cloned()
-                        .unwrap_or_else(|| provider_protocol::Connection {
-                            protocol: self.0.client.default_protocol(),
-                            ..Default::default()
-                        })
-                });
+            let connection = (matches!(
+                self.client_id(),
+                ClientId::Agy | ClientId::Grok | ClientId::Dsh
+            ))
+            .then(|| {
+                s.store
+                    .grok_connections
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| provider_protocol::Connection {
+                        protocol: self.0.client.default_protocol(),
+                        ..Default::default()
+                    })
+            });
             let query = quota::Query {
                 client_id: self.0.client,
                 id: p.id.clone(),
@@ -2389,6 +2507,22 @@ impl Gateway {
     fn request_state(&self) -> parking_lot::MutexGuard<'_, Inner> {
         self.0.inner.lock()
     }
+    /// Copies the providers' current endless settings into `routes`. A
+    /// request keeps the address, token and version it started with.
+    fn refresh_endless(&self, routes: &mut HashMap<String, Route>) {
+        let s = self.0.inner.lock();
+        for p in &s.store.providers {
+            if let Some(route) = routes.get_mut(&p.id) {
+                route.provider.endless_mode = p.endless_mode;
+                route.provider.upstream_retry_seconds = p.upstream_retry_seconds;
+                route.provider.normal_retry_seconds = p.normal_retry_seconds;
+                route.provider.risk_codes.clone_from(&p.risk_codes);
+                route.provider.retry_intensity = p.retry_intensity;
+                route.provider.limit_retry_seconds = p.limit_retry_seconds;
+                route.provider.limit_rest_seconds = p.limit_rest_seconds;
+            }
+        }
+    }
     fn routing_ids(&self, pinned: Option<&str>) -> Vec<String> {
         let s = self.0.inner.lock();
         s.store
@@ -2477,7 +2611,13 @@ impl Gateway {
             .clone();
         Some(Route {
             dsh_models,
-            grok: (matches!(self.0.client, ClientId::Grok | ClientId::Dsh)).then(|| {
+            model_map: s.store.model_maps.get(id).cloned().unwrap_or_default(),
+            delegate: s.store.delegates.get(id).cloned().unwrap_or_default(),
+            grok: (matches!(
+                self.0.client,
+                ClientId::Agy | ClientId::Grok | ClientId::Dsh
+            ))
+            .then(|| {
                 s.store
                     .grok_connections
                     .get(&provider.id)

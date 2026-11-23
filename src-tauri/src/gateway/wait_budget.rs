@@ -1,7 +1,8 @@
 //! Queue/backoff time shares one budget; upstream attempts have phase timeouts.
+use super::connectivity::Links;
 use parking_lot::Mutex;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -18,6 +19,21 @@ pub enum Silence {
     /// Compaction, once dispatched: this long from dispatch while it has
     /// produced no output, without limit afterwards.
     Compaction(Option<Duration>),
+    /// A response that has started: until the caller's deadline, and no
+    /// longer than the outage limit while its endpoint is held.
+    Started,
+    /// A stream the model is writing: as `Started`, and no longer than this.
+    Flowing(Duration),
+}
+/// Why a wait for the upstream gave up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quiet {
+    /// The caller's deadline passed.
+    Deadline,
+    /// A stream the model was writing went silent.
+    Stalled,
+    /// The response went silent while its endpoint's network was down.
+    Held,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -30,9 +46,68 @@ pub struct PendingRequest {
     pub elapsed_seconds: u64,
     pub remaining_seconds: Option<u64>,
     pub phase: String,
+    /// Upstream bytes of the attempt in progress; absent while nothing is
+    /// being received.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_bytes: Option<u64>,
+    /// Averaged over the last five seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_per_second: Option<u64>,
+    /// Since the last upstream byte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub silent_seconds: Option<u64>,
+}
+const RATE_WINDOW: Duration = Duration::from_secs(5);
+/// Upstream data received by the attempt in progress.
+struct Transfer {
+    received: u64,
+    began: Instant,
+    last: Instant,
+    /// Bytes per recent slice of time, oldest first.
+    recent: VecDeque<(Instant, u64)>,
+}
+impl Transfer {
+    fn add(&mut self, bytes: u64, now: Instant) {
+        self.received = self.received.saturating_add(bytes);
+        self.last = now;
+        while self
+            .recent
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) > RATE_WINDOW)
+        {
+            self.recent.pop_front();
+        }
+        match self.recent.back_mut() {
+            Some((at, slice)) if now.duration_since(*at) < Duration::from_millis(250) => {
+                *slice = slice.saturating_add(bytes)
+            }
+            _ => self.recent.push_back((now, bytes)),
+        }
+    }
+    fn rate(&self, now: Instant) -> u64 {
+        let bytes: u64 = self
+            .recent
+            .iter()
+            .filter(|(at, _)| now.duration_since(*at) <= RATE_WINDOW)
+            .map(|(_, bytes)| bytes)
+            .sum();
+        // A transfer younger than the window is averaged over its own age.
+        let span = now
+            .duration_since(self.began)
+            .clamp(Duration::from_secs(1), RATE_WINDOW);
+        (bytes as f64 / span.as_secs_f64()).round() as u64
+    }
+}
+/// The endpoint an attempt's response comes from, watched for an outage.
+#[derive(Clone)]
+struct Outage {
+    links: Links,
+    key: String,
+    limit: Duration,
 }
 struct Pending {
     view: PendingRequest,
+    transfer: Option<Transfer>,
     started: Instant,
     deadline: Instant,
     compaction_execution: bool,
@@ -60,6 +135,9 @@ impl Pending {
 struct State {
     active: Option<Pending>,
     cancelled: Option<Instant>,
+    /// Kept here rather than with `active`, which the first output removes
+    /// while the response is still being relayed.
+    outage: Option<Outage>,
 }
 struct Shared {
     state: Mutex<State>,
@@ -102,6 +180,12 @@ impl Registry {
                     .elapsed()
                     .saturating_sub(active.paused_for())
                     .as_secs();
+                if let Some(transfer) = &active.transfer {
+                    let now = Instant::now();
+                    view.received_bytes = Some(transfer.received);
+                    view.bytes_per_second = Some(transfer.rate(now));
+                    view.silent_seconds = Some(now.duration_since(transfer.last).as_secs());
+                }
                 if active.paused() {
                     view.phase = "frozen".into();
                 }
@@ -232,7 +316,11 @@ impl WaitBudget {
                 elapsed_seconds: 0,
                 remaining_seconds: Some(self.seconds),
                 phase: "admission".into(),
+                received_bytes: None,
+                bytes_per_second: None,
+                silent_seconds: None,
             },
+            transfer: None,
             started,
             deadline: started + Duration::from_secs(self.seconds),
             compaction_execution: false,
@@ -254,9 +342,9 @@ impl WaitBudget {
         drop(state);
         self.shared.changes.send_replace(());
     }
-    pub fn set_endless(&self) {
+    pub fn set_endless(&self, endless: bool) {
         if let Some(active) = &mut self.shared.state.lock().active {
-            active.endless = true;
+            active.endless = endless;
         }
         self.shared.changes.send_replace(());
     }
@@ -294,12 +382,41 @@ impl WaitBudget {
             }
             active.view.phase = phase.into();
             active.compaction_execution = false;
+            // Each attempt and each wait counts its own transfer.
+            active.transfer = None;
         }
         drop(state);
         self.shared.changes.send_replace(());
         if let Some(registry) = &self.shared.registry {
             let _ = registry.0.events.send(());
         }
+    }
+    /// Counts upstream bytes for the request `deadline` identifies. The list
+    /// is read on a timer, so nobody is woken for it.
+    pub fn progress(&self, deadline: Option<Instant>, bytes: usize) {
+        let mut state = self.shared.state.lock();
+        if let Some(active) = state
+            .active
+            .as_mut()
+            .filter(|p| Some(p.deadline) == deadline)
+        {
+            let now = Instant::now();
+            active
+                .transfer
+                .get_or_insert_with(|| Transfer {
+                    received: 0,
+                    began: now,
+                    last: now,
+                    recent: VecDeque::new(),
+                })
+                .add(bytes as u64, now);
+        }
+    }
+    /// Sets the endpoint whose outage shortens this request's response
+    /// waits, or none while outages are not probed.
+    pub fn watch_endpoint(&self, endpoint: Option<(Links, String, Duration)>) {
+        self.shared.state.lock().outage =
+            endpoint.map(|(links, key, limit)| Outage { links, key, limit });
     }
     pub fn buffering(&self) {
         let mut state = self.shared.state.lock();
@@ -363,9 +480,16 @@ impl WaitBudget {
         deadline: Instant,
         silence: Silence,
         future: impl std::future::Future<Output = T>,
-    ) -> Result<T, tokio::time::error::Elapsed> {
-        let Silence::Compaction(limit) = silence else {
-            return tokio::time::timeout_at(deadline, future).await;
+    ) -> Result<T, Quiet> {
+        let limit = match silence {
+            Silence::Ordinary => {
+                return tokio::time::timeout_at(deadline, future)
+                    .await
+                    .map_err(|_| Quiet::Deadline)
+            }
+            Silence::Started => return self.watched(deadline, None, future).await,
+            Silence::Flowing(stall) => return self.watched(deadline, Some(stall), future).await,
+            Silence::Compaction(limit) => limit,
         };
         let mut changes = self.shared.changes.subscribe();
         tokio::pin!(future);
@@ -373,7 +497,9 @@ impl WaitBudget {
             changes.borrow_and_update();
             if let Some(since) = self.compaction_since() {
                 return match limit {
-                    Some(limit) => tokio::time::timeout_at(since + limit, future).await,
+                    Some(limit) => tokio::time::timeout_at(since + limit, future)
+                        .await
+                        .map_err(|_| Quiet::Deadline),
                     None => Ok(future.await),
                 };
             }
@@ -381,7 +507,53 @@ impl WaitBudget {
                 biased;
                 result = &mut future => return Ok(result),
                 _ = changes.changed() => {},
-                elapsed = tokio::time::timeout_at(deadline, std::future::pending()) => return elapsed,
+                _ = tokio::time::sleep_until(deadline) => return Err(Quiet::Deadline),
+            }
+        }
+    }
+    /// Waits for a started response. While the endpoint is held for an
+    /// outage the wait ends `limit` after it began; once the hold is over,
+    /// `limit` after that, since a connection silent through an outage has
+    /// most likely died with it.
+    async fn watched<T>(
+        &self,
+        deadline: Instant,
+        stall: Option<Duration>,
+        future: impl std::future::Future<Output = T>,
+    ) -> Result<T, Quiet> {
+        let began = Instant::now();
+        let (limit, cause) = match stall {
+            Some(stall) if began + stall < deadline => (began + stall, Quiet::Stalled),
+            _ => (deadline, Quiet::Deadline),
+        };
+        let Some(outage) = self.shared.state.lock().outage.clone() else {
+            return tokio::time::timeout_at(limit, future)
+                .await
+                .map_err(|_| cause);
+        };
+        let mut changes = outage.links.subscribe();
+        let mut watching = true;
+        let mut held = false;
+        let mut outage_limit = None;
+        tokio::pin!(future);
+        loop {
+            changes.borrow_and_update();
+            if outage.links.down(&outage.key) {
+                held = true;
+                outage_limit = Some(began + outage.limit);
+            } else if held {
+                held = false;
+                outage_limit = Some(Instant::now() + outage.limit);
+            }
+            let (limit, cause) = match outage_limit {
+                Some(outage_limit) if outage_limit < limit => (outage_limit, Quiet::Held),
+                _ => (limit, cause),
+            };
+            tokio::select! {
+                biased;
+                result = &mut future => return Ok(result),
+                changed = changes.changed(), if watching => watching = changed.is_ok(),
+                _ = tokio::time::sleep_until(limit) => return Err(cause),
             }
         }
     }
@@ -642,6 +814,165 @@ mod tests {
         assert!(response.is_err());
         // Counted from the dispatch, not from the ordinary deadline.
         assert_eq!(started.elapsed(), Duration::from_secs(410));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flowing_stream_stalls_at_its_own_limit_or_the_callers_deadline() {
+        let budget = WaitBudget::new(300);
+        budget.begin();
+        let stall = Silence::Flowing(Duration::from_secs(120));
+        let started = Instant::now();
+        let quiet = budget
+            .response(
+                started + Duration::from_secs(300),
+                stall,
+                std::future::pending::<()>(),
+            )
+            .await;
+        assert_eq!(quiet, Err(Quiet::Stalled));
+        assert_eq!(started.elapsed(), Duration::from_secs(120));
+
+        let started = Instant::now();
+        let quiet = budget
+            .response(
+                started + Duration::from_secs(30),
+                stall,
+                std::future::pending::<()>(),
+            )
+            .await;
+        assert_eq!(quiet, Err(Quiet::Deadline));
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+
+        let data = budget
+            .response(started + Duration::from_secs(300), stall, async {
+                tokio::time::sleep(Duration::from_secs(119)).await;
+                7
+            })
+            .await;
+        assert_eq!(data, Ok(7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_started_response_is_cut_short_while_its_endpoint_is_held() {
+        let budget = WaitBudget::new(300);
+        budget.begin();
+        let links = Links::default();
+        let limit = Duration::from_secs(60);
+        let far = Duration::from_secs(400);
+        // Without an endpoint to watch only the caller's deadline counts.
+        let started = Instant::now();
+        let quiet = budget
+            .response(
+                started + far,
+                Silence::Started,
+                std::future::pending::<()>(),
+            )
+            .await;
+        assert_eq!(quiet, Err(Quiet::Deadline));
+        assert_eq!(started.elapsed(), far);
+
+        budget.watch_endpoint(Some((links.clone(), "fixture".into(), limit)));
+        let after = |links: &Links, seconds, down| {
+            let links = links.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(seconds)).await;
+                links.set_down("fixture", down);
+            })
+        };
+        let wait = |silence| {
+            let budget = &budget;
+            async move {
+                let started = Instant::now();
+                let quiet = budget
+                    .response(started + far, silence, std::future::pending::<()>())
+                    .await;
+                (quiet, started.elapsed())
+            }
+        };
+
+        // Held 25 seconds into the silence: over 60 seconds after it began.
+        after(&links, 25, true);
+        assert_eq!(wait(Silence::Started).await, (Err(Quiet::Held), limit));
+        // Still held when the next wait begins.
+        assert_eq!(wait(Silence::Started).await, (Err(Quiet::Held), limit));
+        // The earlier of the two limits ends a flowing stream.
+        assert_eq!(
+            wait(Silence::Flowing(Duration::from_secs(120))).await,
+            (Err(Quiet::Held), limit)
+        );
+        assert_eq!(
+            wait(Silence::Flowing(Duration::from_secs(45))).await,
+            (Err(Quiet::Stalled), Duration::from_secs(45))
+        );
+        // The hold ends 20 seconds in: the wait gets the limit again from there.
+        after(&links, 20, false);
+        assert_eq!(
+            wait(Silence::Started).await,
+            (Err(Quiet::Held), Duration::from_secs(80))
+        );
+        // Already silent for longer than the limit when the hold begins.
+        after(&links, 90, true);
+        assert_eq!(
+            wait(Silence::Started).await,
+            (Err(Quiet::Held), Duration::from_secs(90))
+        );
+        // The wait for a response head does not watch the endpoint.
+        assert_eq!(wait(Silence::Ordinary).await, (Err(Quiet::Deadline), far));
+        // Data that arrives in time is returned, held or not.
+        let data = budget
+            .response(Instant::now() + far, Silence::Started, async {
+                tokio::time::sleep(Duration::from_secs(59)).await;
+                7
+            })
+            .await;
+        assert_eq!(data, Ok(7));
+
+        budget.watch_endpoint(None);
+        assert_eq!(wait(Silence::Started).await, (Err(Quiet::Deadline), far));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_receiving_request_reports_its_transfer_until_its_phase_changes() {
+        let registry = Registry::new(broadcast::channel(16).0);
+        let budget = WaitBudget::tracked(300, &registry);
+        budget.begin();
+        let identity = budget.deadline();
+        budget.describe(Some("fixture"), None, "headers");
+        let row = || {
+            let row = registry.view().pop().unwrap();
+            (row.received_bytes, row.bytes_per_second, row.silent_seconds)
+        };
+        assert_eq!(row(), (None, None, None));
+
+        budget.progress(identity, 4096);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        budget.progress(identity, 4096);
+        assert_eq!(row(), (Some(8192), Some(8192), Some(0)));
+        // Averaged over five seconds once the transfer is that old.
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(row(), (Some(8192), Some(1638), Some(4)));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(row(), (Some(8192), Some(0), Some(6)));
+        // The tail of an earlier round is not this request's transfer.
+        budget.progress(identity.map(|at| at + Duration::from_secs(1)), 1);
+        assert_eq!(row().0, Some(8192));
+        budget.progress(identity, 1024);
+        assert_eq!(row(), (Some(9216), Some(205), Some(0)));
+
+        let json = serde_json::to_value(registry.view().pop().unwrap()).unwrap();
+        assert_eq!(
+            (
+                &json["receivedBytes"],
+                &json["bytesPerSecond"],
+                &json["silentSeconds"]
+            ),
+            (&json!(9216), &json!(205), &json!(0))
+        );
+        // A retry, a hold or the next attempt starts from nothing.
+        budget.describe(Some("fixture"), None, "retry");
+        assert_eq!(row(), (None, None, None));
+        let json = serde_json::to_value(registry.view().pop().unwrap()).unwrap();
+        assert!(json.get("receivedBytes").is_none());
     }
 
     #[tokio::test(start_paused = true)]

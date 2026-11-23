@@ -4,7 +4,13 @@ import {
   type UsageRecord,
   type UsageSettings,
 } from "./usage-types";
-import { date, preciseDate, promptTokens, missingReason } from "./usage-format";
+import {
+  date,
+  formatBytes,
+  preciseDate,
+  promptTokens,
+  missingReason,
+} from "./usage-format";
 import { durationSeverity, firstTokenSeverity } from "./latency-health";
 import {
   ArrowDown,
@@ -568,6 +574,16 @@ export default function UsageLogTable({
                   {[...performanceFields, "status" as const]
                     .filter(visible)
                     .map(metric)}
+                  {state && a.transfer && (
+                    <span
+                      className="usage-token-item"
+                      aria-label="已收"
+                      title="中断前从上游读取的数据量"
+                    >
+                      <small>已收</small>
+                      {formatBytes(a.transfer.upstreamBytes)}
+                    </span>
+                  )}
                 </div>
               );
               return (

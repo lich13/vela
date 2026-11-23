@@ -32,13 +32,61 @@ struct Entry {
     /// A request is being held on this endpoint, so its return is announced.
     held: Arc<AtomicBool>,
 }
-#[derive(Clone, Default)]
-pub(super) struct Links(Arc<Mutex<HashMap<String, Entry>>>);
-#[cfg(test)]
-impl Links {
-    pub fn is_empty(&self) -> bool {
-        self.0.lock().is_empty()
+struct Shared {
+    entries: Mutex<HashMap<String, Entry>>,
+    /// Signals every change of an endpoint between down and not down.
+    changes: watch::Sender<()>,
+}
+#[derive(Clone)]
+pub(super) struct Links(Arc<Shared>);
+impl Default for Links {
+    fn default() -> Self {
+        Self(Arc::new(Shared {
+            entries: Mutex::default(),
+            changes: watch::channel(()).0,
+        }))
     }
+}
+impl Links {
+    /// Requests are being held on this endpoint because its network is down.
+    pub fn down(&self, key: &str) -> bool {
+        self.0
+            .entries
+            .lock()
+            .get(key)
+            .is_some_and(|entry| *entry.link.borrow() == Link::Down)
+    }
+    /// Wakes whenever `down` may answer differently. Watchers use this
+    /// instead of an endpoint's own link, whose receivers keep its probe alive.
+    pub fn subscribe(&self) -> watch::Receiver<()> {
+        self.0.changes.subscribe()
+    }
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.0.entries.lock().is_empty()
+    }
+    /// Marks an endpoint as held without a probe behind it.
+    #[cfg(test)]
+    pub fn set_down(&self, key: &str, down: bool) {
+        let mut entries = self.0.entries.lock();
+        if down {
+            entries.insert(
+                key.into(),
+                Entry {
+                    link: Arc::new(watch::channel(Link::Down).0),
+                    held: Arc::default(),
+                },
+            );
+        } else {
+            entries.remove(key);
+        }
+        drop(entries);
+        self.0.changes.send_replace(());
+    }
+}
+/// What identifies the endpoint a route's requests go to.
+pub(super) fn endpoint_key(route: &Route) -> String {
+    format!("{}\n{}", route.provider.id, route.provider.base_url)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -79,9 +127,12 @@ pub(super) async fn settle(
     if !settings.network_probe {
         return Verdict::Reachable;
     }
-    let key = format!("{}\n{}", route.provider.id, route.provider.base_url);
+    // The verdict may take as long as a freeze lasts. Until it comes the
+    // request waits rather than drains, so the freeze can still be lifted.
+    budget.describe(Some(&route.provider.id), model, "retry");
+    let key = endpoint_key(route);
     let (mut link, held) = {
-        let mut links = gateway.0.links.0.lock();
+        let mut links = gateway.0.links.0.entries.lock();
         let entry = links.entry(key.clone()).or_insert_with(|| {
             let entry = Entry {
                 link: Arc::new(watch::channel(Link::Checking).0),
@@ -127,7 +178,9 @@ pub(super) async fn settle(
     }
 }
 
-/// Probes until the endpoint answers or nobody waits for it any more.
+/// Probes until the endpoint answers or nobody waits for it any more. A
+/// frozen client sends nothing, the probe included: it resumes with the thaw,
+/// and an answer that arrives after the freeze releases nothing.
 async fn probe(
     gateway: Gateway,
     route: Route,
@@ -136,41 +189,57 @@ async fn probe(
     link: Arc<watch::Sender<Link>>,
     held: Arc<AtomicBool>,
 ) {
+    let freeze = gateway.freeze_gate();
+    let mut thaw = freeze.subscribe_control();
     let mut failures = 0u32;
     loop {
-        let up = tokio::select! {
-            up = reachable(&route) => up,
-            _ = link.closed() => false,
-        };
-        if up {
-            let mut links = gateway.0.links.0.lock();
-            link.send_replace(Link::Up);
-            links.remove(&key);
-            drop(links);
-            if held.load(Ordering::SeqCst) {
-                report(
-                    &gateway,
-                    &route,
-                    Reason::NetworkRestored,
-                    Action::RetryingSame,
-                    "网络已恢复，已重发暂存请求",
-                );
+        thaw.borrow_and_update();
+        if freeze.is_frozen(route.client_id) {
+            tokio::select! {
+                _ = link.closed() => {}
+                _ = thaw.changed() => {}
             }
-            return;
-        }
-        failures = failures.saturating_add(1);
-        let down = failures >= attempts;
-        if down {
-            link.send_replace(Link::Down);
-        }
-        tokio::select! {
-            _ = link.closed() => {}
-            _ = tokio::time::sleep(if down { HELD_GAP } else { CHECK_GAP }) => {}
+        } else {
+            let up = tokio::select! {
+                up = reachable(&route) => up,
+                _ = link.closed() => false,
+            };
+            if up {
+                let mut links = gateway.0.links.0.entries.lock();
+                if !freeze.is_frozen(route.client_id) {
+                    link.send_replace(Link::Up);
+                    links.remove(&key);
+                    drop(links);
+                    gateway.0.links.0.changes.send_replace(());
+                    if held.load(Ordering::SeqCst) {
+                        report(
+                            &gateway,
+                            &route,
+                            Reason::NetworkRestored,
+                            Action::RetryingSame,
+                            "网络已恢复，已重发暂存请求",
+                        );
+                    }
+                    return;
+                }
+            } else {
+                failures = failures.saturating_add(1);
+                let down = failures >= attempts;
+                if down && link.send_replace(Link::Down) != Link::Down {
+                    gateway.0.links.0.changes.send_replace(());
+                }
+                tokio::select! {
+                    _ = link.closed() => {}
+                    _ = tokio::time::sleep(if down { HELD_GAP } else { CHECK_GAP }) => {}
+                }
+            }
         }
         // Waiters subscribe under this lock, so none can arrive after the check.
-        let mut links = gateway.0.links.0.lock();
+        let mut links = gateway.0.links.0.entries.lock();
         if link.receiver_count() == 0 {
             links.remove(&key);
+            drop(links);
+            gateway.0.links.0.changes.send_replace(());
             return;
         }
     }

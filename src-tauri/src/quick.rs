@@ -130,21 +130,7 @@ impl Panel {
         let path = data.join("quick.json");
         let preferences = storage::read_optional(&path)?
             .map(|raw| {
-                serde_json::from_slice::<serde_json::Value>(&raw)
-                    .and_then(|mut value| {
-                        if let Some(clients) = value
-                            .get_mut("hiddenClients")
-                            .and_then(serde_json::Value::as_array_mut)
-                        {
-                            clients.retain(|v| v != "agy");
-                        }
-                        if value.get("selectedClient").and_then(|v| v.as_str()) == Some("agy") {
-                            if let Some(obj) = value.as_object_mut() {
-                                obj.remove("selectedClient");
-                            }
-                        }
-                        serde_json::from_value(value)
-                    })
+                serde_json::from_slice(&raw)
                     .map_err(|_| AppError::new(code::PANEL, "快捷面板设置无法读取"))
             })
             .transpose()?
@@ -736,7 +722,7 @@ mod tests {
 mod preference_tests {
     use super::*;
     #[test]
-    fn removed_cli_preferences_preserve_other_choices() {
+    fn antigravity_choices_are_kept_like_any_other_client() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("quick.json"),
@@ -746,8 +732,14 @@ mod preference_tests {
         let panel = Panel::new(dir.path()).unwrap();
         let prefs = panel.preferences.lock();
         assert!(prefs.pinned);
-        assert_eq!(prefs.hidden_clients, [crate::gateway::ClientId::Claude]);
-        assert_eq!(prefs.selected_client, None);
+        assert_eq!(
+            prefs.hidden_clients,
+            [
+                crate::gateway::ClientId::Agy,
+                crate::gateway::ClientId::Claude
+            ]
+        );
+        assert_eq!(prefs.selected_client, Some(crate::gateway::ClientId::Agy));
     }
     #[test]
     fn legacy_preferences_default_visible_and_hidden_platforms_round_trip() {

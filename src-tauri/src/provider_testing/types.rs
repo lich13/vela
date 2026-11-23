@@ -258,6 +258,14 @@ pub struct Degradation {
     pub queue_removed: bool,
     pub error: Option<String>,
 }
+/// Models picked for the last manual test of each kind. An empty connection
+/// model is the "default model" choice; job summaries only keep what it resolved to.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LastModels {
+    pub connection: String,
+    pub fingerprint: String,
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SavedBank {
@@ -284,6 +292,7 @@ pub struct Persisted {
     pub platforms: BTreeMap<String, PlatformSettings>,
     pub detection: BTreeMap<String, Detection>,
     pub detection_timing: BTreeMap<String, DetectionTiming>,
+    pub last_models: BTreeMap<String, LastModels>,
     pub models: BTreeMap<String, Models>,
     pub degraded: BTreeMap<String, Degradation>,
     pub history: Vec<Job>,
@@ -299,6 +308,7 @@ impl Default for Persisted {
             platforms: BTreeMap::new(),
             detection: BTreeMap::new(),
             detection_timing: BTreeMap::new(),
+            last_models: BTreeMap::new(),
             models: BTreeMap::new(),
             degraded: BTreeMap::new(),
             history: vec![],
@@ -328,6 +338,7 @@ pub struct State {
     pub platform: PlatformSettings,
     pub banks: Value,
     pub jobs: Vec<Job>,
+    pub last_models: LastModels,
     pub detection: Detection,
     pub degraded: BTreeMap<String, Degradation>,
     pub detection_status: Vec<DetectionStatus>,

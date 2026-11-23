@@ -1,6 +1,6 @@
 # 本地数据与恢复
 
-v0.25.14 新增模型目录缓存：各客户端数据目录的 `provider-models.json` 保存供应商 ID、配置版本、模型 ID、查询时间、缓存状态和脱敏错误；每个供应商最多 4,096 个模型，模型 ID 最长 256 字节，文件最多 2 MiB。删除供应商会删除对应缓存项，损坏文件不会被失败刷新覆盖。定价目录旁的 `models-dev-index.json` 只保存裁剪后的 models.dev 公共元数据，下载上限 16 MiB，缓存上限 4 MiB。v0.26.23 的目录同时保留弃用状态、发布日期、工具调用及输入输出类型，用于 Vertex 候选筛选。
+v0.25.14 新增模型目录缓存：各客户端数据目录的 `provider-models.json` 保存供应商 ID、配置版本、模型 ID、查询时间、缓存状态和脱敏错误；每个供应商最多 4,096 个模型，模型 ID 最长 256 字节，文件最多 2 MiB。删除供应商会删除对应缓存项，损坏文件不会被失败刷新覆盖。定价目录旁的 `models-dev-index.json` 只保存裁剪后的 models.dev 公共元数据，下载上限 16 MiB，缓存上限 4 MiB；除首次缺少缓存和手动刷新外，后台每 6 小时刷新一次，出现未定价记录后满 1 小时再试一次，内容有变化才重写文件，失败保留原文件。
 
 Codex 数据目录的 `codex-models.json` 是“接管模型列表”选用“官方最新列表”时下载的 openai/codex 模型目录原文，上限 8 MiB，文件修改时间即上次下载时间（界面显示的“最近更新”）；不含地址或凭据，可随时删除，下次同步时重新下载。
 
@@ -8,22 +8,32 @@ Codex 数据目录的 `codex-models.json` 是“接管模型列表”选用“�
 
 DSH 目录使用 profile 原有的 `cordis.patch.yml`、`.env` 和 `.credentials.yaml`；多文件写入不落盘事务记录：某个文件写入失败时在进程内还原本项已写入的文件并报错，遇外部修改保持原样；兼容旧版单 profile 快照。profile 配置快照独立保存，共享凭据只保留首次接入前的快照。配置编辑的 `dsh-previous` 按文件保留一份私有原文备份，不将备份中的凭据放入状态、模型文件或错误。凭据文件沿用现有私有权限保护，恢复只修改受管行并保留未知字段。用量数据库仍为 v13，不新增 SQL 计量列、固定字典或历史费用重算；推理、速度和解析依据保存在现有诊断体中，冷详情和重启读取继续保留。
 
-`gateway-listener.json` 保存四个客户端共用的端口及格式版本（v2）。Grok 明确导入不落盘事务记录：TOML、可选 `endpoint.env` 与供应商库任一写入失败时，在进程内还原已写入的文件并报错重试，遇外部修改保持原样。
+`gateway-listener.json` 保存各客户端共用的端口及格式版本（v2）。Grok 明确导入不落盘事务记录：TOML、可选 `endpoint.env` 与供应商库任一写入失败时，在进程内还原已写入的文件并报错重试，遇外部修改保持原样。
 
-数据目录统一位于 `~/.vela`（权限 `0700`）。`accounts.json` 保存完整账号，`previous-auth.json`、`previous-config.toml`、`claude/previous-settings.json` 各保留一份最近写入前的文件。`quick.json` 保存快捷面板固定状态、`hiddenClients` 与 `selectedClient`，旧设置默认显示全部平台。`gateway.json` 保存 Codex 状态，`claude/gateway.json` 保存 Claude 状态，`grok/gateway.json` 保存 Grok 状态（供应商、并发、RPM、模型白名单、访问令牌和恢复意图）；各客户端目录内的 `gateway-recovery.json` 保存版本化的连接事务与停止目标；普通 API 模式写入两文件时不另存恢复现场，失败即在进程内还原。61 秒 RPM 滑动窗口仅在内存中维护；`endpoint-owners.json` 持久化保存 7 天端点归属钉选。供应商 Token 仅用于其上游认证；凭据不写日志、不返回到列表或事件。文件采用当前用户权限，**未加密**，应像原 `auth.json` 一样保护。
+数据目录统一位于 `~/.vela`（权限 `0700`）。`accounts.json` 保存完整账号，`previous-auth.json`、`previous-config.toml`、`claude/previous-settings.json` 各保留一份最近写入前的文件。`quick.json` 保存快捷面板固定状态、`hiddenClients` 与 `selectedClient`，旧设置默认显示全部平台。`gateway.json` 保存 Codex 状态，`claude/gateway.json` 保存 Claude 状态，`grok/gateway.json` 保存 Grok 状态（供应商、并发、RPM、模型白名单、访问令牌和恢复意图）；供应商条目同时保存无尽模式的开关、三个重试间隔、限流静默、风控代码和动态强度；Claude 供应商的模型映射，以及 Codex 与 Claude 供应商的压缩／辅助请求接管设置（开关、模型、思考强度），按供应商 ID 保存在各自的 `gateway.json`，删除供应商时一并移除；各客户端目录内的 `gateway-recovery.json` 保存版本化的连接事务与停止目标；普通 API 模式写入两文件时不另存恢复现场，失败即在进程内还原。61 秒 RPM 滑动窗口仅在内存中维护；`endpoint-owners.json` 持久化保存 7 天端点归属钉选。供应商 Token 仅用于其上游认证；凭据不写日志、不返回到列表或事件。文件采用当前用户权限，**未加密**，应像原 `auth.json` 一样保护。
 
 损坏的用量设置保留原文件，并在同一私有目录保存按内容摘要去重的备份，通过已有错误通道反馈；正常设置和数据格式保持兼容。启动清理只处理客户端私有目录内可确认归属的遗留请求暂存文件，恢复事务不按年龄删除。
 
 ## 模型检测数据
 
-`provider-tests.json` 使用 schema 3，保存全局测试文案、四客户端各自的检测源与两源组数，以及按客户端和供应商隔离的设置、计时、降智标记、历史和模型缓存。历史检测结果不重算。任务与重试固定创建时的检测源、资源版本、挑战与请求身份。LM Detector 公开资源使用独立的 `lm-detector.json.gz` 包保存，手动更新整体校验后原子替换；运行中的任务继续使用已加载资源。该包损坏或与当前版本的评分算法不匹配时，加载时直接删除并改用内置库，不留副本，之后可再次“检查更新”。
+`provider-tests.json` 使用 schema 3，保存全局测试文案、四客户端各自的检测源与两源组数，以及按客户端和供应商隔离的设置、计时、降智标记、历史、模型缓存和上次手动连接测试／指纹检测所选的模型（旧文件缺少该字段时视为未选）。历史检测结果不重算。任务与重试固定创建时的检测源、资源版本、挑战与请求身份。LM Detector 公开资源使用独立的 `lm-detector.json.gz` 包保存，手动更新整体校验后原子替换；运行中的任务继续使用已加载资源。该包损坏或与当前版本的评分算法不匹配时，加载时直接删除并改用内置库，不留副本，之后可再次“一键更新”。
 
 LM Detector 的 `lmBank` 更新元数据保存在同一文件中：检查时间、实际更新时间使用毫秒时间戳，记录“已是最新／已更新／失败”和脱敏错误；旧文件缺少这些字段时保持未知。同版本且当前资源有效时只检查提交版本。检查失败保留资源与实际更新时间，状态保存失败明确报错。新任务报告与降智标记可带汇总／低家族混用依据和从 1 开始的证据组号，旧记录不补算。
 
-## Antigravity app
+## Antigravity app 与 CLI
 
-配置编辑器管理原生 `config/config.json`，保留未知字段并以文件摘要检查外部修改。账号库 `antigravity-accounts.json` 在现有 OAuth／ADC 条目之外保存 Vertex Key、所选账号、本地访问令牌及接管前的网关和模型设置快照，沿用私有权限；不另建接管状态文件。切换事务同时检查 App 的 `.antigravity/settings.json`，失败恢复原状态，切回 OAuth／ADC 恢复受管设置。
+配置编辑器管理原生 `config/config.json`，保留未知字段并以文件摘要检查外部修改。账号库 `antigravity-accounts.json` 只保存 OAuth 账号（名称、邮箱、登录凭据和更新时间）、当前账号标记、账号激活时间记录和已删除账号的登录摘要，沿用私有权限。切换账号只写回所选账号的 OAuth 登录，失败恢复原登录与账号库；不读写 App 的 `~/.antigravity/settings.json`，也不另建状态文件。
 
-用量复用现有数据库、增量游标与去重凭据；本地采集接口仅执行只读查询，不保存消息正文或认证头。App 返回的会话标题与内部会话摘要保存在私有同步游标中，关闭 App 后仍可显示原名；标题变化只更新元数据，不重建历史记录。旧 CLI 历史日志与账单仍可读，其数据不计入 app。
+启动时在首次读取账号库之前，检查其中是否还有旧版本留下的内容：非 OAuth 条目（Google Cloud ADC、Vertex API Key）和 `gateway` 接管记录。有则丢弃这些内容并改写账号库，OAuth 账号、当前账号标记与激活时间记录保留；没有则文件保持原样，账号库无法解析时同样不改写。带有接管记录时，若 App 的 `~/.antigravity/settings.json` 中 `gateway` 仍是 Vela 当时写入的受管值（已启用、指向当时的回环地址并带当时的本地令牌），把 `gateway` 与 `models` 两个键还原为接管前的值，接管前没有该文件且还原后为空则删除文件；该文件已被改动、不是 JSON 或不存在时完全不触碰。还原或改写失败时账号库保持原样，下次启动重试。这一步不改动 `~/.config/gcloud`、`~/.config/agswitch`、`config/config.json` 的 `enableAdc`、钥匙串和令牌文件：旧版停用 ADC 时改名的 `application_default_credentials.json.disabled` 保持原名，`enableAdc` 保持原值。
 
-Antigravity OAuth 账号实际观测的 5h／7d 周期边界保存在现有用量数据库的 metadata 中，仅边界变化时写入；不新增状态文件或后台轮询。账号信息与凭据只在 Rust 读取，前端周期结果只包含账号名称、ID、类型、边界与汇总。macOS 上 App 的 OAuth 登录只读取登录钥匙串中的 Antigravity 项目，通过系统 `/usr/bin/security` 访问（写回经 `security -i` 标准输入传入，命令上限 4096 字节），并按 `~/Library/Keychains/login.keychain-db` 的 `(ino, len, modified_ns)` 指纹缓存成功读取结果，未变化时不重复启动 `security` 子进程或解析账号库；写回或删除前后立即失效缓存。不再读取、同步或删除旧 OAuth 令牌文件。账号归属使用现有激活时间记录，同账号令牌刷新不重置周期起点。Windows 继续读写令牌文件。
+用量复用现有数据库、增量游标与去重凭据；本地采集接口仅执行只读查询，不保存消息正文或认证头。Antigravity 2.33.0 起，Vela 只读 `~/.gemini/antigravity/daemon/` 下的 `hub_*.json` 与 `ls_*.json`（按修改时间取最近 64 个，每个最多 8192 字节）取得实例端口和本机接口令牌，探测通过后用于回环只读请求；令牌只在内存中使用，不另行保存。`~/.gemini/antigravity/conversations/` 只列出 `.db` 文件名并读取 `.db` 与 `.db-wal` 的文件身份、大小和修改时间，用来判断会话是否有新内容，不打开会话库。App 返回的模型目录（模型 ID、内部名称、显示名和读取时间）保存在现有用量数据库的 metadata 中，已下架的条目保留，供历史会话解析模型名。App 返回的会话标题与内部会话摘要保存在私有同步游标中，关闭 App 后仍可显示原名；标题变化只更新元数据，不重建历史记录。
+
+Antigravity CLI（`agy`）的会话用量只读导入，与 App 同记在客户端 Antigravity 下。读取两类文件：`~/.gemini/antigravity-cli/brain/<会话 ID>/.system_generated/logs/transcript_full.jsonl`（会话记录）和 `~/.gemini/antigravity-cli/conversations/<会话 ID>.db`（会话库）。会话记录逐行读取，只取模型步骤的 Token 数、模型名、步骤序号、时间、状态与错误码，消息正文只在内存中用于查找“Model Selection”设置变更和归类失败步骤的错误；会话库只查询 `steps` 与 `gen_metadata` 两张表里对应步骤的元数据，取思考 Token、缓存写入、响应标识和模型标识。保存到用量数据库的只有 Token 数、模型名与显示名、思考强度、时间、错误码，以及会话 ID 与响应标识的 SHA-256 摘要；消息正文、提示词、工具参数和文件路径都不保存。与 App 目录不同，CLI 的会话库会被打开，但只读且不跟随符号链接：`-wal` 与 `-shm` 没有同时存在时按不可变文件打开，只读库文件本身，不产生任何附属文件；两者都在时经日志读取，日志的共享索引同样只读打开，不写入、不新建也不整理库、日志和索引。`~/.gemini` 解析后的目录以下，凡要经过符号链接才能到达的会话目录、会话记录或会话库一律不读。单行超过 32 MiB 的会话记录报告为未同步，超过 32 MiB 的库字段不读取。读取位置（文件身份、偏移、末段摘要、修改时间、最近选择的模型显示名，以及会话库与其日志的文件身份、大小和修改时间）保存在现有用量数据库的同步游标中，不新增状态文件或后台任务；用量库仍为 v13，不新增 SQL 列，来源由记录已有的传输字段区分（`cli_file`）。CLI 的账号无法从本机文件可靠判定，记录不带账号归属。经 Vela 网关的 agy 请求与对应的会话记录按响应标识摘要合并（读不到标识时沿用现有的唯一指纹规则），只计一次。
+
+Antigravity CLI 的 `settings.json` 保存前，上一版内容私有备份到 `~/.vela/previous-antigravity-cli-settings.json`，供配置页“恢复上次配置”使用。
+
+Antigravity 网关的供应商库与模型列表保存在 `~/.vela/antigravity/`；网关运行期间该目录另有 `agy.env`（0600，本地地址与本地令牌），停用或退出时删除。shell 启动文件中 `# >>> vela agy >>>` 与 `# <<< vela agy <<<` 之间的函数块由 Vela 写入，手动停用网关时移除，其余内容不改动。
+
+旧版本以 `agy` 为客户端保存的历史日志与用量记录仍可读，用量页同样显示为 Antigravity，但不并入 Antigravity 的筛选、独立页和账单。
+
+Antigravity OAuth 账号实际观测的 5h／7d 周期边界保存在现有用量数据库的 metadata 中，仅边界变化时写入；不新增状态文件或后台轮询。账号信息与凭据只在 Rust 读取，前端周期结果只包含账号名称、ID、边界与汇总。macOS 上 App 的 OAuth 登录只读取登录钥匙串中的 Antigravity 项目，通过系统 `/usr/bin/security` 访问（写回经 `security -i` 标准输入传入，命令上限 4096 字节），并按 `~/Library/Keychains/login.keychain-db` 的 `(ino, len, modified_ns)` 指纹缓存成功读取结果，未变化时不重复启动 `security` 子进程或解析账号库；写回或删除前后立即失效缓存。不再读取、同步或删除旧 OAuth 令牌文件。账号归属使用现有激活时间记录，同账号令牌刷新不重置周期起点。Windows 继续读写令牌文件。

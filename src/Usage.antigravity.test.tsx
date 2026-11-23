@@ -141,6 +141,51 @@ it("shows real response identity, service, request outcome and separate generati
   expect(screen.getByText("11.4 tok/s")).toBeInTheDocument();
 });
 
+it("旧 agy 记录与 CLI 会话记录都显示为 Antigravity，来源只在详情里区分", () => {
+  // A gateway row an older version stored under the CLI's own client id.
+  const legacy = record();
+  legacy.id = "fixture-legacy";
+  legacy.client = "agy";
+  legacy.source = "proxy";
+  legacy.attempts[0].provider = "fixture-provider";
+  legacy.attempts[0].status = 200;
+  legacy.attempts[0].transport = "http";
+  // A row read from a CLI session file.
+  const session = record();
+  session.id = "fixture-cli-session";
+  session.attempts[0].transport = "cli_file";
+
+  const list = render(
+    <UsageLogTable
+      rows={[legacy, session]}
+      settings={settings}
+      name={(id) => id ?? "本机会话"}
+      open={vi.fn()}
+      busy={false}
+    />,
+  );
+  const table = screen.getByRole("table", { name: "请求记录" });
+  expect(within(table).getAllByText("Antigravity")).toHaveLength(2);
+  expect(
+    within(table).queryByText(/Antigravity (app|CLI)/),
+  ).not.toBeInTheDocument();
+  list.unmount();
+
+  const field = (label: string) =>
+    screen.getByText(label, { selector: "dt" }).nextElementSibling;
+  const old = render(
+    <Detail record={legacy} name={(id) => id ?? ""} onClose={vi.fn()} />,
+  );
+  expect(field("客户端")).toHaveTextContent(/^Antigravity$/);
+  expect(field("来源")).toHaveTextContent(/^网关$/);
+  old.unmount();
+
+  render(<Detail record={session} name={() => "本机会话"} onClose={vi.fn()} />);
+  expect(field("客户端")).toHaveTextContent(/^Antigravity$/);
+  expect(field("来源")).toHaveTextContent(/^Antigravity 会话$/);
+  expect(field("传输")).toHaveTextContent(/^CLI 会话文件$/);
+});
+
 it("runs explicit app history repair through the existing synchronization command", async () => {
   const state = {
     settings,
@@ -193,7 +238,6 @@ function buildStats(
       {
         id: "ag-oauth-1",
         name: "Fixture OAuth",
-        kind: "oauth",
         total: {
           period: null,
           requests: 15,
@@ -282,7 +326,7 @@ function buildStats(
         sharePercent: 67.3,
       },
       {
-        id: "ag-adc-1",
+        id: "ag-oauth-2",
         requests: 5,
         tokens: 85_000,
         reasoningTokens: 5_800,
@@ -418,16 +462,13 @@ describe("Usage Antigravity statistics tab", () => {
         if (name === "get_gateway") return { providers: [] };
         if (name === "get_antigravity_auth_state")
           return {
-            mode: "oauth",
-            enableAdc: false,
             accounts: [
               {
                 id: "ag-oauth-1",
                 name: "oauth@example.invalid",
-                kind: "oauth",
                 current: true,
               },
-              { id: "ag-adc-1", name: "ADC 凭据 · p1", kind: "adc" },
+              { id: "ag-oauth-2", name: "backup@example.invalid" },
             ],
           };
         if (
@@ -590,14 +631,16 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(tracks).getByText("配额剩余 74.5%")).toBeInTheDocument();
     expect(within(tracks).getByText("配额剩余 42.0%")).toBeInTheDocument();
 
-    const creds = screen.getByLabelText("账号与凭据分布");
+    const creds = screen.getByLabelText("账号分布");
     expect(
-      within(creds).getByText("oauth@example.invalid (OAuth)"),
+      within(creds).getByText("oauth@example.invalid"),
     ).toBeInTheDocument();
-    expect(within(creds).getByText("ADC 凭据 · p1 (ADC)")).toBeInTheDocument();
+    expect(
+      within(creds).getByText("backup@example.invalid"),
+    ).toBeInTheDocument();
     await user.click(
       within(creds).getByRole("button", {
-        name: "按 oauth@example.invalid (OAuth) 筛选",
+        name: "按 oauth@example.invalid 筛选",
       }),
     );
 
@@ -611,7 +654,7 @@ describe("Usage Antigravity statistics tab", () => {
     });
 
     const cancelBtn = within(creds).getByRole("button", {
-      name: "取消按 oauth@example.invalid (OAuth) 筛选",
+      name: "取消按 oauth@example.invalid 筛选",
     });
     expect(cancelBtn).toHaveAttribute("aria-pressed", "true");
     await user.click(cancelBtn);
@@ -656,21 +699,21 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(summary).getByText("未定价")).toBeInTheDocument();
     const tracks = screen.getByLabelText("账号周期用量");
     expect(within(tracks).getAllByText("未定价")).toHaveLength(4);
-    const creds = screen.getByLabelText("账号与凭据分布");
+    const creds = screen.getByLabelText("账号分布");
     expect(within(creds).getAllByText("未定价")).toHaveLength(2);
   });
 
-  it("follows the active authentication mode without changing the global usage filter", async () => {
-    const extra = (["vertex_key", "adc"] as const).map((kind) => ({
-      ...statsPayload.accounts[0],
-      id: kind,
-      name: kind,
-      kind,
-      tracks: [],
-    }));
+  it("follows the app's current account without changing the global usage filter", async () => {
     statsPayload = {
       ...statsPayload,
-      accounts: [...statsPayload.accounts, ...extra],
+      accounts: [
+        ...statsPayload.accounts,
+        {
+          ...statsPayload.accounts[0],
+          id: "ag-oauth-2",
+          name: "Fixture Backup",
+        },
+      ],
     };
     const user = userEvent.setup();
     render(<Usage />);
@@ -679,30 +722,24 @@ describe("Usage Antigravity statistics tab", () => {
       name: "Antigravity 用量账号",
     });
     await waitFor(() => expect(select).toHaveValue("ag-oauth-1"));
-    const accounts = statsPayload.accounts.map((a) => ({
-      ...a,
-      current: true,
-    }));
-    for (const mode of ["vertex_key", "adc"] as const) {
-      const count = mock.command.mock.calls.filter(
+    const statsReads = () =>
+      mock.command.mock.calls.filter(
         ([name]) => name === "get_antigravity_usage_stats",
       ).length;
-      act(() =>
-        mock.listeners
-          .get("antigravity-auth-state")
-          ?.forEach((listener) =>
-            listener({ accounts, mode, enableAdc: mode === "adc" }),
-          ),
-      );
-      await waitFor(() => expect(select).toHaveValue(mode));
-      await waitFor(() =>
-        expect(
-          mock.command.mock.calls.filter(
-            ([name]) => name === "get_antigravity_usage_stats",
-          ).length,
-        ).toBeGreaterThan(count),
-      );
-    }
+    const reads = statsReads();
+    act(() =>
+      mock.listeners.get("antigravity-auth-state")?.forEach((listener) =>
+        listener({
+          revision: "ag-rev-2",
+          accounts: [
+            { id: "ag-oauth-1", name: "oauth@example.invalid", current: false },
+            { id: "ag-oauth-2", name: "backup@example.invalid", current: true },
+          ],
+        }),
+      ),
+    );
+    await waitFor(() => expect(select).toHaveValue("ag-oauth-2"));
+    await waitFor(() => expect(statsReads()).toBeGreaterThan(reads));
     const count = mock.command.mock.calls.length;
     await user.selectOptions(select, "ag-oauth-1");
     expect(mock.command.mock.calls).toHaveLength(count);
@@ -728,13 +765,7 @@ it("selects one account, retains manual selection on refresh, follows the curren
   const accounts = [
     ...base.accounts,
     unavailable,
-    ...(["vertex_key", "adc"] as const).map((kind) => ({
-      ...base.accounts[0],
-      id: kind,
-      name: kind,
-      kind,
-      tracks: [],
-    })),
+    { ...base.accounts[0], id: "c", name: "Fixture C" },
   ];
   const props = {
     stats: { ...base, accounts },
@@ -744,6 +775,10 @@ it("selects one account, retains manual selection on refresh, follows the curren
   const view = render(<UsageAntigravity {...props} />);
   const select = screen.getByRole("combobox", { name: "Antigravity 用量账号" });
   expect(select).toHaveValue("ag-oauth-1");
+  // Options carry the account name only; no account type is shown.
+  expect(
+    [...select.querySelectorAll("option")].map((option) => option.textContent),
+  ).toEqual(["选择账号", "Fixture OAuth（当前）", "Fixture B", "Fixture C"]);
   expect(screen.queryByLabelText("Fixture B")).not.toBeInTheDocument();
   const known = screen.getByLabelText("Fixture OAuth");
   expect(within(known).getAllByText("当前 5h")).toHaveLength(2);
@@ -756,27 +791,24 @@ it("selects one account, retains manual selection on refresh, follows the curren
   expect(
     within(screen.getByLabelText("Fixture B")).getAllByText("未获取当前周期"),
   ).toHaveLength(4);
-  for (const kind of ["vertex_key", "adc"]) {
-    await user.selectOptions(select, kind);
-    const section = screen.getByLabelText(kind);
-    expect(within(section).getByText(/所选日期/)).toBeInTheDocument();
-    expect(within(section).queryByText("当前 5h")).not.toBeInTheDocument();
-    expect(within(section).getByText("请求")).toBeInTheDocument();
-    expect(
-      section.querySelector(".usage-ag-window-stats.is-three"),
-    ).not.toBeNull();
-  }
+  // Every account uses the two current-period cards; no date-range summary.
+  await user.selectOptions(select, "c");
+  const third = screen.getByLabelText("Fixture C");
+  expect(third.querySelectorAll(".usage-ag-track-card")).toHaveLength(2);
+  expect(within(third).getAllByText("当前 5h")).toHaveLength(2);
+  expect(within(third).getAllByText("当前 7d")).toHaveLength(2);
+  expect(screen.queryByText(/所选日期/)).not.toBeInTheDocument();
   expect(screen.getByLabelText("Token 构成与缓存节省")).toHaveTextContent(
     "$1.2450",
   );
   view.rerender(<UsageAntigravity {...props} currentAccountId="b" />);
   expect(select).toHaveValue("b");
-  await user.selectOptions(select, "adc");
+  await user.selectOptions(select, "c");
   view.rerender(
     <UsageAntigravity
       {...props}
       currentAccountId="b"
-      stats={{ ...base, accounts: accounts.filter((a) => a.id !== "adc") }}
+      stats={{ ...base, accounts: accounts.filter((a) => a.id !== "c") }}
     />,
   );
   expect(select).toHaveValue("b");

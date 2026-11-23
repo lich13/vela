@@ -599,69 +599,6 @@
 }
 }
 
-.antigravity-accounts {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.ag-status-card {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  flex-wrap: wrap;
-}
-
-.ag-status-card.warning {
-  border-color: rgba(234, 179, 8, 0.45);
-  background: rgba(234, 179, 8, 0.08);
-}
-
-.ag-status-main {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 240px;
-  flex: 1;
-}
-
-.ag-status-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-}
-
-.ag-status-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.ag-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 9px;
-  border-radius: 999px;
-  font-size: 12px;
-  line-height: 1.4;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  color: var(--muted);
-}
-
-.ag-status-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
 .ag-account-meta {
   display: flex;
   align-items: center;
@@ -687,15 +624,6 @@
   margin-top: 0;
   font-size: 13px;
 }
-.ag-account-form textarea {
-  width: 100%;
-  resize: vertical;
-  padding: 9px 11px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--canvas);
-  color: var(--ink);
-}
 .ag-account-form .modal-actions {
   padding-top: 8px;
 }
@@ -703,81 +631,10 @@
   font-size: 13px;
 }
 
-.ag-json-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.ag-checkbox-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  cursor: pointer;
-}
-.ag-checkbox-row input {
-  width: 15px;
-  height: 15px;
-  accent-color: var(--accent);
-}
-
-.ag-import-tabs {
-  display: flex;
-  width: 100%;
-}
-.ag-import-tabs .exchange-button {
-  flex: 1;
-  justify-content: center;
-}
-.ag-import-tabs .exchange-button.active,
-.antigravity-accounts .exchange-button.active {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.ag-key-location {
-  display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
-  gap: 12px;
-}
-.ag-adc-form label,
-.ag-adc-form input,
-.ag-adc-form textarea,
-.ag-form-error {
-  font-size: 13px;
-}
-.ag-adc-form textarea {
-  font-family: inherit;
-  line-height: 1.5;
-}
 .ag-form-error {
   margin: 0;
   color: var(--error);
+  font-size: 13px;
   line-height: 1.5;
   overflow-wrap: anywhere;
-}
-.antigravity-accounts > .list-tools {
-  flex-wrap: wrap;
-  gap: 12px;
-}
-.antigravity-accounts > .list-tools .exchange-button {
-  white-space: nowrap;
-}
-
-.ag-model-catalog {
-  display: grid;
-  gap: 8px;
-}
-.ag-model-catalog select {
-  width: 100%;
-  min-width: 0;
-  height: 36px;
-  font: inherit;
-  color: var(--ink);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
 }

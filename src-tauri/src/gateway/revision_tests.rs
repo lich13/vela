@@ -18,6 +18,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         let edit = |e| g.edit(e, &g.view().revision, &home).unwrap();
         for (url, token) in [("https://a.invalid", "a"), ("https://b.invalid", "b")] {
             edit(Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -25,6 +26,10 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: url.into(),
@@ -66,6 +71,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         let selected = g.view().selected;
         g.edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -73,6 +79,10 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://c.invalid/sub".into(),
@@ -184,6 +194,7 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
     let id = initial.providers[0].id.clone();
     let version = gateway.0.inner.lock().store.providers[0].version.clone();
     let edit = |base: &str, role: Option<bool>| Edit::SaveProvider {
+        delegate: Default::default(),
         id: Some(id.clone()),
         base_url: base.into(),
         token: "fixture-rotated".into(),
@@ -196,6 +207,10 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
         endless_mode: None,
         upstream_retry_seconds: None,
         normal_retry_seconds: None,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     };
     assert!(gateway
         .edit(edit("invalid", Some(true)), &initial.revision, dir.path())
@@ -240,6 +255,7 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
     assert!(claude
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 id: None,
                 base_url: "https://claude.example.invalid".into(),
                 token: "fixture".into(),
@@ -252,6 +268,10 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
             },
             &claude.view().revision,
             dir.path()

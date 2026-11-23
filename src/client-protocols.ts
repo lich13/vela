@@ -8,6 +8,7 @@ export const protocolNames: Record<GrokProtocol, string> = {
 export const clientProtocols: Record<ClientId, GrokProtocol[]> = {
   codex: ["responses"],
   claude: ["messages"],
+  agy: ["gemini_native"],
   grok: ["responses", "chat_completions", "messages"],
   dsh: ["chat_completions"],
 };

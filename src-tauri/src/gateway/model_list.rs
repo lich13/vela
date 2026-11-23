@@ -83,6 +83,10 @@ pub struct File {
     pub pins: BTreeMap<String, String>,
     pub backfilled: BTreeSet<String>,
     pub custom: BTreeMap<String, Custom>,
+    /// The model put at the head of the list. Antigravity starts on the
+    /// first model its gateway names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first: Option<String>,
 }
 impl Default for File {
     fn default() -> Self {
@@ -92,6 +96,7 @@ impl Default for File {
             pins: BTreeMap::new(),
             backfilled: BTreeSet::new(),
             custom: BTreeMap::new(),
+            first: None,
         }
     }
 }
@@ -151,6 +156,7 @@ impl File {
                 .custom
                 .iter()
                 .any(|(id, custom)| !valid_id(id) || !custom.valid())
+            || self.first.as_ref().is_some_and(|id| !valid_id(id))
         {
             return Err(error("模型 ID、来源或数量无效"));
         }
@@ -223,6 +229,8 @@ pub struct Model {
     pub id: String,
     pub providers: Vec<Source>,
     pub manual: bool,
+    /// Put at the head of the list by the user.
+    pub first: bool,
     pub source: Option<String>,
     pub pinned: Option<String>,
     pub metadata: Option<models_dev::Metadata>,
@@ -258,6 +266,7 @@ pub enum Operation {
     Pin,
     Unpin,
     Custom,
+    First,
 }
 
 impl Gateway {
@@ -297,6 +306,7 @@ impl Gateway {
                         id: id.clone(),
                         providers: vec![],
                         manual: false,
+                        first: false,
                         source: None,
                         pinned: None,
                         metadata: None,
@@ -321,6 +331,7 @@ impl Gateway {
                     id: manual.id.clone(),
                     providers: vec![],
                     manual: true,
+                    first: false,
                     source: None,
                     pinned: None,
                     metadata: None,
@@ -333,6 +344,14 @@ impl Gateway {
             model.source = file.source(&model.id).map(str::to_owned);
             model.pinned = file.pins.get(&model.id).cloned();
             model.custom = file.custom.get(&model.id).cloned();
+        }
+        if let Some(index) = file
+            .first
+            .as_ref()
+            .and_then(|first| models.iter().position(|m| &m.id == first))
+        {
+            models[index].first = true;
+            models[..=index].rotate_right(1);
         }
         Ok(models)
     }
@@ -378,6 +397,9 @@ impl Gateway {
                 }
                 ClientId::Grok => "开启“接管模型列表”后，本列表写入 Grok 配置的模型表",
                 ClientId::Dsh => "修改后请同步模型列表，将变更写入 profile",
+                ClientId::Agy => {
+                    "agy 启动时读取本列表，排在最前的是默认模型；也可用 agy --model 指定"
+                }
             },
             models,
             providers,
@@ -394,6 +416,9 @@ impl Gateway {
     ) -> Result<View> {
         if self.0.client == ClientId::Codex && !matches!(op, Operation::Custom) {
             return Err(error("Codex 模型列表只读"));
+        }
+        if matches!(op, Operation::First) && self.0.client != ClientId::Agy {
+            return Err(error("只有 Antigravity 按列表顺序选择默认模型"));
         }
         custom.sort();
         if !valid_id(id) {
@@ -431,6 +456,10 @@ impl Gateway {
                 }
                 Operation::Unpin => {
                     file.pins.remove(id);
+                }
+                // Chosen a second time, the model goes back to its own place.
+                Operation::First => {
+                    file.first = (file.first.as_deref() != Some(id)).then(|| id.into());
                 }
                 Operation::Custom => {
                     if custom == Custom::default() {
@@ -585,6 +614,7 @@ mod tests {
                 store
                     .edit(
                         super::super::Edit::SaveProvider {
+                            delegate: Default::default(),
                             search_only: None,
                             end_on_message_stop: None,
                             filter_count_tokens: None,
@@ -592,6 +622,10 @@ mod tests {
                             endless_mode: None,
                             upstream_retry_seconds: None,
                             normal_retry_seconds: None,
+                            risk_codes: None,
+                            retry_intensity: None,
+                            limit_retry_seconds: None,
+                            limit_rest_seconds: None,
                             quota_access_token: None,
                             id: None,
                             name: Some(format!("Fixture {n}")),
@@ -752,6 +786,7 @@ mod tests {
                 store
                     .edit(
                         super::super::Edit::SaveGrokProvider {
+                            delegate: Default::default(),
                             quota_access_token: None,
                             id: None,
                             name: Some(name.into()),

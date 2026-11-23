@@ -24,6 +24,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
     store
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -31,6 +32,10 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://api.example.invalid/deployment".into(),
@@ -45,6 +50,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
     store
         .edit(
             Edit::SaveProvider {
+                delegate: Default::default(),
                 search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
@@ -52,6 +58,10 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
                 quota_access_token: None,
                 id: None,
                 base_url: "https://fallback.example.invalid/v1".into(),
@@ -65,6 +75,7 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
 
     let invalid = store.edit(
         Edit::SaveProvider {
+            delegate: Default::default(),
             search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
@@ -72,6 +83,10 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
             quota_access_token: None,
             id: None,
             base_url: "https://invalid.example.invalid".into(),
@@ -367,6 +382,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
         &g,
         &t,
         Edit::SaveProvider {
+            delegate: Default::default(),
             search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
@@ -374,6 +390,10 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
             quota_access_token: None,
             id: None,
             base_url: format!("http://127.0.0.1:{port}"),
@@ -427,6 +447,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
         &g,
         &t,
         Edit::SaveProvider {
+            delegate: Default::default(),
             search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
@@ -434,6 +455,10 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
             quota_access_token: None,
             id: Some(id.clone()),
             base_url: format!("http://127.0.0.1:{blocked}"),
@@ -501,6 +526,7 @@ async fn catalog_errors_and_changed_credentials_do_not_expose_raw_responses() {
         &g,
         &t,
         Edit::SaveProvider {
+            delegate: Default::default(),
             search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
@@ -508,6 +534,10 @@ async fn catalog_errors_and_changed_credentials_do_not_expose_raw_responses() {
             endless_mode: None,
             upstream_retry_seconds: None,
             normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
             quota_access_token: None,
             id: Some(id),
             base_url: format!("http://127.0.0.1:{port}"),
@@ -613,6 +643,7 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
         store
             .edit(
                 Edit::SaveProvider {
+                    delegate: Default::default(),
                     id: None,
                     name: None,
                     base_url: "https://new.example.invalid".into(),
@@ -625,6 +656,10 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
                     endless_mode: None,
                     upstream_retry_seconds: None,
                     normal_retry_seconds: None,
+                    risk_codes: None,
+                    retry_intensity: None,
+                    limit_retry_seconds: None,
+                    limit_rest_seconds: None,
                 },
                 false,
             )
@@ -633,6 +668,7 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
         store
             .edit(
                 Edit::SaveProvider {
+                    delegate: Default::default(),
                     id: Some("inherited".into()),
                     name: None,
                     base_url: "https://one.example.invalid".into(),
@@ -645,6 +681,10 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
                     endless_mode: None,
                     upstream_retry_seconds: None,
                     normal_retry_seconds: None,
+                    risk_codes: None,
+                    retry_intensity: None,
+                    limit_retry_seconds: None,
+                    limit_rest_seconds: None,
                 },
                 false,
             )
@@ -666,6 +706,7 @@ fn auxiliary_endpoint_clear_preserves_connection_and_deleted_providers_leave_no_
     store
         .edit(
             Edit::SaveGrokProvider {
+                delegate: Default::default(),
                 id: None,
                 name: Some("fixture".into()),
                 base_url: "https://primary.example.invalid".into(),
@@ -731,6 +772,7 @@ fn endless_retry_waits_longer_for_risk_control_and_older_stores_keep_their_inter
     assert_eq!(seconds(&store.providers[0]), (5, 3));
     assert_eq!(seconds(&store.providers[1]), (33, 3));
     let save = |id: Option<&str>, risk, normal| Edit::SaveProvider {
+        delegate: Default::default(),
         id: id.map(str::to_owned),
         name: None,
         base_url: "https://one.example.invalid".into(),
@@ -743,6 +785,10 @@ fn endless_retry_waits_longer_for_risk_control_and_older_stores_keep_their_inter
         endless_mode: None,
         upstream_retry_seconds: risk,
         normal_retry_seconds: normal,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
     };
     store
         .edit(save(Some("saved"), None, Some(9)), false)
@@ -751,48 +797,590 @@ fn endless_retry_waits_longer_for_risk_control_and_older_stores_keep_their_inter
     store.edit(save(None, None, None), false).unwrap();
     assert_eq!(seconds(&store.providers[2]), (33, 3));
 
-    let provider = &mut store.providers[0];
-    (
-        provider.upstream_retry_seconds,
-        provider.normal_retry_seconds,
-    ) = (40, 2);
     let plain = crate::events::Details::default();
     let embedded = |code: Option<&str>, kind: Option<&str>| crate::events::Details {
         upstream_code: code.map(str::to_owned),
         upstream_type: kind.map(str::to_owned),
         ..Default::default()
     };
+    use crate::gateway::model::{retry_class, RetryClass::*};
+    let codes = crate::gateway::ClientId::Claude.default_risk_codes();
+    assert_eq!(codes, [520]);
+    let classified = |basis| crate::events::Details {
+        error_basis: Some(basis),
+        ..Default::default()
+    };
+    let limited = classified(crate::events::ErrorBasis::Rpm);
+    let overloaded = classified(crate::events::ErrorBasis::Capacity);
     for (status, details, expected) in [
-        (Some(429), &plain, 40),
-        (Some(520), &plain, 40),
-        (Some(503), &plain, 2),
-        (Some(529), &plain, 2),
+        (Some(520), &plain, Risk),
+        (Some(429), &plain, Limit),
+        // A 429 that only said the service was unavailable is a rate limit.
+        (Some(429), &overloaded, Limit),
+        (Some(503), &plain, Normal),
+        (Some(529), &overloaded, Normal),
         // Connection failures and timeouts carry no status.
-        (None, &plain, 2),
-        (Some(200), &plain, 2),
-        (Some(200), &embedded(Some("429"), None), 40),
-        (Some(200), &embedded(Some("520"), None), 40),
-        (Some(200), &embedded(None, Some("rate_limit_error")), 40),
-        (Some(200), &embedded(Some("500"), Some("api_error")), 2),
-        // A real status decides; the body's wording does not override it.
+        (None, &plain, Normal),
+        (Some(200), &plain, Normal),
+        (Some(200), &embedded(Some("520"), None), Risk),
+        (Some(200), &embedded(Some("429"), None), Limit),
+        (Some(200), &embedded(None, Some("rate_limit_error")), Limit),
+        (Some(200), &limited, Limit),
+        (Some(200), &overloaded, Normal),
+        (Some(200), &embedded(Some("500"), Some("api_error")), Normal),
+        // A real status decides; the body's wording does not override it,
+        // but content classified as a rate limit is one under any status.
         (
             Some(503),
             &embedded(Some("429"), Some("rate_limit_error")),
-            2,
+            Normal,
         ),
+        (Some(400), &limited, Limit),
     ] {
         assert_eq!(
-            provider.endless_retry_seconds(status, details),
+            retry_class(codes, status, details),
             expected,
-            "{status:?} {:?} {:?}",
+            "{status:?} {:?} {:?} {:?}",
             details.upstream_code,
-            details.upstream_type
+            details.upstream_type,
+            details.error_basis
         );
     }
-    (
-        provider.upstream_retry_seconds,
-        provider.normal_retry_seconds,
-    ) = (0, 0);
-    assert_eq!(provider.endless_retry_seconds(Some(429), &plain), 1);
-    assert_eq!(provider.endless_retry_seconds(None, &plain), 1);
+    // The list decides first: a listed 429 is risk control, and a status
+    // taken off the list falls back to its own class.
+    assert_eq!(retry_class(&[403, 429], Some(403), &plain), Risk);
+    assert_eq!(retry_class(&[403, 429], Some(429), &plain), Risk);
+    assert_eq!(retry_class(&[], Some(520), &plain), Normal);
+    assert_eq!(retry_class(&[], Some(429), &plain), Limit);
+}
+
+#[test]
+fn endless_pacing_is_checked_on_saving_and_unset_fields_keep_what_was_saved() {
+    use crate::gateway::ClientId;
+    assert_eq!(ClientId::Claude.default_risk_codes(), [520]);
+    assert_eq!(ClientId::Dsh.default_risk_codes(), [524]);
+    assert!(ClientId::Codex.default_risk_codes().is_empty());
+    assert!(ClientId::Grok.default_risk_codes().is_empty());
+
+    let save = |id: Option<&str>, codes: Option<Vec<u16>>, intensity, limit| Edit::SaveProvider {
+        delegate: Default::default(),
+        id: id.map(str::to_owned),
+        name: None,
+        base_url: "https://one.example.invalid".into(),
+        token: "fixture".into(),
+        quota_access_token: None,
+        search_only: None,
+        end_on_message_stop: None,
+        filter_count_tokens: None,
+        buffer_complete_response: None,
+        endless_mode: None,
+        upstream_retry_seconds: None,
+        normal_retry_seconds: None,
+        risk_codes: codes,
+        retry_intensity: intensity,
+        limit_retry_seconds: limit,
+        limit_rest_seconds: None,
+    };
+    let pacing = |store: &Store| {
+        let p = &store.providers[0];
+        (
+            p.risk_codes.clone(),
+            p.retry_intensity(),
+            p.limit_retry_seconds(),
+        )
+    };
+    let mut store = Store::default();
+    store.edit(save(None, None, None, None), false).unwrap();
+    let (id, version) = {
+        let p = &store.providers[0];
+        (p.id.clone(), p.version.clone())
+    };
+    // Nothing chosen: the client's own list, the middle intensity, and a
+    // rate limit waits what risk control waits.
+    assert_eq!(pacing(&store), (None, 5, 33));
+
+    let all = Some(vec![599, 400, 599]);
+    store
+        .edit(save(Some(&id), all, Some(10), Some(7)), false)
+        .unwrap();
+    assert_eq!(pacing(&store), (Some(vec![400, 599]), 10, 7));
+    // An empty list is a choice of its own, and the rest stays as saved.
+    store
+        .edit(save(Some(&id), Some(vec![]), None, None), false)
+        .unwrap();
+    assert_eq!(pacing(&store), (Some(vec![]), 10, 7));
+    let sixteen = Some((400..416).collect());
+    store
+        .edit(save(Some(&id), sixteen, Some(0), None), false)
+        .unwrap();
+    assert_eq!(pacing(&store).1, 0);
+
+    let saved = pacing(&store);
+    for (codes, intensity) in [
+        (Some(vec![399]), None),
+        (Some(vec![600]), None),
+        (Some((400..417).collect()), None),
+        (None, Some(11)),
+    ] {
+        let edit = save(Some(&id), codes.clone(), intensity, None);
+        assert!(store.edit(edit, false).is_err(), "{codes:?} {intensity:?}");
+    }
+    assert_eq!(pacing(&store), saved);
+    // Pacing is not what a conversation's affinity to the provider rests on.
+    assert_eq!(store.providers[0].version, version);
+
+    // A store written before these fields reads the same defaults.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gateway.json");
+    let mut value = serde_json::to_value(Store::default()).unwrap();
+    value["providers"] = json!([
+        {"id":"saved","name":"Saved","baseUrl":"https://one.example.invalid","token":"fixture","queued":true,"version":"one","upstreamRetrySeconds":5}
+    ]);
+    value["settings"]
+        .as_object_mut()
+        .unwrap()
+        .retain(|key, _| key != "stallSeconds" && key != "holdIdleSeconds");
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let (store, _) = Store::load(&path).unwrap();
+    assert_eq!(pacing(&store), (None, 5, 5));
+    assert_eq!(
+        (
+            store.settings.stall_seconds,
+            store.settings.hold_idle_seconds
+        ),
+        (120, 60)
+    );
+    for (stall, hold, valid) in [
+        (1, 1, true),
+        (86400, 86400, true),
+        (0, 60, false),
+        (120, 0, false),
+        (86401, 60, false),
+        (120, 86401, false),
+    ] {
+        let settings = Settings {
+            stall_seconds: stall,
+            hold_idle_seconds: hold,
+            ..Settings::default()
+        };
+        assert_eq!(settings.validate().is_ok(), valid, "{stall} {hold}");
+    }
+}
+
+/// A provider form as the interface sends it, with `fields` over a new
+/// provider's.
+fn form(fields: serde_json::Value) -> Edit {
+    let mut edit = json!({
+        "op": "saveProvider",
+        "id": null,
+        "baseUrl": "https://one.example.invalid",
+        "token": "fixture",
+    });
+    edit.as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    serde_json::from_value(edit).unwrap()
+}
+
+#[test]
+fn a_provider_form_carries_its_takeover_and_rest_settings_beside_the_others() {
+    use crate::gateway::model::Delegated;
+    let mut store = Store::default();
+    store.edit(form(json!({})), false).unwrap();
+    let id = store.providers[0].id.clone();
+    let edit = |store: &mut Store, fields: serde_json::Value| {
+        let mut fields = fields;
+        fields["id"] = json!(id);
+        fields["token"] = json!("");
+        store.edit(form(fields), false)
+    };
+    // Nothing chosen: eight seconds of rest after a rate limit, nothing taken.
+    assert_eq!(store.providers[0].limit_rest_seconds(), 8);
+    assert!(store.delegates.is_empty());
+
+    edit(
+        &mut store,
+        json!({
+            "endlessMode": true,
+            "limitRetrySeconds": 9,
+            "limitRestSeconds": 0,
+            "takeCompaction": true,
+            "compactionModel": " compact-fixture ",
+            "compactionEffort": " high ",
+            "takeAuxiliary": true,
+            "auxiliaryModel": "",
+            "auxiliaryEffort": "",
+            "takeWebSearch": true,
+            "webSearchModel": " search-fixture ",
+            "webSearchEffort": "low",
+        }),
+    )
+    .unwrap();
+    let p = &store.providers[0];
+    assert!(p.endless_mode);
+    assert_eq!((p.limit_retry_seconds(), p.limit_rest_seconds()), (9, 0));
+    let delegate = &store.delegates[&id];
+    assert_eq!(
+        delegate.takes(Delegated::Compaction),
+        Some((Some("compact-fixture"), Some("high")))
+    );
+    assert_eq!(delegate.takes(Delegated::Auxiliary), Some((None, None)));
+    assert_eq!(
+        delegate.takes(Delegated::WebSearch),
+        Some((Some("search-fixture"), Some("low")))
+    );
+    let saved = serde_json::to_value(&store).unwrap();
+    assert_eq!(
+        saved["delegates"][&id],
+        json!({
+            "compaction": true, "compactionModel": "compact-fixture",
+            "compactionEffort": "high", "auxiliary": true,
+            "webSearch": true, "webSearchModel": "search-fixture", "webSearchEffort": "low"
+        })
+    );
+    assert_eq!(saved["providers"][0]["limitRestSeconds"], 0);
+
+    // A form without these fields leaves them as saved.
+    edit(&mut store, json!({"endlessMode": false})).unwrap();
+    assert_eq!(store.providers[0].limit_rest_seconds(), 0);
+    assert_eq!(
+        store.delegates[&id].takes(Delegated::Compaction),
+        Some((Some("compact-fixture"), Some("high")))
+    );
+    // An option switched off keeps its model and effort for the next time.
+    edit(&mut store, json!({"takeCompaction": false})).unwrap();
+    assert_eq!(store.delegates[&id].takes(Delegated::Compaction), None);
+    assert_eq!(
+        (
+            store.delegates[&id].compaction_model.as_deref(),
+            store.delegates[&id].compaction_effort.as_deref()
+        ),
+        (Some("compact-fixture"), Some("high"))
+    );
+    // Emptied, they are cleared, and a provider left taking nothing has no entry.
+    edit(
+        &mut store,
+        json!({
+            "compactionModel": " ", "compactionEffort": "", "takeAuxiliary": false,
+            "takeWebSearch": false, "webSearchModel": "", "webSearchEffort": " "
+        }),
+    )
+    .unwrap();
+    assert!(store.delegates.is_empty());
+
+    let long = "m".repeat(257);
+    for model in ["claude-*", "bad\u{7}model", long.as_str()] {
+        assert!(
+            edit(&mut store, json!({"auxiliaryModel": model})).is_err(),
+            "{model}"
+        );
+    }
+    // An effort is a level's name as the API spells it.
+    let long = "e".repeat(33);
+    for effort in ["High", "x high", "高", long.as_str()] {
+        assert!(
+            edit(&mut store, json!({"auxiliaryEffort": effort})).is_err(),
+            "{effort}"
+        );
+    }
+    assert!(store.delegates.is_empty());
+
+    // A copy takes the settings with it; deleting it drops only its own.
+    edit(
+        &mut store,
+        json!({
+            "takeAuxiliary": true, "auxiliaryModel": "small-fixture",
+            "takeWebSearch": true, "webSearchModel": "search-fixture"
+        }),
+    )
+    .unwrap();
+    store
+        .edit(Edit::DuplicateProvider { id: id.clone() }, false)
+        .unwrap();
+    let copied = store.providers[1].id.clone();
+    assert!(store.delegates[&copied] == store.delegates[&id]);
+    assert_eq!(
+        store.delegates[&copied].takes(Delegated::WebSearch),
+        Some((Some("search-fixture"), None))
+    );
+    assert_eq!(store.providers[1].limit_rest_seconds, Some(0));
+    store
+        .edit(Edit::DeleteProvider { id: copied.clone() }, false)
+        .unwrap();
+    assert!(!store.delegates.contains_key(&copied) && store.delegates.contains_key(&id));
+
+    // A store written before these settings reads their defaults, and one
+    // that names a provider no longer there forgets it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gateway.json");
+    let mut value = serde_json::to_value(&store).unwrap();
+    value["delegates"]["gone"] = json!({"compaction": true});
+    // Web searches were the last kind a provider came to take.
+    value["delegates"][&id] = json!({"auxiliary": true, "auxiliaryModel": "small-fixture"});
+    value["providers"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("limitRestSeconds");
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let (store, _) = Store::load(&path).unwrap();
+    assert_eq!(store.providers[0].limit_rest_seconds(), 8);
+    assert_eq!(store.delegates.keys().collect::<Vec<_>>(), [&id]);
+    assert_eq!(
+        store.delegates[&id].takes(Delegated::Auxiliary),
+        Some((Some("small-fixture"), None))
+    );
+    assert_eq!(store.delegates[&id].takes(Delegated::WebSearch), None);
+}
+
+#[test]
+fn a_copy_takes_everything_but_the_identity_and_sits_below_its_original() {
+    let mut store = Store::default();
+    let save = |name: &str| Edit::SaveDshProvider {
+        id: None,
+        name: Some(name.into()),
+        base_url: "https://primary.example.invalid".into(),
+        token: "fixture".into(),
+        quota_access_token: Some("fixture-access".into()),
+        protocol: grok_config::Protocol::ChatCompletions,
+        endless_mode: Some(true),
+        upstream_retry_seconds: Some(7),
+        normal_retry_seconds: Some(2),
+        risk_codes: Some(vec![524, 403]),
+        retry_intensity: Some(0),
+        limit_retry_seconds: Some(11),
+        limit_rest_seconds: None,
+    };
+    store.edit(save("Original"), false).unwrap();
+    store.edit(save("Last"), false).unwrap();
+    let id = store.providers[0].id.clone();
+    for edit in [
+        Edit::EndpointsProvider {
+            id: id.clone(),
+            base_urls: vec!["https://backup.example.invalid".into()],
+        },
+        Edit::ConcurrencyProvider {
+            id: id.clone(),
+            max_concurrency: 3,
+        },
+        Edit::RpmProvider {
+            id: id.clone(),
+            max_rpm: 9,
+        },
+        Edit::QueueProvider {
+            id: id.clone(),
+            queued: false,
+        },
+        Edit::ModelMapProvider {
+            id: id.clone(),
+            mapping: [("asked".into(), "sent".into())].into(),
+        },
+    ] {
+        store.edit(edit, false).unwrap();
+    }
+    store.dsh_models.insert(
+        id.clone(),
+        dsh::ModelMapping([("deepseek-flash".to_owned(), Some("vendor".to_owned()))].into()),
+    );
+    let selected = store.selected.clone();
+    assert_eq!(selected.as_deref(), Some(id.as_str()));
+
+    store
+        .edit(Edit::DuplicateProvider { id: id.clone() }, false)
+        .unwrap();
+    let names: Vec<_> = store.providers.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Original", "Original (copy)", "Last"]);
+    assert_eq!(store.selected, selected);
+    let (original, copy) = (&store.providers[0], &store.providers[1]);
+    assert_ne!(copy.id, original.id);
+    assert_ne!(copy.version, original.version);
+    let mut same = copy.clone();
+    same.id.clone_from(&original.id);
+    same.version.clone_from(&original.version);
+    same.name.clone_from(&original.name);
+    assert_eq!(
+        serde_json::to_value(&same).unwrap(),
+        serde_json::to_value(original).unwrap()
+    );
+    assert_eq!(
+        (
+            copy.risk_codes.as_deref(),
+            copy.retry_intensity,
+            copy.limit_retry_seconds
+        ),
+        (Some([403, 524].as_slice()), Some(0), Some(11))
+    );
+    let copied = copy.id.clone();
+    assert_eq!(store.quota_access_tokens[&copied], "fixture-access");
+    assert_eq!(
+        store.provider_endpoints[&copied],
+        store.provider_endpoints[&id]
+    );
+    assert_eq!(
+        serde_json::to_value(&store.grok_connections[&copied]).unwrap(),
+        serde_json::to_value(&store.grok_connections[&id]).unwrap()
+    );
+    assert_eq!(store.dsh_models[&copied], store.dsh_models[&id]);
+    assert_eq!(store.model_maps[&copied], store.model_maps[&id]);
+
+    // A long name makes room for the suffix; a copy of a copy says so twice.
+    store
+        .edit(
+            Edit::RenameProvider {
+                id: copied.clone(),
+                name: "长".repeat(120),
+            },
+            false,
+        )
+        .unwrap();
+    store
+        .edit(Edit::DuplicateProvider { id: copied.clone() }, false)
+        .unwrap();
+    assert_eq!(
+        store.providers[2].name,
+        format!("{} (copy)", "长".repeat(113))
+    );
+    assert!(store
+        .edit(
+            Edit::DuplicateProvider {
+                id: "missing".into()
+            },
+            false
+        )
+        .is_err());
+
+    // Deleting the copy takes its own data and leaves the original's.
+    store
+        .edit(Edit::DeleteProvider { id: copied.clone() }, false)
+        .unwrap();
+    assert!(!store.model_maps.contains_key(&copied) && !store.dsh_models.contains_key(&copied));
+    assert!(store.model_maps.contains_key(&id) && store.quota_access_tokens.contains_key(&id));
+}
+
+#[test]
+fn a_model_mapping_holds_complete_model_ids_and_is_dropped_with_its_provider() {
+    let mut store = Store::default();
+    store
+        .edit(
+            Edit::SaveProvider {
+                delegate: Default::default(),
+                id: None,
+                name: None,
+                base_url: "https://one.example.invalid".into(),
+                token: "fixture".into(),
+                quota_access_token: None,
+                search_only: None,
+                end_on_message_stop: None,
+                filter_count_tokens: None,
+                buffer_complete_response: None,
+                endless_mode: None,
+                upstream_retry_seconds: None,
+                normal_retry_seconds: None,
+                risk_codes: None,
+                retry_intensity: None,
+                limit_retry_seconds: None,
+                limit_rest_seconds: None,
+            },
+            false,
+        )
+        .unwrap();
+    let id = store.providers[0].id.clone();
+    let version = store.providers[0].version.clone();
+    let map = |pairs: &[(&str, &str)]| Edit::ModelMapProvider {
+        id: id.clone(),
+        mapping: pairs
+            .iter()
+            .map(|(from, to)| ((*from).to_owned(), (*to).to_owned()))
+            .collect(),
+    };
+    store
+        .edit(map(&[(" asked ", " sent "), ("second", "sent")]), false)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&store).unwrap()["modelMaps"][&id],
+        json!({"asked": "sent", "second": "sent"})
+    );
+    assert_eq!(store.providers[0].version, version);
+
+    let long = "m".repeat(257);
+    for pairs in [
+        vec![("", "sent")],
+        vec![("asked", " ")],
+        vec![("claude-*", "sent")],
+        vec![("asked", "sent*")],
+        vec![("asked\u{7}", "sent")],
+        vec![("same", "same")],
+        vec![("asked", " asked")],
+        // Two keys that are one model once trimmed.
+        vec![("asked", "sent"), (" asked", "other")],
+        vec![(long.as_str(), "sent")],
+        vec![("asked", long.as_str())],
+    ] {
+        assert!(store.edit(map(&pairs), false).is_err(), "{pairs:?}");
+    }
+    let many: Vec<(String, String)> = (0..513).map(|n| (format!("m{n}"), "sent".into())).collect();
+    let refs = |n: usize| -> Vec<(&str, &str)> {
+        many[..n]
+            .iter()
+            .map(|(from, to)| (from.as_str(), to.as_str()))
+            .collect()
+    };
+    assert!(store.edit(map(&refs(513)), false).is_err());
+    assert_eq!(
+        store.model_maps[&id].len(),
+        2,
+        "a refused edit changes nothing"
+    );
+    store.edit(map(&refs(512)), false).unwrap();
+    assert_eq!(store.model_maps[&id].len(), 512);
+    assert!(store
+        .edit(
+            Edit::ModelMapProvider {
+                id: "missing".into(),
+                mapping: Default::default()
+            },
+            false
+        )
+        .is_err());
+
+    // An empty mapping is not kept, and a saved one does not outlive its provider.
+    store.edit(map(&[]), false).unwrap();
+    assert!(store.model_maps.is_empty());
+    assert!(serde_json::to_value(&store)
+        .unwrap()
+        .get("modelMaps")
+        .is_none());
+    store.edit(map(&[("asked", "sent")]), false).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gateway.json");
+    let mut orphaned = store.clone();
+    orphaned.providers.clear();
+    fs::write(&path, serde_json::to_vec(&orphaned).unwrap()).unwrap();
+    assert!(Store::load(&path).unwrap().0.model_maps.is_empty());
+    fs::write(&path, serde_json::to_vec(&store).unwrap()).unwrap();
+    assert_eq!(
+        Store::load(&path).unwrap().0.model_maps[&id]["asked"],
+        "sent"
+    );
+    store.edit(Edit::DeleteProvider { id }, false).unwrap();
+    assert!(store.model_maps.is_empty());
+}
+
+#[test]
+fn only_the_claude_gateway_takes_a_model_mapping() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = Gateway::new(dir.path().join("codex")).unwrap();
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let refused = codex.edit(
+        Edit::ModelMapProvider {
+            id: "any".into(),
+            mapping: Default::default(),
+        },
+        &codex.view().revision,
+        &home,
+    );
+    assert_eq!(
+        refused.err().map(|error| error.message).as_deref(),
+        Some("此操作仅适用于 Claude Code")
+    );
 }

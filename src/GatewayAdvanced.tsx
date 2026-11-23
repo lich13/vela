@@ -85,6 +85,9 @@ export default function Advanced({
         ["firstByteSeconds", "首字节 / 秒"],
         ["compactionSeconds", "压缩首字 / 秒"],
         ["idleSeconds", "流静默 / 秒"],
+        ...(clientId === "claude"
+          ? [["stallSeconds", "传输中静默 / 秒"] as [NumberField, string]]
+          : []),
         ...(clientId === "codex"
           ? [
               ["websocketRetrySeconds", "WebSocket 断开等待 / 秒"] as [
@@ -108,11 +111,7 @@ export default function Advanced({
         aria-label={label}
         form={formId}
         type="number"
-        disabled={
-          busy ||
-          (key === "port" &&
-            (!!listener.runningClients.length || listener.antigravityActive))
-        }
+        disabled={busy || (key === "port" && !!listener.runningClients.length)}
         required
         min={key === "maxRetries" ? 0 : key === "endpointProbeSeconds" ? 10 : 1}
         max={
@@ -184,6 +183,7 @@ export default function Advanced({
         />
       </label>
       {draft.networkProbe && field(["networkProbeAttempts", "探测次数"])}
+      {draft.networkProbe && field(["holdIdleSeconds", "断网时静默 / 秒"])}
     </>
   );
   return (

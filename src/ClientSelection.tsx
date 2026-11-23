@@ -3,22 +3,24 @@ import { useCallback, useState } from "react";
 import type { ClientId, ConfigClientId } from "./types";
 import { confirmAction } from "./confirmation";
 
-export const clients: ClientId[] = ["codex", "claude", "grok", "dsh"];
+export const clients: ClientId[] = ["codex", "claude", "agy", "grok", "dsh"];
 export const clientName = (client: ConfigClientId) =>
   ({
     codex: "Codex",
     claude: "Claude Code",
+    agy: "Antigravity",
     grok: "Grok Build",
     dsh: "DSH",
-    antigravity: "Antigravity app",
+    antigravity: "Antigravity",
   })[client];
 export const quickClientName = (client: ConfigClientId) =>
   ({
     codex: "Codex",
     claude: "Claude",
+    agy: "agy",
     grok: "Grok",
     dsh: "DSH",
-    antigravity: "Antigravity app",
+    antigravity: "Antigravity",
   })[client];
 export function useClientSelection(
   surface: "config",
@@ -40,7 +42,7 @@ export function useClientSelection(surface: "main" | "quick" | "config") {
       return stored === "claude" ||
         stored === "grok" ||
         stored === "dsh" ||
-        (surface === "config" && stored === "antigravity")
+        stored === (surface === "config" ? "antigravity" : "agy")
         ? stored
         : "codex";
     } catch {

@@ -11,7 +11,6 @@ function listener(runningClients: GatewayListener["runningClients"]): GatewayLis
     port: gatewayDemo.settings.port,
     revision: "fixture-listener-revision",
     runningClients,
-    antigravityActive: false,
   };
 }
 
