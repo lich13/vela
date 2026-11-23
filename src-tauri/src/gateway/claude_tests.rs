@@ -91,7 +91,6 @@ async fn claude_missing_settings_are_created_without_other_fields() {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,

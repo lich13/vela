@@ -181,7 +181,6 @@ fn takeover_edit_updates_one_field_and_rejects_an_empty_operation() {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,

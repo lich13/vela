@@ -129,6 +129,8 @@ use crate::storage::{self, AppError, Result};
 use circuit::{Circuit, Health};
 use connector::Connector;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+#[cfg(test)]
+pub(crate) use model::DelegateEdit;
 use model::Provider;
 pub(crate) use model::Store;
 pub use model::{Edit, Settings};
@@ -185,7 +187,6 @@ pub struct ProviderView {
     pub take_web_search: bool,
     pub web_search_model: String,
     pub web_search_effort: String,
-    pub search_only: bool,
     pub end_on_message_stop: bool,
     pub filter_count_tokens: bool,
     pub buffer_complete_response: bool,
@@ -508,6 +509,15 @@ impl Gateway {
     pub fn cancel_wait(&self, request_id: &str) -> bool {
         self.0.pending_requests.cancel(request_id)
     }
+    /// `cancel_wait`, telling a request sent again (`resent`) from one whose
+    /// response had begun and was ended (`ended`) and one already over (`gone`).
+    pub fn interrupt_wait(&self, request_id: &str) -> &'static str {
+        match self.0.pending_requests.interrupt(request_id) {
+            Some(true) => "resent",
+            Some(false) => "ended",
+            None => "gone",
+        }
+    }
 
     fn claude_official(&self) -> bool {
         self.0.client == ClientId::Claude
@@ -826,7 +836,6 @@ impl Gateway {
             next.edit(
                 Edit::SaveProvider {
                     delegate: Default::default(),
-                    search_only: None,
                     end_on_message_stop: None,
                     filter_count_tokens: None,
                     buffer_complete_response: None,
@@ -1043,7 +1052,6 @@ impl Gateway {
                         take_web_search: delegate.web_search,
                         web_search_model: delegate.web_search_model.unwrap_or_default(),
                         web_search_effort: delegate.web_search_effort.unwrap_or_default(),
-                        search_only: p.search_only,
                         end_on_message_stop: p.end_on_message_stop,
                         filter_count_tokens: p.filter_count_tokens,
                         buffer_complete_response: p.buffer_complete_response,
@@ -1336,15 +1344,10 @@ impl Gateway {
             store
                 .providers
                 .iter()
-                .find(|p| !p.search_only && Some(&p.id) == store.selected.as_ref())
+                .find(|p| Some(&p.id) == store.selected.as_ref())
         } else {
-            last.and_then(|id| {
-                store
-                    .providers
-                    .iter()
-                    .find(|p| p.id == id && !p.search_only)
-            })
-            .or_else(|| store.providers.iter().find(|p| p.queued && !p.search_only))
+            last.and_then(|id| store.providers.iter().find(|p| p.id == id))
+                .or_else(|| store.providers.iter().find(|p| p.queued))
         };
         p.ok_or_else(|| {
             AppError::new(
@@ -1357,6 +1360,65 @@ impl Gateway {
         self.try_view().is_err()
             || self.request_state().running
             || self.0.data.join("gateway-recovery.json").exists()
+    }
+    /// The edit a client's provider form sends, with a new provider that
+    /// names nothing to take over set to take every kind the client has.
+    pub fn with_new_provider_defaults(&self, edit: Edit) -> Edit {
+        match edit {
+            Edit::SaveProvider {
+                delegate,
+                id: None,
+                end_on_message_stop,
+                filter_count_tokens,
+                buffer_complete_response,
+                endless_mode,
+                upstream_retry_seconds,
+                normal_retry_seconds,
+                risk_codes,
+                retry_intensity,
+                limit_retry_seconds,
+                limit_rest_seconds,
+                base_url,
+                token,
+                quota_access_token,
+                name,
+            } => Edit::SaveProvider {
+                delegate: delegate.or_everything(self.0.client),
+                id: None,
+                end_on_message_stop,
+                filter_count_tokens,
+                buffer_complete_response,
+                endless_mode,
+                upstream_retry_seconds,
+                normal_retry_seconds,
+                risk_codes,
+                retry_intensity,
+                limit_retry_seconds,
+                limit_rest_seconds,
+                base_url,
+                token,
+                quota_access_token,
+                name,
+            },
+            Edit::SaveGrokProvider {
+                delegate,
+                id: None,
+                base_url,
+                token,
+                quota_access_token,
+                name,
+                protocol,
+            } => Edit::SaveGrokProvider {
+                delegate: delegate.or_everything(self.0.client),
+                id: None,
+                base_url,
+                token,
+                quota_access_token,
+                name,
+                protocol,
+            },
+            edit => edit,
+        }
     }
     pub fn edit(&self, edit: Edit, expected: &str, home: &Path) -> Result<View> {
         self.edit_checked(edit, expected, home, None)
@@ -1394,16 +1456,7 @@ impl Gateway {
                 "网关设置已变化，请使用最新状态重试",
             ));
         }
-        if self.0.client != ClientId::Codex
-            && matches!(
-                &edit,
-                Edit::TakeoverProvider { .. }
-                    | Edit::SaveProvider {
-                        search_only: Some(_),
-                        ..
-                    }
-            )
-        {
+        if self.0.client != ClientId::Codex && matches!(&edit, Edit::TakeoverProvider { .. }) {
             return Err(AppError::new(code::SETTINGS, "接管策略仅适用于 Codex"));
         }
         if self.0.client != ClientId::Codex
@@ -1457,13 +1510,14 @@ impl Gateway {
                     "压缩与辅助请求接管仅适用于 Codex 和 Claude Code",
                 ));
             }
-            // Codex searches go to its search-only providers instead.
-            if !matches!(self.0.client, ClientId::Claude | ClientId::Grok)
-                && delegate.enables(Delegated::WebSearch)
+            if !matches!(
+                self.0.client,
+                ClientId::Codex | ClientId::Claude | ClientId::Grok
+            ) && delegate.enables(Delegated::WebSearch)
             {
                 return Err(AppError::new(
                     code::CLIENT,
-                    "网络搜索请求接管仅适用于 Claude Code 和 Grok Build",
+                    "网络搜索请求接管仅适用于 Codex、Claude Code 和 Grok Build",
                 ));
             }
         }
@@ -1582,7 +1636,6 @@ impl Gateway {
                 next.edit(
                     Edit::SaveProvider {
                         delegate: Default::default(),
-                        search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
                         buffer_complete_response: None,
@@ -2224,6 +2277,30 @@ impl Gateway {
             (query, connection)
         })
     }
+    /// Ids of this client's providers on the same host as the given provider,
+    /// or as the address of one that is not saved yet.
+    pub fn same_host_providers(&self, id: Option<&str>, base_url: Option<&str>) -> Vec<String> {
+        let host = |address: &str| {
+            url::Url::parse(address)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        };
+        let s = self.0.inner.lock();
+        let providers = &s.store.providers;
+        let Some(target) = id
+            .and_then(|id| providers.iter().find(|p| p.id == id))
+            .map(|p| p.base_url.as_str())
+            .or(base_url)
+            .and_then(host)
+        else {
+            return Vec::new();
+        };
+        providers
+            .iter()
+            .filter(|p| host(&p.base_url).as_ref() == Some(&target))
+            .map(|p| p.id.clone())
+            .collect()
+    }
     pub async fn list_models(&self, id: &str, force: bool) -> Result<catalog::View> {
         let (input, connection) = self.query_snapshot(id, false)?;
         let version = input.version.clone();
@@ -2472,11 +2549,7 @@ impl Gateway {
     }
 
     fn sync_single_protection(&self, state: &Inner) {
-        let mut queue = state
-            .store
-            .providers
-            .iter()
-            .filter(|p| p.queued && !p.search_only);
+        let mut queue = state.store.providers.iter().filter(|p| p.queued);
         let first = queue.next();
         let single = if self.0.client == ClientId::Codex
             && state.store.mode == "auto"
@@ -2528,26 +2601,11 @@ impl Gateway {
         s.store
             .providers
             .iter()
-            .filter(|p| {
-                !p.search_only
-                    && match pinned {
-                        Some(id) => p.id == id,
-                        None if s.store.mode == "auto" => p.queued,
-                        None => s.store.selected.as_deref() == Some(p.id.as_str()),
-                    }
+            .filter(|p| match pinned {
+                Some(id) => p.id == id,
+                None if s.store.mode == "auto" => p.queued,
+                None => s.store.selected.as_deref() == Some(p.id.as_str()),
             })
-            .map(|p| p.id.clone())
-            .collect()
-    }
-    fn search_backups(&self) -> Vec<String> {
-        if self.client_id() != ClientId::Codex {
-            return vec![];
-        }
-        let s = self.0.inner.lock();
-        s.store
-            .providers
-            .iter()
-            .filter(|p| p.queued && p.search_only)
             .map(|p| p.id.clone())
             .collect()
     }

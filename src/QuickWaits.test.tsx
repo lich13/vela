@@ -21,7 +21,7 @@ afterEach(() => {
 });
 it("keeps long compaction cancellable and shows elapsed time without a countdown", async () => {
   const start = Math.floor(Date.now() / 1000);
-  mock.command.mockResolvedValueOnce(true);
+  mock.command.mockResolvedValueOnce("resent");
   render(
     <QuickWaits
       gateway={{
@@ -69,7 +69,7 @@ it("shows only long waits and cancels the selected request on its platform", asy
       phase: i === 1 ? "ws_wait" : "headers",
     })),
   };
-  mock.command.mockResolvedValueOnce(false);
+  mock.command.mockResolvedValueOnce("gone");
   const notify = vi.fn();
   const { rerender } = render(
     <QuickWaits
@@ -91,9 +91,16 @@ it("shows only long waits and cancels the selected request on its platform", asy
     clientId: "claude",
     requestId: "fixture-2",
   });
-  mock.command.mockResolvedValueOnce(true);
+  mock.command.mockResolvedValueOnce("resent");
   fireEvent.click(within(row).getByRole("button", { name: "重发" }));
   await waitFor(() => expect(notify).toHaveBeenCalledWith("已打断并重发"));
+  mock.command.mockResolvedValueOnce("ended");
+  fireEvent.click(within(row).getByRole("button", { name: "重发" }));
+  await waitFor(() =>
+    expect(notify).toHaveBeenCalledWith(
+      "回应已开始交付，已中止，需由客户端重试",
+    ),
+  );
   rerender(
     <QuickWaits
       gateway={{ ...gateway, pendingRequests: [] }}
@@ -192,7 +199,7 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
 
 it("maps buffering phase to 缓冲响应 with elapsed seconds and cancellation", async () => {
   const start = Math.floor(Date.now() / 1000);
-  mock.command.mockResolvedValueOnce(true);
+  mock.command.mockResolvedValueOnce("resent");
   render(
     <QuickWaits
       gateway={{

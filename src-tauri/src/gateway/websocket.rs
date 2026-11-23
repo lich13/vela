@@ -2129,9 +2129,7 @@ impl<'a> Session<'a> {
             self.g
                 .route(&self.route.provider.id)
                 .filter(|r| {
-                    r.provider.queued
-                        && !r.provider.search_only
-                        && requirement.allows(r.provider.allowed_models.as_deref())
+                    r.provider.queued && requirement.allows(r.provider.allowed_models.as_deref())
                 })
                 .into_iter()
                 .collect()
@@ -2260,9 +2258,7 @@ impl<'a> Session<'a> {
                 .g
                 .route(&self.route.provider.id)
                 .filter(|r| {
-                    r.provider.queued
-                        && !r.provider.search_only
-                        && requirement.allows(r.provider.allowed_models.as_deref())
+                    r.provider.queued && requirement.allows(r.provider.allowed_models.as_deref())
                 })
                 .into_iter()
                 .collect();
@@ -2808,9 +2804,7 @@ impl<'a> Session<'a> {
                 .g
                 .route(&self.route.provider.id)
                 .filter(|r| {
-                    r.provider.queued
-                        && !r.provider.search_only
-                        && requirement.allows(r.provider.allowed_models.as_deref())
+                    r.provider.queued && requirement.allows(r.provider.allowed_models.as_deref())
                 })
                 .ok_or((1013, "thread owner is no longer available"))?;
             if refreshed.provider.version != self.route.provider.version {
@@ -3312,7 +3306,6 @@ impl<'a> Session<'a> {
                 .and_then(|id| self.g.route(id))
                 .filter(|old| {
                     old.provider.queued
-                        && !old.provider.search_only
                         && Requirement::model(self.current_model.as_deref())
                             .allows(old.provider.allowed_models.as_deref())
                 })

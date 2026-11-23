@@ -206,6 +206,7 @@ struct QuickPalette {
     var accentBlue: Color { isDark ? Self.hex(0x60A5FA) : Self.hex(0x2563EB) }
     var accentAmber: Color { isDark ? Self.hex(0xFBBF24) : Self.hex(0xB45309) }
     var accentEmerald: Color { isDark ? Self.hex(0x34D399) : Self.hex(0x059669) }
+    var accentViolet: Color { isDark ? Self.hex(0xA78BFA) : Self.hex(0x6D28D9) }
     var accentSoft: Color { isDark ? Self.rgba(56, 189, 248, 0.14) : Self.rgba(2, 132, 199, 0.11) }
 
     var success: Color { isDark ? Self.hex(0x34D399) : Self.hex(0x059669) }
@@ -222,6 +223,7 @@ struct QuickPalette {
         case "claude": return accentBlue
         case "grok": return accentAmber
         case "dsh": return accentEmerald
+        case "agy": return accentViolet
         default: return accent
         }
     }

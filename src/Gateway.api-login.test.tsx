@@ -52,15 +52,15 @@ beforeEach(() => {
           op?: string;
           mode?: "bearer" | "apiKey";
           id?: string;
-          searchOnly?: boolean;
+          takeWebSearch?: boolean;
         };
         if (edit.op === "connection" && edit.mode) {
           current.connectionMode = edit.mode;
           current.revision = `saved-${current.clientId}`;
         }
-        if (edit.op === "saveProvider" && edit.searchOnly !== undefined) {
+        if (edit.op === "saveProvider" && edit.takeWebSearch !== undefined) {
           const provider = current.providers.find((p) => p.id === edit.id);
-          if (provider) provider.searchOnly = edit.searchOnly;
+          if (provider) provider.takeWebSearch = edit.takeWebSearch;
         }
         return structuredClone(current);
       }
@@ -173,9 +173,9 @@ describe("Codex API login gateway controls", () => {
       await screen.findByRole("button", { name: "添加" });
 
       const addDialog = await openProviderEditor(user, "add");
-      expect(
-        within(addDialog).queryByLabelText("仅网络搜索"),
-      ).not.toBeInTheDocument();
+      // A new provider takes every kind over; a saved one keeps its own.
+      for (const name of ["接管压缩请求", "接管辅助请求", "接管网络搜索请求"])
+        expect(within(addDialog).getByRole("checkbox", { name })).toBeChecked();
       expect(within(addDialog).getByLabelText(label)).toHaveAttribute(
         "type",
         "password",
@@ -190,6 +190,10 @@ describe("Codex API login gateway controls", () => {
       await user.click(within(addDialog).getByRole("button", { name: "取消" }));
 
       const editDialog = await openProviderEditor(user, "edit");
+      for (const name of ["接管压缩请求", "接管辅助请求", "接管网络搜索请求"])
+        expect(
+          within(editDialog).getByRole("checkbox", { name }),
+        ).not.toBeChecked();
       expect(within(editDialog).getByLabelText(label)).toHaveAttribute(
         "type",
         "password",
@@ -260,12 +264,15 @@ describe("Codex API login gateway controls", () => {
         normalRetrySeconds: 3,
         riskCodes: [],
         retryIntensity: 5,
-        takeCompaction: false,
+        takeCompaction: true,
         compactionModel: "",
         compactionEffort: "",
-        takeAuxiliary: false,
+        takeAuxiliary: true,
         auxiliaryModel: "",
         auxiliaryEffort: "",
+        takeWebSearch: true,
+        webSearchModel: "",
+        webSearchEffort: "",
       },
       expectedRevision: original.revision,
     });
@@ -308,11 +315,11 @@ it("edits search policy only inside the API form and discards a cancelled draft"
   render(<Gateway notify={() => {}} />);
   await screen.findByRole("button", { name: "添加" });
   expect(
-    screen.queryByRole("button", { name: /仅网络搜索/ }),
+    screen.queryByRole("button", { name: /接管网络搜索请求/ }),
   ).not.toBeInTheDocument();
   let dialog = await openProviderEditor(user, "edit");
   await user.click(
-    within(dialog).getByRole("checkbox", { name: "仅网络搜索" }),
+    within(dialog).getByRole("checkbox", { name: "接管网络搜索请求" }),
   );
   expect(
     mock.command.mock.calls.some(([name]) => name === "update_gateway"),
@@ -320,10 +327,10 @@ it("edits search policy only inside the API form and discards a cancelled draft"
   await user.click(within(dialog).getByRole("button", { name: "取消" }));
   dialog = await openProviderEditor(user, "edit");
   expect(
-    within(dialog).getByRole("checkbox", { name: "仅网络搜索" }),
+    within(dialog).getByRole("checkbox", { name: "接管网络搜索请求" }),
   ).not.toBeChecked();
   await user.click(
-    within(dialog).getByRole("checkbox", { name: "仅网络搜索" }),
+    within(dialog).getByRole("checkbox", { name: "接管网络搜索请求" }),
   );
   await user.clear(within(dialog).getByLabelText("base_url"));
   await user.type(
@@ -341,12 +348,12 @@ it("edits search policy only inside the API form and discards a cancelled draft"
   expect(writes[0][1]).toMatchObject({
     edit: {
       op: "saveProvider",
-      searchOnly: true,
+      takeWebSearch: true,
       baseUrl: "https://changed.example.invalid/v1",
       token: "",
     },
   });
-  expect(codexState.providers[0].searchOnly).toBe(true);
+  expect(codexState.providers[0].takeWebSearch).toBe(true);
 });
 
 it("retains the search policy draft through a save conflict and retries with the current revision", async () => {
@@ -366,16 +373,16 @@ it("retains the search policy draft through a save conflict and retries with the
   const dialog = await openProviderEditor(user, "edit");
   const initialRevision = codexState.revision;
   await user.click(
-    within(dialog).getByRole("checkbox", { name: "仅网络搜索" }),
+    within(dialog).getByRole("checkbox", { name: "接管网络搜索请求" }),
   );
   await user.click(within(dialog).getByRole("button", { name: "保存" }));
   expect(await within(dialog).findByRole("alert")).toHaveTextContent(
     "配置已变化",
   );
   expect(
-    within(dialog).getByRole("checkbox", { name: "仅网络搜索" }),
+    within(dialog).getByRole("checkbox", { name: "接管网络搜索请求" }),
   ).toBeChecked();
-  expect(codexState.providers[0].searchOnly).not.toBe(true);
+  expect(codexState.providers[0].takeWebSearch).not.toBe(true);
   await user.click(within(dialog).getByRole("button", { name: "重试" }));
   await waitFor(() =>
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
@@ -385,10 +392,10 @@ it("retains the search policy draft through a save conflict and retries with the
   );
   expect(writes[0][1]).toMatchObject({
     expectedRevision: initialRevision,
-    edit: { searchOnly: true },
+    edit: { takeWebSearch: true },
   });
   expect(writes[1][1]).toMatchObject({
     expectedRevision: "fixture-new-revision",
-    edit: { searchOnly: true },
+    edit: { takeWebSearch: true },
   });
 });

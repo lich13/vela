@@ -71,7 +71,6 @@ async fn fixture(
         token: String::new(),
         name: None,
         quota_access_token: None,
-        search_only: None,
         end_on_message_stop: None,
         filter_count_tokens: None,
         buffer_complete_response: None,

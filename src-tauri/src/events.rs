@@ -1158,6 +1158,65 @@ pub struct Page {
     pub page: usize,
     pub error: Option<String>,
 }
+/// One upstream error status a group of providers has answered with.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SeenStatus {
+    pub status: u16,
+    pub count: u32,
+    /// The classification of the most recent record that carries one.
+    pub basis: Option<ErrorBasis>,
+    pub last_at: u64,
+}
+/// Upstream 4xx and 5xx statuses of the given providers, most frequent first.
+fn seen_statuses<'a>(
+    records: impl Iterator<Item = &'a Record>,
+    client: ClientId,
+    providers: &[String],
+    cutoff: u64,
+) -> Vec<SeenStatus> {
+    let mut seen: Vec<(SeenStatus, u64)> = Vec::new();
+    for r in records {
+        let Some(status) = r.status.filter(|s| (400..600).contains(s)) else {
+            continue;
+        };
+        if r.last_at < cutoff
+            || r.client_id != Some(JournalClient::Active(client))
+            || r.origin() != Origin::Upstream
+            || !r
+                .provider_id
+                .as_ref()
+                .is_some_and(|id| providers.contains(id))
+        {
+            continue;
+        }
+        let index = seen
+            .iter()
+            .position(|(s, _)| s.status == status)
+            .unwrap_or_else(|| {
+                seen.push((
+                    SeenStatus {
+                        status,
+                        count: 0,
+                        basis: None,
+                        last_at: 0,
+                    },
+                    0,
+                ));
+                seen.len() - 1
+            });
+        let (entry, basis_at) = &mut seen[index];
+        entry.count = entry.count.saturating_add(r.count);
+        entry.last_at = entry.last_at.max(r.last_at);
+        if r.details.error_basis.is_some() && (entry.basis.is_none() || r.last_at >= *basis_at) {
+            entry.basis = r.details.error_basis;
+            *basis_at = r.last_at;
+        }
+    }
+    let mut seen: Vec<_> = seen.into_iter().map(|(s, _)| s).collect();
+    seen.sort_by_key(|s| (std::cmp::Reverse(s.count), s.status));
+    seen
+}
 impl Journal {
     fn circuit_causes(&self, cutoff: u64) -> HashSet<&str> {
         self.records
@@ -1637,6 +1696,15 @@ impl Service {
         // Failure to persist acknowledgment never blocks gateway delivery.
         let _ = self.sender.try_send(Job::NotificationAccepted(id));
     }
+    pub fn seen_statuses(&self, client: ClientId, providers: &[String]) -> Vec<SeenStatus> {
+        let j = self.journal.lock();
+        seen_statuses(
+            j.records.iter().map(|r| &**r),
+            client,
+            providers,
+            now().saturating_sub(RETENTION),
+        )
+    }
     pub fn query(&self, f: Filter) -> Page {
         let j = self.journal.lock();
         let cutoff = now().saturating_sub(RETENTION);
@@ -2084,6 +2152,112 @@ mod diagnostic_record_tests {
             assert_eq!(record.details.local_code.as_deref(), Some(code));
             assert_eq!(record.details.message.as_deref(), Some("恢复未完成"));
         }
+    }
+    #[test]
+    fn seen_statuses_sum_upstream_errors_of_the_given_providers() {
+        let record = |provider: &str, client, status, count, last_at, basis| {
+            let mut r = Record::new(
+                Some(client),
+                Some(provider),
+                Some("fixture-model"),
+                Reason::RateLimit,
+                Action::TryingNext,
+                Some(status),
+                Some(1),
+            );
+            r.count = count;
+            r.last_at = last_at;
+            r.details.error_basis = basis;
+            r
+        };
+        let records = [
+            record(
+                "00000000-0000-4000-8000-000000000001",
+                ClientId::Claude,
+                429,
+                2,
+                100,
+                Some(ErrorBasis::Rpm),
+            ),
+            record(
+                "00000000-0000-4000-8000-000000000002",
+                ClientId::Claude,
+                429,
+                3,
+                200,
+                Some(ErrorBasis::Tpm),
+            ),
+            record(
+                "00000000-0000-4000-8000-000000000002",
+                ClientId::Claude,
+                429,
+                1,
+                300,
+                None,
+            ),
+            record(
+                "00000000-0000-4000-8000-000000000001",
+                ClientId::Claude,
+                503,
+                9,
+                150,
+                None,
+            ),
+            // Another provider, another client, a success and an expired record.
+            record(
+                "00000000-0000-4000-8000-000000000003",
+                ClientId::Claude,
+                500,
+                7,
+                100,
+                None,
+            ),
+            record(
+                "00000000-0000-4000-8000-000000000001",
+                ClientId::Codex,
+                502,
+                7,
+                100,
+                None,
+            ),
+            record(
+                "00000000-0000-4000-8000-000000000001",
+                ClientId::Claude,
+                200,
+                7,
+                100,
+                None,
+            ),
+            record(
+                "00000000-0000-4000-8000-000000000001",
+                ClientId::Claude,
+                529,
+                7,
+                10,
+                None,
+            ),
+        ];
+        let providers = [
+            "00000000-0000-4000-8000-000000000001".to_owned(),
+            "00000000-0000-4000-8000-000000000002".to_owned(),
+        ];
+        assert_eq!(
+            seen_statuses(records.iter(), ClientId::Claude, &providers, 50),
+            [
+                SeenStatus {
+                    status: 503,
+                    count: 9,
+                    basis: None,
+                    last_at: 150
+                },
+                SeenStatus {
+                    status: 429,
+                    count: 6,
+                    basis: Some(ErrorBasis::Tpm),
+                    last_at: 300
+                },
+            ]
+        );
     }
     #[test]
     fn distinct_error_codes_statuses_and_actions_do_not_merge() {

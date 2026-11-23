@@ -1496,7 +1496,7 @@ async fn detection_resets_after_sleep_and_exits_without_accumulating_periods() {
 }
 
 #[tokio::test]
-async fn search_only_connection_uses_ordinary_chat_and_streamed_text() {
+async fn a_search_taker_connection_uses_ordinary_chat_and_streamed_text() {
     let port = server(|request| async {
         assert!(request.uri().path().ends_with("/responses"));
         let body: Value = serde_json::from_slice(&request.into_body().collect().await.unwrap().to_bytes()).unwrap();
@@ -1516,13 +1516,15 @@ async fn search_only_connection_uses_ordinary_chat_and_streamed_text() {
     gateway
         .edit(
             Edit::SaveProvider {
-                delegate: Default::default(),
+                delegate: crate::gateway::DelegateEdit {
+                    take_web_search: Some(true),
+                    ..Default::default()
+                },
                 id: Some(id.clone()),
                 base_url: format!("http://127.0.0.1:{port}/v1"),
                 token: String::new(),
                 quota_access_token: None,
                 name: None,
-                search_only: Some(true),
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -1538,7 +1540,7 @@ async fn search_only_connection_uses_ordinary_chat_and_streamed_text() {
             dir.path(),
         )
         .unwrap();
-    assert!(gateway.view().providers[0].search_only);
+    assert!(gateway.view().providers[0].take_web_search);
     let job = service
         .start(request(&service, ClientId::Codex, &id))
         .unwrap();
@@ -1559,9 +1561,8 @@ async fn search_only_connection_uses_ordinary_chat_and_streamed_text() {
             .unwrap_or(0),
         0
     );
-    assert!(service
-        .start(fingerprint_request(&service, &id, 1))
-        .is_err());
+    // A provider that takes searches is an ordinary one as well.
+    assert!(service.start(fingerprint_request(&service, &id, 1)).is_ok());
 }
 
 #[tokio::test]

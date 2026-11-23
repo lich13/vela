@@ -61,7 +61,6 @@ fn codex_identity_is_atomic_success_only_private_and_bound_to_home() {
                 base_url: "https://example.invalid/v1".into(),
                 token: "fixture-provider-key".into(),
                 quota_access_token: None,
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -192,18 +191,20 @@ fn v02523_business_user_agent_is_platform_scoped_success_only_and_survives_reloa
 }
 
 #[test]
-fn v02523_search_only_is_excluded_from_model_union_exit_and_generation_routes() {
+fn a_provider_that_takes_searches_stays_in_model_union_exit_and_generation_routes() {
     let dir = tempfile::tempdir().unwrap();
     let gateway = Gateway::new(dir.path().join("data")).unwrap();
     {
         let mut state = gateway.0.inner.lock();
         let store = &mut state.editable_mut().store;
-        for (name, search_only) in [("search", true), ("ordinary", false)] {
+        for (name, searching) in [("search", true), ("ordinary", false)] {
             store
                 .edit(
                     Edit::SaveProvider {
-                        delegate: Default::default(),
-                        search_only: None,
+                        delegate: crate::gateway::model::DelegateEdit {
+                            take_web_search: Some(searching),
+                            ..Default::default()
+                        },
                         end_on_message_stop: None,
                         filter_count_tokens: None,
                         buffer_complete_response: None,
@@ -225,21 +226,21 @@ fn v02523_search_only_is_excluded_from_model_union_exit_and_generation_routes() 
                 .unwrap();
             let provider = store.providers.last_mut().unwrap();
             provider.queued = true;
-            provider.search_only = search_only;
             provider.allowed_models = Some(vec![format!("fixture-{name}")]);
         }
         store.mode = "auto".into();
         assert_eq!(
-            Gateway::exit_provider(&state.store, Some(&state.store.providers[0].id))
-                .unwrap()
-                .name,
-            "ordinary"
+            Gateway::exit_provider(&state.store, None).unwrap().name,
+            "search"
         );
     }
     let routes = gateway.routing_ids(None);
-    assert_eq!(routes.len(), 1);
-    assert_eq!(gateway.model_union(None).unwrap(), vec!["fixture-ordinary"]);
-    assert_eq!(gateway.gateway_models().unwrap().providers.len(), 1);
+    assert_eq!(routes.len(), 2);
+    assert_eq!(
+        gateway.model_union(None).unwrap(),
+        vec!["fixture-search", "fixture-ordinary"]
+    );
+    assert_eq!(gateway.gateway_models().unwrap().providers.len(), 2);
     let store = &gateway.0.inner.lock().store;
-    assert_eq!(routes[0], store.providers[1].id);
+    assert_eq!(routes[0], store.providers[0].id);
 }

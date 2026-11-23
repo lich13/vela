@@ -434,7 +434,6 @@ export type DshBatch = {
 export type GatewayEdit =
   | {
       op: "saveProvider";
-      searchOnly?: boolean;
       takeCompaction?: boolean;
       /** "" clears the model. */
       compactionModel?: string;
@@ -445,7 +444,7 @@ export type GatewayEdit =
       auxiliaryModel?: string;
       /** "" clears the effort. */
       auxiliaryEffort?: string;
-      /** Claude only; a Grok provider's is sent with `saveGrokProvider`. */
+      /** Codex and Claude; a Grok provider's is sent with `saveGrokProvider`. */
       takeWebSearch?: boolean;
       /** "" clears the model. */
       webSearchModel?: string;
@@ -563,7 +562,10 @@ export type CommandMap = {
   read_previous_antigravity_config: Call<None, string>;
   validate_antigravity_config: Call<{ text: string }, void>;
   /** `missing` means the CLI has not created the file yet; Vela never creates it. */
-  read_antigravity_cli_config: Call<None, ConfigDocument & { missing: boolean }>;
+  read_antigravity_cli_config: Call<
+    None,
+    ConfigDocument & { missing: boolean }
+  >;
   save_antigravity_cli_config: Call<
     { text: string } & Revision,
     ConfigDocument & { missing: boolean }
@@ -647,7 +649,10 @@ export type CommandMap = {
   >;
   quick_ready: Call<None, void>;
   hide_quick: Call<None, void>;
-  cancel_gateway_wait: Call<Client & { requestId: string }, boolean>;
+  cancel_gateway_wait: Call<
+    Client & { requestId: string },
+    "resent" | "ended" | "gone"
+  >;
   get_gateway: Call<Client, GatewayState>;
   get_gateway_freeze: Call<None, GatewayFreeze>;
   set_gateway_frozen: Call<
@@ -714,6 +719,16 @@ export type CommandMap = {
   >;
   query_provider_quota: Call<Provider & { force: boolean }, ProviderQuota>;
   list_provider_models: Call<Provider & { force: boolean }, ModelCatalog>;
+  /** Upstream error statuses met by the providers sharing the host, most frequent first. */
+  get_provider_seen_statuses: Call<
+    { clientId: ClientId; providerId?: string; baseUrl?: string },
+    {
+      status: number;
+      count: number;
+      basis: string | null;
+      lastAt: number;
+    }[]
+  >;
   get_clamshell_state: Call<None, PowerState>;
   set_clamshell_awake: Call<{ enabled: boolean } & Revision, PowerState>;
   install_power_helper: Call<None, PowerState>;

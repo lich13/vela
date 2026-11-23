@@ -48,7 +48,6 @@ const idle = {
   takeWebSearch: false,
   webSearchModel: "",
   webSearchEffort: "",
-  searchOnly: false,
   endOnMessageStop: false,
   filterCountTokens: false,
   bufferCompleteResponse: false,
@@ -319,7 +318,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       (r) => r.requestId !== args.requestId,
     );
     s.waitingRequests = s.pendingRequests.length;
-    return found;
+    return found ? "resent" : "gone";
   }
   if (name === "update_codex_catalog") {
     if (!s.modelCatalog || !s.modelCatalogOfficial)
@@ -807,7 +806,6 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         p.baseUrl = String(e.baseUrl);
         if (e.op === "saveGrokProvider")
           p.protocol = e.protocol as GrokProtocol;
-        if (e.searchOnly !== undefined) p.searchOnly = Boolean(e.searchOnly);
         if (e.takeCompaction !== undefined)
           p.takeCompaction = Boolean(e.takeCompaction);
         if (e.compactionModel !== undefined)

@@ -309,17 +309,15 @@ it("keeps the search policy out of row controls and hides generation intake for 
   rerender(
     <ProviderControls
       {...props}
-      provider={{ ...provider, searchOnly: true }}
+      provider={{ ...provider, takeWebSearch: true }}
     />,
   );
+  // A provider that takes searches still serves the conversation.
   expect(
-    screen.queryByRole("button", { name: /仅网络搜索/ }),
-  ).not.toBeInTheDocument();
+    screen.getByRole("button", { name: /压缩后接管/ }),
+  ).toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: /压缩后接管/ }),
-  ).not.toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: /新线程接管/ }),
-  ).not.toBeInTheDocument();
+    screen.getByRole("button", { name: /新线程接管/ }),
+  ).toBeInTheDocument();
   expect(screen.getByRole("button", { name: /并发上限/ })).toBeInTheDocument();
 });

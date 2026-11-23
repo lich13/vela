@@ -192,13 +192,12 @@ export type Provider = {
   auxiliaryModel: string;
   /** Replaces the reasoning effort an auxiliary request asked for; "" keeps it. */
   auxiliaryEffort: string;
-  /** Claude and Grok: this provider serves the searches the client's web search tool sends. */
+  /** Codex, Claude and Grok: this provider serves the searches the client's web search tool sends. */
   takeWebSearch: boolean;
   /** Replaces the model a web search request asked for; "" keeps it. */
   webSearchModel: string;
   /** Replaces the reasoning effort a web search request asked for; "" keeps it. */
   webSearchEffort: string;
-  searchOnly: boolean;
   endOnMessageStop: boolean;
   filterCountTokens: boolean;
   bufferCompleteResponse: boolean;

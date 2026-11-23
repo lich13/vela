@@ -61,11 +61,17 @@ export default function QuickWaits({
             onClick={async () => {
               setBusy((v) => [...v, r.requestId]);
               try {
-                const cancelled = await command("cancel_gateway_wait", {
+                const outcome = await command("cancel_gateway_wait", {
                   clientId,
                   requestId: r.requestId,
                 });
-                notify(cancelled ? "已打断并重发" : "等待已结束");
+                notify(
+                  outcome === "resent"
+                    ? "已打断并重发"
+                    : outcome === "ended"
+                      ? "回应已开始交付，已中止，需由客户端重试"
+                      : "等待已结束",
+                );
               } catch (e) {
                 error(errorOf(e).message);
               } finally {

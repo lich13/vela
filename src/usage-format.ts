@@ -65,6 +65,14 @@ export function missingReason(
   field: string,
   source: string,
 ): string {
+  // An Antigravity CLI session file holds no first-token time.
+  if (
+    field === "first_token" &&
+    source === "antigravity" &&
+    a.transport === "cli_file" &&
+    (a.operation ?? "model") === "model"
+  )
+    return "CLI 未记录";
   if (
     field === "first_token" &&
     (!["proxy", "antigravity"].includes(source) ||
@@ -87,4 +95,47 @@ export function missingReason(
       } as Record<string, string>
     )[kind] ?? "历史缺失"
   );
+}
+
+// Folds aliases of one model together: case, `models/` and vendor prefixes,
+// trailing release dates and `-latest`.
+export function normalizeModelName(model: string): string {
+  let name = model.trim().toLowerCase();
+  name = name.slice(name.lastIndexOf("/") + 1);
+  for (;;) {
+    const next = name.replace(/(?:[-@]\d{8}|-\d{4}-\d{2}-\d{2}|-latest)$/, "");
+    if (next === name) return name;
+    name = next;
+  }
+}
+
+export type ModelRelation = {
+  // The upstream was asked for a different model than the client requested.
+  mapped: boolean;
+  // The upstream answered with a different model than the one it was sent.
+  mismatch: boolean;
+  title: string;
+};
+
+export function modelRelation(
+  a: Pick<Attempt, "requestedModel" | "upstreamModel" | "responseModel">,
+): ModelRelation {
+  const sent = a.upstreamModel || a.requestedModel;
+  const mapped =
+    !!a.upstreamModel &&
+    !!a.requestedModel &&
+    a.upstreamModel !== a.requestedModel;
+  const mismatch =
+    !!sent &&
+    !!a.responseModel &&
+    normalizeModelName(sent) !== normalizeModelName(a.responseModel);
+  return {
+    mapped,
+    mismatch,
+    title: [
+      `请求模型 ${a.requestedModel || "—"}`,
+      `上游请求模型 ${sent || "—"}`,
+      `收到的响应模型 ${a.responseModel || "—"}`,
+    ].join(" · "),
+  };
 }

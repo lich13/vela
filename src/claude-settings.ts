@@ -18,13 +18,23 @@ export type Field = {
   path: Path;
   /**
    * `integer` keeps digits as text (environment values), `number` writes a
-   * whole number, and `list` is a list of strings.
+   * whole number, `list` is a list of strings and `map` a table of strings.
    */
-  kind: "text" | "model" | "boolean" | "select" | "integer" | "number" | "list";
+  kind:
+    | "text"
+    | "model"
+    | "boolean"
+    | "select"
+    | "integer"
+    | "number"
+    | "list"
+    | "map";
   options?: [string, string][];
   override?: string[];
   /** What the client uses while the key is absent; shown beside "默认". */
   initial?: boolean | number | string;
+  /** What a switch writes when it turns an absent key on; `true` unless given. */
+  on?: "1";
   hint?: string;
   min?: number;
   max?: number;
@@ -59,7 +69,18 @@ export const countable = (key: string) =>
     .toLowerCase()
     .split(/[^a-z\d]+/)
     .some((word) => amounts.has(word));
-export const groups = ["模型", "权限", "偏好", "环境变量", "高级"] as const;
+/** An environment switch: absent until turned on, then the string "1". */
+const envFlag =
+  (section: string) =>
+  ([label, key]: string[]): Field => ({
+    label,
+    path: ["env", key],
+    kind: "boolean",
+    on: "1",
+    hint: key,
+    section,
+  });
+export const groups =["模型", "权限", "偏好", "环境变量", "高级"] as const;
 export const fields: Record<string, Field[]> = {
   模型: [
     {
@@ -89,6 +110,10 @@ export const fields: Record<string, Field[]> = {
       path: ["env", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
       kind: "integer",
     },
+    ...[
+      ["使用 Amazon Bedrock", "CLAUDE_CODE_USE_BEDROCK"],
+      ["使用 Google Vertex AI", "CLAUDE_CODE_USE_VERTEX"],
+    ].map(envFlag("云平台")),
   ],
   权限: [
     {
@@ -117,6 +142,15 @@ export const fields: Record<string, Field[]> = {
     ].map(([label, key]): Field => ({ label, path: [key], kind: "boolean" })),
     { label: "提交署名", path: ["attribution", "commit"], kind: "text" },
     { label: "PR 署名", path: ["attribution", "pr"], kind: "text" },
+    ...[
+      ["停用遥测", "DISABLE_TELEMETRY"],
+      ["停用错误上报", "DISABLE_ERROR_REPORTING"],
+      ["停用自动更新", "DISABLE_AUTOUPDATER"],
+      ["停用非必要网络请求", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+      ["停用非必要模型调用", "DISABLE_NON_ESSENTIAL_MODEL_CALLS"],
+      ["停用费用提醒", "DISABLE_COST_WARNINGS"],
+      ["停用终端标题更新", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE"],
+    ].map(envFlag("环境开关")),
   ],
 };
 export function tree(text: string): Node {

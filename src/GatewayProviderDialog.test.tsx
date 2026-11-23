@@ -273,20 +273,16 @@ describe("request takeover", () => {
   };
 
   it.each(["codex", "claude"] as const)(
-    "lets a new %s provider take both kinds over and trims the model",
+    "has a new %s provider take every kind over and trims the model",
     async (clientId) => {
       const user = userEvent.setup();
       const save = open(clientId);
-      for (const name of takeovers)
-        expect(screen.getByRole("checkbox", { name })).not.toBeChecked();
-      // Codex searches go to its search-only providers instead.
-      expect(screen.queryAllByRole("checkbox", { name: search })).toHaveLength(
-        clientId === "claude" ? 1 : 0,
-      );
-      expect(screen.queryByLabelText("压缩模型")).toBeNull();
-      expect(screen.queryByLabelText("辅助模型")).toBeNull();
+      // A new provider starts with every takeover on.
+      for (const name of [...takeovers, search])
+        expect(screen.getByRole("checkbox", { name })).toBeChecked();
+      expect(screen.queryByRole("checkbox", { name: "仅网络搜索" })).toBeNull();
+      expect(screen.getByRole("textbox", { name: "搜索模型" })).toHaveValue("");
 
-      await user.click(screen.getByRole("checkbox", { name: "接管压缩请求" }));
       const model = screen.getByRole("textbox", { name: "压缩模型" });
       expect(model).toHaveAttribute("placeholder", "留空则沿用客户端模型");
       expect(model).toHaveAttribute("maxlength", "256");
@@ -315,7 +311,6 @@ describe("request takeover", () => {
             ],
       );
       await user.selectOptions(effort, "low");
-      await user.click(screen.getByRole("checkbox", { name: "接管辅助请求" }));
       expect(screen.getByRole("textbox", { name: "辅助模型" })).toHaveValue("");
       expect(
         screen.getByRole("combobox", { name: "辅助思考强度" }),
@@ -348,12 +343,13 @@ describe("request takeover", () => {
           takeAuxiliary: true,
           auxiliaryModel: "",
           auxiliaryEffort: "",
+          takeWebSearch: true,
+          webSearchModel: "",
+          webSearchEffort: "",
         }),
         "fixture-revision",
       );
-      if (clientId === "codex")
-        for (const field of searchFields)
-          expect(save.mock.calls[0][0]).not.toHaveProperty(field);
+      expect(save.mock.calls[0][0]).not.toHaveProperty("searchOnly");
     },
   );
 
@@ -412,32 +408,50 @@ describe("request takeover", () => {
     );
   });
 
-  it("hides both takeovers on a search-only Codex provider and saves them off", async () => {
+  it("offers a saved Codex provider the web searches without switching anything on", async () => {
     const user = userEvent.setup();
     vi.mocked(command).mockRejectedValue(new Error("fixture list failed"));
     const save = open("codex", {
       takeCompaction: true,
       compactionModel: "fixture-compact",
-      takeAuxiliary: true,
     });
     await waitFor(() => expect(command).toHaveBeenCalled());
-    await user.click(screen.getByRole("checkbox", { name: "仅网络搜索" }));
     // A model list that cannot be read is not reported.
     expect(screen.queryByRole("alert")).toBeNull();
-    for (const name of takeovers)
-      expect(screen.queryByRole("checkbox", { name })).toBeNull();
-    expect(screen.queryByLabelText("压缩模型")).toBeNull();
-    expect(screen.queryByLabelText("辅助模型")).toBeNull();
+    // Search-only providers are gone; the searches are a takeover like the
+    // other two.
+    expect(screen.queryByRole("checkbox", { name: "仅网络搜索" })).toBeNull();
+    // A saved provider keeps what it has: only a new one starts all on.
+    expect(
+      screen.getByRole("checkbox", { name: "接管压缩请求" }),
+    ).toBeChecked();
+    for (const name of ["接管辅助请求", search])
+      expect(screen.getByRole("checkbox", { name })).not.toBeChecked();
+    expect(screen.queryByLabelText("搜索模型")).toBeNull();
 
+    await user.click(screen.getByRole("checkbox", { name: search }));
+    await user.type(
+      screen.getByRole("textbox", { name: "搜索模型" }),
+      "  fixture-search  ",
+    );
+    // The efforts are those of the Responses API.
+    const effort = screen.getByRole("combobox", { name: "搜索思考强度" });
+    expect(within(effort).getAllByRole("option")).toHaveLength(9);
+    await user.selectOptions(effort, "low");
     await user.click(screen.getByRole("button", { name: "保存" }));
     expect(save).toHaveBeenCalledWith(
       expect.objectContaining({
-        searchOnly: true,
-        takeCompaction: false,
+        op: "saveProvider",
+        takeCompaction: true,
+        compactionModel: "fixture-compact",
         takeAuxiliary: false,
+        takeWebSearch: true,
+        webSearchModel: "fixture-search",
+        webSearchEffort: "low",
       }),
       "fixture-revision",
     );
+    expect(save.mock.calls[0][0]).not.toHaveProperty("searchOnly");
   });
 
   it.each(["grok", "dsh"] as const)(
@@ -447,10 +461,15 @@ describe("request takeover", () => {
       const save = open(clientId, {});
       for (const name of takeovers)
         expect(screen.queryByRole("checkbox", { name })).toBeNull();
-      // Of the two, Grok Build alone has web searches to hand over.
+      // Of the two, Grok Build alone has web searches to hand over, and a
+      // saved provider's stay as they are.
       expect(screen.queryAllByRole("checkbox", { name: search })).toHaveLength(
         clientId === "grok" ? 1 : 0,
       );
+      if (clientId === "grok")
+        expect(
+          screen.getByRole("checkbox", { name: search }),
+        ).not.toBeChecked();
       await user.click(screen.getByRole("button", { name: "保存" }));
       expect(save).toHaveBeenCalledTimes(1);
       for (const field of clientId === "grok"
@@ -510,11 +529,11 @@ describe("request takeover", () => {
     const user = userEvent.setup();
     const save = open("grok");
     expect(screen.getByLabelText("API 协议")).toHaveValue("responses");
-    expect(screen.getByRole("checkbox", { name: search })).not.toBeChecked();
+    // A new provider starts with the takeover on.
+    expect(screen.getByRole("checkbox", { name: search })).toBeChecked();
     for (const name of [...takeovers, "无尽模式"])
       expect(screen.queryByRole("checkbox", { name })).toBeNull();
 
-    await user.click(screen.getByRole("checkbox", { name: search }));
     await user.type(
       screen.getByRole("textbox", { name: "搜索模型" }),
       "fixture-search",
@@ -576,5 +595,158 @@ describe("request takeover", () => {
       }),
       "fixture-revision",
     );
+  });
+});
+
+describe("risk codes met on the same host", () => {
+  afterEach(() => vi.mocked(command).mockReset());
+
+  it("ticks the met statuses and keeps the listed and typed ones", async () => {
+    const user = userEvent.setup();
+    const save = vi.fn().mockResolvedValue(undefined);
+    const dirty = vi.fn();
+    vi.mocked(command).mockImplementation((async (name: string) =>
+      name === "get_provider_seen_statuses"
+        ? [
+            { status: 429, count: 12, basis: "rpm", lastAt: 2 },
+            { status: 503, count: 3, basis: null, lastAt: 1 },
+          ]
+        : undefined) as never);
+    const item = {
+      ...claudeGatewayDemo.providers[0],
+      endlessMode: true,
+      riskCodes: [520],
+    };
+    render(
+      <GatewayProviderDialog
+        clientId="claude"
+        connectionMode="bearer"
+        dialog={{ kind: "provider", item }}
+        revision="fixture-revision"
+        close={() => {}}
+        save={save}
+        onDirtyChange={dirty}
+      />,
+    );
+    const met = await screen.findByRole("checkbox", {
+      name: "429 · 12 次 · 上游 RPM 限制",
+    });
+    expect(command).toHaveBeenCalledWith("get_provider_seen_statuses", {
+      clientId: "claude",
+      providerId: item.id,
+    });
+    expect(met).not.toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "520 · 未遇到" }),
+    ).toBeChecked();
+    const other = screen.getByRole("textbox", { name: "其他代码" });
+    expect(other).toHaveValue("");
+    // Moving the listed code into the list is not an edit.
+    expect(dirty).toHaveBeenLastCalledWith(false);
+
+    await user.click(met);
+    await user.click(screen.getByRole("checkbox", { name: "503 · 3 次" }));
+    await user.click(screen.getByRole("checkbox", { name: "503 · 3 次" }));
+    await user.type(other, "524");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ riskCodes: [429, 520, 524] }),
+      "fixture-revision",
+    );
+  });
+
+  it("leaves the typed field alone when nothing was met", async () => {
+    vi.mocked(command).mockResolvedValue([] as never);
+    render(
+      <GatewayProviderDialog
+        clientId="claude"
+        connectionMode="bearer"
+        dialog={{
+          kind: "provider",
+          item: {
+            ...claudeGatewayDemo.providers[0],
+            endlessMode: true,
+            riskCodes: [520],
+          },
+        }}
+        revision="fixture-revision"
+        close={() => {}}
+        save={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("暂无已遇到的报错")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "风控代码" })).toHaveValue(
+      "520",
+    );
+  });
+});
+
+describe("Vertex AI access", () => {
+  const open = (clientId: "claude" | "agy", item?: Provider) => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    render(
+      <GatewayProviderDialog
+        clientId={clientId}
+        connectionMode="bearer"
+        dialog={{ kind: "provider", item }}
+        revision="fixture-revision"
+        close={() => {}}
+        save={save}
+      />,
+    );
+    return save;
+  };
+
+  it("builds the address from the picked region and project", async () => {
+    const user = userEvent.setup();
+    const save = open("claude");
+    await user.click(screen.getByRole("button", { name: "Vertex AI" }));
+    const address = screen.getByLabelText("ANTHROPIC_BASE_URL");
+    expect(address).toHaveAttribute("readonly");
+    expect(address).toHaveValue(
+      "https://aiplatform.googleapis.com/v1/publishers/anthropic",
+    );
+    await user.type(screen.getByLabelText("项目 ID"), "fixture-project");
+    expect(address).toHaveValue(
+      "https://aiplatform.googleapis.com/v1/projects/fixture-project/locations/global/publishers/anthropic",
+    );
+    await user.selectOptions(screen.getByLabelText("区域"), "us-east5");
+    await user.type(screen.getByLabelText("Google API Key"), "fixture-key");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl:
+          "https://us-east5-aiplatform.googleapis.com/v1/projects/fixture-project/locations/us-east5/publishers/anthropic",
+        token: "fixture-key",
+      }),
+      "fixture-revision",
+    );
+  });
+
+  it("reads a saved Vertex AI address back into its region and project", () => {
+    open("agy", {
+      ...claudeGatewayDemo.providers[0],
+      baseUrl:
+        "https://europe-west4-aiplatform.googleapis.com/v1/projects/fixture-project/locations/europe-west4/publishers/google",
+    });
+    expect(screen.getByRole("button", { name: "Vertex AI" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByLabelText("区域")).toHaveValue("europe-west4");
+    expect(screen.getByLabelText("项目 ID")).toHaveValue("fixture-project");
+  });
+
+  it("keeps any other address a plain endpoint", () => {
+    open("claude", {
+      ...claudeGatewayDemo.providers[0],
+      baseUrl:
+        "https://us-east5-aiplatform.googleapis.com/v1/projects/fixture-project/locations/global/publishers/anthropic",
+    });
+    expect(screen.getByRole("button", { name: "普通端点" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.queryByLabelText("区域")).not.toBeInTheDocument();
   });
 });

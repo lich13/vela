@@ -101,7 +101,6 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -127,7 +126,6 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -200,7 +198,6 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
