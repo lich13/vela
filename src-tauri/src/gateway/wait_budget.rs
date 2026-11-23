@@ -213,6 +213,7 @@ impl Registry {
         });
         result
     }
+    #[cfg(test)]
     pub fn cancel(&self, id: &str) -> bool {
         self.interrupt(id).is_some()
     }

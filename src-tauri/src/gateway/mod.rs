@@ -506,6 +506,7 @@ impl Gateway {
     pub(super) fn wake_endpoint_prober(&self) {
         self.0.probe_wake.notify_one();
     }
+    #[cfg(test)]
     pub fn cancel_wait(&self, request_id: &str) -> bool {
         self.0.pending_requests.cancel(request_id)
     }

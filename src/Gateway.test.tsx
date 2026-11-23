@@ -923,9 +923,12 @@ it("maps a Claude provider's models from its row", async () => {
     dialog.getByRole("combobox", { name: "映射 1 请求模型" }),
     "claude-opus",
   );
+  const upstream = await dialog.findByRole("combobox", {
+    name: "映射 1 上游模型",
+  });
   await user.selectOptions(
-    await dialog.findByRole("combobox", { name: "映射 1 上游模型" }),
-    await dialog.findByRole("option", { name: "upstream-opus" }),
+    upstream,
+    await within(upstream).findByRole("option", { name: "upstream-opus" }),
   );
   await user.click(dialog.getByRole("button", { name: "保存" }));
   await waitFor(() => expect(notify).toHaveBeenCalledWith("模型映射已保存"));
