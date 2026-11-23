@@ -2,6 +2,8 @@
 //! providers set to take them from the ordinary one. There are four queues:
 //! the ordinary one, and those of the providers that take compactions, that
 //! take web searches and that take auxiliary requests, each in list order.
+//! A kind that has a queue is served by that queue alone: its requests go
+//! from one provider of it to the next and never to the ordinary queue.
 use super::{
     model::Delegated,
     replay::{RequestHints, SearchTools},
@@ -121,6 +123,32 @@ pub(super) struct Taker {
     pub effort: Option<String>,
 }
 
+/// The provider `id` as a taker of `kind` and its health there, when its
+/// whitelist allows the model the request is routed as there.
+fn fit(
+    id: &String,
+    routes: &std::collections::HashMap<String, Route>,
+    kind: Delegated,
+    model: Option<&str>,
+) -> Option<(Taker, super::Health)> {
+    let route = routes.get(id).filter(|route| !route.provider.search_only)?;
+    let (named, effort) = route.delegate.takes(kind)?;
+    let routed = named.or(model);
+    let requirement = Requirement::model(routed);
+    requirement
+        .allows(route.provider.allowed_models.as_deref())
+        .then(|| {
+            (
+                Taker {
+                    id: id.clone(),
+                    model: routed.map(str::to_owned),
+                    effort: effort.map(str::to_owned),
+                },
+                route.health_for(&requirement),
+            )
+        })
+}
+
 /// Picks the provider next in the queue for requests of `kind` among `order`,
 /// the providers the request may still be handed to in list order. A taker
 /// must be able to serve now: on the model the request is routed as there,
@@ -134,24 +162,28 @@ pub(super) fn taker(
     model: Option<&str>,
     owner: Option<&str>,
 ) -> Option<Taker> {
-    let able = |id: &String| {
-        let route = routes.get(id).filter(|route| !route.provider.search_only)?;
-        let (named, effort) = route.delegate.takes(kind)?;
-        let routed = named.or(model);
-        let requirement = Requirement::model(routed);
-        (requirement.allows(route.provider.allowed_models.as_deref())
-            && route.health_for(&requirement).available)
-            .then(|| Taker {
-                id: id.clone(),
-                model: routed.map(str::to_owned),
-                effort: effort.map(str::to_owned),
-            })
-    };
     order
         .iter()
         .filter(|id| Some(id.as_str()) == owner)
         .chain(order.iter())
-        .find_map(able)
+        .filter_map(|id| fit(id, routes, kind, model))
+        .find_map(|(taker, health)| health.available.then_some(taker))
+}
+
+/// The provider of the queue for `kind` among `order` that is cooling and
+/// recovers first: the one a request waits for when none can serve it now.
+pub(super) fn recovering(
+    order: &[String],
+    routes: &std::collections::HashMap<String, Route>,
+    kind: Delegated,
+    model: Option<&str>,
+) -> Option<Taker> {
+    order
+        .iter()
+        .filter_map(|id| fit(id, routes, kind, model))
+        .filter(|(_, health)| !health.available)
+        .min_by_key(|(_, health)| health.retry_in)
+        .map(|(taker, _)| taker)
 }
 
 #[cfg(test)]
@@ -365,6 +397,15 @@ mod tests {
                 Some("cooling")
             ),
             pick("ready", asked)
+        );
+        // It is the one a request waits for when none is ready.
+        assert_eq!(
+            recovering(&order, &routes, Delegated::Compaction, asked),
+            pick("cooling", asked)
+        );
+        assert_eq!(
+            recovering(&order, &routes, Delegated::Auxiliary, asked),
+            None
         );
     }
 

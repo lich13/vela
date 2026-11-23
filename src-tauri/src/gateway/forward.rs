@@ -1193,15 +1193,25 @@ fn admission_budget(settings: &Settings, traffic: &super::freeze::Ticket, plan: 
     }
     budget
 }
-/// A request in the hands of a provider that takes its kind over, and what it
-/// goes back to when that provider does not serve it: the model the client
-/// asked for and the queue planned for it.
+/// How a request comes to a provider of the queue for its kind.
+#[derive(Clone, Copy, PartialEq)]
+enum Turn {
+    /// Asked whether it has room now.
+    Offered,
+    /// It had no room when asked; the request now waits in line for it.
+    Busy,
+    /// It is cooling; the request waits for it to recover.
+    Cooling,
+}
+/// A request in the hands of a provider that takes its kind over, and what
+/// was planned for it before: the model the client asked for and the
+/// ordinary queue, which the next provider of the kind's queue is picked from.
 struct Ordinary {
     kind: Delegated,
     /// The reasoning effort the provider runs the kind on, when it names one.
     effort: Option<String>,
-    /// Every provider of the kind's queue has been offered the request, which
-    /// now waits for room at this one.
+    /// No provider of the kind's queue could serve the request when offered
+    /// it, which now waits for this one.
     waits: bool,
     model: Option<String>,
     requirement: Requirement,
@@ -1334,21 +1344,20 @@ struct Exchange<'a> {
     asked: Vec<String>,
     /// Those of them that had no room for it when asked.
     busy: Vec<String>,
-    /// That queue did not serve the request, which is back in its own.
-    handed_back: bool,
 }
 impl Exchange<'_> {
-    /// Hands the request to the next provider in the queue that takes its
-    /// kind, if one can serve it now. The request is then that provider's
-    /// alone, on the model and at the reasoning effort the provider names;
-    /// what was planned for it is kept to go back to.
-    ///
-    /// Each provider of the queue is offered the request once, in list order
-    /// and without waiting. When none of them had room, the request waits in
-    /// line for the first that was only busy.
-    fn delegate(&mut self, kind: Delegated) {
+    /// The provider of the queue for `kind` the request goes to next, and
+    /// how it comes to it. Each provider of the queue is offered the request
+    /// once, in list order and without waiting. When none of them had room,
+    /// the request waits in line for the first that was only busy; and when
+    /// the rest are cooling, for the one that recovers first.
+    fn next_taker(&self, kind: Delegated) -> Option<(super::delegation::Taker, Turn)> {
+        let (ids, routes, model) = match &self.ordinary {
+            Some(o) => (&o.ids, &o.routes, o.model.as_deref()),
+            None => (&self.ids, &self.routes, self.plan.model.as_deref()),
+        };
         let (order, owner) = if self.mode == "manual" {
-            (self.ids.clone(), None)
+            (ids.clone(), None)
         } else {
             let order: Vec<_> = self
                 .gateway
@@ -1367,25 +1376,47 @@ impl Exchange<'_> {
                 .and_then(|thread| self.gateway.0.compaction.owner(thread));
             (order, owner)
         };
-        let taker = |among: &[String], owner: Option<&str>| {
-            super::delegation::taker(among, &self.routes, kind, self.plan.model.as_deref(), owner)
-        };
         let unasked: Vec<_> = order
             .into_iter()
             .filter(|id| !self.asked.contains(id))
             .collect();
-        let (taker, waits) = match taker(&unasked, owner.as_deref()) {
-            Some(taker) => (taker, false),
-            None => match taker(&std::mem::take(&mut self.busy), None) {
-                Some(taker) => (taker, true),
-                None => return,
-            },
+        super::delegation::taker(&unasked, routes, kind, model, owner.as_deref())
+            .map(|taker| (taker, Turn::Offered))
+            .or_else(|| {
+                super::delegation::taker(&self.busy, routes, kind, model, None)
+                    .map(|taker| (taker, Turn::Busy))
+            })
+            .or_else(|| {
+                super::delegation::recovering(&unasked, routes, kind, model)
+                    .map(|taker| (taker, Turn::Cooling))
+            })
+    }
+    /// Hands the request to the next provider in the queue that takes its
+    /// kind. The request is then that provider's alone, on the model and at
+    /// the reasoning effort the provider names. Reports whether there was
+    /// such a provider.
+    fn delegate(&mut self, kind: Delegated) -> bool {
+        let Some((taker, turn)) = self.next_taker(kind) else {
+            return false;
         };
+        if let Some(ordinary) = self.ordinary.take() {
+            // The plan the last provider of the queue ran it on is undone.
+            self.plan.model = ordinary.model;
+            self.plan.requirement = ordinary.requirement;
+            self.plan.pinned = ordinary.pinned;
+            self.plan.ownership = ordinary.ownership;
+            self.plan.established_capacity_owner = ordinary.established_capacity_owner;
+            self.ids = ordinary.ids;
+            self.routes = ordinary.routes;
+        }
         let Some(route) = self.routes.get(&taker.id).cloned() else {
-            return;
+            return false;
         };
         let id = taker.id;
-        if !waits {
+        let waits = turn != Turn::Offered;
+        if turn == Turn::Busy {
+            self.busy.clear();
+        } else {
             self.asked.push(id.clone());
         }
         let requirement = Requirement::model(taker.model.as_deref());
@@ -1403,8 +1434,8 @@ impl Exchange<'_> {
         });
         self.wait_budget = admission_budget(self.settings, &self.traffic, &self.plan);
         if waits {
-            // The wait ends before the request's own waiting budget does, so
-            // that the ordinary queue still has its turn.
+            // A queue wait, which ends before the request's own waiting
+            // budget does.
             self.wait_budget.restart(
                 self.settings
                     .queue_seconds
@@ -1413,44 +1444,35 @@ impl Exchange<'_> {
         }
         self.request_budget
             .describe(Some(&id), self.plan.model.as_deref(), "admission");
+        true
     }
     /// The provider that took the request over did not serve it: the request
-    /// goes on to the next provider of that queue, and after the last of them
-    /// back to the queue planned for it, as though it had just arrived.
-    /// `reply` is what the client would have been answered with, kept in case
-    /// nothing better comes. Reports whether a provider had taken the request
-    /// over; when none had, nothing changes and `reply` is not kept.
+    /// goes on to the next provider of that queue, as though it had just
+    /// arrived. It never leaves the queue: after the last provider of it the
+    /// request is over. `reply` is what the client would have been answered
+    /// with, kept in case nothing better comes. Reports whether the request
+    /// went on.
     fn hand_back(&mut self, reply: Option<Response<WireBody>>) -> bool {
-        let Some(ordinary) = self.ordinary.take() else {
+        let Some(kind) = self.ordinary.as_ref().map(|o| o.kind) else {
             return false;
         };
-        let kind = ordinary.kind;
-        self.plan.model = ordinary.model;
-        self.plan.requirement = ordinary.requirement;
-        self.plan.pinned = ordinary.pinned;
-        self.plan.ownership = ordinary.ownership;
-        self.plan.established_capacity_owner = ordinary.established_capacity_owner;
-        self.ids = ordinary.ids;
-        self.routes = ordinary.routes;
-        self.handed_back = true;
-        self.claude_owner = None;
-        self.set_unbounded(false);
-        self.wait_budget = admission_budget(self.settings, &self.traffic, &self.plan);
-        self.request_budget.begin();
-        self.request_budget.attach_traffic(&self.traffic);
-        self.request_budget.describe(
-            self.plan.pinned.as_deref(),
-            self.plan.model.as_deref(),
-            "admission",
-        );
         if reply.is_some() {
             self.last = reply;
         }
+        if !self.delegate(kind) {
+            self.ids.clear();
+            return false;
+        }
+        self.claude_owner = None;
+        self.unpinned = None;
+        self.set_unbounded(false);
+        self.request_budget.begin();
+        self.request_budget.attach_traffic(&self.traffic);
         self.attempted = 0;
         self.ordinary_attempts = 0;
         self.transient_retries = 0;
         self.retry_owner = None;
-        // What that provider refused says nothing about the queue.
+        // What that provider refused says nothing about the next.
         self.hard_denied.clear();
         self.capacity_protected = false;
         self.capacity_pending = false;
@@ -1458,8 +1480,14 @@ impl Exchange<'_> {
         self.capacity_retry_after = None;
         self.rpm_retry_after = None;
         self.capacity_sources.clear();
-        self.delegate(kind);
         true
+    }
+    /// A provider this request may go to is set to take requests of `kind`:
+    /// the kind has a queue, and the request is not the ordinary queue's.
+    fn queued_for(&self, kind: Delegated) -> bool {
+        self.routes.iter().any(|(id, route)| {
+            (self.mode != "manual" || self.ids.contains(id)) && route.delegate.takes(kind).is_some()
+        })
     }
     /// The model the client asked for, whatever the request is routed as.
     fn client_model(&self) -> Option<&str> {
@@ -1468,9 +1496,15 @@ impl Exchange<'_> {
             .map_or(self.plan.model.as_deref(), |o| o.model.as_deref())
     }
     /// What follows a failure the client would otherwise be answered with or
-    /// kept waiting on: a request a provider took over goes back to its queue.
+    /// kept waiting on: a request a provider took over goes on to the next
+    /// provider of that queue, while there is one.
     fn after(&self, action: Action) -> Action {
-        if self.ordinary.is_some() && matches!(action, Action::Returned | Action::Waiting) {
+        if matches!(action, Action::Returned | Action::Waiting)
+            && self
+                .ordinary
+                .as_ref()
+                .is_some_and(|o| self.next_taker(o.kind).is_some())
+        {
             Action::TryingNext
         } else {
             action
@@ -2032,7 +2066,7 @@ impl Exchange<'_> {
             super::failover::Stage::UnknownOwner
         } else if self.plan.pinned.is_some() {
             super::failover::Stage::CursorPinned
-        } else if self.attempted > 0 || !self.hard_denied.is_empty() || self.handed_back {
+        } else if self.attempted > 0 || !self.hard_denied.is_empty() {
             super::failover::Stage::FailureFallback
         } else if self.plan.ownership.as_ref().is_some_and(|l| l.handoff) {
             super::failover::Stage::ProactiveHandoff
@@ -4402,10 +4436,12 @@ async fn forward_inner(
             ordinary: None,
             asked: Vec::new(),
             busy: Vec::new(),
-            handed_back: false,
         };
         if let Some(kind) = cx.plan.delegated {
-            cx.delegate(kind);
+            if !cx.delegate(kind) && cx.queued_for(kind) {
+                // The kind's queue cannot serve it, and no other may.
+                cx.ids.clear();
+            }
         }
         loop {
             cx.refresh_endless();
@@ -4445,7 +4481,12 @@ async fn forward_inner(
                     if cx.ordinary.is_none() {
                         return *response;
                     }
-                    cx.hand_back(Some(*response));
+                    if !cx.hand_back(Some(*response)) {
+                        match cx.last.take() {
+                            Some(last) => return last,
+                            None => break,
+                        }
+                    }
                 }
                 Some(Ok(Accepted::Tunnel(attempt, response))) => {
                     return cx.tunnel(attempt, *response)
