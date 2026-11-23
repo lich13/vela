@@ -716,10 +716,169 @@ fn keychain_stdin_command_enforces_4096_limit_and_fingerprint_cache_skips_repeat
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
+#[derive(Default)]
+struct FakeCredentialStore {
+    blob: Mutex<Option<Vec<u8>>>,
+    writes: Mutex<usize>,
+    /// Keeps something other than what was written.
+    garbles_writes: bool,
+    fail_read: bool,
+    keeps_deleted: bool,
+}
+
+impl FakeCredentialStore {
+    fn holding(blob: &[u8]) -> Self {
+        Self {
+            blob: Mutex::new(Some(blob.to_vec())),
+            ..Self::default()
+        }
+    }
+    fn blob(&self) -> Option<Vec<u8>> {
+        self.blob.lock().clone()
+    }
+}
+
+impl CredentialStore for FakeCredentialStore {
+    fn read(&self) -> Result<Option<Vec<u8>>> {
+        if self.fail_read {
+            return Err(AppError::new(code::AUTH, "模拟凭据管理器读取失败"));
+        }
+        Ok(self.blob())
+    }
+    fn write(&self, blob: &[u8]) -> Result<()> {
+        *self.writes.lock() += 1;
+        *self.blob.lock() = Some(if self.garbles_writes {
+            b"{}".to_vec()
+        } else {
+            blob.to_vec()
+        });
+        Ok(())
+    }
+    fn delete(&self) -> Result<()> {
+        if !self.keeps_deleted {
+            *self.blob.lock() = None;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn credential_manager_login_is_read_raw_or_prefixed_and_ahead_of_the_token_file() {
+    let (_tmp, paths) = setup_paths();
+    assert_eq!(
+        read_windows_oauth(&paths, &FakeCredentialStore::default()).unwrap(),
+        None
+    );
+    fs::write(paths.oauth_file(), FIRST_LOGIN).unwrap();
+    assert_eq!(
+        read_windows_oauth(&paths, &FakeCredentialStore::default())
+            .unwrap()
+            .as_deref(),
+        Some(FIRST_LOGIN)
+    );
+    for stored in [
+        SECOND_LOGIN.to_owned(),
+        format!("{SECOND_LOGIN}\r\n"),
+        encode_keyring(SECOND_LOGIN),
+    ] {
+        let store = FakeCredentialStore::holding(stored.as_bytes());
+        assert_eq!(
+            read_windows_oauth(&paths, &store).unwrap().as_deref(),
+            Some(SECOND_LOGIN)
+        );
+    }
+    // An entry holding no login does not hide the file Antigravity fell back to.
+    for stored in [&b""[..], b" \n", b"go-keyring-base64:***"] {
+        let store = FakeCredentialStore::holding(stored);
+        assert_eq!(
+            read_windows_oauth(&paths, &store).unwrap().as_deref(),
+            Some(FIRST_LOGIN)
+        );
+    }
+    let locked = FakeCredentialStore {
+        fail_read: true,
+        ..FakeCredentialStore::default()
+    };
+    assert!(read_windows_oauth(&paths, &locked).is_err());
+}
+
+#[test]
+fn credential_manager_write_keeps_the_blob_limit_and_checks_what_was_stored() {
+    let store = FakeCredentialStore::default();
+    let fits = "x".repeat(CREDENTIAL_BLOB_LIMIT);
+    set_credential_login(&store, Some(&fits)).unwrap();
+    assert_eq!(store.blob().as_deref(), Some(fits.as_bytes()));
+    // The limit counts bytes, as the credential manager does.
+    let multibyte = "凭".repeat(CREDENTIAL_BLOB_LIMIT / 3 + 1);
+    for oversized in [format!("{fits}x"), multibyte] {
+        let error = set_credential_login(&store, Some(&oversized)).unwrap_err();
+        assert_eq!(
+            error.message,
+            "Antigravity 登录凭据过大，无法写入 Windows 凭据管理器"
+        );
+    }
+    assert_eq!(store.blob().as_deref(), Some(fits.as_bytes()));
+    assert_eq!(*store.writes.lock(), 1);
+
+    let garbling = FakeCredentialStore {
+        garbles_writes: true,
+        ..FakeCredentialStore::default()
+    };
+    assert!(set_credential_login(&garbling, Some(FIRST_LOGIN)).is_err());
+
+    // Removing a login that is not there succeeds; one that stays is an error.
+    set_credential_login(&FakeCredentialStore::default(), None).unwrap();
+    set_credential_login(&store, None).unwrap();
+    assert_eq!(store.blob(), None);
+    let stuck = FakeCredentialStore {
+        keeps_deleted: true,
+        ..FakeCredentialStore::holding(FIRST_LOGIN.as_bytes())
+    };
+    assert!(set_credential_login(&stuck, None).is_err());
+}
+
+#[test]
+fn windows_login_goes_to_the_credential_manager_or_falls_back_to_the_token_file() {
+    let (_tmp, paths) = setup_paths();
+    let store = FakeCredentialStore::default();
+    write_windows_oauth(&paths, &store, FIRST_LOGIN).unwrap();
+    assert_eq!(store.blob().as_deref(), Some(FIRST_LOGIN.as_bytes()));
+    assert!(!paths.oauth_file().exists());
+
+    // A login the credential manager cannot hold moves to the file, and the
+    // entry that would be read ahead of it goes away.
+    let oversized = format!(
+        r#"{{"email":"u3@example.invalid","access_token":"{}"}}"#,
+        "t".repeat(CREDENTIAL_BLOB_LIMIT)
+    );
+    write_windows_oauth(&paths, &store, &oversized).unwrap();
+    assert_eq!(store.blob(), None);
+    assert_eq!(fs::read_to_string(paths.oauth_file()).unwrap(), oversized);
+    assert_eq!(
+        read_windows_oauth(&paths, &store).unwrap().as_deref(),
+        Some(oversized.as_str())
+    );
+
+    // A file left from then follows the next login, so it never differs
+    // from the entry read ahead of it.
+    write_windows_oauth(&paths, &store, SECOND_LOGIN).unwrap();
+    assert_eq!(store.blob().as_deref(), Some(SECOND_LOGIN.as_bytes()));
+    assert_eq!(
+        fs::read_to_string(paths.oauth_file()).unwrap(),
+        SECOND_LOGIN
+    );
+
+    let stuck = FakeCredentialStore {
+        keeps_deleted: true,
+        ..FakeCredentialStore::holding(FIRST_LOGIN.as_bytes())
+    };
+    assert!(write_windows_oauth(&paths, &stuck, &oversized).is_err());
+}
+
 #[test]
 fn fixture_homes_never_reach_the_keychain() {
     let (_tmp, paths) = setup_paths();
-    assert!(!paths.keychain());
+    assert!(!paths.system_store());
     assert!(read_oauth(&paths, false).unwrap().is_none());
     write_oauth(&paths, r#"{"access_token":"fixture"}"#).unwrap();
     assert_eq!(
