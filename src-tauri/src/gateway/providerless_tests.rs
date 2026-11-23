@@ -295,3 +295,34 @@ async fn claude_with_no_settings_takes_its_two_fields_out_again() {
     claude.start(&claude.view().revision, &home).await.unwrap();
     claude.stop().await.unwrap();
 }
+
+// 既没有供应商、Codex 配置里也没有 custom 连接：启用补齐 custom 并写入本地地址，停用后保留该地址
+// （没有可还原的原值）且不留事务记录，再次启用、添加供应商后停用都照常完成。
+#[tokio::test]
+async fn codex_without_a_provider_or_a_custom_connection_starts_and_stops() {
+    for original in [None, Some("# mine\nmodel = 'keep'\n")] {
+        let (t, g) = fixture(vec![]).await;
+        let path = t.path().join("config.toml");
+        match original {
+            Some(text) => std::fs::write(&path, text).unwrap(),
+            None => std::fs::remove_file(&path).unwrap(),
+        }
+        assert!(g.view().providers.is_empty());
+        assert_eq!(g.view().config_error, None);
+
+        for _ in 0..2 {
+            start(&g, &t).await;
+            assert!(g.view().running);
+            let live = std::fs::read_to_string(&path).unwrap();
+            assert!(live.starts_with("model_provider = \"custom\"\n"));
+            assert!(live.contains("http://127.0.0.1:"));
+            assert!(live.contains(original.unwrap_or_default()));
+            every_request_is_unanswerable(&g).await;
+            g.stop().await.unwrap();
+            assert!(!g.view().running && !journal(t.path()));
+            assert_eq!(g.view().config_error, None);
+            // Nothing was there before, so the local address stays.
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), live);
+        }
+    }
+}
