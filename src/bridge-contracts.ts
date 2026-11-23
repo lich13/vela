@@ -854,6 +854,8 @@ export type CommandMap = {
   get_pricing: Call<None, PricingView>;
   calculate_usage_cost: Call<{ input: CostCalculatorInput }, CostCalculation>;
   get_usage_calculator_models: Call<{ client: string }, CalculatorModel[]>;
+  /** Model IDs Claude clients asked the gateway for over the last 7 days. */
+  get_claude_requested_models: Call<None, { model: string; count: number }[]>;
   get_usage_calculator_totals: Call<{ filter: UsageFilter }, Totals>;
   search_pricing: Call<
     { query: string; offset: number; limit: number },

@@ -2704,6 +2704,7 @@ pub fn run() {
             usage::commands::get_pricing,
             usage::commands::calculate_usage_cost,
             usage::commands::get_usage_calculator_models,
+            usage::commands::get_claude_requested_models,
             usage::commands::get_usage_calculator_totals,
             usage::commands::search_pricing,
             usage::commands::get_models_dev,

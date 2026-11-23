@@ -1463,3 +1463,88 @@ fn a_new_provider_that_names_nothing_takes_every_kind_its_client_hands_over() {
         (None, None, None, None, None)
     );
 }
+
+#[test]
+fn a_claude_model_belongs_to_the_family_its_id_names() {
+    use crate::gateway::model::model_family;
+    for (model, family) in [
+        ("claude-fable-5-2", Some("fable")),
+        ("claude-fable-5-2[1m]", Some("fable")),
+        ("claude-opus-4-1-20250805", Some("opus")),
+        ("claude-opus-4-8", Some("opus")),
+        ("claude-3-opus-20240229", Some("opus")),
+        ("claude-sonnet-4-5-20250929", Some("sonnet")),
+        ("claude-sonnet-4-5-20250929[1m]", Some("sonnet")),
+        ("claude-3-5-sonnet-20241022", Some("sonnet")),
+        ("claude-3-7-sonnet-latest", Some("sonnet")),
+        ("claude-haiku-4-5-20251001", Some("haiku")),
+        ("claude-3-5-haiku-20241022", Some("haiku")),
+        (" Claude-Opus-4-1 ", Some("opus")),
+        // Vendor-prefixed and vendor-suffixed IDs name the same model.
+        ("anthropic/claude-opus-4-1", Some("opus")),
+        ("us.anthropic.claude-3-5-haiku-20241022-v1:0", Some("haiku")),
+        ("claude-sonnet-4-5@20250929", Some("sonnet")),
+        // The aliases a Claude client sends as they are.
+        ("opus", Some("opus")),
+        ("opus[1m]", Some("opus")),
+        ("opusplan", Some("opus")),
+        ("sonnet", Some("sonnet")),
+        ("sonnet[1m]", Some("sonnet")),
+        ("haiku", Some("haiku")),
+        ("fable", Some("fable")),
+        // The family is a whole word of a Claude model ID.
+        ("claude-opusx-4", None),
+        ("claude-instant-1.2", None),
+        ("claude-fixture", None),
+        ("gpt-5-opus", None),
+        ("notclaude-opus-4", None),
+        ("deepseek-sonnet", None),
+        ("default", None),
+        ("", None),
+    ] {
+        assert_eq!(model_family(model), family, "{model}");
+    }
+}
+
+#[test]
+fn a_mapping_resolves_the_model_itself_before_its_family() {
+    use crate::gateway::model::mapped_model;
+    let mapping: BTreeMap<String, String> = [
+        ("family:opus", "family-upstream"),
+        ("claude-opus-4-8", "exact-upstream"),
+        ("vendor-model", "vendor-upstream"),
+    ]
+    .into_iter()
+    .map(|(from, to)| (from.to_owned(), to.to_owned()))
+    .collect();
+    for (model, upstream) in [
+        ("claude-opus-4-8", Some("exact-upstream")),
+        ("claude-opus-4-8[1m]", Some("family-upstream")),
+        ("claude-opus-4-1-20250805", Some("family-upstream")),
+        ("opusplan", Some("family-upstream")),
+        ("vendor-model", Some("vendor-upstream")),
+        ("claude-sonnet-4-5", None),
+        ("gpt-opus", None),
+    ] {
+        assert_eq!(mapped_model(&mapping, model), upstream, "{model}");
+    }
+    assert_eq!(mapped_model(&BTreeMap::new(), "claude-opus-4-8"), None);
+}
+
+#[test]
+fn a_model_mapping_takes_the_four_family_keys_and_no_other() {
+    use crate::gateway::model::{model_map, MODEL_FAMILIES};
+    for family in MODEL_FAMILIES {
+        let key = format!("family:{family}");
+        assert_eq!(
+            model_map([(format!(" {key} "), "upstream".to_owned())].into()).unwrap(),
+            [(key, "upstream".to_owned())].into()
+        );
+    }
+    for key in ["family:", "family:claude", "family:Opus", "family:opus-4"] {
+        assert!(
+            model_map([(key.to_owned(), "upstream".to_owned())].into()).is_err(),
+            "{key}"
+        );
+    }
+}

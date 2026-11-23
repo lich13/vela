@@ -35,6 +35,27 @@ pub async fn get_usage_calculator_models(r: R<'_>, client: String) -> Result<Vec
     .await
     .map_err(|_| failure("用量模型查询中断"))?
 }
+#[derive(serde::Serialize)]
+pub struct RequestedModel {
+    pub model: String,
+    pub count: u64,
+}
+/// The model IDs Claude clients asked the gateway for over the last 7 days.
+#[tauri::command]
+pub async fn get_claude_requested_models(r: R<'_>) -> Result<Vec<RequestedModel>> {
+    let service = r.usage.clone();
+    tokio::task::spawn_blocking(move || {
+        let since = now() - 7 * 86_400_000;
+        let models = service
+            .read(|db| super::storage_v12::requested_models(&db.connection, "claude", since, 50))?;
+        Ok(models
+            .into_iter()
+            .map(|(model, count)| RequestedModel { model, count })
+            .collect())
+    })
+    .await
+    .map_err(|_| failure("用量模型查询中断"))?
+}
 #[tauri::command]
 pub async fn get_usage_calculator_totals(r: R<'_>, filter: Filter) -> Result<Totals> {
     let service = r.usage.clone();

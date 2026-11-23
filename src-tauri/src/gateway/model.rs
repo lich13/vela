@@ -359,7 +359,7 @@ pub fn mapped_model<'a>(mapping: &'a BTreeMap<String, String>, model: &str) -> O
 /// A provider's model mapping with its IDs trimmed: a complete model ID or a
 /// `family:<name>` key on the requested side, a complete model ID upstream,
 /// each requested model once, none mapped to itself.
-fn model_map(mapping: BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
+pub(super) fn model_map(mapping: BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
     let invalid = || {
         AppError::new(
             code::MODELS,
