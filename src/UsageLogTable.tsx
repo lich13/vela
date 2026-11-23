@@ -376,25 +376,22 @@ export default function UsageLogTable({
                       ].join(" → ") || model
                     }
                   >
-                    <strong>
-                      {relation?.mapped
-                        ? `${a.requestedModel} → ${a.upstreamModel}`
-                        : model}
-                    </strong>
-                    <span className="usage-badges">
+                    <span className="usage-model-lines">
+                      <strong>
+                        {relation?.mapped ? a.requestedModel : model}
+                      </strong>
                       {relation?.mapped && (
-                        <span className="usage-badge" title={relation.title}>
-                          映射
-                        </span>
+                        <small title={relation.title}>
+                          ↳ 映射 {a.upstreamModel}
+                        </small>
                       )}
                       {relation?.mismatch && (
-                        <span
-                          className="usage-badge mismatch"
-                          title={relation.title}
-                        >
-                          响应不一致
-                        </span>
+                        <small className="mismatch" title={relation.title}>
+                          ↳ 返回 {a.responseModel}
+                        </small>
                       )}
+                    </span>
+                    <span className="usage-badges">
                       {a.reasoningEffort && (
                         <span className="usage-badge">
                           思考{" "}

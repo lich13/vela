@@ -542,6 +542,21 @@
   gap: 3px;
   min-width: 0;
 }
+.usage-model-lines {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.usage-model-lines small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+.usage-model-lines small.mismatch {
+  color: var(--warning);
+}
 .usage-badges {
   display: flex;
   justify-content: center;

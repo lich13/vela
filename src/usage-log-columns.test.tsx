@@ -399,7 +399,7 @@ it("classifies mapped and mismatched models", () => {
   ])
     expect(relation(sent, null, received)).toEqual([false, false]);
 });
-it("shows mapping and mismatch badges in the model column", () => {
+it("stacks the mapped and returned models under the model name", () => {
   render(
     <UsageLogTable
       rows={[
@@ -424,12 +424,25 @@ it("shows mapping and mismatch badges in the model column", () => {
       open={() => {}}
     />,
   );
-  expect(
-    screen.getByText("fixture-request → fixture-mapped"),
-  ).toBeInTheDocument();
-  expect(screen.getByText("映射")).toBeInTheDocument();
-  expect(screen.getByText("响应不一致")).toHaveAttribute(
+  const title =
+    "请求模型 fixture-request · 上游请求模型 fixture-mapped · 收到的响应模型 fixture-other";
+  const name = screen.getByText("fixture-request");
+  expect(name.tagName).toBe("STRONG");
+  const lines = [...name.parentElement!.children].map((e) => e.textContent);
+  expect(lines).toEqual([
+    "fixture-request",
+    "↳ 映射 fixture-mapped",
+    "↳ 返回 fixture-other",
+  ]);
+  expect(screen.getByText("↳ 映射 fixture-mapped")).toHaveAttribute(
     "title",
-    "请求模型 fixture-request · 上游请求模型 fixture-mapped · 收到的响应模型 fixture-other",
+    title,
   );
+  expect(screen.getByText("↳ 返回 fixture-other")).toHaveAttribute(
+    "title",
+    title,
+  );
+  expect(screen.getByText("↳ 返回 fixture-other")).toHaveClass("mismatch");
+  expect(screen.queryByText("映射")).toBeNull();
+  expect(screen.queryByText("响应不一致")).toBeNull();
 });
