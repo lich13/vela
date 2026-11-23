@@ -123,13 +123,22 @@ fn cached(saved: &super::types::SavedBank) -> Option<(Value, Value)> {
     }
     None
 }
+/// Whether the bank bundled with this build was built after the downloaded one.
+fn superseded(saved: &super::types::SavedBank) -> bool {
+    let at = |value: &Value| chrono::DateTime::parse_from_rfc3339(string(value)).ok();
+    let cached = saved.version.as_ref().and_then(|v| at(&v["built_at"]));
+    at(&super::modeltrace::manifest()["builtAt"])
+        .zip(cached)
+        .is_some_and(|(bundled, cached)| bundled > cached)
+}
 pub(super) struct Resource {
     pub snapshot: Result<std::sync::Arc<(Value, Value)>>,
     metadata: Value,
 }
 impl Resource {
     pub fn load(saved: &super::types::SavedBank) -> Self {
-        let cached = cached(saved);
+        let superseded = superseded(saved);
+        let cached = if superseded { None } else { cached(saved) };
         let from_cache = cached.is_some();
         let snapshot = cached
             .map(Ok)
@@ -140,7 +149,7 @@ impl Resource {
                 "version": snapshot.1,
                 "source": if from_cache { "cache" } else { "builtin" },
                 "models": snapshot.0["models"].as_array().map(|models| models.iter().map(|m| json!({"id":m["id"],"name":m["display_name"]})).collect::<Vec<_>>()).unwrap_or_default(),
-                "error": (saved.data.is_some() && !from_cache).then_some("指纹缓存校验失败，已使用内置库"),
+                "error": (saved.data.is_some() && !from_cache && !superseded).then_some("指纹缓存校验失败，已使用内置库"),
             }),
             Err(error) => json!({"error":error.message,"models":[]}),
         };

@@ -163,9 +163,9 @@ The v0.22 diagnostics and request-detail organization reference CC Switch at `90
 
 ## ModelTrace fingerprint tests
 
-The numerical challenge, analyzer and bundled fingerprint bank (`unified_bank.json`) are adapted from Hanmo123/ModelTrace at `477d59d525c3cd31fe56e4e63958fbc4574ca187` (derived from xqy2006/ModelTrace, MIT, copyright 2026 xqy2006), using the Rust implementation from sub2api-ops-companion. The full upstream license is distributed in `licenses/ModelTrace-MIT.txt` and retained in `src-tauri/resources/modeltrace/LICENSE.txt`. Provider tests and closed-set statistical attribution run offline locally and independently of gateway business accounting; local degradation threshold rules (`VerdictMode`) and queue removal policies are independently defined by Vela and are unrelated to the upstream project or its authors.
+The numerical challenge, analyzer and bundled fingerprint bank (`unified_bank.json`) are adapted from Hanmo123/ModelTrace at `c5ff880f517a606bbe1aced238ce48c3a7bec7ae` (derived from xqy2006/ModelTrace, MIT, copyright 2026 xqy2006), using the Rust implementation from sub2api-ops-companion. The full upstream license is distributed in `licenses/ModelTrace-MIT.txt` and retained in `src-tauri/resources/modeltrace/LICENSE.txt`. Provider tests and closed-set statistical attribution run offline locally and independently of gateway business accounting; local degradation threshold rules (`VerdictMode`) and queue removal policies are independently defined by Vela and are unrelated to the upstream project or its authors.
 
-Source: https://github.com/Hanmo123/ModelTrace/tree/477d59d525c3cd31fe56e4e63958fbc4574ca187
+Source: https://github.com/Hanmo123/ModelTrace/tree/c5ff880f517a606bbe1aced238ce48c3a7bec7ae
 Upstream: https://github.com/xqy2006/ModelTrace
 
 MIT License

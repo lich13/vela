@@ -3665,7 +3665,8 @@ async fn freezing_keeps_started_detection_rounds_and_manual_tests_running() {
 fn modeltrace_accepts_verified_compatible_cache_and_rejects_unknown_algorithms() {
     let manifest = modeltrace::manifest();
     let (data, version) = modeltrace::bundled().unwrap();
-    assert_eq!(data["models"].as_array().unwrap().len(), 36);
+    assert_eq!(data["models"].as_array().unwrap().len(), 37);
+    assert_eq!(manifest["builtAt"], data["built_at"]);
     let raw = include_bytes!("../../resources/modeltrace/unified_bank.json");
     assert_eq!(compat::sha256(raw), manifest["files"]["bank"]["sha256"]);
     assert_eq!(
@@ -3699,5 +3700,40 @@ fn modeltrace_accepts_verified_compatible_cache_and_rejects_unknown_algorithms()
             bank::Resource::load(&saved).status(None, None, false)["source"],
             "builtin"
         );
+        saved.provenance.as_mut().unwrap()["challenge_blob"] =
+            manifest["files"]["challenge"]["compatibleGitBlobs"][0].clone();
+        assert_eq!(
+            bank::Resource::load(&saved).status(None, None, false)["source"],
+            "cache"
+        );
+    }
+}
+
+#[test]
+fn modeltrace_bundled_bank_replaces_an_older_cache() {
+    let manifest = modeltrace::manifest();
+    let (mut data, mut version) = modeltrace::bundled().unwrap();
+    let provenance = json!({
+        "core_blob": manifest["files"]["core"]["gitBlob"],
+        "challenge_blob": manifest["files"]["challenge"]["gitBlob"],
+    });
+    let status = |data: &Value, version: &Value| {
+        bank::Resource::load(&SavedBank {
+            data: Some(data.clone()),
+            version: Some(version.clone()),
+            provenance: Some(provenance.clone()),
+            ..Default::default()
+        })
+        .status(None, None, false)
+    };
+    for (built_at, source) in [
+        ("2026-01-01T00:00:00+00:00", "builtin"),
+        ("2099-01-01T00:00:00+00:00", "cache"),
+    ] {
+        data["built_at"] = built_at.into();
+        version["built_at"] = built_at.into();
+        let status = status(&data, &version);
+        assert_eq!(status["source"], source);
+        assert!(status["error"].is_null());
     }
 }
