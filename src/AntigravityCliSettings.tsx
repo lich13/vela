@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { get, type Field, type Json } from "./claude-settings";
-import { JsonNode, Rules, Settings, jsonEditing } from "./ClaudeSettings";
+import { JsonRoot, Rules, Settings, jsonEditing } from "./ClaudeSettings";
 
 export const antigravityCliGroups = [
   "外观与交互",
@@ -340,8 +340,7 @@ export default function AntigravityCliSettings({
           />
         )}
         {group === "高级" && (
-          <JsonNode
-            path={[]}
+          <JsonRoot
             value={value}
             editing={editing}
             hidden={["enableTelemetry", "hooks"]}

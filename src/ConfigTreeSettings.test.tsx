@@ -140,7 +140,7 @@ it("精选字段在键不存在时可以设置，恢复默认会删除该键", a
 it("没有精选字段时只显示通用结构树", async () => {
   render(<Host shown={{}} />);
   expect(await screen.findByRole("switch", { name: "enabled" })).toBeVisible();
-  expect(screen.queryByRole("navigation")).toBeNull();
+  expect(screen.queryByRole("navigation", { name: "配置分组" })).toBeNull();
 });
 
 it("凭据只显示已设置，特殊值和列表里的表留给原文", async () => {
@@ -148,8 +148,12 @@ it("凭据只显示已设置，特殊值和列表里的表留给原文", async (
   expect(screen.getByText("已设置")).toBeInTheDocument();
   expect(screen.queryByLabelText("api_key")).toBeNull();
   expect(screen.getByText("2026-01-01T00:00:00Z")).toBeInTheDocument();
-  // The credential, the date and the table inside a list.
-  expect(screen.getAllByText("在原文中编辑")).toHaveLength(3);
+  // The credential and the date.
+  expect(screen.getAllByText("在原文中编辑")).toHaveLength(2);
+  await user.click(screen.getByRole("button", { name: "servers" }));
+  // The table inside a list.
+  expect(screen.getAllByText("在原文中编辑")).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "hosts" }));
   expect(screen.getByLabelText("hosts.0")).toHaveValue("127.0.0.1");
   await user.type(screen.getByLabelText("添加 hosts"), "example.invalid");
   await user.click(screen.getByRole("button", { name: "确认添加 hosts" }));
@@ -198,31 +202,27 @@ it("草稿解析失败时保留上一次的结构树", async () => {
 });
 
 // A provider file as Rust reports it: credentials arrive hidden.
-const providers = table([
+const providerTables: [string, ConfigTreeNode][] = [
   [
-    "model_providers",
+    "relay",
     table([
+      ["name", { kind: "string", value: "Relay" }],
+      ["base_url", { kind: "string", value: "https://example.invalid/v1" }],
+      ["wire_api", { kind: "string", value: "responses" }],
+      ["request_max_retries", { kind: "integer", value: 1 }],
+      ["supports_websockets", { kind: "boolean", value: false }],
       [
-        "relay",
-        table([
-          ["name", { kind: "string", value: "Relay" }],
-          ["base_url", { kind: "string", value: "https://example.invalid/v1" }],
-          ["wire_api", { kind: "string", value: "responses" }],
-          ["request_max_retries", { kind: "integer", value: 1 }],
-          ["supports_websockets", { kind: "boolean", value: false }],
-          [
-            "query_params",
-            table([["api-version", { kind: "string", value: "1" }]]),
-          ],
-          ["env_key", { kind: "secret" }],
-          ["http_headers", table([["X-Fixture", { kind: "secret" }]])],
-          ["future_flag", { kind: "boolean", value: true }],
-        ]),
+        "query_params",
+        table([["api-version", { kind: "string", value: "1" }]]),
       ],
-      ["spare", table([["base_url", { kind: "string", value: "" }]])],
+      ["env_key", { kind: "secret" }],
+      ["http_headers", table([["X-Fixture", { kind: "secret" }]])],
+      ["future_flag", { kind: "boolean", value: true }],
     ]),
   ],
-]);
+  ["spare", table([["base_url", { kind: "string", value: "" }]])],
+];
+const providers = table([["model_providers", table(providerTables)]]);
 async function named(tab: string) {
   trees = { base: providers };
   const user = userEvent.setup();
@@ -233,9 +233,9 @@ async function named(tab: string) {
 
 it("具名子表逐个列出，模板字段带标签并按子表路径写回", async () => {
   const user = await named("模型供应商");
-  expect(screen.getByText("relay")).toBeInTheDocument();
-  expect(screen.getByText("spare")).toBeInTheDocument();
-  await user.click(screen.getByText("relay"));
+  const tabs = within(screen.getByRole("navigation", { name: "模型供应商" }));
+  expect(tabs.getByRole("button", { name: "relay" })).toBeInTheDocument();
+  expect(tabs.getByRole("button", { name: "spare" })).toBeInTheDocument();
   expect(screen.getByLabelText("relay 接口地址")).toHaveValue(
     "https://example.invalid/v1",
   );
@@ -267,7 +267,6 @@ it("具名子表逐个列出，模板字段带标签并按子表路径写回", a
 
 it("键值表逐键打补丁", async () => {
   const user = await named("模型供应商");
-  await user.click(screen.getByText("relay"));
   fireEvent.change(screen.getByLabelText("relay 查询参数 api-version"), {
     target: { value: "2" },
   });
@@ -290,14 +289,12 @@ it("键值表逐键打补丁", async () => {
 
 it("子表里的凭据键只读，并提示在原文中编辑", async () => {
   const user = await named("模型供应商");
-  await user.click(screen.getByText("relay"));
-  const card = within(screen.getByText("relay").closest("details")!);
-  const row = card.getByText("API Key 环境变量").closest(".setting-row")!;
+  const row = screen.getByText("API Key 环境变量").closest(".setting-row")!;
   expect(row).toHaveTextContent("已设置");
   expect(row).toHaveTextContent("在原文中编辑");
   expect(row.querySelector("input")).toBeNull();
   expect(
-    card.getByText("Bearer 令牌").closest(".setting-row"),
+    screen.getByText("Bearer 令牌").closest(".setting-row"),
   ).toHaveTextContent("未设置");
   expect(screen.queryByLabelText(/X-Fixture/)).toBeNull();
   expect(
@@ -352,7 +349,7 @@ it("新增子表写入名称下的首个字段", async () => {
 
 it("子表和通用树的表都能添加字段", async () => {
   const user = await named("模型供应商");
-  await user.click(screen.getByText("spare"));
+  await user.click(screen.getByRole("button", { name: "spare" }));
   await user.click(
     screen.getByRole("button", { name: "model_providers.spare 添加字段" }),
   );
@@ -386,4 +383,69 @@ it("子表和通用树的表都能添加字段", async () => {
       [["verbose"], false],
     ]),
   );
+});
+
+it("切换第二层分栏显示对应的子表", async () => {
+  const user = await named("模型供应商");
+  const tabs = within(screen.getByRole("navigation", { name: "模型供应商" }));
+  expect(tabs.getByRole("button", { name: "relay" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await user.click(tabs.getByRole("button", { name: "spare" }));
+  expect(tabs.getByRole("button", { name: "spare" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  expect(screen.getByLabelText("spare 接口地址")).toHaveValue("");
+  expect(screen.queryByLabelText("relay 接口地址")).toBeNull();
+});
+
+it("新增的子表自动选中，选中的子表消失后退回第一个", async () => {
+  const user = await named("模型供应商");
+  trees["base+"] = table([
+    [
+      "model_providers",
+      table([
+        ...providerTables,
+        ["extra", table([["base_url", { kind: "string", value: "" }]])],
+      ]),
+    ],
+  ]);
+  trees["base++"] = providers;
+  await user.type(screen.getByLabelText("新模型供应商名称"), "extra");
+  await user.type(
+    screen.getByLabelText("新模型供应商接口地址"),
+    "https://example.invalid/v3",
+  );
+  await user.click(screen.getByRole("button", { name: "添加" }));
+  const added = await screen.findByRole("button", { name: "extra" });
+  expect(added).toHaveAttribute("aria-pressed", "true");
+  await user.click(
+    screen.getByRole("switch", { name: "extra 支持 WebSocket" }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "relay" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    ),
+  );
+  expect(screen.queryByRole("button", { name: "extra" })).toBeNull();
+});
+
+it("嵌套的表不需要点击就能看到字段", async () => {
+  trees = { base: providers };
+  const user = userEvent.setup();
+  const { container } = render(<Host shown={{}} />);
+  await user.click(
+    await screen.findByRole("button", { name: "model_providers" }),
+  );
+  expect(
+    screen.getByRole("switch", { name: "model_providers.relay.future_flag" }),
+  ).toBeVisible();
+  expect(
+    screen.getByLabelText("model_providers.relay.query_params.api-version"),
+  ).toHaveValue("1");
+  expect(screen.getByLabelText("model_providers.spare.base_url")).toBeVisible();
+  expect(container.querySelector("details")).toBeNull();
 });

@@ -626,19 +626,41 @@ function AddField({
     </form>
   );
 }
-export function JsonNode({
+/** The second row of tabs, inside one settings group. */
+export function SubTabs({
+  label,
+  tabs,
+  shown,
+  onPick,
+}: {
+  label: string;
+  tabs: string[];
+  shown: number;
+  onPick: (index: number) => void;
+}) {
+  return (
+    <nav className="settings-subtabs" aria-label={label}>
+      {tabs.map((tab, i) => (
+        <button
+          key={i}
+          type="button"
+          aria-pressed={shown === i}
+          onClick={() => onPick(i)}
+        >
+          {tab}
+        </button>
+      ))}
+    </nav>
+  );
+}
+function JsonNode({
   path,
   value,
   editing,
-  depth = 0,
-  hidden,
 }: {
   path: Path;
   value: Json;
   editing: Editing;
-  depth?: number;
-  /** Keys of this node that are left to the source editor. */
-  hidden?: string[];
 }) {
   const label = String(path.at(-1) ?? "配置");
   const containsManaged =
@@ -647,12 +669,14 @@ export function JsonNode({
       path.length === 0 ||
       (path.length === 1 && path[0] === "env"));
   if (value && typeof value === "object") {
-    const shown = Object.entries(value).filter(
-      ([key]) => !hidden?.includes(key),
-    );
+    const shown = Object.entries(value);
     return (
-      <details className="json-node" open={depth === 0 ? true : undefined}>
-        <summary>
+      <div
+        className="json-node"
+        role="group"
+        aria-label={path.join(".") || label}
+      >
+        <div className="json-node-title">
           <span>{label}</span>
           <span className="node-count">{shown.length}</span>
           {path.length > 0 && (
@@ -660,15 +684,12 @@ export function JsonNode({
               className="icon-button"
               aria-label={`删除 ${path.join(".")}`}
               disabled={containsManaged}
-              onClick={(e) => {
-                e.preventDefault();
-                editing.change(path, undefined);
-              }}
+              onClick={() => editing.change(path, undefined)}
             >
               <Trash2 size={14} />
             </button>
           )}
-        </summary>
+        </div>
         <div className="json-children">
           {shown.map(([key, v]) => (
             <JsonNode
@@ -676,12 +697,11 @@ export function JsonNode({
               path={[...path, Array.isArray(value) ? Number(key) : key]}
               value={v}
               editing={editing}
-              depth={depth + 1}
             />
           ))}
           <AddField path={path} value={value} editing={editing} />
         </div>
-      </details>
+      </div>
     );
   }
   return (
@@ -708,6 +728,70 @@ export function JsonNode({
         </button>
       </div>
     </div>
+  );
+}
+/** A whole JSON document: its plain keys in one tab, each object or list in its own. */
+export function JsonRoot({
+  value,
+  editing,
+  hidden,
+}: {
+  value: Json;
+  editing: Editing;
+  /** Top-level keys that are left to the source editor. */
+  hidden?: string[];
+}) {
+  const [picked, setPicked] = useState<string | null>(null);
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return <JsonNode path={[]} value={value} editing={editing} />;
+  const entries = Object.entries(value).filter(
+    ([key]) => !hidden?.includes(key),
+  );
+  const nested = entries
+    .filter(([, v]) => v && typeof v === "object")
+    .map(([key]) => key);
+  const shown = picked !== null && nested.includes(picked) ? picked : null;
+  return (
+    <>
+      {nested.length > 0 && (
+        <SubTabs
+          label="高级分栏"
+          tabs={["顶层字段", ...nested]}
+          shown={shown === null ? 0 : nested.indexOf(shown) + 1}
+          onPick={(i) => setPicked(i ? nested[i - 1] : null)}
+        />
+      )}
+      {shown !== null ? (
+        <JsonNode
+          key={shown}
+          path={[shown]}
+          value={value[shown]}
+          editing={editing}
+        />
+      ) : (
+        <>
+          {entries.map(
+            ([key, v]) =>
+              !nested.includes(key) && (
+                <JsonNode key={key} path={[key]} value={v} editing={editing} />
+              ),
+          )}
+          <AddField
+            path={[]}
+            value={value}
+            editing={{
+              ...editing,
+              // A new object or list is a tab of its own; follow it there.
+              change: (path, next) => {
+                editing.change(path, next);
+                if (next && typeof next === "object")
+                  setPicked(String(path[0]));
+              },
+            }}
+          />
+        </>
+      )}
+    </>
   );
 }
 function Environment({ editing }: { editing: Editing }) {
@@ -922,9 +1006,7 @@ export default function ClaudeSettings({
           />
         )}
         {group === "环境变量" && <Environment editing={editing} />}
-        {group === "高级" && (
-          <JsonNode path={[]} value={value} editing={editing} />
-        )}
+        {group === "高级" && <JsonRoot value={value} editing={editing} />}
       </div>
     </div>
   );

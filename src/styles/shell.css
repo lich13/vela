@@ -854,6 +854,7 @@ button.exchange-button:active:not(:disabled) {
 }
 
 .claude-profile-warning ul {
+  margin: 4px 0 0;
   padding-left: 20px;
 }
 
