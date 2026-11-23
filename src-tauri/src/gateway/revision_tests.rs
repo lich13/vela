@@ -19,7 +19,6 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         for (url, token) in [("https://a.invalid", "a"), ("https://b.invalid", "b")] {
             edit(Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -72,7 +71,6 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         g.edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -194,13 +192,15 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
     let id = initial.providers[0].id.clone();
     let version = gateway.0.inner.lock().store.providers[0].version.clone();
     let edit = |base: &str, role: Option<bool>| Edit::SaveProvider {
-        delegate: Default::default(),
+        delegate: crate::gateway::model::DelegateEdit {
+            take_web_search: role,
+            ..Default::default()
+        },
         id: Some(id.clone()),
         base_url: base.into(),
         token: "fixture-rotated".into(),
         quota_access_token: None,
         name: None,
-        search_only: role,
         end_on_message_stop: None,
         filter_count_tokens: None,
         buffer_complete_response: None,
@@ -215,7 +215,7 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
     assert!(gateway
         .edit(edit("invalid", Some(true)), &initial.revision, dir.path())
         .is_err());
-    assert!(!gateway.view().providers[0].search_only);
+    assert!(!gateway.view().providers[0].take_web_search);
     assert_eq!(gateway.view().revision, initial.revision);
     gateway
         .edit(
@@ -225,7 +225,7 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
         )
         .unwrap();
     let updated = gateway.view();
-    assert!(updated.providers[0].search_only);
+    assert!(updated.providers[0].take_web_search);
     assert_eq!(
         updated.providers[0].base_url,
         "https://changed.example.invalid/v1"
@@ -250,18 +250,21 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
             dir.path(),
         )
         .unwrap();
-    assert!(gateway.view().providers[0].search_only);
+    assert!(gateway.view().providers[0].take_web_search);
+    // Taking searches over is not Codex's alone.
     let claude = gateway.companion(dir.path().join("claude-policy")).unwrap();
-    assert!(claude
+    claude
         .edit(
             Edit::SaveProvider {
-                delegate: Default::default(),
+                delegate: crate::gateway::model::DelegateEdit {
+                    take_web_search: Some(true),
+                    ..Default::default()
+                },
                 id: None,
                 base_url: "https://claude.example.invalid".into(),
                 token: "fixture".into(),
                 quota_access_token: None,
                 name: None,
-                search_only: Some(true),
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -274,8 +277,8 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
                 limit_rest_seconds: None,
             },
             &claude.view().revision,
-            dir.path()
+            dir.path(),
         )
-        .is_err());
-    assert!(claude.view().providers.is_empty());
+        .unwrap();
+    assert!(claude.view().providers[0].take_web_search);
 }

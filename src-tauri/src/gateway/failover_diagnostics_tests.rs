@@ -885,7 +885,6 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
         &dir,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,

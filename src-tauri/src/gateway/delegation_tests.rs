@@ -142,7 +142,6 @@ fn saving(f: &Fixture, index: usize, delegate: DelegateEdit) -> Edit {
         token: String::new(),
         name: None,
         quota_access_token: None,
-        search_only: None,
         end_on_message_stop: None,
         filter_count_tokens: None,
         buffer_complete_response: None,
@@ -337,7 +336,6 @@ async fn a_request_its_taker_does_not_serve_is_answered_and_stays_out_of_the_que
                 token: FIXTURE_KEY.into(),
                 name: None,
                 quota_access_token: None,
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -530,6 +528,59 @@ async fn a_model_a_taker_lacks_sends_the_request_to_the_next_taker_alone() {
         );
         f.stop().await;
     }
+}
+
+#[tokio::test]
+async fn an_endless_taker_retries_a_rate_limit_where_it_was() {
+    let (main, main_seen) = upstream(|n| answered(200, message(&format!("msg_main_{n}")))).await;
+    let (first, first_seen) = upstream(|n| match n {
+        1 => answered(
+            429,
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"rate limit"}}"#.into(),
+        ),
+        _ => answered(200, message(&format!("msg_first_{n}"))),
+    })
+    .await;
+    let (second, second_seen) =
+        upstream(|n| answered(200, message(&format!("msg_second_{n}")))).await;
+    let (f, _) = listed(ClientId::Claude, &[&main, &first, &second]).await;
+    for index in [1, 2] {
+        takes(&f, index, None, Some(""));
+    }
+    let mut edit = saving(&f, 1, Default::default());
+    if let Edit::SaveProvider {
+        endless_mode,
+        limit_retry_seconds,
+        limit_rest_seconds,
+        retry_intensity,
+        ..
+    } = &mut edit
+    {
+        *endless_mode = Some(true);
+        *limit_retry_seconds = Some(1);
+        *limit_rest_seconds = Some(0);
+        *retry_intensity = Some(0);
+    }
+    f.edit(edit);
+    f.start().await;
+    let started = std::time::Instant::now();
+    let (status, body) = send(&f.gateway, "/v1/messages", &[AUXILIARY], ASKED).await;
+    assert_eq!(
+        (status, body.as_ref()),
+        (200, message("msg_first_2").as_bytes())
+    );
+    // It waited its interval there: neither the next taker nor the ordinary
+    // queue was asked.
+    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert_eq!(
+        (
+            main_seen.lock().len(),
+            first_seen.lock().len(),
+            second_seen.lock().len()
+        ),
+        (0, 2, 0)
+    );
+    f.stop().await;
 }
 
 #[tokio::test]
@@ -1016,14 +1067,24 @@ async fn a_provider_takes_over_only_the_kinds_its_client_hands_over() {
         (&json!(true), &json!("search-fixture"))
     );
 
-    // Codex searches have providers of their own instead.
+    // Codex hands over all three.
     let f = Fixture::new(ClientId::Codex, &["http://127.0.0.1:9/v1".to_owned()]).await;
-    let revision = f.gateway.view().revision;
-    let search = DelegateEdit {
-        take_web_search: Some(true),
-        ..Default::default()
-    };
-    let refused = f.gateway.edit(saving(&f, 0, search), &revision, &f.home);
-    assert!(refused.is_err());
+    searches(&f, 0, Some(("search-fixture", "low")));
     takes(&f, 0, Some(""), Some(""));
+    let view = serde_json::to_value(&f.gateway.view().providers[0]).unwrap();
+    assert_eq!(
+        (
+            &view["takeWebSearch"],
+            &view["webSearchModel"],
+            &view["takeCompaction"],
+            &view["takeAuxiliary"]
+        ),
+        (
+            &json!(true),
+            &json!("search-fixture"),
+            &json!(true),
+            &json!(true)
+        )
+    );
+    assert!(view.get("searchOnly").is_none());
 }

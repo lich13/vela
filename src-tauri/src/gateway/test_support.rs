@@ -129,7 +129,6 @@ pub(crate) fn policy_provider(id: &str, handoff: bool, take: bool) -> Provider {
         allowed_models: None,
         handoff_after_compaction: handoff,
         take_new_threads: take,
-        search_only: false,
         end_on_message_stop: false,
         filter_count_tokens: false,
         buffer_complete_response: false,
@@ -320,7 +319,6 @@ pub(crate) mod loopback {
                 &dir,
                 Edit::SaveProvider {
                     delegate: Default::default(),
-                    search_only: None,
                     end_on_message_stop: None,
                     filter_count_tokens: None,
                     buffer_complete_response: None,

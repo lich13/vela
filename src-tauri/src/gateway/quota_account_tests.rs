@@ -15,7 +15,6 @@ fn save_account(g: &Gateway, t: &tempfile::TempDir, token: Option<&str>, base: O
         t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,

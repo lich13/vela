@@ -33,7 +33,6 @@ fn provider(id: &str, allowed_models: Option<&str>, handoff: bool) -> Provider {
         allowed_models: allowed_models.map(|model| vec![model.into()]),
         handoff_after_compaction: handoff,
         take_new_threads: handoff,
-        search_only: false,
         end_on_message_stop: false,
         filter_count_tokens: false,
         buffer_complete_response: false,

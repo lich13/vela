@@ -42,7 +42,6 @@ fn provider(id: &str, handoff: bool, take: bool) -> Provider {
         allowed_models: None,
         handoff_after_compaction: handoff,
         take_new_threads: take,
-        search_only: false,
         end_on_message_stop: false,
         filter_count_tokens: false,
         buffer_complete_response: false,
@@ -176,7 +175,6 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -478,7 +476,6 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
             &dir,
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,

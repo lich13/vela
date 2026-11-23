@@ -33,7 +33,6 @@ async fn resumable_codex() -> Resumable {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -242,7 +241,6 @@ async fn resumable_claude() -> (tempfile::TempDir, PathBuf, PathBuf, Gateway, Ga
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,

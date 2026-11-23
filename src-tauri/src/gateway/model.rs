@@ -26,8 +26,6 @@ pub struct Provider {
     #[serde(default)]
     pub take_new_threads: bool,
     #[serde(default)]
-    pub search_only: bool,
-    #[serde(default)]
     pub end_on_message_stop: bool,
     #[serde(default)]
     pub filter_count_tokens: bool,
@@ -224,6 +222,23 @@ pub struct DelegateEdit {
     pub web_search_effort: Option<String>,
 }
 impl DelegateEdit {
+    /// The form of a new provider that says nothing of what it takes over:
+    /// the provider takes every kind `client` has, each on the model and
+    /// effort the request names.
+    pub(super) fn or_everything(mut self, client: super::ClientId) -> Self {
+        use super::ClientId;
+        if self.take_compaction.is_some()
+            || self.take_auxiliary.is_some()
+            || self.take_web_search.is_some()
+        {
+            return self;
+        }
+        let both = matches!(client, ClientId::Codex | ClientId::Claude);
+        self.take_compaction = both.then_some(true);
+        self.take_auxiliary = both.then_some(true);
+        self.take_web_search = (both || client == ClientId::Grok).then_some(true);
+        self
+    }
     /// The form asks this provider to take requests of `kind` over.
     pub(super) fn enables(&self, kind: Delegated) -> bool {
         let taken = match kind {
@@ -596,8 +611,6 @@ pub enum Edit {
     },
     SaveProvider {
         #[serde(default)]
-        search_only: Option<bool>,
-        #[serde(default)]
         end_on_message_stop: Option<bool>,
         #[serde(default)]
         filter_count_tokens: Option<bool>,
@@ -837,7 +850,7 @@ impl Store {
     pub fn load(path: &Path) -> Result<(Self, String)> {
         let raw = storage::read_optional(path)?;
         let invalid = || AppError::new(code::STORE, "网关存储无法读取，请保留原文件");
-        let mut store: Self = match &raw {
+        let mut store = match &raw {
             Some(raw) => {
                 let mut value: serde_json::Value =
                     serde_json::from_slice(raw).map_err(|_| invalid())?;
@@ -858,7 +871,25 @@ impl Store {
                         }
                     }
                 }
-                serde_json::from_value(value).map_err(|_| invalid())?
+                // A provider once kept for web searches alone now takes them
+                // over, on the model and effort the request names.
+                let searching: Vec<String> = value
+                    .get_mut("providers")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_object_mut)
+                    .filter_map(|provider| {
+                        let kept = provider.remove("searchOnly")?.as_bool()?;
+                        let id = provider.get("id")?.as_str()?;
+                        kept.then(|| id.to_owned())
+                    })
+                    .collect();
+                let mut store: Self = serde_json::from_value(value).map_err(|_| invalid())?;
+                for id in searching {
+                    store.delegates.entry(id).or_default().web_search = true;
+                }
+                store
             }
             None => Self::default(),
         };
@@ -980,7 +1011,6 @@ impl Store {
                 self.edit(
                     Edit::SaveProvider {
                         delegate,
-                        search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
                         buffer_complete_response: None,
@@ -1021,7 +1051,6 @@ impl Store {
                 self.edit(
                     Edit::SaveProvider {
                         delegate: Default::default(),
-                        search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
                         buffer_complete_response: None,
@@ -1095,7 +1124,6 @@ impl Store {
                 self.edit(
                     Edit::SaveProvider {
                         delegate: Default::default(),
-                        search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
                         buffer_complete_response: None,
@@ -1127,7 +1155,6 @@ impl Store {
                 self.selected = selected;
             }
             Edit::SaveProvider {
-                search_only,
                 end_on_message_stop,
                 filter_count_tokens,
                 buffer_complete_response,
@@ -1183,10 +1210,6 @@ impl Store {
                     let base_url = u.as_str().trim_end_matches('/');
                     let credentials_changed =
                         p.base_url != base_url || (!token.is_empty() && p.token != token);
-                    let policy_changed = search_only.is_some_and(|value| value != p.search_only);
-                    if let Some(value) = search_only {
-                        p.search_only = value;
-                    }
                     if let Some(value) = end_on_message_stop {
                         p.end_on_message_stop = value;
                     }
@@ -1224,7 +1247,7 @@ impl Store {
                     if display_name.is_some() {
                         p.name = label;
                     }
-                    if credentials_changed || policy_changed {
+                    if credentials_changed {
                         p.version = uuid::Uuid::new_v4().to_string();
                     }
                 } else {
@@ -1244,7 +1267,6 @@ impl Store {
                         allowed_models: None,
                         handoff_after_compaction: false,
                         take_new_threads: false,
-                        search_only: search_only.unwrap_or(false),
                         end_on_message_stop: end_on_message_stop.unwrap_or(false),
                         filter_count_tokens: filter_count_tokens.unwrap_or(false),
                         buffer_complete_response: buffer_complete_response.unwrap_or(false),
@@ -1429,12 +1451,7 @@ impl Store {
                     .sort_by_key(|p| ids.iter().position(|id| id == &p.id).unwrap_or(usize::MAX));
             }
             Edit::Select { id } => {
-                if self.provider_mut(&id)?.search_only {
-                    return Err(AppError::new(
-                        code::SETTINGS,
-                        "仅网络搜索供应商不能用于普通生成",
-                    ));
-                }
+                self.provider_mut(&id)?;
                 self.selected = Some(id);
                 self.mode = "manual".into();
             }

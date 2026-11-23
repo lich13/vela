@@ -91,7 +91,6 @@ async fn dual_fixture(codex_urls: Vec<String>, claude_urls: Vec<String>) -> Dual
                 home,
                 Edit::SaveProvider {
                     delegate: Default::default(),
-                    search_only: None,
                     end_on_message_stop: None,
                     filter_count_tokens: None,
                     buffer_complete_response: None,
@@ -770,7 +769,6 @@ async fn peer_gateway_urls_are_rejected_when_saved() {
                 .edit(
                     Edit::SaveProvider {
                         delegate: Default::default(),
-                        search_only: None,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
                         buffer_complete_response: None,

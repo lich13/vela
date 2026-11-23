@@ -62,8 +62,7 @@ fn codex_auxiliary(headers: &hyper::HeaderMap) -> bool {
 /// Claude Code's search tool sends a message that declares a `web_search_…`
 /// tool, Grok Build's a response whose only tool is `web_search`. A turn of
 /// Grok's that declares that tool beside its others is the conversation.
-/// Codex searches have a path and providers of their own, and are not taken
-/// over here.
+/// Codex searches on a path of its own.
 ///
 /// A request of two kinds is the one that comes first: a compaction, then a
 /// search, then an errand. A search is one only while `searches_taken`, a
@@ -87,7 +86,7 @@ pub(super) fn class(
     let tools = hints.map(|hints| hints.search_tools).unwrap_or_default();
     let (search, auxiliary) = match client {
         ClientId::Codex => (
-            false,
+            operation == Operation::WebSearch,
             matches!(path, "/responses" | "/v1/responses") && codex_auxiliary(&parts.headers),
         ),
         ClientId::Claude if path == "/v1/messages" => (
@@ -124,17 +123,24 @@ pub(super) struct Taker {
 }
 
 /// The provider `id` as a taker of `kind` and its health there, when its
-/// whitelist allows the model the request is routed as there.
+/// whitelist allows the model the request is routed as there. A `resource`
+/// request, such as a Codex search, needs no model unless the provider names
+/// one.
 fn fit(
     id: &String,
     routes: &std::collections::HashMap<String, Route>,
     kind: Delegated,
     model: Option<&str>,
+    resource: bool,
 ) -> Option<(Taker, super::Health)> {
-    let route = routes.get(id).filter(|route| !route.provider.search_only)?;
+    let route = routes.get(id)?;
     let (named, effort) = route.delegate.takes(kind)?;
     let routed = named.or(model);
-    let requirement = Requirement::model(routed);
+    let requirement = if resource && named.is_none() {
+        Requirement::Resource
+    } else {
+        Requirement::model(routed)
+    };
     requirement
         .allows(route.provider.allowed_models.as_deref())
         .then(|| {
@@ -161,12 +167,13 @@ pub(super) fn taker(
     kind: Delegated,
     model: Option<&str>,
     owner: Option<&str>,
+    resource: bool,
 ) -> Option<Taker> {
     order
         .iter()
         .filter(|id| Some(id.as_str()) == owner)
         .chain(order.iter())
-        .filter_map(|id| fit(id, routes, kind, model))
+        .filter_map(|id| fit(id, routes, kind, model, resource))
         .find_map(|(taker, health)| health.available.then_some(taker))
 }
 
@@ -177,10 +184,11 @@ pub(super) fn recovering(
     routes: &std::collections::HashMap<String, Route>,
     kind: Delegated,
     model: Option<&str>,
+    resource: bool,
 ) -> Option<Taker> {
     order
         .iter()
-        .filter_map(|id| fit(id, routes, kind, model))
+        .filter_map(|id| fit(id, routes, kind, model, resource))
         .filter(|(_, health)| !health.available)
         .min_by_key(|(_, health)| health.retry_in)
         .map(|(taker, _)| taker)
@@ -191,7 +199,7 @@ mod tests {
     use super::*;
     use crate::gateway::{
         circuit::Outcome,
-        model::{Delegate, Provider, Settings},
+        model::{Delegate, Settings},
         test_support::{policy_provider, route},
     };
     use std::collections::HashMap;
@@ -220,6 +228,16 @@ mod tests {
                 .map(|r| (r.provider.id.clone(), r))
                 .collect(),
         )
+    }
+    /// The taker of a request that needs a model.
+    fn taker(
+        order: &[String],
+        routes: &HashMap<String, Route>,
+        kind: Delegated,
+        model: Option<&str>,
+        owner: Option<&str>,
+    ) -> Option<Taker> {
+        super::taker(order, routes, kind, model, owner, false)
     }
     fn pick(id: &str, model: Option<&str>) -> Option<Taker> {
         Some(Taker {
@@ -329,13 +347,6 @@ mod tests {
             route.provider.allowed_models = Some(models.iter().map(|m| (*m).to_owned()).collect());
             route
         };
-        let search_only = |mut route: Route| {
-            route.provider = Provider {
-                search_only: true,
-                ..route.provider
-            };
-            route
-        };
         let asked = Some("asked-fixture");
         // The whitelist is read for the model the request is routed as.
         let (order, routes) = among([
@@ -364,17 +375,24 @@ mod tests {
             pick("follows", Some("small-fixture"))
         );
 
-        // A provider kept for searches takes nothing over.
+        // A request for a resource, such as a Codex search, is no model's:
+        // a whitelist turns it away only when the provider names a model.
+        let searching = |id: &str, model: Option<&str>| {
+            let mut route = taking(id, None, None);
+            route.delegate.web_search = true;
+            route.delegate.web_search_model = model.map(str::to_owned);
+            listed(route, &["small-fixture"])
+        };
         let (order, routes) = among([
-            search_only(taking("searches", Some(""), Some(""))),
-            taking("ordinary", Some(""), None),
+            searching("names-other", Some("other-fixture")),
+            searching("follows", None),
         ]);
         assert_eq!(
-            taker(&order, &routes, Delegated::Compaction, asked, None),
-            pick("ordinary", asked)
+            super::taker(&order, &routes, Delegated::WebSearch, asked, None, true),
+            pick("follows", asked)
         );
         assert_eq!(
-            taker(&order, &routes, Delegated::Auxiliary, asked, None),
+            taker(&order, &routes, Delegated::WebSearch, asked, None),
             None
         );
 
@@ -400,11 +418,11 @@ mod tests {
         );
         // It is the one a request waits for when none is ready.
         assert_eq!(
-            recovering(&order, &routes, Delegated::Compaction, asked),
+            recovering(&order, &routes, Delegated::Compaction, asked, false),
             pick("cooling", asked)
         );
         assert_eq!(
-            recovering(&order, &routes, Delegated::Auxiliary, asked),
+            recovering(&order, &routes, Delegated::Auxiliary, asked, false),
             None
         );
     }
@@ -662,9 +680,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_searches_are_left_to_its_search_providers() {
+    fn a_codex_search_is_a_request_on_its_search_path() {
         use serde_json::json;
-        // Codex declares the tool in its turns and searches on a path of its own.
+        // Codex declares the tool in its turns and searches on a path of its
+        // own: a turn that declares the tool is the conversation.
         let declared = hints(json!({
             "model": "gpt-fixture", "tools": [{"type": "web_search"}],
             "input": [{"role": "user", "content": "fixture"}]
@@ -687,6 +706,20 @@ mod tests {
             ),
             Some(Delegated::Auxiliary)
         );
-        assert_eq!(class("/v1/alpha/search", &[], Operation::WebSearch), None);
+        assert_eq!(
+            class("/v1/alpha/search", &[], Operation::WebSearch),
+            Some(Delegated::WebSearch)
+        );
+        // With no provider set to take searches it is the ordinary queue's.
+        assert_eq!(
+            super::class(
+                ClientId::Codex,
+                &parts("/v1/alpha/search", &[]),
+                Operation::WebSearch,
+                Some(&declared),
+                false,
+            ),
+            None
+        );
     }
 }

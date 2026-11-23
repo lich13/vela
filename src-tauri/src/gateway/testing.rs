@@ -71,7 +71,6 @@ pub(crate) struct Target {
     pub provider_id: String,
     pub provider_name: String,
     pub version: String,
-    pub search_only: bool,
     pub protocol: String,
     pub headers: HeaderMap,
     pub base_url: String,
@@ -166,7 +165,6 @@ impl Target {
 pub(crate) struct Candidate {
     pub id: String,
     pub queued: bool,
-    pub search_only: bool,
 }
 fn codex_installation(
     user_agent: &header::HeaderValue,
@@ -280,7 +278,6 @@ impl Gateway {
             .map(|p| Candidate {
                 id: p.id.clone(),
                 queued: p.queued,
-                search_only: p.search_only,
             })
             .collect())
     }
@@ -368,7 +365,6 @@ impl Gateway {
             provider_id: id.into(),
             provider_name: provider.name.clone(),
             version: provider.version.clone(),
-            search_only: provider.search_only,
             protocol: connection.protocol.name().into(),
             headers,
             base_url: provider.base_url.clone(),

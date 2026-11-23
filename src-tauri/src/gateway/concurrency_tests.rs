@@ -213,7 +213,6 @@ async fn capacity_spills_over_and_returns_to_priority_without_circuit_failures()
     g.edit(
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,
@@ -366,7 +365,6 @@ async fn rpm_windows_are_isolated_between_codex_and_claude() {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -486,7 +484,6 @@ async fn dynamic_limits_keep_slots_across_route_edits_and_do_not_oversubscribe()
         &t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,
@@ -586,7 +583,6 @@ async fn panel_edits_preserve_live_slots_files_and_persist_queue_priority() {
         &t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,

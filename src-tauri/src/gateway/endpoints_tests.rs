@@ -22,7 +22,6 @@ fn v0212_provider(base_url: &str) -> Provider {
         allowed_models: None,
         handoff_after_compaction: false,
         take_new_threads: false,
-        search_only: false,
         end_on_message_stop: false,
         filter_count_tokens: false,
         buffer_complete_response: false,
@@ -44,7 +43,6 @@ fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_pr
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -158,7 +156,6 @@ fn v0212_gateway_rejects_stale_edit_revision_and_persists_endpoints_across_resta
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -340,7 +337,6 @@ async fn v0212_loopback_probe_sends_no_authorization_or_business_rpm_and_keeps_e
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,

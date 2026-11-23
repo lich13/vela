@@ -385,8 +385,8 @@ struct Relay {
     failed: bool,
     delivery: std::sync::Arc<super::protocol::Delivery>,
     /// A success makes this the provider the client is left with when the
-    /// gateway stops. Not so for a search backup or a provider that only
-    /// took the request over.
+    /// gateway stops. Not so for a provider that only took the request
+    /// over.
     lasting: bool,
     body: WireBody,
     inspected_bytes: u64,
@@ -903,7 +903,6 @@ struct Plan {
     auxiliary: bool,
     owned_search: bool,
     ownership: Option<std::sync::Arc<super::compaction::Lease>>,
-    dedicated_search: bool,
     established_capacity_owner: Option<String>,
     usage_trace: Option<crate::usage::Trace>,
     /// The kind of request this is, when a provider may take it over. A
@@ -1115,28 +1114,8 @@ async fn plan(
     } else {
         None
     };
-    let search_backups = if mode == "auto"
-        && gateway.client_id() == super::ClientId::Codex
-        && operation == crate::usage::model::Operation::WebSearch
-        && !websocket
-    {
-        gateway
-            .search_backups()
-            .into_iter()
-            .filter(|id| routes.contains_key(id))
-            .collect::<Vec<_>>()
-    } else {
-        vec![]
-    };
-    let dedicated_search = !search_backups.is_empty();
-    if dedicated_search {
-        ids.extend(search_backups);
-    }
-    let established_capacity_owner = if dedicated_search {
-        None
-    } else {
-        routing::capacity_owner(gateway.client_id(), mode == "manual", ownership.as_deref())
-    };
+    let established_capacity_owner =
+        routing::capacity_owner(gateway.client_id(), mode == "manual", ownership.as_deref());
     let usage_trace = if (matches!(requirement, Requirement::Resource)
         && operation != crate::usage::model::Operation::WebSearch)
         || (gemini && super::gemini::counts(parts.uri.path()))
@@ -1177,7 +1156,6 @@ async fn plan(
         auxiliary,
         owned_search,
         ownership,
-        dedicated_search,
         established_capacity_owner,
         usage_trace,
         delegated,
@@ -1277,7 +1255,6 @@ struct Attempt {
     /// This attempt went to a different provider than the previous one.
     rerouted: bool,
     started: Instant,
-    search_deadline: tokio::time::Instant,
 }
 /// The start of an accepted response, read before anything reaches the client.
 struct Opening {
@@ -1330,7 +1307,6 @@ struct Exchange<'a> {
     capacity_sources: Vec<CapacitySource>,
     transient_retries: u8,
     retry_owner: Option<String>,
-    search_fallback: bool,
     claude_owner: Option<String>,
     /// What endless mode set aside when it fixed the request to a provider:
     /// the providers not yet tried and the attempts counted until then.
@@ -1352,10 +1328,16 @@ impl Exchange<'_> {
     /// the request waits in line for the first that was only busy; and when
     /// the rest are cooling, for the one that recovers first.
     fn next_taker(&self, kind: Delegated) -> Option<(super::delegation::Taker, Turn)> {
-        let (ids, routes, model) = match &self.ordinary {
-            Some(o) => (&o.ids, &o.routes, o.model.as_deref()),
-            None => (&self.ids, &self.routes, self.plan.model.as_deref()),
+        let (ids, routes, model, requirement) = match &self.ordinary {
+            Some(o) => (&o.ids, &o.routes, o.model.as_deref(), &o.requirement),
+            None => (
+                &self.ids,
+                &self.routes,
+                self.plan.model.as_deref(),
+                &self.plan.requirement,
+            ),
         };
+        let resource = matches!(requirement, Requirement::Resource);
         let (order, owner) = if self.mode == "manual" {
             (ids.clone(), None)
         } else {
@@ -1380,14 +1362,14 @@ impl Exchange<'_> {
             .into_iter()
             .filter(|id| !self.asked.contains(id))
             .collect();
-        super::delegation::taker(&unasked, routes, kind, model, owner.as_deref())
+        super::delegation::taker(&unasked, routes, kind, model, owner.as_deref(), resource)
             .map(|taker| (taker, Turn::Offered))
             .or_else(|| {
-                super::delegation::taker(&self.busy, routes, kind, model, None)
+                super::delegation::taker(&self.busy, routes, kind, model, None, resource)
                     .map(|taker| (taker, Turn::Busy))
             })
             .or_else(|| {
-                super::delegation::recovering(&unasked, routes, kind, model)
+                super::delegation::recovering(&unasked, routes, kind, model, resource)
                     .map(|taker| (taker, Turn::Cooling))
             })
     }
@@ -1419,7 +1401,15 @@ impl Exchange<'_> {
         } else {
             self.asked.push(id.clone());
         }
-        let requirement = Requirement::model(taker.model.as_deref());
+        // A request for a resource stays one where the provider names no
+        // model of its own for it.
+        let requirement = if matches!(self.plan.requirement, Requirement::Resource)
+            && taker.model == self.plan.model
+        {
+            Requirement::Resource
+        } else {
+            Requirement::model(taker.model.as_deref())
+        };
         self.ordinary = Some(Ordinary {
             kind,
             effort: taker.effort,
@@ -1510,10 +1500,10 @@ impl Exchange<'_> {
             action
         }
     }
-    /// Endless mode applies to this request at `route`. A dedicated search
-    /// keeps its own fallback to the search backups.
+    /// Endless mode applies to this request at `route`, whichever queue the
+    /// request is in.
     fn endless(&self, route: &Route) -> bool {
-        route.endless() && !self.plan.dedicated_search
+        route.endless()
     }
     fn max_waiting(&self) -> usize {
         if self.unbounded {
@@ -1921,15 +1911,6 @@ impl Exchange<'_> {
             .iter()
             .filter_map(|id| self.routes.get(id).cloned())
             .collect();
-        if self.plan.dedicated_search {
-            candidates.retain(|route| route.provider.search_only == self.search_fallback);
-            if candidates.is_empty() {
-                return Err(End::Stop);
-            }
-            if self.search_fallback {
-                self.wait_budget.search_fallback();
-            }
-        }
         let mut observed_candidates = candidates.clone();
         observed_candidates.extend(
             self.gateway
@@ -1960,9 +1941,7 @@ impl Exchange<'_> {
             });
         }
         self.wait_budget.capacity_owner = None;
-        if self.plan.dedicated_search && self.search_fallback {
-            // Search backups do not inherit generation intake policies.
-        } else if let Some(owner) = self.retry_owner.take() {
+        if let Some(owner) = self.retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
         } else if let Some(lease) = self
             .plan
@@ -1985,16 +1964,6 @@ impl Exchange<'_> {
             && !self.plan.auxiliary
         {
             candidates = super::compaction::unidentified_candidates(candidates);
-        }
-        if self.plan.dedicated_search && !self.search_fallback {
-            candidates.truncate(1);
-            if candidates
-                .first()
-                .is_some_and(|route| !route.health_for(&self.plan.requirement).available)
-            {
-                self.search_fallback = true;
-                return Err(End::Again);
-            }
         }
         let unbounded = self.claude_owner.is_some()
             || (!candidates.is_empty() && candidates.iter().all(|r| self.endless(r)));
@@ -2113,7 +2082,6 @@ impl Exchange<'_> {
         }
         if self.gateway.client_id() == super::ClientId::Codex
             && self.mode == "auto"
-            && !self.plan.dedicated_search
             && self.plan.pinned.is_none()
             && !self.plan.auxiliary
         {
@@ -2139,14 +2107,16 @@ impl Exchange<'_> {
         // A provider that takes the request over is first only offered it:
         // with no room there, the next of its queue is asked before the
         // request waits for any of them.
-        let offered = self.ordinary.as_ref().is_some_and(|o| !o.waits);
+        // A provider endless mode has fixed the request to is waited for.
+        let offered =
+            self.ordinary.as_ref().is_some_and(|o| !o.waits) && self.claude_owner.is_none();
         let admission = self
             .gateway
             .0
             .admission
             .acquire_for_immediate(
                 candidates,
-                self.mode == "manual" && !(self.plan.dedicated_search && self.search_fallback),
+                self.mode == "manual",
                 self.max_waiting(),
                 &mut self.wait_budget,
                 &self.plan.requirement,
@@ -2490,7 +2460,6 @@ impl Exchange<'_> {
                 .map(watch::Sender::subscribe),
             None,
         );
-        let search_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         Attempt {
             admission,
             route,
@@ -2498,7 +2467,6 @@ impl Exchange<'_> {
             reset_generation,
             rerouted,
             started,
-            search_deadline,
         }
     }
     /// The request never got a response head: the connection failed.
@@ -2535,8 +2503,7 @@ impl Exchange<'_> {
         // Use the same owner and budget as 5xx for connection failures,
         // including a peer closing before response headers arrive.
         // Header timeouts still use the separate no-replay boundary.
-        let retry_same = !self.plan.dedicated_search
-            && connection
+        let retry_same = connection
             && !self.plan.unknown_affinity
             && self.ordinary_attempts <= self.settings.max_retries
             && ((route.client_id == super::ClientId::Codex
@@ -2579,11 +2546,7 @@ impl Exchange<'_> {
                 ..Default::default()
             },
         );
-        if self.plan.dedicated_search {
-            admission.permits.neutral(self.settings);
-        } else {
-            admission.permits.failure(self.settings, None);
-        }
+        admission.permits.failure(self.settings, None);
         let retry_delay = super::attempt::same_provider_delay(
             retry_same,
             &route.health_for(&self.plan.requirement),
@@ -2602,7 +2565,7 @@ impl Exchange<'_> {
         }));
         let mut retry_delay = retry_delay;
         drop(admission);
-        if connection && !self.plan.dedicated_search && (retry_delay.is_some() || stranded) {
+        if connection && (retry_delay.is_some() || stranded) {
             match super::connectivity::settle(
                 self.gateway,
                 &route,
@@ -2676,33 +2639,25 @@ impl Exchange<'_> {
             ..
         } = attempt;
         self.failover.failure(super::failover::Failure::Transport);
-        let retry_dsh = self.plan.dedicated_search
-            || route.client_id == super::ClientId::Dsh
-                && super::attempt::retained_fallback(
-                    self.gateway,
-                    &route.provider.id,
-                    &self.ids,
-                    &self.routes,
-                    &self.plan.requirement,
-                    self.parts.uri.path(),
-                    self.plan.ownership.as_deref(),
-                    false,
-                    super::attempt::may_fail_over(
-                        self.mode == "manual",
-                        self.plan.pinned.as_deref(),
-                        self.plan.unknown_affinity,
-                        self.ordinary_attempts,
-                        self.settings.max_retries,
-                    ),
-                ) == Action::TryingNext;
-        protocol.timeout(
-            "response_headers",
-            if self.plan.dedicated_search {
-                30
-            } else {
-                self.first_byte_seconds()
-            },
-        );
+        let retry_dsh = route.client_id == super::ClientId::Dsh
+            && super::attempt::retained_fallback(
+                self.gateway,
+                &route.provider.id,
+                &self.ids,
+                &self.routes,
+                &self.plan.requirement,
+                self.parts.uri.path(),
+                self.plan.ownership.as_deref(),
+                false,
+                super::attempt::may_fail_over(
+                    self.mode == "manual",
+                    self.plan.pinned.as_deref(),
+                    self.plan.unknown_affinity,
+                    self.ordinary_attempts,
+                    self.settings.max_retries,
+                ),
+            ) == Action::TryingNext;
+        protocol.timeout("response_headers", self.first_byte_seconds());
         protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
         self.last_error = Some(self.failover.report_failure(Some(&protocol), || {
             admission.permits.report(
@@ -2725,11 +2680,7 @@ impl Exchange<'_> {
                 },
             )
         }));
-        if self.plan.dedicated_search {
-            admission.permits.neutral(self.settings);
-        } else {
-            admission.permits.failure(self.settings, None);
-        }
+        admission.permits.failure(self.settings, None);
         if retry_dsh {
             self.last_category = code::FIRST_BYTE_TIMEOUT;
             return End::Again;
@@ -2919,7 +2870,6 @@ impl Exchange<'_> {
                             reset_generation,
                             rerouted: false,
                             started: Instant::now(),
-                            search_deadline: tokio::time::Instant::now(),
                         },
                         Some(status.as_u16()),
                         code::HTTP,
@@ -2955,7 +2905,7 @@ impl Exchange<'_> {
         let capacity = !model_error && !hard_rejection && policy.temporary;
         let wait_same =
             capacity && self.plan.established_capacity_owner.as_deref() == Some(&route.provider.id);
-        if capacity && !self.websocket && !self.plan.dedicated_search {
+        if capacity && !self.websocket {
             self.ordinary_attempts = self.ordinary_attempts.saturating_sub(1);
             self.capacity_protected = true;
             self.wait_budget.protect_capacity();
@@ -2988,28 +2938,23 @@ impl Exchange<'_> {
             super::failover::Failure::UpstreamService
         });
         let will_retry = retryable
-            && ((self.plan.dedicated_search
-                && self
-                    .ids
-                    .iter()
-                    .any(|id| self.routes.get(id).is_some_and(|r| r.provider.search_only)))
-                || super::attempt::retained_fallback(
-                    self.gateway,
-                    &route.provider.id,
-                    &self.ids,
-                    &self.routes,
-                    &self.plan.requirement,
-                    self.parts.uri.path(),
-                    self.plan.ownership.as_deref(),
-                    self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
-                    super::attempt::may_fail_over(
-                        self.mode == "manual",
-                        self.plan.pinned.as_deref(),
-                        self.plan.unknown_affinity,
-                        self.ordinary_attempts,
-                        self.settings.max_retries,
-                    ),
-                ) == Action::TryingNext);
+            && (super::attempt::retained_fallback(
+                self.gateway,
+                &route.provider.id,
+                &self.ids,
+                &self.routes,
+                &self.plan.requirement,
+                self.parts.uri.path(),
+                self.plan.ownership.as_deref(),
+                self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
+                super::attempt::may_fail_over(
+                    self.mode == "manual",
+                    self.plan.pinned.as_deref(),
+                    self.plan.unknown_affinity,
+                    self.ordinary_attempts,
+                    self.settings.max_retries,
+                ),
+            ) == Action::TryingNext);
         let reason = if compact_error {
             Reason::ProtocolError
         } else {
@@ -3125,7 +3070,7 @@ impl Exchange<'_> {
                 Err(_) => return End::Stop,
             }
         }
-        if capacity && !self.plan.dedicated_search {
+        if capacity {
             if wait_same {
                 self.capacity_wait_owner = Some(route.provider.id.clone());
                 self.ids.clear();
@@ -3154,7 +3099,7 @@ impl Exchange<'_> {
         }
         let status = response.status();
         let protocol = &mut attempt.protocol;
-        let (started, search_deadline) = (attempt.started, attempt.search_deadline);
+        let started = attempt.started;
         let (mut response_parts, body) = response.into_parts();
         let mut body = body
             .map_err(|error| Box::new(error) as BoxError)
@@ -3163,9 +3108,6 @@ impl Exchange<'_> {
         let mut first_deadline = tokio::time::Instant::now()
             + Duration::from_secs(self.settings.first_byte_seconds)
                 .saturating_sub(started.elapsed());
-        if self.plan.dedicated_search {
-            first_deadline = search_deadline;
-        }
         // Buffer through initialization and heartbeats until effective output or a
         // terminal outcome (or bounded JSON); preserve
         // the original frames and encoding exactly, including comments/trailers.
@@ -3199,7 +3141,7 @@ impl Exchange<'_> {
                         {
                             protocol.effective_output();
                         }
-                        if !self.plan.dedicated_search && !bytes.is_empty() {
+                        if !bytes.is_empty() {
                             first_deadline = tokio::time::Instant::now()
                                 + Duration::from_secs(self.settings.idle_seconds);
                         }
@@ -3498,11 +3440,7 @@ impl Exchange<'_> {
                 ..protocol.observation.error.clone()
             },
         );
-        if self.plan.dedicated_search {
-            admission.permits.neutral(self.settings);
-        } else {
-            admission.permits.failure(self.settings, None);
-        }
+        admission.permits.failure(self.settings, None);
         let retry_delay = if failure_kind == code::STREAM_INTERRUPTED
             && self.plan.fixed_dsh.as_deref() == Some(&route.provider.id)
             && !self.plan.unknown_affinity
@@ -3655,7 +3593,6 @@ impl Exchange<'_> {
             reset_generation,
             rerouted,
             started,
-            search_deadline,
         } = attempt;
         let (status, failed) = (opening.status, opening.failed);
         opening.ended |= failed;
@@ -3741,7 +3678,7 @@ impl Exchange<'_> {
                 .and_then(|h| h.to_str().ok())
                 .and_then(circuit::retry_after)
                 .max(protocol.observation.retry_after);
-            if initial_capacity && !self.plan.dedicated_search {
+            if initial_capacity {
                 if wait_same {
                     self.capacity_wait_owner = Some(route.provider.id.clone());
                     self.ids.clear();
@@ -3769,28 +3706,23 @@ impl Exchange<'_> {
                         .is_some_and(|lease| lease.owns(&route.provider.id))
                     || self.plan.fixed_dsh.as_deref() == Some(&route.provider.id));
             let will_retry = policy.retryable
-                && ((self.plan.dedicated_search
-                    && self
-                        .ids
-                        .iter()
-                        .any(|id| self.routes.get(id).is_some_and(|r| r.provider.search_only)))
-                    || super::attempt::retained_fallback(
-                        self.gateway,
-                        &route.provider.id,
-                        &self.ids,
-                        &self.routes,
-                        &self.plan.requirement,
-                        self.parts.uri.path(),
-                        self.plan.ownership.as_deref(),
-                        self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
-                        super::attempt::may_fail_over(
-                            self.mode == "manual",
-                            self.plan.pinned.as_deref(),
-                            self.plan.unknown_affinity,
-                            self.ordinary_attempts,
-                            self.settings.max_retries,
-                        ),
-                    ) == Action::TryingNext);
+                && (super::attempt::retained_fallback(
+                    self.gateway,
+                    &route.provider.id,
+                    &self.ids,
+                    &self.routes,
+                    &self.plan.requirement,
+                    self.parts.uri.path(),
+                    self.plan.ownership.as_deref(),
+                    self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
+                    super::attempt::may_fail_over(
+                        self.mode == "manual",
+                        self.plan.pinned.as_deref(),
+                        self.plan.unknown_affinity,
+                        self.ordinary_attempts,
+                        self.settings.max_retries,
+                    ),
+                ) == Action::TryingNext);
             let mut details = protocol.observation.error.clone();
             details.phase = Some(crate::events::Phase::Response);
             details.counted_failure = Some(!initial_compact_error && policy.counted_failure);
@@ -3907,7 +3839,6 @@ impl Exchange<'_> {
             reset_generation,
             rerouted,
             started,
-            search_deadline,
         })
     }
     /// One round of the request: admission to a provider, the upstream
@@ -3917,12 +3848,10 @@ impl Exchange<'_> {
         stream_started: &mut Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<Accepted, End> {
         self.traffic.waiting();
-        self.search_fallback |= self.attempted > 0;
         // An unknown previous_response_id has no safe owner to replay against;
         // preserve the existing one-attempt rule instead of silently
         // repeating the request on an arbitrary provider.
         if self.claude_owner.is_none()
-            && !self.plan.dedicated_search
             && ((self.plan.unknown_affinity && !self.capacity_protected)
                 || (self.gateway.client_id() == super::ClientId::Claude && self.plan.continuation))
             && self.attempted > 0
@@ -4002,11 +3931,8 @@ impl Exchange<'_> {
             Err(Unbuilt::Reject(response)) => return Err(End::Reply(response)),
         };
         let mut attempt = self.begin(admission, route, upstream_model, new_thread_model_denied);
-        let deadline = if self.plan.dedicated_search {
-            attempt.search_deadline
-        } else {
-            tokio::time::Instant::now() + Duration::from_secs(self.settings.first_byte_seconds)
-        };
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(self.settings.first_byte_seconds);
         let response = self
             .request_budget
             .response(
@@ -4054,8 +3980,7 @@ impl Exchange<'_> {
             opening.failure_kind = code::STREAM_INTERRUPTED;
         }
         if opening.failed
-            && (self.plan.dedicated_search
-                || attempt.route.client_id == super::ClientId::Dsh
+            && (attempt.route.client_id == super::ClientId::Dsh
                 || ((attempt.route.provider.buffer_complete_response
                     || self.endless(&attempt.route))
                     && !attempt.protocol.explicit_failure())
@@ -4166,7 +4091,7 @@ impl Exchange<'_> {
             ended,
             failed,
             delivery,
-            lasting: !self.plan.dedicated_search && self.ordinary.is_none(),
+            lasting: self.ordinary.is_none(),
             body,
             inspected_bytes,
             neutral,
@@ -4257,7 +4182,7 @@ async fn forward_inner(
             s.store
                 .providers
                 .iter()
-                .filter(|p| p.queued && !p.search_only)
+                .filter(|p| p.queued)
                 .map(|p| p.id.clone())
                 .collect::<Vec<_>>()
         } else {
@@ -4317,11 +4242,6 @@ async fn forward_inner(
         .filter_map(|id| gateway.route(&id).map(|r| (id, r)))
         .collect();
     routes.retain(|_, route| route.accepts_protocol(request.uri().path()));
-    ids.retain(|id| {
-        routes
-            .get(id)
-            .is_some_and(|route| !route.provider.search_only)
-    });
     let active = Active::new(gateway.clone());
     let websocket = request
         .headers()
@@ -4429,7 +4349,6 @@ async fn forward_inner(
             capacity_sources: Vec::new(),
             transient_retries: 0,
             retry_owner: None,
-            search_fallback: false,
             claude_owner: None,
             unpinned: None,
             unbounded: false,
@@ -4445,10 +4364,7 @@ async fn forward_inner(
         }
         loop {
             cx.refresh_endless();
-            if cx.claude_owner.is_none()
-                && !cx.plan.dedicated_search
-                && cx.ordinary_attempts > cx.settings.max_retries
-            {
+            if cx.claude_owner.is_none() && cx.ordinary_attempts > cx.settings.max_retries {
                 if cx.hand_back(None) {
                     continue;
                 }

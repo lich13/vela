@@ -36,7 +36,6 @@ fn provider_secrets_never_appear_in_view() {
     let update = |edit| g.edit(edit, &g.view().revision, temp.path()).unwrap();
     update(Edit::SaveProvider {
         delegate: Default::default(),
-        search_only: None,
         end_on_message_stop: None,
         filter_count_tokens: None,
         buffer_complete_response: None,
@@ -152,7 +151,6 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
             &t,
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -563,7 +561,6 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
         &t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,
@@ -607,7 +604,6 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
         &t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,
@@ -868,7 +864,6 @@ async fn real_codex_cli_with_isolated_home() {
         &t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,
@@ -1265,7 +1260,6 @@ async fn quota_late_response_is_discarded_after_provider_edit() {
         &t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,

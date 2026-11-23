@@ -25,7 +25,6 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -51,7 +50,6 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
         .edit(
             Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -76,7 +74,6 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
     let invalid = store.edit(
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,
@@ -383,7 +380,6 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
         &t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,
@@ -448,7 +444,6 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
         &t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,
@@ -527,7 +522,6 @@ async fn catalog_errors_and_changed_credentials_do_not_expose_raw_responses() {
         &t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,
@@ -649,7 +643,6 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
                     base_url: "https://new.example.invalid".into(),
                     token: "fixture".into(),
                     quota_access_token: None,
-                    search_only: None,
                     end_on_message_stop: None,
                     filter_count_tokens: None,
                     buffer_complete_response: None,
@@ -674,7 +667,6 @@ fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
                     base_url: "https://one.example.invalid".into(),
                     token: String::new(),
                     quota_access_token: None,
-                    search_only: None,
                     end_on_message_stop: Some(!legacy),
                     filter_count_tokens: None,
                     buffer_complete_response: None,
@@ -778,7 +770,6 @@ fn endless_retry_waits_longer_for_risk_control_and_older_stores_keep_their_inter
         base_url: "https://one.example.invalid".into(),
         token: "fixture".into(),
         quota_access_token: None,
-        search_only: None,
         end_on_message_stop: None,
         filter_count_tokens: None,
         buffer_complete_response: None,
@@ -869,7 +860,6 @@ fn endless_pacing_is_checked_on_saving_and_unset_fields_keep_what_was_saved() {
         base_url: "https://one.example.invalid".into(),
         token: "fixture".into(),
         quota_access_token: None,
-        search_only: None,
         end_on_message_stop: None,
         filter_count_tokens: None,
         buffer_complete_response: None,
@@ -1268,7 +1258,6 @@ fn a_model_mapping_holds_complete_model_ids_and_is_dropped_with_its_provider() {
                 base_url: "https://one.example.invalid".into(),
                 token: "fixture".into(),
                 quota_access_token: None,
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
@@ -1382,5 +1371,95 @@ fn only_the_claude_gateway_takes_a_model_mapping() {
     assert_eq!(
         refused.err().map(|error| error.message).as_deref(),
         Some("此操作仅适用于 Claude Code")
+    );
+}
+
+#[test]
+fn a_provider_once_kept_for_searches_is_loaded_as_one_that_takes_them_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gateway.json");
+    let mut value = serde_json::to_value(Store::default()).unwrap();
+    value["providers"] = json!([
+        {"id":"search","name":"Search","baseUrl":"https://one.example.invalid","token":"fixture","queued":true,"version":"one","searchOnly":true},
+        {"id":"ordinary","name":"Ordinary","baseUrl":"https://two.example.invalid","token":"fixture","queued":true,"version":"two","searchOnly":false},
+        {"id":"named","name":"Named","baseUrl":"https://three.example.invalid","token":"fixture","queued":true,"version":"three","searchOnly":true}
+    ]);
+    // What a provider already takes over is kept beside the search.
+    value["delegates"] = json!({"named": {"auxiliary": true, "auxiliaryModel": "aux-fixture"}});
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let (store, revision) = Store::load(&path).unwrap();
+    let saved = serde_json::to_value(&store).unwrap();
+    // The request's own model and effort are used: none is named.
+    assert_eq!(
+        saved["delegates"],
+        json!({
+            "search": {"webSearch": true},
+            "named": {"auxiliary": true, "auxiliaryModel": "aux-fixture", "webSearch": true}
+        })
+    );
+    // The old field is not written again, and a second load changes nothing.
+    assert!(saved["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|provider| provider.get("searchOnly").is_none()));
+    store.persist(&path, &revision).unwrap();
+    let (again, _) = Store::load(&path).unwrap();
+    assert_eq!(serde_json::to_value(&again).unwrap(), saved);
+}
+
+#[test]
+fn a_new_provider_that_names_nothing_takes_every_kind_its_client_hands_over() {
+    let form = |op: &str, extra: serde_json::Value| -> Edit {
+        let mut form = json!({
+            "op": op, "baseUrl": "https://new.example.invalid/v1", "token": "fixture"
+        });
+        form.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(form).unwrap()
+    };
+    let taken = |client: ClientId, edit: Edit| {
+        let dir = tempfile::tempdir().unwrap();
+        let gateway = Gateway::new_client(dir.path().join("data"), client, None).unwrap();
+        match gateway.with_new_provider_defaults(edit) {
+            Edit::SaveProvider { delegate, .. } | Edit::SaveGrokProvider { delegate, .. } => (
+                delegate.take_compaction,
+                delegate.take_auxiliary,
+                delegate.take_web_search,
+                delegate.compaction_model,
+                delegate.web_search_effort,
+            ),
+            _ => unreachable!(),
+        }
+    };
+    let all = (Some(true), Some(true), Some(true), None, None);
+    assert_eq!(taken(ClientId::Codex, form("saveProvider", json!({}))), all);
+    assert_eq!(
+        taken(ClientId::Claude, form("saveProvider", json!({}))),
+        all
+    );
+    assert_eq!(
+        taken(
+            ClientId::Grok,
+            form("saveGrokProvider", json!({"protocol": "responses"}))
+        ),
+        (None, None, Some(true), None, None)
+    );
+    // A form that names any of them is taken at its word.
+    assert_eq!(
+        taken(
+            ClientId::Codex,
+            form("saveProvider", json!({"takeAuxiliary": false}))
+        ),
+        (None, Some(false), None, None, None)
+    );
+    // So is the form of a provider that already exists.
+    assert_eq!(
+        taken(
+            ClientId::Codex,
+            form("saveProvider", json!({"id": "saved"}))
+        ),
+        (None, None, None, None, None)
     );
 }

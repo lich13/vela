@@ -361,7 +361,6 @@ async fn capacity_round_reads_new_queue_and_routes_without_touching_files() {
         &t,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,

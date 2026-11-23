@@ -55,7 +55,6 @@ fn provider(id: &str, base: &str, token: &str) -> Provider {
         allowed_models: None,
         handoff_after_compaction: true,
         take_new_threads: false,
-        search_only: false,
         end_on_message_stop: false,
         filter_count_tokens: false,
         buffer_complete_response: false,
@@ -332,7 +331,6 @@ async fn v020_gateway_api_mode_owns_only_base_and_auth_through_select_start_swit
         &home,
         Edit::SaveProvider {
             delegate: Default::default(),
-            search_only: None,
             end_on_message_stop: None,
             filter_count_tokens: None,
             buffer_complete_response: None,

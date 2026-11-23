@@ -1303,7 +1303,7 @@ pub fn derive_gateway_card(
                 runtime_alert: (!runtime_status.is_empty()).then_some(runtime_status),
                 fault_event_id: fault.map(|f| f.event_id.clone()),
                 fault_provider_id: fault.map(|_| p.id.clone()),
-                show_codex_policies: view.client_id == ClientId::Codex && !p.search_only,
+                show_codex_policies: view.client_id == ClientId::Codex,
                 handoff_after_compaction: p.handoff_after_compaction,
                 take_new_threads: p.take_new_threads,
                 concurrency_label: format!("并发 {}/{conc_cap}", p.active_requests),
@@ -2804,7 +2804,6 @@ mod tests {
         gw.edit(
             gateway::Edit::SaveProvider {
                 delegate: Default::default(),
-                search_only: None,
                 end_on_message_stop: None,
                 filter_count_tokens: None,
                 buffer_complete_response: None,
