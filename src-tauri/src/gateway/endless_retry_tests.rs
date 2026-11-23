@@ -735,3 +735,92 @@ async fn codex_endless_mode_sorts_and_retries_its_failures_the_same_way() {
         f.stop().await;
     }
 }
+
+/// A started Claude gateway in automatic mode whose first provider runs
+/// endless mode at `pace`.
+async fn queued(urls: &[String], pace: Pacing) -> Fixture {
+    let f = Fixture::new(ClientId::Claude, urls).await;
+    options(&f, true, true, false);
+    pacing(&f, pace);
+    f.edit(Edit::Mode {
+        mode: "auto".into(),
+    });
+    f.start().await;
+    f
+}
+
+#[tokio::test]
+async fn a_model_the_endless_provider_lacks_moves_the_request_on_at_once() {
+    // Under an ordinary status, and under one listed as risk control.
+    for (status, kind, message) in [
+        (
+            404,
+            "model_not_found",
+            "The model claude-fixture does not exist",
+        ),
+        (
+            429,
+            "new_api_error",
+            "no available channel for model claude-fixture",
+        ),
+    ] {
+        let (first, first_hits) = answering(move |_| rejected(status, kind, message)).await;
+        let (second, second_hits) = answering(|_| sse(COMPLETE)).await;
+        // Every retry interval outlasts the fixture's wait for a response.
+        let pace = Pacing {
+            codes: Some(vec![429]),
+            risk: Some(60),
+            limit: Some(60),
+            normal: Some(60),
+            ..Default::default()
+        };
+        let f = queued(&[first.url("/v1"), second.url("/v1")], pace).await;
+        completes(request(&f.gateway, "/v1/messages", STREAM_REQUEST).await).await;
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1, "{status}");
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1, "{status}");
+        f.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_model_the_only_provider_lacks_is_answered_without_a_retry() {
+    let (upstream, hits) = answering(|_| {
+        rejected(
+            404,
+            "model_not_found",
+            "The model claude-fixture does not exist",
+        )
+    })
+    .await;
+    let f = endless(
+        ClientId::Claude,
+        &[upstream.url("/v1")],
+        true,
+        only(RetryClass::Normal),
+    )
+    .await;
+    let body = response_bytes(request(&f.gateway, "/v1/messages", STREAM_REQUEST).await).await;
+    assert!(String::from_utf8_lossy(&body).contains("model_not_found"));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_rate_limit_is_still_retried_where_it_was_with_another_provider_free() {
+    let (first, first_hits) = answering(|n| match n {
+        0 => rejected(429, "rate_limit_error", "rate limit"),
+        _ => sse(COMPLETE),
+    })
+    .await;
+    let (second, second_hits) = answering(|_| sse(COMPLETE)).await;
+    let f = queued(
+        &[first.url("/v1"), second.url("/v1")],
+        only(RetryClass::Limit),
+    )
+    .await;
+    completes(request(&f.gateway, "/v1/messages", STREAM_REQUEST).await).await;
+    assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+    f.stop().await;
+}

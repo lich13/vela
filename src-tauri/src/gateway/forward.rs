@@ -1322,6 +1322,9 @@ struct Exchange<'a> {
     retry_owner: Option<String>,
     search_fallback: bool,
     claude_owner: Option<String>,
+    /// What endless mode set aside when it fixed the request to a provider:
+    /// the providers not yet tried and the attempts counted until then.
+    unpinned: Option<(Vec<String>, usize)>,
     /// Every provider this request can go to is in endless mode: it waits
     /// and retries without the limits that would answer it with an error.
     unbounded: bool,
@@ -1491,6 +1494,35 @@ impl Exchange<'_> {
             self.request_budget.set_endless(unbounded);
             self.wait_budget.set_endless(unbounded);
         }
+    }
+    /// The provider endless mode fixed the request to cannot serve it, which
+    /// no retry cures: the request goes on to the providers it had not tried
+    /// that serve its model, and the attempts made here are not counted.
+    /// Answers whether there is such a provider, when `needed`; otherwise
+    /// the request is released whatever is left.
+    fn unpin(&mut self, needed: bool) -> bool {
+        if self.claude_owner.is_none() {
+            return false;
+        }
+        let (mut ids, attempts) = self.unpinned.clone().unwrap_or_default();
+        ids.retain(|id| {
+            self.routes.get(id).is_some_and(|r| {
+                self.plan
+                    .requirement
+                    .allows(r.provider.allowed_models.as_deref())
+            })
+        });
+        if needed && ids.is_empty() {
+            return false;
+        }
+        self.unpinned = None;
+        self.claude_owner = None;
+        self.retry_owner = None;
+        self.set_unbounded(false);
+        self.wait_budget = admission_budget(self.settings, &self.traffic, &self.plan);
+        self.ids = ids;
+        self.ordinary_attempts = attempts;
+        true
     }
     /// Applies the providers' current endless settings to this request, so an
     /// edit reaches a request already in flight on its next attempt.
@@ -2823,7 +2855,10 @@ impl Exchange<'_> {
             details.health_scope = Some(crate::events::HealthScope::Provider);
         }
         let policy = super::failure_policy::decision(Some(status.as_u16()), &details);
-        if self.endless(&route) {
+        // A model this provider does not have is not waited out, whatever the
+        // status: the request goes on to the next provider at once.
+        let moved = model_error && self.unpin(true);
+        if !moved && self.endless(&route) {
             let reply = match captured {
                 Ok(body) => Response::from_parts(response_parts, body.body()),
                 Err(_) => error(status, code::UPSTREAM_BODY, "上游错误响应未完整接收"),
@@ -3503,7 +3538,14 @@ impl Exchange<'_> {
         attempt: Attempt,
         opening: &mut Opening,
     ) -> Result<Attempt, End> {
-        if (self.endless(&attempt.route) || attempt.route.provider.buffer_complete_response)
+        let moved = attempt.protocol.terminal()
+            == Some(super::protocol::Terminal::ModelUnavailable)
+            && !attempt.protocol.observation.meter.content_seen
+            && !attempt.protocol.observation.search_content
+            && !attempt.protocol.observation.opaque_output
+            && self.unpin(true);
+        if !moved
+            && (self.endless(&attempt.route) || attempt.route.provider.buffer_complete_response)
             && attempt.protocol.explicit_failure()
         {
             let mut attempt = attempt;
@@ -3896,10 +3938,13 @@ impl Exchange<'_> {
             }
         }
         if self.endless(&route) {
+            let rest = std::mem::take(&mut self.ids);
+            if self.claude_owner.as_deref() != Some(&route.provider.id) {
+                self.unpinned = Some((rest, self.ordinary_attempts));
+            }
             self.claude_owner = Some(route.provider.id.clone());
             self.set_unbounded(true);
             self.wait_budget.pin_provider();
-            self.ids.clear();
         }
         let (upstream, upstream_model) = match upstream_request(
             &route,
@@ -3915,7 +3960,11 @@ impl Exchange<'_> {
         .await
         {
             Ok(built) => built,
-            Err(Unbuilt::Skip) => return Err(End::Again),
+            Err(Unbuilt::Skip) => {
+                // Nothing was sent: a fixed request moves on as well.
+                self.unpin(false);
+                return Err(End::Again);
+            }
             Err(Unbuilt::Reject(response)) => return Err(End::Reply(response)),
         };
         let mut attempt = self.begin(admission, route, upstream_model, new_thread_model_denied);
@@ -4348,6 +4397,7 @@ async fn forward_inner(
             retry_owner: None,
             search_fallback: false,
             claude_owner: None,
+            unpinned: None,
             unbounded: false,
             ordinary: None,
             asked: Vec::new(),
