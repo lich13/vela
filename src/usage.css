@@ -576,6 +576,11 @@
   background: var(--accent-blue-soft);
   border-color: color-mix(in srgb, var(--accent-blue) 28%, var(--line));
 }
+.usage-badge.mismatch {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-color: color-mix(in srgb, var(--warning) 32%, var(--line));
+}
 .usage-cell-cost {
   text-align: center;
   color: var(--success, #47c991);

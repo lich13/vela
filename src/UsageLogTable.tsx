@@ -10,6 +10,7 @@ import {
   preciseDate,
   promptTokens,
   missingReason,
+  modelRelation,
 } from "./usage-format";
 import { durationSeverity, firstTokenSeverity } from "./latency-health";
 import {
@@ -277,6 +278,11 @@ export default function UsageLogTable({
                           : a.responseModel) ??
                         a.requestedModel ??
                         "—");
+              const relation =
+                (native && r.attempts.length > 1) ||
+                a.operation === "web_search"
+                  ? null
+                  : modelRelation(a);
               const token = (
                 value: number | null | undefined,
                 field: string,
@@ -370,8 +376,25 @@ export default function UsageLogTable({
                       ].join(" → ") || model
                     }
                   >
-                    <strong>{model}</strong>
+                    <strong>
+                      {relation?.mapped
+                        ? `${a.requestedModel} → ${a.upstreamModel}`
+                        : model}
+                    </strong>
                     <span className="usage-badges">
+                      {relation?.mapped && (
+                        <span className="usage-badge" title={relation.title}>
+                          映射
+                        </span>
+                      )}
+                      {relation?.mismatch && (
+                        <span
+                          className="usage-badge mismatch"
+                          title={relation.title}
+                        >
+                          响应不一致
+                        </span>
+                      )}
                       {a.reasoningEffort && (
                         <span className="usage-badge">
                           思考{" "}

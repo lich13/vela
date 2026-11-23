@@ -7,7 +7,12 @@ import {
   routingOutcome,
 } from "./routing-labels";
 import { Drawer } from "./UsageDrawer";
-import { preciseDate, promptTokens, missingReason } from "./usage-format";
+import {
+  preciseDate,
+  promptTokens,
+  missingReason,
+  modelRelation,
+} from "./usage-format";
 import {
   interruption,
   interruptionLabel,
@@ -329,6 +334,7 @@ function AttemptDetails({
   const first = measuredFirstToken(a, source);
   const elapsed = logDuration(a);
   const generatedSpeed = generationSpeed(a);
+  const relation = modelRelation(a);
   return (
     <>
       <h3>基本信息</h3>
@@ -533,9 +539,35 @@ function AttemptDetails({
             : []),
           ["请求模型", a.requestedModel],
           ...(a.upstreamModel
-            ? [["上游请求模型", a.upstreamModel] as [string, string]]
+            ? [
+                [
+                  "上游请求模型",
+                  relation.mapped ? (
+                    <>
+                      {a.upstreamModel}{" "}
+                      <span className="usage-badge" title={relation.title}>
+                        映射
+                      </span>
+                    </>
+                  ) : (
+                    a.upstreamModel
+                  ),
+                ] as [string, React.ReactNode],
+              ]
             : []),
-          ["收到的响应模型", a.responseModel],
+          [
+            "收到的响应模型",
+            relation.mismatch ? (
+              <>
+                {a.responseModel}{" "}
+                <span className="usage-badge mismatch" title={relation.title}>
+                  响应不一致
+                </span>
+              </>
+            ) : (
+              a.responseModel
+            ),
+          ],
           ["中断状态", interruptionLabel(a) || null],
           [
             "请求速度",
