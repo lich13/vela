@@ -375,19 +375,57 @@
   width: 100%;
 }
 
+.settings-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0 10px;
+}
+
+.settings-subtabs button {
+  min-height: 26px;
+  padding: 3px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 540;
+  overflow-wrap: anywhere;
+}
+
+.settings-subtabs button:hover:not([aria-pressed="true"]) {
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+.settings-subtabs button[aria-pressed="true"] {
+  color: var(--accent-blue);
+  border-color: color-mix(in srgb, var(--accent-blue) 42%, var(--line));
+  background: var(--accent-blue-soft);
+  font-weight: 600;
+}
+
+.antigravity-settings .settings-subtabs button[aria-pressed="true"] {
+  color: var(--accent-violet);
+  border-color: color-mix(in srgb, var(--accent-violet) 42%, var(--line));
+  background: var(--accent-violet-soft);
+}
+
 .json-node {
   border-bottom: 1px solid var(--line);
 }
 
-.json-node summary {
+.json-node-title {
+  display: flex;
+  align-items: center;
   padding: 8px 0;
-  cursor: pointer;
   overflow-wrap: anywhere;
   font-size: 13px;
+  font-weight: 600;
 }
 
-.json-node summary > button {
-  float: right;
+.json-node-title > button {
+  margin-left: auto;
 }
 
 .node-count {
@@ -501,17 +539,6 @@
   border-radius: var(--radius-xs);
   background: var(--surface);
   color: var(--ink);
-}
-
-.dsh-advanced-files summary {
-  cursor: pointer;
-  padding: 6px 0;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.dsh-advanced-files label {
-  margin-top: 6px;
 }
 
 .dsh-source-editor {

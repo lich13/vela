@@ -970,6 +970,133 @@ it("asks before a tab switch drops an unsaved draft", async () => {
   ).toBe(false);
 });
 
+describe("saving a draft from the tab bar", () => {
+  const edits = () =>
+    mock.command.mock.calls
+      .filter(([name]) => name === "update_gateway")
+      .map(([, args]) => args.edit);
+  const choose = async (label: string) =>
+    userEvent.click(
+      within(await screen.findByRole("dialog", { name: "确认操作" })).getByRole(
+        "button",
+        { name: label },
+      ),
+    );
+  // `update` answers each edit; by default the gateway accepts it unchanged.
+  const open = async (update: (edit: { op: string }) => void = () => {}) => {
+    mock.command.mockImplementation(async (name: string, args) => {
+      if (name === "list_provider_models")
+        return { models: ["gpt-A", "gpt-B"], error: null, stale: false };
+      if (name === "update_gateway") update(args.edit);
+      if (name === "get_gateway" || name === "update_gateway")
+        return structuredClone(state);
+    });
+    const user = userEvent.setup();
+    render(<Gateway notify={() => {}} />);
+    const name = state.providers[0].name;
+    await user.click(
+      await screen.findByRole("button", { name: `${name} 编辑 API` }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: `编辑供应商 · ${name}` }),
+    );
+    const tab = (label: string) =>
+      within(dialog.getByRole("navigation", { name: "供应商设置" })).getByRole(
+        "button",
+        { name: label },
+      );
+    return { user, dialog, tab, name };
+  };
+  const closed = (name: string) =>
+    waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: `编辑供应商 · ${name}` }),
+      ).not.toBeInTheDocument(),
+    );
+
+  it("saves the whitelist and moves on to the tab that was picked", async () => {
+    const { user, dialog, tab, name } = await open();
+    await user.click(tab("白名单"));
+    await user.click(await dialog.findByRole("checkbox", { name: "gpt-A" }));
+    await user.click(tab("端点"));
+    const confirm = await screen.findByRole("dialog", { name: "确认操作" });
+    expect(
+      within(confirm)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["", "取消", "放弃修改", "保存"]);
+    await choose("保存");
+    await waitFor(() =>
+      expect(tab("端点")).toHaveAttribute("aria-pressed", "true"),
+    );
+    expect(edits()).toEqual([
+      { op: "policyProvider", id: "primary", allowedModels: ["gpt-A"] },
+    ]);
+    expect(
+      screen.getByRole("dialog", { name: `编辑供应商 · ${name}` }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the next tab on the provider as the save left it", async () => {
+    const { user, dialog, tab, name } = await open((edit) => {
+      if (edit.op === "renameProvider")
+        state.providers[0].name = (edit as { name?: string }).name!;
+    });
+    await user.type(dialog.getByRole("textbox", { name: "名称" }), "草稿");
+    await user.click(tab("端点"));
+    await choose("保存");
+    const renamed = await screen.findByRole("dialog", {
+      name: `编辑供应商 · ${name}草稿`,
+    });
+    expect(
+      within(renamed).getByRole("button", { name: "端点" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(edits().map((edit) => edit.op)).toEqual([
+      "renameProvider",
+      "saveProvider",
+    ]);
+  });
+
+  it("stays on the tab when its form rejects the draft, and a later save still closes", async () => {
+    const { user, dialog, tab, name } = await open();
+    await user.click(tab("白名单"));
+    await dialog.findByRole("checkbox", { name: "gpt-A" });
+    await user.click(
+      within(dialog.getByRole("group", { name: "模型规则" })).getByRole(
+        "button",
+        { name: "白名单" },
+      ),
+    );
+    await user.click(tab("端点"));
+    await choose("保存");
+    expect(await dialog.findByRole("alert")).toHaveTextContent(
+      "白名单至少选择一个模型",
+    );
+    expect(tab("白名单")).toHaveAttribute("aria-pressed", "true");
+    expect(edits()).toEqual([]);
+    await user.click(dialog.getByRole("checkbox", { name: "gpt-A" }));
+    await user.click(dialog.getByRole("button", { name: "保存" }));
+    await closed(name);
+    expect(edits()).toHaveLength(1);
+  });
+
+  it("stays on the tab when the save fails, and the retry still closes", async () => {
+    let failing = true;
+    const { user, dialog, tab, name } = await open(() => {
+      if (failing) throw { code: "CONFLICT", message: "设置已变化" };
+    });
+    await user.click(tab("白名单"));
+    await user.click(await dialog.findByRole("checkbox", { name: "gpt-A" }));
+    await user.click(tab("端点"));
+    await choose("保存");
+    expect(await dialog.findByText("设置已变化")).toBeInTheDocument();
+    expect(tab("白名单")).toHaveAttribute("aria-pressed", "true");
+    failing = false;
+    await user.click(dialog.getByRole("button", { name: "重试" }));
+    await closed(name);
+  });
+});
+
 it("opens the model mapping tab for DSH model rules on request", async () => {
   localStorage.setItem("vela.main.client", "dsh");
   state.clientId = "dsh";

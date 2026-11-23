@@ -244,30 +244,27 @@ export default function DshConfigEditor({
             </select>
           </label>
           {choices.files.some((file) => file !== "profilePatch") && (
-            <details className="dsh-advanced-files">
-              <summary>高级文件</summary>
-              <label>
-                文件
-                <select
-                  aria-label="DSH 配置文件"
-                  value={key}
-                  disabled={busy || loading}
-                  onChange={(e) =>
-                    void switchFile(profile, e.target.value as DshFileKey)
-                  }
-                >
-                  {choices.files.map((file) => (
-                    <option
-                      key={file}
-                      value={file}
-                      disabled={file === "profilePatch" && !profile}
-                    >
-                      {names[file]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </details>
+            <label>
+              高级文件
+              <select
+                aria-label="DSH 配置文件"
+                value={key}
+                disabled={busy || loading}
+                onChange={(e) =>
+                  void switchFile(profile, e.target.value as DshFileKey)
+                }
+              >
+                {choices.files.map((file) => (
+                  <option
+                    key={file}
+                    value={file}
+                    disabled={file === "profilePatch" && !profile}
+                  >
+                    {names[file]}
+                  </option>
+                ))}
+              </select>
+            </label>
           )}
         </div>
         <span>

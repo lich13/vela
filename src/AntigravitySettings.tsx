@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { get, type Field, type Json } from "./claude-settings";
-import { JsonNode, Settings, jsonEditing } from "./ClaudeSettings";
+import { JsonRoot, Settings, jsonEditing } from "./ClaudeSettings";
 
 export const antigravityGroups = [
   "外观与交互",
@@ -179,9 +179,7 @@ export default function AntigravitySettings({
           flagUnknown
         />
         {group === "远程与插件" && <PluginsOverview text={text} />}
-        {group === "高级" && (
-          <JsonNode path={[]} value={value} editing={editing} />
-        )}
+        {group === "高级" && <JsonRoot value={value} editing={editing} />}
       </div>
     </div>
   );

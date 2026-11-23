@@ -56,3 +56,31 @@ it("高级里的 0/1 取值是开关并沿用原来的写法，数量键仍是�
     maxCount: 1,
   });
 });
+
+it("高级按顶层键分栏，嵌套对象直接展开，新建的对象自动选中", async () => {
+  const user = userEvent.setup();
+  const { container } = render(
+    <Host
+      initial={{ flat: "x", userSettings: { nested: { deep: { leaf: "v" } } } }}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: "高级" }));
+  const tabs = screen.getByRole("navigation", { name: "高级分栏" });
+  expect(screen.getByLabelText("flat")).toHaveValue("x");
+  expect(screen.queryByLabelText("userSettings.nested.deep.leaf")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "userSettings" }));
+  expect(screen.getByLabelText("userSettings.nested.deep.leaf")).toHaveValue(
+    "v",
+  );
+  expect(screen.queryByLabelText("flat")).toBeNull();
+  expect(container.querySelector("details")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "顶层字段" }));
+  await user.click(screen.getByRole("button", { name: "添加字段" }));
+  await user.type(screen.getByLabelText("字段名称"), "extra");
+  await user.selectOptions(screen.getByLabelText("字段类型"), "object");
+  await user.click(screen.getByRole("button", { name: "添加" }));
+  expect(JSON.parse(draft).extra).toEqual({});
+  expect(tabs).toContainElement(
+    screen.getByRole("button", { name: "extra", pressed: true }),
+  );
+});

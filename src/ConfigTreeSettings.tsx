@@ -7,6 +7,7 @@ import {
   Scalar,
   Setting,
   Settings,
+  SubTabs,
   sourceOnly,
   type Editing,
 } from "./ClaudeSettings";
@@ -288,19 +289,18 @@ function TreeNode({
       </Row>
     );
   if (item) return <Row path={path}>{sourceOnly}</Row>;
-  const last = path.at(-1);
   return (
-    <details className="json-node">
-      <summary>
-        <span>{last}</span>
+    <div className="json-node" role="group" aria-label={path.join(".")}>
+      <div className="json-node-title">
+        <span>{path.at(-1)}</span>
         <span className="node-count">
           {node.kind === "table" ? node.entries.length : node.items.length}
         </span>
-      </summary>
+      </div>
       <div className="json-children">
         <Children node={node} path={path} editing={editing} />
       </div>
-    </details>
+    </div>
   );
 }
 
@@ -309,10 +309,12 @@ function AddTable({
   spec,
   taken,
   editing,
+  onAdded,
 }: {
   spec: NamedTables;
   taken: string[];
   editing: Editing;
+  onAdded: (name: string) => void;
 }) {
   const [name, setName] = useState(""),
     [key, setKey] = useState(spec.first[0]),
@@ -331,6 +333,7 @@ function AddTable({
         e.preventDefault();
         if (!valid) return;
         editing.change([...spec.path, name.trim(), key], draft.trim());
+        onAdded(name.trim());
         setName("");
         setDraft("");
       }}
@@ -371,7 +374,60 @@ function AddTable({
   );
 }
 
-/** One card per named sub-table: the template fields, then whatever else it holds. */
+/** A named sub-table: the template fields, then whatever else it holds. */
+function Table({
+  spec,
+  name,
+  node,
+  editing,
+}: {
+  spec: NamedTables;
+  name: string;
+  node: Extract<ConfigTreeNode, { kind: "table" }>;
+  editing: Editing;
+}) {
+  const path = [...spec.path, name];
+  return (
+    <>
+      {spec.fields.map((field) => (
+        <Setting
+          key={field.path.join(".")}
+          field={{ ...field, path: [...path, ...field.path], section: name }}
+          editing={editing}
+        />
+      ))}
+      {spec.source.map(([label, key]) => (
+        <div className="setting-row" key={key}>
+          <label>
+            {label}
+            <small>{key}</small>
+          </label>
+          <div className="setting-value">
+            {node.entries.some(([k]) => k === key) ? (
+              secretRow
+            ) : (
+              <>
+                <span className="config-readonly">未设置</span>
+                {sourceOnly}
+              </>
+            )}
+          </div>
+        </div>
+      ))}
+      <Children
+        node={node}
+        path={path}
+        editing={editing}
+        hidden={[
+          ...spec.fields.map((f) => String(f.path[0])),
+          ...spec.source.map(([, key]) => key),
+        ]}
+      />
+    </>
+  );
+}
+
+/** One tab per named sub-table. */
 function Tables({
   spec,
   tree,
@@ -381,76 +437,94 @@ function Tables({
   tree: ConfigTreeNode;
   editing: Editing;
 }) {
+  const [picked, setPicked] = useState("");
   const holder = nodeAt(tree, spec.path);
   if (holder && holder.kind !== "table")
     return <Row path={spec.path}>{sourceOnly}</Row>;
   const entries = holder?.entries ?? [];
-  const known = [
-    ...spec.fields.map((f) => String(f.path[0])),
-    ...spec.source.map(([, key]) => key),
-  ];
+  const named = entries.flatMap(([name, node]) =>
+    node.kind === "table" ? [[name, node] as const] : [],
+  );
+  // A table that was just added, or was removed, is not among them.
+  const current = named.find(([name]) => name === picked) ?? named[0];
   return (
     <>
       {entries.length === 0 && <p className="muted">还没有{spec.label}</p>}
-      {entries.map(([name, node]) => {
-        const path = [...spec.path, name];
-        if (node.kind !== "table")
-          return (
-            <Row key={name} path={path}>
+      {current && (
+        <SubTabs
+          label={spec.label}
+          tabs={named.map(([name]) => name)}
+          shown={named.indexOf(current)}
+          onPick={(i) => setPicked(named[i][0])}
+        />
+      )}
+      {entries.map(
+        ([name, node]) =>
+          node.kind !== "table" && (
+            <Row key={name} path={[...spec.path, name]}>
               {node.kind === "secret" ? secretRow : sourceOnly}
             </Row>
-          );
-        return (
-          <details className="json-node" key={name}>
-            <summary>
-              <span>{name}</span>
-              <span className="node-count">{node.entries.length}</span>
-            </summary>
-            <div className="json-children">
-              {spec.fields.map((field) => (
-                <Setting
-                  key={field.path.join(".")}
-                  field={{
-                    ...field,
-                    path: [...path, ...field.path],
-                    section: name,
-                  }}
-                  editing={editing}
-                />
-              ))}
-              {spec.source.map(([label, key]) => (
-                <div className="setting-row" key={key}>
-                  <label>
-                    {label}
-                    <small>{key}</small>
-                  </label>
-                  <div className="setting-value">
-                    {node.entries.some(([k]) => k === key) ? (
-                      secretRow
-                    ) : (
-                      <>
-                        <span className="config-readonly">未设置</span>
-                        {sourceOnly}
-                      </>
-                    )}
-                  </div>
-                </div>
-              ))}
-              <Children
-                node={node}
-                path={path}
-                editing={editing}
-                hidden={known}
-              />
-            </div>
-          </details>
-        );
-      })}
+          ),
+      )}
+      {current && (
+        <Table
+          key={current[0]}
+          spec={spec}
+          name={current[0]}
+          node={current[1]}
+          editing={editing}
+        />
+      )}
       <AddTable
         spec={spec}
         taken={entries.map(([name]) => name)}
         editing={editing}
+        onAdded={setPicked}
       />
+    </>
+  );
+}
+
+/** The whole file: its plain keys in one tab, each table or list in its own. */
+function Everything({
+  tree,
+  editing,
+}: {
+  tree: Extract<ConfigTreeNode, { kind: "table" }>;
+  editing: Editing;
+}) {
+  const [picked, setPicked] = useState<string | null>(null);
+  const nested = tree.entries.flatMap(([key, node]) =>
+    node.kind === "table" || node.kind === "array"
+      ? [[key, node] as const]
+      : [],
+  );
+  const shown = nested.find(([key]) => key === picked);
+  return (
+    <>
+      {nested.length > 0 && (
+        <SubTabs
+          label={`${everything}分栏`}
+          tabs={["顶层字段", ...nested.map(([key]) => key)]}
+          shown={shown ? nested.indexOf(shown) + 1 : 0}
+          onPick={(i) => setPicked(i ? nested[i - 1][0] : null)}
+        />
+      )}
+      {shown ? (
+        <Children
+          key={shown[0]}
+          node={shown[1]}
+          path={[shown[0]]}
+          editing={editing}
+        />
+      ) : (
+        <Children
+          node={tree}
+          path={[]}
+          editing={editing}
+          hidden={nested.map(([key]) => key)}
+        />
+      )}
     </>
   );
 }
@@ -563,13 +637,16 @@ export default function ConfigTreeSettings({
           <Settings fields={fields[shown]} editing={editing} />
         ) : shown !== everything ? (
           <Tables
+            key={shown}
             spec={tables.find((spec) => spec.label === shown)!}
             tree={tree}
             editing={editing}
           />
         ) : tree.kind !== "table" && tree.kind !== "array" ? (
           <Row path={["配置"]}>{sourceOnly}</Row>
-        ) : tree.kind === "table" || tree.items.length ? (
+        ) : tree.kind === "table" ? (
+          <Everything tree={tree} editing={editing} />
+        ) : tree.items.length ? (
           <Children node={tree} path={[]} editing={editing} />
         ) : (
           <p className="muted">文件中还没有设置</p>
