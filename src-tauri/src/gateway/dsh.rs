@@ -1547,11 +1547,6 @@ fn import_selection(
             p.allowed_models = Some(mapping.allowed());
         }
     }
-    if store.providers.is_empty() {
-        return Err(error(
-            "未读取到可接入的 Chat Completions 供应商，请检查协议和凭据",
-        ));
-    }
     Ok(())
 }
 

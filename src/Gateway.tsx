@@ -421,12 +421,7 @@ function GatewayContent({
           </div>
           <button
             className={state.running ? "secondary" : "primary"}
-            disabled={
-              busy ||
-              (!state.running &&
-                !state.recoveryPending &&
-                !state.providers.length)
-            }
+            disabled={busy}
             onClick={toggle}
           >
             <Power size={15} />

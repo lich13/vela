@@ -102,13 +102,16 @@ fn incompatible_protocol_is_explained_and_ambiguous_mapping_is_left_empty() {
         .as_ref()
         .unwrap()
         .contains("Chat Completions"));
-    assert!(import_selection(
+    // A provider that cannot be taken in is left out; nothing else stops the import.
+    let mut store = Store::default();
+    import_selection(
         home.path(),
         &super::shared_profile_tests::options(),
-        &mut Store::default(),
-        43721
+        &mut store,
+        43721,
     )
-    .is_err());
+    .unwrap();
+    assert!(store.providers.is_empty());
     assert!(Store::default()
         .edit(
             Edit::SaveDshProvider {
@@ -188,7 +191,7 @@ impl Fixture {
             p.allowed_models = Some(mapping.allowed());
             store.dsh_models.insert(p.id.clone(), mapping);
         }
-        store.selected = Some(store.providers[0].id.clone());
+        store.selected = store.providers.first().map(|p| p.id.clone());
         store
             .persist(&data.join("gateway.json"), "missing")
             .unwrap();
@@ -230,6 +233,63 @@ impl Fixture {
 }
 fn success() -> Response<replay::WireBody> {
     Response::builder().header("content-type", "application/json").body(replay::full(br#"{"choices":[{"message":{"role":"assistant","content":"fixture"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#.to_vec())).unwrap()
+}
+
+#[tokio::test]
+async fn a_profile_attaches_with_no_provider_and_the_last_one_can_go_while_it_runs() {
+    let fixture = Fixture::new(&[], false).await;
+    let home = fixture.home.path();
+    let unanswerable = || async {
+        let response = fixture.request(models::FLASH, false).await;
+        assert_eq!(response.status(), 503);
+        assert!(response.text().await.unwrap().contains("没有可用供应商"));
+    };
+    let view = fixture.gateway.view();
+    assert!(view.running && view.providers.is_empty());
+    unanswerable().await;
+    fixture.gateway.stop_for_exit().await.unwrap();
+    fixture.gateway.resume(home).await.unwrap();
+    assert!(fixture.gateway.view().running);
+    fixture.gateway.stop().await.unwrap();
+    fixture
+        .gateway
+        .start(&fixture.gateway.view().revision, home)
+        .await
+        .unwrap();
+
+    let edit = |edit| {
+        fixture
+            .gateway
+            .edit(edit, &fixture.gateway.view().revision, home)
+            .unwrap()
+    };
+    let id = edit(Edit::SaveDshProvider {
+        endless_mode: None,
+        upstream_retry_seconds: None,
+        normal_retry_seconds: None,
+        risk_codes: None,
+        retry_intensity: None,
+        limit_retry_seconds: None,
+        limit_rest_seconds: None,
+        quota_access_token: None,
+        id: None,
+        name: None,
+        base_url: "https://example.invalid/v1".into(),
+        token: "fixture-upstream".into(),
+        protocol: Protocol::ChatCompletions,
+    })
+    .providers[0]
+        .id
+        .clone();
+    edit(Edit::Select { id: id.clone() });
+    let view = edit(Edit::DeleteProvider { id });
+    assert!(view.running && view.providers.is_empty() && view.selected.is_none());
+    edit(Edit::Mode {
+        mode: "auto".into(),
+    });
+    unanswerable().await;
+    fixture.gateway.stop().await.unwrap();
+    assert!(!fixture.gateway.view().running && fixture.gateway.view().error.is_none());
 }
 
 #[tokio::test]

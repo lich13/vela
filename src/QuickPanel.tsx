@@ -314,11 +314,7 @@ function QuickContent({
                   <button
                     className="icon-button"
                     aria-label={gateway?.running ? "停用网关" : "启用网关"}
-                    disabled={
-                      busy ||
-                      !gateway ||
-                      (!gateway.running && !gateway.providers.length)
-                    }
+                    disabled={busy || !gateway}
                     onClick={() =>
                       run(async () => {
                         if (!gateway) return;

@@ -151,16 +151,21 @@ fn insertion(
     );
     (at..at, out)
 }
+/// Leaves the two fields as `target` has them; one it lacks is taken out.
 pub fn patch(text: &str, target: &Pair) -> Result<String> {
     let (root, env, fields) = locations(text)?;
-    let values = [target.base_url.as_ref(), target.token.as_ref()];
-    if values.iter().any(|v| v.is_none()) {
-        return Err(invalid());
-    }
     let mut edits = Vec::new();
     let mut missing = Vec::new();
-    for (key, value) in KEYS.into_iter().zip(values) {
-        let encoded = serde_json::to_string(value.unwrap()).unwrap();
+    let mut absent = Vec::new();
+    for (key, value) in KEYS
+        .into_iter()
+        .zip([target.base_url.as_ref(), target.token.as_ref()])
+    {
+        let Some(value) = value else {
+            absent.push(key);
+            continue;
+        };
+        let encoded = serde_json::to_string(value).unwrap();
         if let Some(m) = unique(&fields, key)? {
             edits.push((m.span.clone(), encoded));
         } else {
@@ -191,6 +196,9 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
     let mut out = text.to_owned();
     for (range, value) in edits {
         out.replace_range(range, &value);
+    }
+    for key in absent {
+        out = patch_env_value(&out, key, None)?;
     }
     Ok(out)
 }

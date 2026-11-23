@@ -326,13 +326,22 @@ pub fn write(
         .base_url
         .as_deref()
         .ok_or_else(|| invalid("缺少供应商地址"))?;
-    let key = target
-        .token
-        .as_deref()
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| invalid("缺少 API Key"))?;
-    value["auth_mode"] = "apikey".into();
-    value["OPENAI_API_KEY"] = key.into();
+    match target.token.as_deref().filter(|k| !k.is_empty()) {
+        Some(key) => {
+            value["auth_mode"] = "apikey".into();
+            value["OPENAI_API_KEY"] = key.into();
+        }
+        // The connection being put back had no API key, so the mode that only
+        // a key gives a meaning goes with it.
+        None => {
+            if let Some(fields) = value.as_object_mut() {
+                fields.remove("OPENAI_API_KEY");
+                if fields.get("auth_mode").and_then(Value::as_str) == Some("apikey") {
+                    fields.remove("auth_mode");
+                }
+            }
+        }
+    }
     let config_after = patch_base(&config_before, id, url)?;
     let auth_after = serde_json::to_vec_pretty(&value).map_err(|_| invalid("无法生成 API 凭据"))?;
     let config = home.join("config.toml");

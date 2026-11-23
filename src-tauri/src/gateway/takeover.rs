@@ -565,27 +565,30 @@ fn grok_snapshot(
         .map(serde_json::from_str::<super::model::Store>)
         .transpose()
         .map_err(|_| AppError::new(code::STORE, "Grok 网关配置无效"))?;
-    let connection = store
-        .as_ref()
-        .and_then(|s| {
-            s.providers
-                .iter()
-                .find(|p| {
-                    provider_pair.is_some_and(|pair| {
-                        pair.base_url.as_deref() == Some(&p.base_url)
-                            && pair.token.as_deref() == Some(&p.token)
-                    })
+    let provider = store.as_ref().and_then(|s| {
+        s.providers
+            .iter()
+            .find(|p| {
+                provider_pair.is_some_and(|pair| {
+                    pair.base_url.as_deref() == Some(&p.base_url)
+                        && pair.token.as_deref() == Some(&p.token)
                 })
-                .or_else(|| {
-                    s.selected
-                        .as_ref()
-                        .and_then(|id| s.providers.iter().find(|p| &p.id == id))
-                })
-                .and_then(|p| s.grok_connections.get(&p.id))
-        })
-        .cloned()
-        .unwrap_or_default();
+            })
+            .or_else(|| {
+                s.selected
+                    .as_ref()
+                    .and_then(|id| s.providers.iter().find(|p| &p.id == id))
+            })
+            .map(|p| s.grok_connections.get(&p.id).cloned().unwrap_or_default())
+    });
     let text = super::grok_config::read(home)?.1;
+    // With no provider to speak for it, the model keeps the protocol it has.
+    let connection = provider.unwrap_or_else(|| super::grok_config::Connection {
+        protocol: super::grok_config::api_profile(&text)
+            .map(|p| p.connection.protocol)
+            .unwrap_or_default(),
+        ..Default::default()
+    });
     Ok(Some(
         if store.as_ref().is_some_and(|s| s.grok_api_model.is_some())
             && super::grok_config::api_profile(&text)
@@ -616,6 +619,39 @@ pub fn grok_unchanged(data: &Path, text: &str) -> Result<bool> {
 }
 pub fn exit_pair(data: &Path) -> Result<Option<Pair>> {
     Ok(load(data)?.map(|r| r.exit))
+}
+/// What stopping writes when no provider is left to write: the connection the
+/// takeover replaced. Codex cannot take a field out of its files again, so a
+/// field that was not there keeps the gateway's value, and an API key that was
+/// not there is removed so the local one is never taken for an account.
+pub fn unprovided(
+    client: ClientId,
+    connection: &Connection,
+    before: &Pair,
+    applied: &Pair,
+) -> Pair {
+    match (client, connection) {
+        (ClientId::Codex, Connection::ApiKey { .. }) => Pair {
+            base_url: before.base_url.clone().or_else(|| applied.base_url.clone()),
+            token: before.token.clone(),
+        },
+        (ClientId::Codex, Connection::Bearer)
+            if before.base_url.is_none() || before.token.is_none() =>
+        {
+            applied.clone()
+        }
+        _ => before.clone(),
+    }
+}
+/// The same for the takeover in progress.
+pub fn unprovided_exit(data: &Path) -> Result<Pair> {
+    let record = load(data)?.ok_or_else(|| AppError::new(code::RECOVERY, "缺少网关事务记录"))?;
+    Ok(unprovided(
+        record.client,
+        &record.connection,
+        &record.before,
+        &record.applied,
+    ))
 }
 #[allow(clippy::too_many_arguments)]
 pub fn commit_store_for(
