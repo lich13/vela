@@ -304,7 +304,7 @@ async fn a_silent_server_fails_the_handshake_after_fifteen_seconds() {
     assert_eq!(started.elapsed(), HANDSHAKE);
     for error in [first.unwrap_err(), second.unwrap_err()] {
         assert_eq!(error.code, SSH);
-        assert!(error.message.contains("15 秒内没有应答"), "{error}");
+        assert_eq!(error.message, format!("{HOST} 在 15 秒内没有应答"));
     }
     assert!(heard.all().is_empty());
     assert_eq!(far.next().await.unwrap().command, wire::CAPABILITIES);
@@ -503,7 +503,10 @@ async fn a_call_gives_up_after_a_minute_and_the_connection_stays() {
     assert_eq!(started.elapsed(), CALL);
     let error = answer.unwrap_err();
     assert_eq!(error.code, SSH);
-    assert!(error.message.contains("60 秒内没有应答"), "{error}");
+    assert_eq!(
+        error.message,
+        format!("{HOST} 在 60 秒内没有应答，操作可能仍在进行，请稍后刷新确认")
+    );
 
     let (answer, ()) = tokio::join!(channel.call("quick", json!({})), async {
         // The late answer has nobody waiting and is dropped.

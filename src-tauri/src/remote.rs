@@ -272,11 +272,13 @@ impl Link {
                 if let Waiting::Open(waiting) = &mut *self.waiting.lock() {
                     waiting.remove(&id);
                 }
-                Err(failure(&format!(
-                    "{} 在 {} 秒内没有应答，操作可能仍在进行，请稍后刷新确认",
-                    self.alias,
-                    limit.as_secs()
-                )))
+                let waited = format!("{} 在 {} 秒内没有应答", self.alias, limit.as_secs());
+                Err(failure(&if self.online.load(Ordering::SeqCst) {
+                    // The request was sent and may still be carried out.
+                    format!("{waited}，操作可能仍在进行，请稍后刷新确认")
+                } else {
+                    waited
+                }))
             }
         }
     }
