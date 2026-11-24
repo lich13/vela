@@ -380,64 +380,8 @@ function ProviderApiForm({
       if (sequence === revealSequence.current) setRevealing(false);
     }
   };
-  const initialDraft = useRef(
-    JSON.stringify([
-      name,
-      baseUrl,
-      token,
-      protocol,
-      quotaAccessToken,
-      endOnMessageStop,
-      filterCountTokens,
-      bufferCompleteResponse,
-      endlessMode,
-      upstreamRetrySeconds,
-      limitRetrySeconds,
-      limitRestSeconds,
-      normalRetrySeconds,
-      riskDraft,
-      retryIntensity,
-      takeCompaction,
-      compactionModel,
-      compactionEffort,
-      takeAuxiliary,
-      auxiliaryModel,
-      auxiliaryEffort,
-      takeWebSearch,
-      webSearchModel,
-      webSearchEffort,
-    ]),
-  );
-  useEffect(() => {
-    onDirtyChange?.(
-      JSON.stringify([
-        name,
-        baseUrl,
-        token,
-        protocol,
-        quotaAccessToken,
-        endOnMessageStop,
-        filterCountTokens,
-        bufferCompleteResponse,
-        endlessMode,
-        upstreamRetrySeconds,
-        limitRetrySeconds,
-        limitRestSeconds,
-        normalRetrySeconds,
-        riskDraft,
-        retryIntensity,
-        takeCompaction,
-        compactionModel,
-        compactionEffort,
-        takeAuxiliary,
-        auxiliaryModel,
-        auxiliaryEffort,
-        takeWebSearch,
-        webSearchModel,
-        webSearchEffort,
-      ]) !== initialDraft.current,
-    );
-  }, [
+  // The fields that make the form dirty, as one comparable string.
+  const snapshot = JSON.stringify([
     name,
     baseUrl,
     token,
@@ -462,8 +406,11 @@ function ProviderApiForm({
     takeWebSearch,
     webSearchModel,
     webSearchEffort,
-    onDirtyChange,
   ]);
+  const initialDraft = useRef(snapshot);
+  useEffect(() => {
+    onDirtyChange?.(snapshot !== initialDraft.current);
+  }, [snapshot, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   return (
     <form
@@ -1319,7 +1266,6 @@ export default function GatewayDialog({
         runtime &&
         (tab === "whitelist" || (tab === "modelMap" && clientId === "dsh")) && (
           <ProviderSettings
-            embedded
             provider={item}
             runtime={runtime}
             clientId={clientId}
@@ -1335,7 +1281,6 @@ export default function GatewayDialog({
         )}
       {item && tab === "modelMap" && clientId === "claude" && (
         <ClaudeModelMapping
-          embedded
           provider={item}
           revision={revision}
           close={finish}
@@ -1346,7 +1291,6 @@ export default function GatewayDialog({
       )}
       {item && runtime && tab === "endpoints" && (
         <ProviderEndpoints
-          embedded
           provider={item}
           runtime={runtime}
           clientId={clientId}

@@ -3,19 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Account, LoginState, ViewState } from "./types";
 
-const mocks = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (payload: unknown) => void>(),
-}));
-
-vi.mock("./bridge", () => ({
-  preview: false,
-  command: mocks.command,
-  subscribe: vi.fn(async (event: string, listener: (payload: unknown) => void) => {
-    mocks.listeners.set(event, listener);
-    return () => mocks.listeners.delete(event);
-  }),
-}));
+import { mock as mocks } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import App from "./App";
 

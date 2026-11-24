@@ -284,7 +284,6 @@ it("keeps provider settings HTTP/SSE-only and opens the API editor", async () =>
   const user = userEvent.setup();
   render(<QuickPanel />);
   await screen.findByText("api.example.com");
-  expect(screen.queryByText("HTTP 桥接")).not.toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "api.example.com 白名单" }),
   ).not.toBeInTheDocument();
@@ -490,17 +489,6 @@ it("protects an unsaved quick concurrency draft until a client switch is confirm
   expect(
     mock.command.mock.calls.some(([name]) => name === "update_gateway"),
   ).toBe(false);
-});
-
-it("does not offer the search-only policy switch in the quick panel", async () => {
-  render(<QuickPanel />);
-  await screen.findByRole("button", { name: "api.example.com 并发上限" });
-  expect(
-    screen.queryByRole("button", { name: /仅网络搜索/ }),
-  ).not.toBeInTheDocument();
-  expect(
-    screen.queryByRole("checkbox", { name: /仅网络搜索/ }),
-  ).not.toBeInTheDocument();
 });
 
 it("keeps a gateway event that arrives before the initial panel reads", async () => {

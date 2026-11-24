@@ -2,44 +2,32 @@ import { render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import Detail from "./UsageDetail";
 import type { Attempt, UsageRecord } from "./usage-types";
+import { usageAttempt, usageRecord } from "./test-fixtures";
 
 const startedAt = Date.UTC(2026, 9, 21, 2);
 
 function attempt(overrides: Partial<Attempt> = {}): Attempt {
-  return {
+  return usageAttempt({
     id: "fixture-v02513-detail-attempt",
-    provider: "fixture-provider",
     requestedModel: "fixture-model",
     responseModel: "fixture-model",
     pricingModel: "fixture-model",
     responseId: "fixture-response",
-    status: 200,
-    outcome: "success",
     startedAt,
     durationMs: 100,
     firstTokenMs: 10,
-    stream: true,
-    transport: "http",
     tokens: { input: 10, output: 2, cacheRead: null, cacheWrite: null },
-    serviceTier: null,
-    price: null,
     ...overrides,
-  };
+  });
 }
 
 function record(overrides: Partial<Attempt> = {}): UsageRecord {
-  return {
+  return usageRecord({
     id: "fixture-v02513-detail",
-    client: "codex",
-    source: "proxy",
     startedAt,
     finishedAt: startedAt + 100,
-    sessionId: null,
     attempts: [attempt(overrides)],
-    completed: true,
-    duplicateOf: null,
-    deduplication: "",
-  };
+  });
 }
 
 const knownOutcomes = [

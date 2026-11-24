@@ -3,28 +3,19 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { EventRecord } from "./EventLog";
 import { mock } from "./test-bridge";
+import { eventRecord } from "./test-fixtures";
 
 vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import EventLog from "./EventLog";
 
-const baseRecord: EventRecord = {
+const baseRecord = eventRecord({
   id: "fixture-v02512-event",
-  firstAt: 1_760_000_000,
   lastAt: 1_760_000_001,
-  count: 1,
-  clientId: "codex",
-  providerId: "provider-1",
-  model: "fixture-model",
   reason: "failover_exhausted",
   errorCode: "FAILOVER_EXHAUSTED",
-  action: "returned",
-  level: "error",
-  status: 502,
   origin: "gateway",
-  category: "ordinary_error",
-  attempt: 1,
-};
+});
 
 let eventRecords: EventRecord[];
 

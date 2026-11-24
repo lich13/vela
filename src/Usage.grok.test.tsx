@@ -11,13 +11,8 @@ import type {
 } from "./usage-types";
 import { detailValue, usageState } from "./test-fixtures";
 
-const mock = vi.hoisted(() => ({ command: vi.fn() }));
-
-vi.mock("./bridge", () => ({
-  preview: false,
-  command: mock.command,
-  subscribe: vi.fn(async () => () => {}),
-}));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import Usage from "./Usage";
 import Detail from "./UsageDetail";

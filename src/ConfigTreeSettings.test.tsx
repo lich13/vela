@@ -11,8 +11,8 @@ import { beforeEach, expect, it, vi } from "vitest";
 import type { Field } from "./claude-settings";
 import { codexTables, type NamedTables } from "./config-fields";
 import type { ConfigTreeNode } from "./config-tree";
-const mock = vi.hoisted(() => ({ command: vi.fn() }));
-vi.mock("./bridge", () => ({ command: mock.command }));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 import ConfigTreeSettings from "./ConfigTreeSettings";
 
 // Synthetic drafts: the fixture maps each draft text to the tree Rust would read.

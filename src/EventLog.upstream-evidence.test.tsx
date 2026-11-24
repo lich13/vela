@@ -2,29 +2,13 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { EventRecord } from "./EventLog";
-import { serveEvents } from "./test-fixtures";
+import { eventRecord, serveEvents } from "./test-fixtures";
 
 vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import EventLog from "./EventLog";
 
-const baseRecord: EventRecord = {
-  id: "fixture-event-v020",
-  firstAt: 1_760_000_000,
-  lastAt: 1_760_000_030,
-  count: 1,
-  clientId: "codex",
-  providerId: "provider-1",
-  model: "fixture-model",
-  reason: "upstream_service",
-  action: "returned",
-  level: "error",
-  status: 502,
-  origin: "upstream",
-  category: "ordinary_error",
-  errorCode: "UPSTREAM_SERVICE_ERROR",
-  attempt: 1,
-};
+const baseRecord = eventRecord({ id: "fixture-event-v020" });
 
 let eventRecords: EventRecord[];
 type CircuitReason = NonNullable<

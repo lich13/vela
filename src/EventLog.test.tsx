@@ -10,42 +10,25 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EventRecord } from "./EventLog";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
-  confirm: vi.fn(),
-}));
+import { mock } from "./test-bridge";
+import { eventRecord } from "./test-fixtures";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
-vi.mock("./bridge", () => ({
-  command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (value: unknown) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
-}));
 vi.mock("./confirmation", () => ({
   confirmAction: mock.confirm,
 }));
 
 import EventLog from "./EventLog";
 
-const record: EventRecord = {
+const record = eventRecord({
   id: "event-1",
-  firstAt: 1_760_000_000,
-  lastAt: 1_760_000_030,
   count: 2,
-  clientId: "codex",
-  providerId: "provider-1",
-  model: "fixture-model",
   reason: "model_unavailable",
   action: "trying_next",
   level: "warning",
   status: 404,
-  origin: "upstream",
-  category: "ordinary_error",
   errorCode: "MODEL_UNAVAILABLE",
-  attempt: 1,
-};
+});
 
 let eventRecords: EventRecord[];
 

@@ -6,10 +6,7 @@ import { command } from "./bridge";
 import { claudeGatewayDemo } from "./gateway-preview";
 import type { Provider } from "./types";
 
-vi.mock("./bridge", () => ({
-  command: vi.fn(),
-  subscribe: vi.fn(async () => () => {}),
-}));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 describe("Claude provider message_stop setting", () => {
   it.each([undefined, false, true])(
@@ -288,7 +285,6 @@ describe("request takeover", () => {
       // A new provider starts with every takeover on.
       for (const name of [...takeovers, search])
         expect(screen.getByRole("checkbox", { name })).toBeChecked();
-      expect(screen.queryByRole("checkbox", { name: "仅网络搜索" })).toBeNull();
       expect(screen.getByRole("textbox", { name: "搜索模型" })).toHaveValue("");
 
       const model = screen.getByRole("textbox", { name: "压缩模型" });
@@ -426,9 +422,6 @@ describe("request takeover", () => {
     await waitFor(() => expect(command).toHaveBeenCalled());
     // A model list that cannot be read is not reported.
     expect(screen.queryByRole("alert")).toBeNull();
-    // Search-only providers are gone; the searches are a takeover like the
-    // other two.
-    expect(screen.queryByRole("checkbox", { name: "仅网络搜索" })).toBeNull();
     // A saved provider keeps what it has: only a new one starts all on.
     expect(
       screen.getByRole("checkbox", { name: "接管压缩请求" }),

@@ -4,7 +4,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import UsageCostCalculator from "./UsageCostCalculator";
 import { command } from "./bridge";
 
-vi.mock("./bridge", () => ({ command: vi.fn() }));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 const result = {
   rates: ["8", "40", "0.2", "10", "16"],
   costs: ["0.000016", "0.06", "0.0032", "1.76", "3.862656"],

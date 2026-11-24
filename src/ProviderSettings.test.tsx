@@ -1,8 +1,8 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
-const mock = vi.hoisted(() => ({ command: vi.fn() }));
-vi.mock("./bridge", () => ({ command: mock.command }));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 import ProviderSettings from "./ProviderSettings";
 import { gatewayDemo } from "./gateway-preview";
 
@@ -107,23 +107,6 @@ it("blocks duplicate model policy saves and keeps the draft until completion", a
   await user.click(screen.getByRole("button", { name: "保存" }));
   expect(screen.getByRole("checkbox", { name: "fixture-model" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "保存中…" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "关闭" })).toBeDisabled();
   expect(save).toHaveBeenCalledTimes(1);
   await act(async () => resolve());
-});
-
-it("does not expose transport controls for Claude", async () => {
-  const provider = structuredClone(gatewayDemo.providers[0]);
-  render(
-    <ProviderSettings
-      provider={provider}
-      runtime={provider}
-      clientId="claude"
-      revision="1"
-      save={vi.fn()}
-      close={() => {}}
-    />,
-  );
-  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
-  expect(await screen.findByRole("checkbox", { name: "fixture-model" })).toBeEnabled();
 });

@@ -36,8 +36,10 @@ export default function QuickControls({
     );
     return events.dispose;
   }, []);
+  // A device without the control never gains it: one answer is enough.
+  const unsupported = state?.supported === false;
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || unsupported) return;
     let disposed = false;
     const refresh = async () => {
       if (lock.current) return;
@@ -57,7 +59,7 @@ export default function QuickControls({
       disposed = true;
       clearInterval(t);
     };
-  }, [visible]);
+  }, [visible, unsupported]);
   const toggle = async () => {
     if (!state || lock.current) return;
     lock.current = true;

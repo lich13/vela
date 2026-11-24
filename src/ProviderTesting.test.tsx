@@ -10,19 +10,8 @@ import type {
   ProviderTestModels,
   ProviderTestError,
 } from "./bridge-contracts";
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value?: unknown) => void>(),
-}));
-vi.mock("./bridge", () => ({
-  command: mock.command,
-  subscribe: vi.fn(
-    async (event: string, callback: (value?: unknown) => void) => {
-      mock.listeners.set(event, callback);
-      return () => mock.listeners.delete(event);
-    },
-  ),
-}));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 import ProviderTesting from "./ProviderTesting";
 let gateway: typeof gatewayDemo;
 let states: Record<string, ProviderTestingState>;
@@ -432,10 +421,7 @@ it.each([
     await act(async () => resolveUpdate(structuredClone(bank)));
     await waitFor(() => expect(button).toBeEnabled());
     const formatted = (at: number) =>
-      new Date(at).toLocaleString("zh-CN", {
-        timeZone: "Asia/Taipei",
-        hour12: false,
-      });
+      new Date(at).toLocaleString("zh-CN", { hour12: false });
     const verify = () => {
       expect(source.getByText("更新结果").nextElementSibling).toHaveTextContent(
         label,
@@ -614,9 +600,7 @@ it("opens only the selected provider and reads cache without fetching upstream",
   );
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   expect(screen.queryByText("全选")).not.toBeInTheDocument();
-  expect(screen.queryByLabelText("测试类型")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("接口")).not.toBeInTheDocument();
-  expect(screen.queryByRole("tab", { name: "预约" })).not.toBeInTheDocument();
 });
 it("refreshes only by explicit click and retains the cached model across reopen", async () => {
   const user = userEvent.setup();

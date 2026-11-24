@@ -2,12 +2,77 @@ import { within } from "@testing-library/react";
 import type { EventRecord } from "./EventLog";
 import { mock } from "./test-bridge";
 import type {
+  Attempt,
   Dashboard,
   UsageFilter,
   UsagePage,
   UsageRecord,
   UsageState,
 } from "./usage-types";
+
+/**
+ * A successful streamed gateway attempt without a price. Each test file passes
+ * the fields it reads.
+ */
+export function usageAttempt(overrides: Partial<Attempt> = {}): Attempt {
+  return {
+    id: "fixture-attempt",
+    provider: "fixture-provider",
+    requestedModel: "fixture-request",
+    responseModel: "fixture-response",
+    pricingModel: "fixture-priced",
+    responseId: null,
+    status: 200,
+    outcome: "success",
+    startedAt: Date.UTC(2026, 9, 8, 2),
+    durationMs: 5000,
+    firstTokenMs: 250,
+    stream: true,
+    transport: "http",
+    tokens: { input: 1000, output: 2000, cacheRead: 3000, cacheWrite: 4000 },
+    serviceTier: null,
+    price: null,
+    ...overrides,
+  };
+}
+
+/** A completed Codex gateway request holding one `usageAttempt`. */
+export function usageRecord(overrides: Partial<UsageRecord> = {}): UsageRecord {
+  return {
+    id: "fixture-request",
+    client: "codex",
+    source: "proxy",
+    startedAt: Date.UTC(2026, 9, 8, 2),
+    sessionId: null,
+    attempts: [usageAttempt()],
+    completed: true,
+    duplicateOf: null,
+    deduplication: "",
+    ...overrides,
+  };
+}
+
+/** A gateway event for an upstream error that was returned to the client. */
+export function eventRecord(overrides: Partial<EventRecord> = {}): EventRecord {
+  return {
+    id: "fixture-event",
+    firstAt: 1_760_000_000,
+    lastAt: 1_760_000_030,
+    count: 1,
+    clientId: "codex",
+    providerId: "provider-1",
+    model: "fixture-model",
+    reason: "upstream_service",
+    action: "returned",
+    level: "error",
+    status: 502,
+    origin: "upstream",
+    category: "ordinary_error",
+    errorCode: "UPSTREAM_SERVICE_ERROR",
+    attempt: 1,
+    ...overrides,
+  };
+}
 
 /** Usage settings with recording and automatic sync switched on. */
 export const usageState: UsageState = {

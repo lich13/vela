@@ -15,7 +15,13 @@ import {
 } from "./provider-status";
 import type { GatewayState } from "./types";
 import { mock } from "./test-bridge";
-import { detailValue, usageDashboard, usageState } from "./test-fixtures";
+import {
+  detailValue,
+  usageAttempt,
+  usageDashboard,
+  usageRecord,
+  usageState,
+} from "./test-fixtures";
 
 vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
@@ -26,46 +32,22 @@ const timestamp = Date.UTC(2026, 9, 8, 2);
 const providerId = "fixture-provider";
 
 function attempt(overrides: Partial<Attempt> = {}): Attempt {
-  return {
+  return usageAttempt({
     id: "fixture-v0259-attempt",
     provider: providerId,
-    requestedModel: "fixture-request",
-    responseModel: "fixture-response",
-    pricingModel: "fixture-priced",
-    responseId: null,
     pricingBasis: "response",
-    status: 200,
-    outcome: "success",
     startedAt: timestamp,
-    durationMs: 5_000,
-    firstTokenMs: 250,
-    stream: true,
-    transport: "http",
-    tokens: {
-      input: 1_000,
-      output: 2_000,
-      cacheRead: 3_000,
-      cacheWrite: 4_000,
-    },
-    serviceTier: null,
-    price: null,
     ...overrides,
-  };
+  });
 }
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
-  return {
+  return usageRecord({
     id: "fixture-v0259-request",
-    client: "codex",
-    source: "proxy",
     startedAt: timestamp,
-    sessionId: null,
     attempts: [attempt()],
-    completed: true,
-    duplicateOf: null,
-    deduplication: "",
     ...overrides,
-  };
+  });
 }
 
 const baseEvent: EventRecord = {

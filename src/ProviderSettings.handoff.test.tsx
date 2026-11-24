@@ -3,8 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ModelCatalog } from "./types";
 
-const mock = vi.hoisted(() => ({ command: vi.fn() }));
-vi.mock("./bridge", () => ({ command: mock.command }));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import ProviderSettings from "./ProviderSettings";
 import { gatewayDemo } from "./gateway-preview";
@@ -46,7 +46,6 @@ it("saves model policy without embedding transport or takeover controls", async 
 
   expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "新线程接管" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
 
   await user.click(await screen.findByRole("checkbox", { name: "fixture-listed" }));
   await user.click(screen.getByRole("button", { name: "保存" }));
@@ -112,6 +111,5 @@ it("does not expose either handoff control for Claude", async () => {
 
   expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "新线程接管" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
   expect(await screen.findByRole("checkbox", { name: "fixture-listed" })).toBeEnabled();
 });

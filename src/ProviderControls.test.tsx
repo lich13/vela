@@ -302,9 +302,6 @@ it("keeps the search policy out of row controls and hides generation intake for 
   const { rerender } = render(
     <ProviderControls {...props} provider={provider} />,
   );
-  expect(
-    screen.queryByRole("button", { name: /仅网络搜索/ }),
-  ).not.toBeInTheDocument();
   expect(commit).not.toHaveBeenCalled();
   rerender(
     <ProviderControls

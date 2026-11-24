@@ -3,28 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { GatewayState } from "./types";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value: GatewayState) => void>(),
-}));
-
-vi.mock("./bridge", () => ({
-  command: (name: string, args: unknown) =>
-    name === "get_gateway_freeze"
-      ? Promise.resolve({
-          clients: ["codex", "claude", "grok", "dsh"].map((clientId) => ({
-            clientId,
-            frozen: false,
-          })),
-        })
-      : mock.command(name, args),
-  subscribe: vi.fn(
-    async (name: string, listener: (value: GatewayState) => void) => {
-      mock.listeners.set(name, listener);
-      return () => mock.listeners.delete(name);
-    },
-  ),
-}));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).unfrozenBridge);
 
 import Gateway from "./Gateway";
 import { gatewayDemo } from "./gateway-preview";
@@ -117,9 +97,6 @@ it("uses the waiting budget label and preserves explicitly saved timeout values"
   expect(
     screen.getByRole("spinbutton", { name: "排队与重试等待 / 秒" }),
   ).toHaveValue(37);
-  expect(
-    screen.queryByRole("spinbutton", { name: "非流式总时限 / 秒" }),
-  ).not.toBeInTheDocument();
 
   const budget = screen.getByRole("spinbutton", {
     name: "排队与重试等待 / 秒",

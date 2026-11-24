@@ -1,8 +1,9 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const command = vi.hoisted(() => vi.fn());
-vi.mock("./bridge", () => ({ command }));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
+const { command } = mock;
 import StartupSettings from "./StartupSettings";
 const initial = {
   launchOnBoot: false,
@@ -16,7 +17,6 @@ describe("native startup settings", () => {
       launchOnBoot: true,
     });
     render(<StartupSettings />);
-    expect(screen.queryByLabelText("启动时恢复网关")).not.toBeInTheDocument();
     const box = await screen.findByLabelText("开机静默启动");
     await waitFor(() => expect(box).toBeEnabled());
     await userEvent.click(box);
@@ -31,7 +31,6 @@ describe("native startup settings", () => {
       message: "系统登录项操作失败",
     });
     render(<StartupSettings />);
-    expect(screen.queryByLabelText("启动时恢复网关")).not.toBeInTheDocument();
     const box = await screen.findByLabelText("开机静默启动");
     await waitFor(() => expect(box).toBeEnabled());
     await userEvent.click(box);

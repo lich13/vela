@@ -9,17 +9,8 @@ import {
 import userEvent from "@testing-library/user-event";
 import { beforeEach, it, expect, vi } from "vitest";
 import type { ConfigDocument } from "./types";
-const mocks = vi.hoisted(() => ({
-  command: vi.fn(),
-  events: new Map<string, (p: unknown) => void>(),
-}));
-vi.mock("./bridge", () => ({
-  command: mocks.command,
-  subscribe: vi.fn(async (event, fn) => {
-    mocks.events.set(event, fn);
-    return () => mocks.events.delete(event);
-  }),
-}));
+import { mock as mocks } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 vi.mock("@uiw/react-codemirror", () => ({
   default: ({
     value,
@@ -59,7 +50,7 @@ let doc: ConfigDocument;
 beforeEach(() => {
   localStorage.clear();
   localStorage.setItem("vela.config.client", "claude");
-  mocks.events.clear();
+  mocks.listeners.clear();
   mocks.command.mockReset();
   doc = {
     clientId: "claude",
@@ -137,7 +128,7 @@ it("keeps invalid source, and protects drafts from other-client and external eve
   expect(source).toHaveValue('{"env":');
   expect(screen.getByRole("alert")).toBeInTheDocument();
   await act(async () =>
-    mocks.events.get("config-state")?.({
+    mocks.listeners.get("config-state")?.({
       clientId: "codex",
       revision: "new",
       guarded: true,
@@ -145,7 +136,7 @@ it("keeps invalid source, and protects drafts from other-client and external eve
   );
   expect(source).toHaveValue('{"env":');
   await act(async () =>
-    mocks.events.get("config-state")?.({
+    mocks.listeners.get("config-state")?.({
       clientId: "claude",
       revision: "new",
       guarded: true,
@@ -353,7 +344,7 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
 
   // External config-state event for antigravity marks conflict without losing draft.
   await act(async () =>
-    mocks.events.get("config-state")?.({
+    mocks.listeners.get("config-state")?.({
       clientId: "antigravity",
       revision: "external-r2",
       guarded: false,

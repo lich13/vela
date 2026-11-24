@@ -3,22 +3,17 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { EventRecord } from "./EventLog";
 import { mock } from "./test-bridge";
-import { serveEvents } from "./test-fixtures";
+import { eventRecord, serveEvents } from "./test-fixtures";
 
 vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import EventLog from "./EventLog";
 
-const baseRecord: EventRecord = {
+const baseRecord = eventRecord({
   // v0.25.10 persisted expected-close status records remain readable after
   // v0.25.11 stops creating new records for those transport outcomes.
   id: "fixture-v02510-legacy-delivery",
-  firstAt: 1_760_000_000,
   lastAt: 1_760_000_001,
-  count: 1,
-  clientId: "codex",
-  providerId: "provider-1",
-  model: "fixture-model",
   reason: "request_interrupted",
   errorCode: "REQUEST_INTERRUPTED",
   action: "not_retried",
@@ -42,7 +37,7 @@ const baseRecord: EventRecord = {
       responseHash: null,
     },
   },
-};
+});
 
 let eventRecords: EventRecord[];
 let rawResponse: {

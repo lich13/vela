@@ -9,18 +9,8 @@ import {
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import type { ViewState, ConfigDocument } from "./types";
-const mocks = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (p: unknown) => void>(),
-}));
-vi.mock("./bridge", () => ({
-  preview: false,
-  command: mocks.command,
-  subscribe: vi.fn(async (event: string, fn: (p: unknown) => void) => {
-    mocks.listeners.set(event, fn);
-    return () => mocks.listeners.delete(event);
-  }),
-}));
+import { mock as mocks } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 vi.mock("@uiw/react-codemirror", () => ({
   default: ({
     value,

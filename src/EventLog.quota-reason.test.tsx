@@ -2,29 +2,20 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { EventRecord } from "./EventLog";
-import { serveEvents } from "./test-fixtures";
+import { eventRecord, serveEvents } from "./test-fixtures";
 
 vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import EventLog from "./EventLog";
 
-const baseRecord: EventRecord = {
+const baseRecord = eventRecord({
   id: "fixture-event-v0257",
-  firstAt: 1_760_000_000,
-  lastAt: 1_760_000_030,
-  count: 1,
-  clientId: "codex",
-  providerId: "provider-1",
-  model: "fixture-model",
   reason: "rate_limit",
   action: "retrying_same",
   level: "warning",
   status: 429,
-  origin: "upstream",
-  category: "ordinary_error",
   errorCode: "RATE_LIMITED",
-  attempt: 1,
-};
+});
 
 let eventRecords: EventRecord[];
 

@@ -11,7 +11,6 @@ import { command } from "./bridge";
 import type { GatewayEdit } from "./bridge-contracts";
 import { confirmAction } from "./confirmation";
 import type { EditRevision } from "./gateway-edit";
-import Modal from "./Modal";
 import { errorOf, type Provider } from "./types";
 
 const MANUAL = "__manual_model__";
@@ -78,7 +77,6 @@ export default function ClaudeModelMapping({
   save,
   close,
   onDirtyChange,
-  embedded = false,
   onBusyChange,
 }: {
   provider: Provider;
@@ -86,8 +84,6 @@ export default function ClaudeModelMapping({
   save: (edit: GatewayEdit, revision: EditRevision) => Promise<void>;
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
-  /** Renders the form alone, for a dialog that hosts it as one of its tabs. */
-  embedded?: boolean;
   onBusyChange?: (busy: boolean) => void;
 }) {
   const [families, setFamilies] = useState(
@@ -195,7 +191,7 @@ export default function ClaudeModelMapping({
         {model}
       </option>
     ));
-  const form = (
+  return (
     <form
       className="gateway-form model-mapping"
       onSubmit={(e) => {
@@ -436,17 +432,5 @@ export default function ClaudeModelMapping({
         </button>
       </footer>
     </form>
-  );
-  return embedded ? (
-    form
-  ) : (
-    <Modal
-      title={`${provider.name} 模型映射`}
-      close={() => void leave()}
-      busy={busy}
-      className="provider-dialog"
-    >
-      {form}
-    </Modal>
   );
 }

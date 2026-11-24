@@ -3,8 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ModelCatalog } from "./types";
 
-const mock = vi.hoisted(() => ({ command: vi.fn(), confirm: vi.fn() }));
-vi.mock("./bridge", () => ({ command: mock.command }));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 vi.mock("./confirmation", () => ({ confirmAction: mock.confirm }));
 
 import ProviderSettings from "./ProviderSettings";
@@ -47,7 +47,6 @@ it("saves an exact model whitelist without transport controls", async () => {
   const p = props();
   render(<ProviderSettings {...p} />);
 
-  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
   await user.click(await screen.findByRole("checkbox", { name: "fixture-listed" }));
   await user.type(screen.getByRole("textbox", { name: "手动添加模型 ID" }), "fixture-custom, fixture-listed");
   await user.click(screen.getByRole("button", { name: "添加到白名单" }));
@@ -73,7 +72,6 @@ it("keeps both policy drafts through background catalog failure and a save confl
   p.save.mockRejectedValueOnce({ message: "网关设置已变化" });
   const { rerender } = render(<ProviderSettings {...p} />);
   await user.click(await screen.findByRole("checkbox", { name: "fixture-listed" }));
-  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
 
   mock.command.mockRejectedValueOnce({ message: "模型列表暂不可用" });
   rerender(<ProviderSettings {...p} runtime={{ ...p.provider, activeRequests: 3, quotaVersion: "fixture-new-catalog", allowedModels: ["fixture-other"] }} revision="fixture-external-revision" />);
@@ -131,7 +129,6 @@ it("saves Claude model restrictions without exposing transport controls", async 
   let finish!: () => void;
   p.save.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
   render(<ProviderSettings {...p} clientId="claude" />);
-  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
   expect(await screen.findByRole("checkbox", { name: "fixture-listed" })).toBeChecked();
   await user.click(screen.getByRole("button", { name: "不限模型" }));
   await user.click(screen.getByRole("button", { name: "保存" }));

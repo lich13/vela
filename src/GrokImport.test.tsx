@@ -4,8 +4,8 @@ import { useState } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { GrokImportPreview } from "./bridge-contracts";
 
-const mock = vi.hoisted(() => ({ command: vi.fn() }));
-vi.mock("./bridge", () => ({ command: mock.command }));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import GrokImport from "./GrokImport";
 import { grokGatewayDemo } from "./gateway-preview";
