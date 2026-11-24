@@ -1,6 +1,7 @@
 //! HTTP/SSE regressions for cross-model side requests preserving a thread owner.
 //! All providers, request bodies, responses, and thread identifiers are fixtures.
 use super::*;
+use crate::gateway::test_support::settled;
 use bytes::Bytes;
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{
@@ -97,27 +98,6 @@ async fn v0255_setup_ports(ports: &[u16]) -> (tempfile::TempDir, Gateway, Vec<St
 
 async fn v0255_setup(main_port: u16, side_port: u16) -> (tempfile::TempDir, Gateway, Vec<String>) {
     v0255_setup_ports(&[main_port, side_port]).await
-}
-
-async fn v0255_wait_until(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !condition() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("fixture gateway state did not settle");
-}
-
-async fn v0255_wait_for_no_active_requests(gateway: &Gateway) {
-    v0255_wait_until(|| {
-        gateway
-            .view()
-            .providers
-            .iter()
-            .all(|provider| provider.active_requests == 0)
-    })
-    .await;
 }
 
 fn v0255_usage_rows(usage: &crate::usage::Service) -> Vec<crate::usage::model::Record> {
@@ -349,7 +329,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         Bytes::from_static(V0255_MAIN_RESPONSE),
         "the next main SSE bytes must pass through unchanged"
     );
-    v0255_wait_for_no_active_requests(&gateway).await;
+    settled(&gateway).await;
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
         Some(ids[0].clone())
@@ -465,7 +445,7 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
         Bytes::from_static(V0255_FAILURE_RESPONSE),
         "the failed side response bytes must pass through unchanged"
     );
-    v0255_wait_for_no_active_requests(&gateway).await;
+    settled(&gateway).await;
     assert_eq!(retry_attempts.load(Ordering::SeqCst), 1);
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
@@ -479,7 +459,7 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
         Bytes::from_static(V0255_SIDE_RESPONSE),
         "a later retry must preserve the successful side SSE bytes"
     );
-    v0255_wait_for_no_active_requests(&gateway).await;
+    settled(&gateway).await;
     assert_eq!(retry_attempts.load(Ordering::SeqCst), 2);
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
@@ -512,7 +492,7 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
     tokio::time::timeout(Duration::from_secs(5), upstream_cancelled)
         .await
         .expect("HTTP cancellation did not drop the held upstream body");
-    v0255_wait_for_no_active_requests(&gateway).await;
+    settled(&gateway).await;
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
         Some(ids[0].clone())
@@ -599,7 +579,7 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
         Bytes::from_static(V0255_SIDE_RESPONSE),
         "the fallback provider response bytes must pass through unchanged"
     );
-    v0255_wait_for_no_active_requests(&gateway).await;
+    settled(&gateway).await;
 
     let rows = v0255_wait_for_usage(&usage, 2).await;
     let record = rows
