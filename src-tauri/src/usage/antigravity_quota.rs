@@ -167,6 +167,7 @@ pub(in crate::usage) struct AccountAccumulator {
     account: Account,
     periods: Periods,
     windows: BTreeMap<&'static str, WindowAcc>,
+    now: i64,
 }
 impl AccountAccumulator {
     pub(in crate::usage) fn new(account: Account, mut periods: Periods, now: i64) -> Self {
@@ -175,6 +176,7 @@ impl AccountAccumulator {
             account,
             periods,
             windows: BTreeMap::new(),
+            now,
         }
     }
     pub(in crate::usage) fn earliest(&self) -> Option<i64> {
@@ -208,13 +210,12 @@ impl AccountAccumulator {
             ("gemini", "Gemini", "gemini-5h", "gemini-weekly"),
             ("claude_gpt", "Claude / GPT", "3p-5h", "3p-weekly"),
         ] {
-            let mut window = |key: &str, hours: f64| {
-                let mut w = self
-                    .windows
-                    .remove(key)
-                    .unwrap_or_default()
-                    .into_view(hours);
+            let mut window = |key: &str| {
+                let spent = self.windows.remove(key).unwrap_or_default();
                 let period = self.periods.remove(key);
+                let hourly = cost_per_hour(spent.cost, period.as_ref(), self.now);
+                let mut w = spent.into_view();
+                w.cost_per_hour = hourly;
                 w.remaining_percent = period.as_ref().and_then(|p| p.remaining_percent);
                 w.period = period;
                 w
@@ -222,17 +223,32 @@ impl AccountAccumulator {
             tracks.push(AntigravityQuotaTrack {
                 id: id.into(),
                 label: label.into(),
-                burst_5h: window(burst, 5.0),
-                weekly_7d: window(weekly, 168.0),
+                burst_5h: window(burst),
+                weekly_7d: window(weekly),
             });
         }
         AccountUsage {
             id: self.account.id,
             name: self.account.name,
             tracks,
-            total: WindowAcc::default().into_view(0.0),
+            total: WindowAcc::default().into_view(),
         }
     }
+}
+/// Spend of the period so far for each hour since it began. The first minute
+/// counts as a whole one, so a period that has just begun shows no runaway
+/// rate.
+fn cost_per_hour(cost: rust_decimal::Decimal, period: Option<&Period>, now: i64) -> String {
+    use rust_decimal::{Decimal, RoundingStrategy};
+    let Some(period) = period else {
+        return "0".into();
+    };
+    let elapsed = now
+        .saturating_sub(period.start)
+        .min(period.end.saturating_sub(period.start))
+        .max(60_000);
+    let hours = Decimal::from(elapsed) / Decimal::from(3_600_000);
+    super::fmt_usd((cost / hours).round_dp_with_strategy(4, RoundingStrategy::MidpointAwayFromZero))
 }
 
 #[cfg(test)]

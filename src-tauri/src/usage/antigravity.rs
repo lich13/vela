@@ -2375,7 +2375,8 @@ pub struct AntigravityTrackWindow {
     pub reasoning_tokens: u64,
     pub cost_usd: String,
     pub unpriced_requests: u64,
-    pub tokens_per_hour: f64,
+    /// Spend of the period so far for each hour since it began, in USD.
+    pub cost_per_hour: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -2499,7 +2500,7 @@ struct WindowAcc {
 }
 
 impl WindowAcc {
-    fn into_view(self, hours: f64) -> AntigravityTrackWindow {
+    fn into_view(self) -> AntigravityTrackWindow {
         AntigravityTrackWindow {
             period: None,
             remaining_percent: None,
@@ -2508,11 +2509,7 @@ impl WindowAcc {
             reasoning_tokens: self.reasoning_tokens,
             cost_usd: fmt_usd(self.cost),
             unpriced_requests: self.unpriced_requests,
-            tokens_per_hour: if hours > 0.0 {
-                ((self.tokens as f64 / hours) * 10.0).round() / 10.0
-            } else {
-                0.0
-            },
+            cost_per_hour: "0".into(),
         }
     }
 }

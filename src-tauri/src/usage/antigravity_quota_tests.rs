@@ -174,6 +174,47 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
     }
 }
 
+#[test]
+fn hourly_cost_is_the_period_spend_over_the_time_since_it_began() {
+    let periods = parse(&summary());
+    let start = periods["gemini-5h"].start;
+    let usage_at = |now: i64| {
+        let account = Account {
+            id: "a".into(),
+            name: "Fixture".into(),
+        };
+        let mut acc = AccountAccumulator::new(account, periods.clone(), now);
+        let spent = WindowAcc {
+            requests: 1,
+            cost: rust_decimal::Decimal::from(3),
+            ..WindowAcc::default()
+        };
+        acc.ingest(start, Some("gemini"), &spent);
+        acc.finish()
+    };
+    let two_hours_in = usage_at(start + 2 * 3_600_000);
+    let gemini = &two_hours_in.tracks[0];
+    assert_eq!(gemini.burst_5h.cost_usd, "3");
+    assert_eq!(gemini.burst_5h.cost_per_hour, "1.5");
+    // The weekly period began six days before the five-hour one: 3 / 146.
+    assert_eq!(gemini.weekly_7d.cost_per_hour, "0.0205");
+    // A period without spend, and the account as a whole.
+    assert_eq!(two_hours_in.tracks[1].burst_5h.cost_per_hour, "0");
+    assert_eq!(two_hours_in.total.cost_per_hour, "0");
+    assert_eq!(
+        serde_json::to_value(&gemini.burst_5h).unwrap()["costPerHour"],
+        "1.5"
+    );
+
+    // The first minute counts as a whole one.
+    assert_eq!(usage_at(start + 1).tracks[0].burst_5h.cost_per_hour, "180");
+
+    // Past its reset a period is not shown, and neither is a rate.
+    let later = usage_at(periods["gemini-5h"].end);
+    assert!(later.tracks[0].burst_5h.period.is_none());
+    assert_eq!(later.tracks[0].burst_5h.cost_per_hour, "0");
+}
+
 #[tokio::test]
 async fn quota_requires_the_app_identity_to_match_the_selected_account() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
