@@ -426,13 +426,13 @@ struct Learned {
     models: BTreeMap<String, LearnedModel>,
 }
 impl Learned {
-    fn load(store: &impl Repository) -> Self {
-        store
-            .antigravity_models()
-            .ok()
-            .flatten()
+    /// The stored list. One that no longer parses reads as none and is
+    /// learned again; a store that cannot be read is a failure of the sync.
+    fn load(store: &impl Repository) -> Result<Self> {
+        Ok(store
+            .antigravity_models()?
             .and_then(|saved| serde_json::from_str(&saved).ok())
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
     /// Adds one `GetAvailableModels` reply. False when it carries no list.
     fn merge(&mut self, reply: &Value, at: i64) -> bool {
@@ -1407,7 +1407,7 @@ impl Api {
     /// Loads the stored model list and asks the app for a newer one when it
     /// is missing or a day old.
     async fn load_models(&self, store: &mut impl Repository) -> Result<()> {
-        let learned = Learned::load(store);
+        let learned = Learned::load(store)?;
         let stale = !(0..86_400_000).contains(&now().saturating_sub(learned.fetched_at));
         *self.models.lock() = (learned, false);
         if stale {
@@ -1966,7 +1966,7 @@ pub(super) fn scan_file_list(
             crate::antigravity::auth::provider_timeline(d, brain.parent().and_then(Path::parent))
         })
         .unwrap_or_default();
-    let learned = Learned::load(store);
+    let learned = Learned::load(store)?;
     for path in files {
         if let Err(error) = scan_file(
             store, brain, path, pricing, settings, report, repair, &timeline, &learned,

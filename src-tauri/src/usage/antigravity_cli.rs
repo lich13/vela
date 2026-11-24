@@ -724,7 +724,13 @@ pub(super) fn scan(
         .data_dir()
         .map(|data| crate::antigravity::auth::provider_timeline(data, Some(home)))
         .unwrap_or_default();
-    let learned = Learned::load(store);
+    let learned = match Learned::load(store) {
+        Ok(learned) => learned,
+        Err(error) => {
+            report.failed(&error);
+            return;
+        }
+    };
     report.total_files += sessions.len() as u64;
     for (cascade, path) in &sessions {
         let database =
