@@ -920,19 +920,23 @@ async fn fetch(
         if !cursors.insert(cursor.to_owned()) || cursors.len() > 100 {
             return Err(fail("模型分页重复或超出上限"));
         }
-        let pairs: Vec<_> = url
-            .query_pairs()
-            .filter(|(key, _)| key != after)
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect();
-        url.query_pairs_mut()
-            .clear()
-            .extend_pairs(pairs)
-            .append_pair(after, cursor);
+        next_page(&mut url, after, cursor);
     }
     models.sort();
     models.dedup();
     Ok(models)
+}
+/// Points `url` at the page after `cursor`, in place of any `after` it had.
+pub(crate) fn next_page(url: &mut url::Url, after: &str, cursor: &str) {
+    let pairs: Vec<_> = url
+        .query_pairs()
+        .filter(|(key, _)| key != after)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(pairs)
+        .append_pair(after, cursor);
 }
 
 #[cfg(test)]

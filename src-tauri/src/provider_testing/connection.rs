@@ -263,15 +263,7 @@ impl Service {
                 if !cursors.insert(cursor.to_owned()) {
                     return Err(failure("模型目录分页重复"));
                 }
-                let pairs: Vec<_> = url
-                    .query_pairs()
-                    .filter(|(key, _)| key != after)
-                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                    .collect();
-                url.query_pairs_mut()
-                    .clear()
-                    .extend_pairs(pairs)
-                    .append_pair(after, cursor);
+                crate::gateway::catalog::next_page(&mut url, after, cursor);
             }
             models.sort_by(|a, b| a.id.cmp(&b.id));
             models.dedup_by(|a, b| a.id == b.id);

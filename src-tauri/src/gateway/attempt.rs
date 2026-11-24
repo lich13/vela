@@ -1,15 +1,14 @@
 //! Attempt policy and delivery settlement shared by the transports. HTTP body
 //! error frames and native WebSocket close frames keep their own wire encoding.
 //! Protocol::finish remains the single usage/terminal finalizer.
-use super::{
-    protocol::{Delivery, DownstreamError, Protocol},
-    replay_policy,
-};
+use super::protocol::{Delivery, DownstreamError, Protocol};
 use crate::errors::code;
 use std::sync::Arc;
 
+/// Transport failures are replayable only before any response data arrives.
+/// Explicit, fully parsed first-event rejections have a separate eligibility path.
 pub(super) fn transport_retry(received: bool, eligible: bool, failure: &str) -> bool {
-    replay_policy::transport_retry(received, eligible) && failure != code::FIRST_BYTE_TIMEOUT
+    eligible && !received && failure != code::FIRST_BYTE_TIMEOUT
 }
 
 /// The current queue order without hard-denied provider versions, and the

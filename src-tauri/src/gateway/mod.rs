@@ -7,7 +7,7 @@ pub mod vertex;
 use crate::errors::code;
 #[cfg(test)]
 mod api_login_tests;
-mod claude_config;
+pub(crate) mod claude_config;
 mod codex_api;
 mod codex_catalog;
 mod codex_official;
@@ -100,7 +100,6 @@ mod quota_wait;
 mod replay;
 #[cfg(test)]
 mod replay_boundary_tests;
-mod replay_policy;
 mod routing;
 mod routing_log;
 mod rpm;

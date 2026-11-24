@@ -594,21 +594,12 @@ impl Snapshot {
         }
         let expected = pair(&self.applied)?;
         let current = pair(text)?;
-        let (Some(base), Some(token)) = (&expected.base_url, &expected.token) else {
-            return Ok(false);
-        };
-        let Some(port) = url::Url::parse(base)
-            .ok()
-            .and_then(|url| url.port_or_known_default())
-        else {
-            return Ok(false);
-        };
-        let ports = [port, super::client::DEFAULT_SHARED_PORT];
-        if !expected.is_gateway(super::ClientId::Grok, token, &ports)
-            || !current.is_gateway(super::ClientId::Grok, token, &ports)
-        {
+        if !super::takeover::gateway_alias(super::ClientId::Grok, &expected, &current) {
             return Ok(false);
         }
+        let Some(base) = expected.base_url else {
+            return Ok(false);
+        };
         let mut doc = parse(text)?;
         let Some(field) = doc
             .get_mut("model")
@@ -618,7 +609,7 @@ impl Snapshot {
         else {
             return Ok(false);
         };
-        let mut canonical = toml_edit::Value::from(base.clone());
+        let mut canonical = toml_edit::Value::from(base);
         *canonical.decor_mut() = field.decor().clone();
         *field = canonical;
         self.unchanged(&doc.to_string())

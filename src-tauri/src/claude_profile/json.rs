@@ -1,73 +1,19 @@
 //! Top-level field edits preserve every unrelated byte, including CRLF/indent.
 use crate::errors::code;
+use crate::gateway::claude_config::{object, removal, Member};
 use crate::storage::{AppError, Result};
 use serde::de::IgnoredAny;
-use std::ops::Range;
-#[derive(Clone)]
-struct Member {
-    key: String,
-    key_start: usize,
-    value: Range<usize>,
-}
 fn invalid() -> AppError {
     AppError::new(code::CLAUDE_PROFILE, "Claude 配置结构无效")
 }
-fn whitespace(text: &str, at: &mut usize) {
-    while text
-        .as_bytes()
-        .get(*at)
-        .is_some_and(u8::is_ascii_whitespace)
-    {
-        *at += 1;
-    }
-}
-fn one<T: serde::de::DeserializeOwned>(text: &str, at: &mut usize) -> Result<T> {
-    let mut stream = serde_json::Deserializer::from_str(&text[*at..]).into_iter::<T>();
-    let value = stream.next().ok_or_else(invalid)?.map_err(|_| invalid())?;
-    *at += stream.byte_offset();
-    Ok(value)
-}
 fn members(text: &str) -> Result<Vec<Member>> {
-    let trimmed = text.trim_start();
-    if !trimmed.starts_with('{') {
-        return Err(invalid());
-    }
-    let mut at = text.len() - trimmed.len() + 1;
-    let mut out = Vec::new();
-    loop {
-        whitespace(text, &mut at);
-        if text.as_bytes().get(at) == Some(&b'}') {
-            break;
-        }
-        let key_start = at;
-        let key: String = one(text, &mut at)?;
-        whitespace(text, &mut at);
-        if text.as_bytes().get(at) != Some(&b':') {
-            return Err(invalid());
-        }
-        at += 1;
-        whitespace(text, &mut at);
-        let start = at;
-        let _: IgnoredAny = one(text, &mut at)?;
-        out.push(Member {
-            key,
-            key_start,
-            value: start..at,
-        });
-        whitespace(text, &mut at);
-        if text.as_bytes().get(at) == Some(&b',') {
-            at += 1;
-        } else if text.as_bytes().get(at) != Some(&b'}') {
-            return Err(invalid());
-        }
-    }
-    Ok(out)
+    object(text, text.len() - text.trim_start().len(), invalid)
 }
 pub fn field(text: &str, key: &str) -> Result<Option<String>> {
     Ok(members(text)?
         .iter()
         .find(|m| m.key == key)
-        .map(|m| text[m.value.clone()].to_owned()))
+        .map(|m| text[m.span.clone()].to_owned()))
 }
 pub fn set(text: &str, key: &str, value: Option<&str>) -> Result<String> {
     let fields = members(text)?;
@@ -76,23 +22,15 @@ pub fn set(text: &str, key: &str, value: Option<&str>) -> Result<String> {
     }
     let mut out = text.to_owned();
     if let Some(i) = fields.iter().position(|m| m.key == key) {
-        let m = &fields[i];
         if let Some(value) = value {
-            out.replace_range(m.value.clone(), value);
+            out.replace_range(fields[i].span.clone(), value);
         } else {
-            let range = if let Some(next) = fields.get(i + 1) {
-                m.key_start..next.key_start
-            } else if i > 0 {
-                fields[i - 1].value.end..m.value.end
-            } else {
-                m.key_start..m.value.end
-            };
-            out.replace_range(range, "");
+            out.replace_range(removal(&fields, i), "");
         }
     } else if let Some(value) = value {
         let at = fields
             .last()
-            .map(|m| m.value.end)
+            .map(|m| m.span.end)
             .unwrap_or(text.len() - text.trim_start().len() + 1);
         let sep = if fields.is_empty() { "" } else { "," };
         let newline = if text.contains("\r\n") {

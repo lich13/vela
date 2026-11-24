@@ -7,10 +7,11 @@ use serde_json::Value;
 use std::ops::Range;
 
 const KEYS: [&str; 2] = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"];
-struct Member {
-    key: String,
-    start: usize,
-    span: Range<usize>,
+/// One member of a JSON object: where its key starts and the bytes of its value.
+pub(crate) struct Member {
+    pub key: String,
+    pub start: usize,
+    pub span: Range<usize>,
 }
 fn invalid() -> AppError {
     AppError::new(
@@ -27,13 +28,15 @@ fn skip(text: &str, at: &mut usize) {
         *at += 1;
     }
 }
-fn one<T: DeserializeOwned>(text: &str, at: &mut usize) -> Result<T> {
+fn one<T: DeserializeOwned>(text: &str, at: &mut usize, invalid: fn() -> AppError) -> Result<T> {
     let mut stream = serde_json::Deserializer::from_str(&text[*at..]).into_iter::<T>();
     let value = stream.next().ok_or_else(invalid)?.map_err(|_| invalid())?;
     *at += stream.byte_offset();
     Ok(value)
 }
-fn object(text: &str, start: usize) -> Result<Vec<Member>> {
+/// The members of the object that opens at `start`, in order; anything that is
+/// not one is `invalid`.
+pub(crate) fn object(text: &str, start: usize, invalid: fn() -> AppError) -> Result<Vec<Member>> {
     if text.as_bytes().get(start) != Some(&b'{') {
         return Err(invalid());
     }
@@ -45,7 +48,7 @@ fn object(text: &str, start: usize) -> Result<Vec<Member>> {
             return Ok(members);
         }
         let start = at;
-        let key: String = one(text, &mut at)?;
+        let key: String = one(text, &mut at, invalid)?;
         skip(text, &mut at);
         if text.as_bytes().get(at) != Some(&b':') {
             return Err(invalid());
@@ -53,7 +56,7 @@ fn object(text: &str, start: usize) -> Result<Vec<Member>> {
         at += 1;
         skip(text, &mut at);
         let begin = at;
-        let _: serde::de::IgnoredAny = one(text, &mut at)?;
+        let _: serde::de::IgnoredAny = one(text, &mut at, invalid)?;
         members.push(Member {
             key,
             start,
@@ -65,6 +68,18 @@ fn object(text: &str, start: usize) -> Result<Vec<Member>> {
             Some(b'}') => return Ok(members),
             _ => return Err(invalid()),
         }
+    }
+}
+/// The bytes that go with member `index`: through the next key, else back over
+/// the comma before it, else the member alone.
+pub(crate) fn removal(members: &[Member], index: usize) -> Range<usize> {
+    let member = &members[index];
+    if let Some(next) = members.get(index + 1) {
+        member.start..next.start
+    } else if index > 0 {
+        members[index - 1].span.end..member.span.end
+    } else {
+        member.start..member.span.end
     }
 }
 fn unique<'a>(members: &'a [Member], key: &str) -> Result<Option<&'a Member>> {
@@ -82,11 +97,11 @@ type ObjectLocations = (Vec<Member>, Option<Range<usize>>, Vec<Member>);
 fn locations(text: &str) -> Result<ObjectLocations> {
     let _: serde::de::IgnoredAny = serde_json::from_str(text).map_err(|_| invalid())?;
     let start = text.len() - text.trim_start().len();
-    let root = object(text, start)?;
+    let root = object(text, start, invalid)?;
     let env = unique(&root, "env")?.map(|m| m.span.clone());
     let fields = env
         .as_ref()
-        .map(|r| object(text, r.start))
+        .map(|r| object(text, r.start, invalid))
         .transpose()?
         .unwrap_or_default();
     for key in KEYS {
@@ -235,14 +250,7 @@ fn patch_env_value(text: &str, key: &str, target: Option<&Value>) -> Result<Stri
             out.replace_range(member.span.clone(), &value.to_string());
         } else {
             let index = fields.iter().position(|m| m.start == member.start).unwrap();
-            let span = if let Some(next) = fields.get(index + 1) {
-                member.start..next.start
-            } else if index > 0 {
-                fields[index - 1].span.end..member.span.end
-            } else {
-                member.start..member.span.end
-            };
-            out.replace_range(span, "");
+            out.replace_range(removal(&fields, index), "");
         }
     } else if let Some(value) = target {
         // The managed address/token patch creates env before this patch.

@@ -77,8 +77,10 @@ struct Journal {
     store_before: Option<String>,
     store_after: Option<String>,
 }
-fn managed_alias(record: &Journal, current: &Pair) -> bool {
-    let (Some(base), Some(token)) = (&record.applied.base_url, &record.applied.token) else {
+/// Whether `current` is the gateway connection `applied` wrote, on the port it
+/// was applied with or on the default shared one.
+pub(super) fn gateway_alias(client: ClientId, applied: &Pair, current: &Pair) -> bool {
+    let (Some(base), Some(token)) = (&applied.base_url, &applied.token) else {
         return false;
     };
     let Some(port) = url::Url::parse(base)
@@ -87,13 +89,11 @@ fn managed_alias(record: &Journal, current: &Pair) -> bool {
     else {
         return false;
     };
-    record.live
-        && record.applied.is_gateway(record.client, token, &[port])
-        && current.is_gateway(
-            record.client,
-            token,
-            &[port, super::client::DEFAULT_SHARED_PORT],
-        )
+    applied.is_gateway(client, token, &[port])
+        && current.is_gateway(client, token, &[port, super::client::DEFAULT_SHARED_PORT])
+}
+fn managed_alias(record: &Journal, current: &Pair) -> bool {
+    record.live && gateway_alias(record.client, &record.applied, current)
 }
 fn parse(text: &str) -> Result<Document<&str>> {
     Document::parse(text)
@@ -303,6 +303,61 @@ pub(super) fn pair_for(client: ClientId, text: &str) -> Result<Pair> {
 fn unmanaged() -> AppError {
     AppError::new(code::CONFIG, "Antigravity 没有可接管的连接配置")
 }
+/// The edit that gives the provider table `table` the assignments it lacks.
+/// An implicit or dotted table takes them under a dotted prefix in its parent
+/// or at the top of the document, an inline table before its closing brace,
+/// and any other table on the line after its last. `id` is the provider's key
+/// as TOML writes it; `unlocated` names the inline or standard table that has
+/// no span.
+pub(super) fn missing_assignments(
+    text: &str,
+    doc: &Document<&str>,
+    table: &Item,
+    id: &str,
+    assignments: &[(&str, String)],
+    unlocated: impl Fn(bool) -> AppError,
+) -> Result<(std::ops::Range<usize>, String)> {
+    let parent = doc.get("model_providers").unwrap();
+    let (container, prefix, root) = if table.as_table().is_some_and(|t| t.is_implicit())
+        || table.as_inline_table().is_some_and(|t| t.is_dotted())
+    {
+        if parent.as_table().is_some_and(|t| t.is_implicit()) {
+            (doc.as_item(), format!("model_providers.{id}."), true)
+        } else {
+            (parent, format!("{id}."), false)
+        }
+    } else {
+        (table, String::new(), false)
+    };
+    let items: Vec<_> = assignments
+        .iter()
+        .map(|(k, v)| format!("{prefix}{k} = {v}"))
+        .collect();
+    if let Some(t) = container.as_inline_table() {
+        let at = t.span().ok_or_else(|| unlocated(true))?.end - 1;
+        let join = if t.is_empty() { "" } else { ", " };
+        return Ok((at..at, format!("{join}{}", items.join(", "))));
+    }
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let end = if root {
+        0
+    } else {
+        let span = container
+            .as_table()
+            .and_then(|t| t.span())
+            .ok_or_else(|| unlocated(false))?;
+        text[span.end..]
+            .find('\n')
+            .map(|i| span.end + i + 1)
+            .unwrap_or(text.len())
+    };
+    let lead = if end > 0 && !text[..end].ends_with('\n') {
+        newline
+    } else {
+        ""
+    };
+    Ok((end..end, format!("{lead}{}{newline}", items.join(newline))))
+}
 pub fn patch(text: &str, target: &Pair) -> Result<String> {
     let doc = parse(text)?;
     let p = custom(&doc)?;
@@ -327,50 +382,21 @@ pub fn patch(text: &str, target: &Pair) -> Result<String> {
         }
     }
     if !missing.is_empty() {
-        let parent = doc.get("model_providers").unwrap();
-        let (container, prefix) = if p.as_table().is_some_and(|t| t.is_implicit())
-            || p.as_inline_table().is_some_and(|t| t.is_dotted())
-        {
-            if parent.as_table().is_some_and(|t| t.is_implicit()) {
-                (doc.as_item(), "model_providers.custom.")
-            } else {
-                (parent, "custom.")
-            }
-        } else {
-            (p, "")
-        };
-        let items: Vec<_> = missing
-            .iter()
-            .map(|(k, v)| format!("{prefix}{k} = {v}"))
-            .collect();
-        if let Some(t) = container.as_inline_table() {
-            let span = t
-                .span()
-                .ok_or_else(|| AppError::new(code::TOML, "无法定位内联表"))?;
-            let at = span.end - 1;
-            let join = if t.is_empty() { "" } else { ", " };
-            edits.push((at..at, format!("{join}{}", items.join(", "))));
-        } else {
-            let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
-            let end = if prefix == "model_providers.custom." {
-                0
-            } else {
-                let span = container
-                    .as_table()
-                    .and_then(|t| t.span())
-                    .ok_or_else(|| AppError::new(code::TOML, "无法定位 custom 表"))?;
-                text[span.end..]
-                    .find('\n')
-                    .map(|i| span.end + i + 1)
-                    .unwrap_or(text.len())
-            };
-            let lead = if end > 0 && !text[..end].ends_with('\n') {
-                newline
-            } else {
-                ""
-            };
-            edits.push((end..end, format!("{lead}{}{newline}", items.join(newline))));
-        }
+        edits.push(missing_assignments(
+            text,
+            &doc,
+            p,
+            "custom",
+            &missing,
+            |inline| {
+                let message = if inline {
+                    "无法定位内联表"
+                } else {
+                    "无法定位 custom 表"
+                };
+                AppError::new(code::TOML, message)
+            },
+        )?);
     }
     edits.sort_by_key(|(s, _)| std::cmp::Reverse(s.start));
     let mut output = text.to_owned();
