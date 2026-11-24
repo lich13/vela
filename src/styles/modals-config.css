@@ -712,6 +712,18 @@
   color: var(--muted);
 }
 
+.instance-form select {
+  background: var(--canvas);
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.instance-alias {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .gateway-form label.instance-sudo {
   flex-direction: row;
   flex-wrap: wrap;

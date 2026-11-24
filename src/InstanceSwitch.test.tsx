@@ -28,6 +28,8 @@ const connection = (
 let server: InstanceState;
 let failure: Partial<Record<string, { code: string; message: string }>>;
 let revision: number;
+/** The aliases of this machine's SSH configuration. */
+let hosts: string[];
 function serve(patch: Partial<InstanceState> = {}) {
   server = {
     revision: "r1",
@@ -54,6 +56,7 @@ async function manage(user: ReturnType<typeof userEvent.setup>) {
 beforeEach(() => {
   revision = 1;
   failure = {};
+  hosts = [];
   confirm.mockClear();
   mock.confirm.mockReset();
   mock.command.mockReset();
@@ -61,6 +64,7 @@ beforeEach(() => {
     async (name: string, args: Record<string, unknown>) => {
       if (failure[name]) throw failure[name];
       if (name === "get_instances") return server;
+      if (name === "list_ssh_hosts") return hosts;
       if (name === "test_instance") return { version: "0.41.0" };
       if (args.expectedRevision !== server.revision)
         throw { code: "CONFLICT", message: "实例列表已更新，请重试" };
@@ -179,6 +183,152 @@ it("edits a server in place", async () => {
     }),
   );
   expect(await dialog.findByText("tokyo · 备用 tokyo-lan")).toBeInTheDocument();
+});
+
+it("offers the aliases of the SSH configuration and saves the ones chosen", async () => {
+  hosts = ["tokyo", "tokyo-lan", "osaka"];
+  const user = userEvent.setup();
+  const dialog = await manage(user);
+  await user.click(dialog.getByRole("button", { name: "添加服务器" }));
+  const host = await dialog.findByRole("combobox", { name: /^SSH 主机别名/ });
+  const fallback = dialog.getByRole("combobox", { name: "备用别名" });
+  expect(calls("list_ssh_hosts")).toEqual([["list_ssh_hosts"]]);
+  expect(
+    within(host)
+      .getAllByRole("option")
+      .map((option) => option.textContent),
+  ).toEqual(["tokyo", "tokyo-lan", "osaka", "手动输入…"]);
+  expect(
+    within(fallback)
+      .getAllByRole("option")
+      .map((option) => option.textContent),
+  ).toEqual(["不使用", "tokyo", "tokyo-lan", "osaka", "手动输入…"]);
+  expect(fallback).toHaveValue("");
+
+  await user.type(dialog.getByLabelText("名称"), "大阪");
+  await user.selectOptions(host, "osaka");
+  await user.selectOptions(fallback, "tokyo-lan");
+  await user.click(dialog.getByRole("button", { name: "保存" }));
+  await waitFor(() =>
+    expect(calls("save_instance")).toEqual([
+      [
+        "save_instance",
+        {
+          expectedRevision: "r1",
+          machine: {
+            id: null,
+            name: "大阪",
+            sshHost: "osaka",
+            fallbackHost: "tokyo-lan",
+            useSudo: false,
+          },
+        },
+      ],
+    ]),
+  );
+});
+
+it("saves no fallback when the list is left at not using one", async () => {
+  hosts = ["tokyo", "tokyo-lan"];
+  serve({ machines: [{ ...tokyo, fallbackHost: "tokyo-lan" }] });
+  const user = userEvent.setup();
+  const dialog = await manage(user);
+  await user.click(dialog.getByRole("button", { name: "编辑 东京" }));
+  const fallback = await dialog.findByRole("combobox", { name: "备用别名" });
+  expect(dialog.getByLabelText(/^SSH 主机别名/)).toHaveValue("tokyo");
+  expect(fallback).toHaveValue("tokyo-lan");
+  await user.selectOptions(fallback, "不使用");
+  await user.click(dialog.getByRole("button", { name: "保存" }));
+  await waitFor(() =>
+    expect(calls("save_instance")[0][1]).toEqual({
+      expectedRevision: "r1",
+      machine: tokyo,
+    }),
+  );
+});
+
+it("leaves the list for a text box, and comes back to it", async () => {
+  hosts = ["tokyo", "osaka"];
+  const user = userEvent.setup();
+  const dialog = await manage(user);
+  await user.click(dialog.getByRole("button", { name: "添加服务器" }));
+  await user.selectOptions(
+    await dialog.findByRole("combobox", { name: /^SSH 主机别名/ }),
+    "手动输入…",
+  );
+  const typed = dialog.getByRole("textbox", { name: /^SSH 主机别名/ });
+  expect(typed).toHaveValue("");
+  expect(typed).toHaveFocus();
+  // Still the list: only the one field was left for a text box.
+  expect(dialog.getByRole("combobox", { name: "备用别名" })).toHaveValue("");
+  // Typing what the list also holds does not bring the list back.
+  await user.type(typed, "osaka");
+  expect(typed).toHaveValue("osaka");
+  await user.type(typed, "-2");
+  await user.type(dialog.getByLabelText("名称"), "大阪");
+  await user.click(dialog.getByRole("button", { name: "保存" }));
+  await waitFor(() =>
+    expect(calls("save_instance")[0][1]).toMatchObject({
+      machine: { sshHost: "osaka-2", fallbackHost: null },
+    }),
+  );
+
+  await user.click(await dialog.findByRole("button", { name: "编辑 大阪" }));
+  await user.click(await dialog.findByRole("button", { name: "从列表选择" }));
+  // What the list does not hold is not kept behind it.
+  const host = dialog.getByRole("combobox", { name: /^SSH 主机别名/ });
+  expect(host).toHaveValue("");
+  await user.selectOptions(host, "tokyo");
+  await user.click(dialog.getByRole("button", { name: "保存" }));
+  await waitFor(() =>
+    expect(calls("save_instance")[1][1]).toMatchObject({
+      machine: { id: "m-new", sshHost: "tokyo" },
+    }),
+  );
+});
+
+it("keeps the text boxes when the SSH configuration names no alias or cannot be read", async () => {
+  const user = userEvent.setup();
+  const dialog = await manage(user);
+  await user.click(dialog.getByRole("button", { name: "添加服务器" }));
+  await waitFor(() => expect(calls("list_ssh_hosts")).toHaveLength(1));
+  expect(dialog.getByRole("textbox", { name: /^SSH 主机别名/ })).toHaveValue(
+    "",
+  );
+  expect(dialog.getByRole("textbox", { name: "备用别名" })).toHaveValue("");
+  expect(dialog.queryByRole("combobox")).not.toBeInTheDocument();
+  expect(
+    dialog.queryByRole("button", { name: "从列表选择" }),
+  ).not.toBeInTheDocument();
+  await user.click(dialog.getByRole("button", { name: "取消" }));
+
+  hosts = ["tokyo"];
+  failure.list_ssh_hosts = { code: "IO", message: "无法读取" };
+  await user.click(dialog.getByRole("button", { name: "添加服务器" }));
+  await waitFor(() => expect(calls("list_ssh_hosts")).toHaveLength(2));
+  expect(dialog.getByRole("textbox", { name: /^SSH 主机别名/ })).toHaveValue(
+    "",
+  );
+  expect(dialog.queryByRole("combobox")).not.toBeInTheDocument();
+  expect(dialog.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("shows an alias the SSH configuration does not name in a text box", async () => {
+  hosts = ["osaka", "tokyo-lan"];
+  serve({ machines: [{ ...tokyo, fallbackHost: "tokyo-lan" }] });
+  const user = userEvent.setup();
+  const dialog = await manage(user);
+  await user.click(dialog.getByRole("button", { name: "编辑 东京" }));
+  // The listed fallback is chosen in the list; the unlisted host is typed.
+  expect(await dialog.findByRole("combobox", { name: "备用别名" })).toHaveValue(
+    "tokyo-lan",
+  );
+  expect(dialog.getByRole("textbox", { name: /^SSH 主机别名/ })).toHaveValue(
+    "tokyo",
+  );
+  expect(
+    dialog.getByRole("button", { name: "从列表选择" }),
+  ).toBeInTheDocument();
 });
 
 it("tests the connection with the typed values and shows the server version", async () => {

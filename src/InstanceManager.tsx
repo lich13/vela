@@ -19,6 +19,102 @@ type Draft = {
 const validAlias = (value: string) =>
   /^[A-Za-z0-9._-]+$/.test(value) && !value.startsWith("-");
 const aliasRule = "只能包含字母、数字、点、下划线和连字符，且不能以连字符开头";
+// The option that turns the list into a text box; no alias can be this.
+const typeIt = ":type";
+
+/**
+ * One alias of a server. With aliases found in the SSH configuration it is a
+ * list of them that can be left for a text box; without any it is the text
+ * box alone.
+ */
+function AliasField({
+  label,
+  value,
+  hosts,
+  optional = false,
+  disabled,
+  hint,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  hosts: string[];
+  /** May be left empty: the list then offers not to use one. */
+  optional?: boolean;
+  disabled: boolean;
+  hint?: string;
+  onChange: (value: string) => void;
+}) {
+  /** Set once the user picks one of the two; until then the value decides. */
+  const [typing, setTyping] = useState<boolean>();
+  const fits = value === "" || hosts.includes(value);
+  if (hosts.length > 0 && !typing && fits)
+    return (
+      <label>
+        {label}
+        <select
+          value={value}
+          disabled={disabled}
+          autoFocus={typing === false}
+          onChange={(e) =>
+            e.target.value === typeIt
+              ? setTyping(true)
+              : onChange(e.target.value)
+          }
+        >
+          {optional ? (
+            <option value="">不使用</option>
+          ) : (
+            // Nothing is chosen for the user.
+            value === "" && (
+              <option value="" disabled hidden>
+                请选择
+              </option>
+            )
+          )}
+          {hosts.map((host) => (
+            <option key={host}>{host}</option>
+          ))}
+          <option value={typeIt}>手动输入…</option>
+        </select>
+        {hint && <small>{hint}</small>}
+      </label>
+    );
+  return (
+    <label>
+      {label}
+      <span className="instance-alias">
+        <input
+          value={value}
+          placeholder={optional ? "可留空" : undefined}
+          disabled={disabled}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoFocus={typing}
+          onChange={(e) => {
+            // A value typed into matching a listed alias stays a text box.
+            if (hosts.length > 0) setTyping(true);
+            onChange(e.target.value);
+          }}
+        />
+        {hosts.length > 0 && (
+          <button
+            type="button"
+            className="text-button"
+            disabled={disabled}
+            onClick={() => {
+              setTyping(false);
+              if (!fits) onChange("");
+            }}
+          >
+            从列表选择
+          </button>
+        )}
+      </span>
+      {hint && <small>{hint}</small>}
+    </label>
+  );
+}
 
 /** The servers this app can control over SSH: add, edit, test and delete. */
 export default function InstanceManager({ close }: { close: () => void }) {
@@ -28,6 +124,8 @@ export default function InstanceManager({ close }: { close: () => void }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [tested, setTested] = useState("");
+  /** The aliases of this machine's SSH configuration, as last read. */
+  const [hosts, setHosts] = useState<string[]>([]);
   useEffect(() => {
     void reloadInstances().catch((e) => setError(errorOf(e).message));
   }, []);
@@ -49,6 +147,8 @@ export default function InstanceManager({ close }: { close: () => void }) {
     setDraft(next);
     setError("");
     setTested("");
+    // Read anew for each form; without a list the aliases are typed.
+    if (next) void command("list_ssh_hosts").then(setHosts, () => setHosts([]));
   };
   /** The connection fields of a draft that passes the alias rule. */
   const target = (d: Draft) => {
@@ -185,28 +285,22 @@ export default function InstanceManager({ close }: { close: () => void }) {
             onChange={(e) => change({ name: e.target.value })}
           />
         </label>
-        <label>
-          SSH 主机别名
-          <input
-            value={draft.sshHost}
-            disabled={!!busy}
-            spellCheck={false}
-            autoCapitalize="off"
-            onChange={(e) => change({ sshHost: e.target.value })}
-          />
-          <small>填 ~/.ssh/config 里的 Host 名称</small>
-        </label>
-        <label>
-          备用别名
-          <input
-            value={draft.fallbackHost}
-            placeholder="可留空"
-            disabled={!!busy}
-            spellCheck={false}
-            autoCapitalize="off"
-            onChange={(e) => change({ fallbackHost: e.target.value })}
-          />
-        </label>
+        <AliasField
+          label="SSH 主机别名"
+          value={draft.sshHost}
+          hosts={hosts}
+          disabled={!!busy}
+          hint="填 ~/.ssh/config 里的 Host 名称"
+          onChange={(sshHost) => change({ sshHost })}
+        />
+        <AliasField
+          label="备用别名"
+          value={draft.fallbackHost}
+          hosts={hosts}
+          optional
+          disabled={!!busy}
+          onChange={(fallbackHost) => change({ fallbackHost })}
+        />
         <label className="check-label instance-sudo">
           <input
             type="checkbox"
