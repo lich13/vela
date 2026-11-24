@@ -218,6 +218,43 @@ fn count_tokens_not_found() -> Response<WireBody> {
         )))
         .unwrap()
 }
+/// The answer to a request the same provider would not serve after all its
+/// retries. Claude Code is told in Anthropic's own terms; the others get the
+/// gateway's error with the status of the failure.
+fn rejection(
+    client: super::ClientId,
+    status: Option<u16>,
+    kind: &'static str,
+    details: &crate::events::Details,
+    model_unavailable: bool,
+) -> Response<WireBody> {
+    if client == super::ClientId::Claude {
+        return claude_rejection_response(status, kind, details, model_unavailable);
+    }
+    if kind == code::UPSTREAM_REJECTED {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            kind,
+            "上游业务请求失败，已结束本次重试",
+        );
+    }
+    let mapped = match status.filter(|status| *status >= 400) {
+        Some(status) => StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+        None if kind.ends_with("TIMEOUT") => StatusCode::GATEWAY_TIMEOUT,
+        None => StatusCode::BAD_GATEWAY,
+    };
+    error(
+        mapped,
+        kind,
+        match kind {
+            code::FIRST_BYTE_TIMEOUT => "上游首字节超时",
+            code::STREAM_TIMEOUT => "上游流式响应超时",
+            code::STREAM_INTERRUPTED => "上游响应提前中断",
+            code::NETWORK => "连接上游供应商失败",
+            _ => "上游拒绝了请求",
+        },
+    )
+}
 fn claude_rejection_response(
     status: Option<u16>,
     kind: &'static str,
@@ -269,7 +306,7 @@ fn claude_rejection_response(
             if details.error_basis == Some(ErrorBasis::Capacity) {
                 "overloaded_error"
             } else {
-                super::claude_stream::anthropic_error_type(mapped_status.as_u16())
+                super::held_stream::anthropic_error_type(mapped_status.as_u16())
             }
         });
     let err_msg = details
@@ -1505,6 +1542,24 @@ impl Exchange<'_> {
     fn endless(&self, route: &Route) -> bool {
         route.endless()
     }
+    /// `route` answers this request whole or not at all: a generation call
+    /// to a provider that sends complete responses only.
+    fn holds(&self, route: &Route) -> bool {
+        route.provider.buffer_complete_response
+            && !self.websocket
+            && super::held_stream::Call::of(&self.parts.uri).is_some()
+    }
+    /// The client's stream is opened before `route` answers and kept alive
+    /// meanwhile. Endless mode does so for Messages alone.
+    fn opens_early(&self, route: &Route) -> bool {
+        use super::held_stream::Call;
+        self.plan.stream_hint
+            && !self.websocket
+            && Call::of(&self.parts.uri).is_some_and(|call| {
+                route.provider.buffer_complete_response
+                    || (call == Call::Messages && self.endless(route))
+            })
+    }
     fn max_waiting(&self) -> usize {
         if self.unbounded {
             usize::MAX
@@ -1655,7 +1710,11 @@ impl Exchange<'_> {
             silence => silence,
         }
     }
-    async fn claude_retry(
+    /// Waits and sends the request to the same provider again: what endless
+    /// mode and a provider answering whole do with a failure, so that the
+    /// client hears of none of them. Past the ordinary retries of a provider
+    /// not in endless mode the request ends with the failure.
+    async fn retry_here(
         &mut self,
         mut attempt: Attempt,
         status: Option<u16>,
@@ -1776,7 +1835,7 @@ impl Exchange<'_> {
         drop(attempt);
         if !can_retry {
             if self.last.is_none() || kind != code::HTTP {
-                self.last = Some(claude_rejection_response(status, kind, &details, false));
+                self.last = Some(rejection(route.client_id, status, kind, &details, false));
             }
             return End::Stop;
         }
@@ -2341,9 +2400,7 @@ impl Exchange<'_> {
         let started = Instant::now();
         let mut protocol = super::protocol::Protocol::new(self.plan.stream_hint);
         protocol.attach_wait_budget(self.request_budget);
-        protocol.buffer_output(
-            route.provider.buffer_complete_response && is_messages_path(self.parts.uri.path()),
-        );
+        protocol.buffer_output(self.holds(&route));
         protocol.attach_failure_rules(&self.settings.custom_failure_rules);
         self.request_budget.describe(
             Some(&route.provider.id),
@@ -2472,7 +2529,7 @@ impl Exchange<'_> {
             attempt.protocol.finish(None, finished);
             let details = attempt.protocol.observation.error.clone();
             return self
-                .claude_retry(attempt, None, code::NETWORK, details, None, true)
+                .retry_here(attempt, None, code::NETWORK, details, None, true)
                 .await;
         }
         let Attempt {
@@ -2606,7 +2663,7 @@ impl Exchange<'_> {
             attempt.protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
             let details = attempt.protocol.observation.error.clone();
             return self
-                .claude_retry(
+                .retry_here(
                     attempt,
                     None,
                     code::FIRST_BYTE_TIMEOUT,
@@ -2846,7 +2903,7 @@ impl Exchange<'_> {
             if !model_error && !compact_error && (transient || window || listed) {
                 self.last = Some(reply);
                 return self
-                    .claude_retry(
+                    .retry_here(
                         Attempt {
                             admission,
                             route,
@@ -3076,9 +3133,7 @@ impl Exchange<'_> {
         response: Response<Incoming>,
         stream: bool,
     ) -> Opening {
-        if attempt.route.provider.buffer_complete_response
-            && is_messages_path(self.parts.uri.path())
-        {
+        if self.holds(&attempt.route) {
             return self.buffered_opening(attempt, response).await;
         }
         let status = response.status();
@@ -3257,6 +3312,7 @@ impl Exchange<'_> {
     ) -> Opening {
         let status = response.status();
         let end_at_stop = ends_at_message_stop(&attempt.route, status, response.headers());
+        let messages = is_messages_path(self.parts.uri.path());
         let (mut parts, mut upstream) = response.into_parts();
         clean_headers(&mut parts.headers, false);
         let mut deadline = tokio::time::Instant::now()
@@ -3344,6 +3400,7 @@ impl Exchange<'_> {
             status.as_u16(),
             captured.as_ref().err().map(|_| failure_kind),
             end_at_stop,
+            messages,
         );
         let (body, inspected_bytes) = captured.map_or_else(
             |_| (replay::empty(), 0),
@@ -3374,7 +3431,7 @@ impl Exchange<'_> {
         if attempt.route.provider.buffer_complete_response || self.endless(&attempt.route) {
             let details = attempt.protocol.observation.error.clone();
             return self
-                .claude_retry(
+                .retry_here(
                     attempt,
                     Some(status.as_u16()),
                     failure_kind,
@@ -3531,7 +3588,7 @@ impl Exchange<'_> {
             {
                 let retry = attempt.protocol.observation.retry_after;
                 return Err(self
-                    .claude_retry(
+                    .retry_here(
                         attempt,
                         Some(opening.status.as_u16()),
                         code::UPSTREAM_REJECTED,
@@ -3553,22 +3610,13 @@ impl Exchange<'_> {
             );
             // Answered here: the general path below would rebuild the queue
             // and leave the provider endless mode fixed.
-            return Err(End::reply(
-                if attempt.route.client_id == super::ClientId::Claude {
-                    claude_rejection_response(
-                        Some(opening.status.as_u16()),
-                        code::UPSTREAM_REJECTED,
-                        &details,
-                        model_unavailable,
-                    )
-                } else {
-                    error(
-                        StatusCode::BAD_GATEWAY,
-                        code::UPSTREAM_REJECTED,
-                        "上游业务请求失败，已结束本次重试",
-                    )
-                },
-            ));
+            return Err(End::reply(rejection(
+                attempt.route.client_id,
+                Some(opening.status.as_u16()),
+                code::UPSTREAM_REJECTED,
+                &details,
+                model_unavailable,
+            )));
         }
         let Attempt {
             mut admission,
@@ -3857,13 +3905,7 @@ impl Exchange<'_> {
         {
             return Err(End::reply(count_tokens_not_found()));
         }
-        if !candidates.is_empty()
-            && self.plan.stream_hint
-            && candidates
-                .iter()
-                .all(|c| c.provider.buffer_complete_response || self.endless(c))
-            && is_messages_path(self.parts.uri.path())
-        {
+        if !candidates.is_empty() && candidates.iter().all(|c| self.opens_early(c)) {
             if let Some(started) = stream_started.take() {
                 let _ = started.send(());
             }
@@ -3876,10 +3918,7 @@ impl Exchange<'_> {
         {
             return Err(End::reply(count_tokens_not_found()));
         }
-        if self.plan.stream_hint
-            && (route.provider.buffer_complete_response || self.endless(&route))
-            && is_messages_path(self.parts.uri.path())
-        {
+        if self.opens_early(&route) {
             if let Some(started) = stream_started.take() {
                 let _ = started.send(());
             }
@@ -3960,7 +3999,9 @@ impl Exchange<'_> {
             && !opening.failed
             && is_messages_path(self.parts.uri.path())
         {
-            opening.failed = !attempt.protocol.finish_buffer(status.as_u16(), None, false);
+            opening.failed = !attempt
+                .protocol
+                .finish_buffer(status.as_u16(), None, false, true);
             opening.failure_kind = code::STREAM_INTERRUPTED;
         }
         if opening.failed
@@ -3984,9 +4025,7 @@ impl Exchange<'_> {
     /// Starts the relay task for an accepted response and returns its head.
     fn hand_over(mut self, mut attempt: Attempt, opening: Opening) -> Response<WireBody> {
         self.request_budget.delivering();
-        if attempt.route.provider.buffer_complete_response
-            && is_messages_path(self.parts.uri.path())
-        {
+        if self.holds(&attempt.route) {
             attempt.protocol.buffer_output(false);
             attempt.protocol.effective_output();
         }
@@ -4138,18 +4177,23 @@ impl Exchange<'_> {
     }
 }
 async fn forward(gateway: Gateway, request: Request<Incoming>) -> Response<WireBody> {
-    let managed = gateway
-        .request_state()
-        .store
-        .providers
-        .iter()
-        .any(|p| p.buffer_complete_response || p.endless_mode);
-    if managed {
+    let call = super::held_stream::Call::of(request.uri()).filter(|_| {
+        gateway
+            .request_state()
+            .store
+            .providers
+            .iter()
+            .any(|p| p.buffer_complete_response || p.endless_mode)
+    });
+    if let Some(call) = call {
         let (started, received) = tokio::sync::oneshot::channel();
+        let client = gateway.client_id();
         // Keep the unboxed forwarding state out of the waiting future.
-        super::claude_stream::waiting(
+        super::held_stream::waiting(
             Box::pin(forward_inner(gateway, request, Some(started))),
             received,
+            call,
+            client,
         )
         .await
     } else {

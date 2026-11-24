@@ -469,6 +469,7 @@ export type GatewayEdit =
     }
   | {
       op: "saveGrokProvider";
+      bufferCompleteResponse?: boolean;
       takeWebSearch?: boolean;
       /** "" clears the model. */
       webSearchModel?: string;
@@ -483,6 +484,7 @@ export type GatewayEdit =
     }
   | {
       op: "saveDshProvider";
+      bufferCompleteResponse?: boolean;
       endlessMode?: boolean;
       upstreamRetrySeconds?: number;
       limitRetrySeconds?: number;
@@ -667,7 +669,12 @@ export type DesktopCommands = {
   open_github: Call<None, void>;
   open_update_release: Call<None, void>;
   open_pricing_directory: Call<None, void>;
-  reveal_provider_token: Call<Provider & Revision, string>;
+  /** The provider's token, or with `quotaAccess` the one its balance is
+   *  asked with. */
+  reveal_provider_token: Call<
+    Provider & Revision & { quotaAccess?: boolean },
+    string
+  >;
   get_instances: Call<None, InstanceState>;
   save_instance: Call<
     Revision & { machine: Omit<Machine, "id"> & { id: string | null } },

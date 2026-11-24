@@ -73,9 +73,38 @@ fn reveal_is_main_window_only_and_scoped_to_the_selected_client() {
         assert!(!error.message.contains("fixture-"));
     }
 
+    // The token a balance is asked with is read the same way, and only
+    // where one is saved.
+    codex
+        .edit(
+            form(serde_json::json!({
+                "id": codex_id,
+                "baseUrl": "https://codex.example.invalid/v1",
+                "token": "",
+                "quotaAccessToken": "fixture-access-token",
+            })),
+            &codex.view().revision,
+            temp.path(),
+        )
+        .unwrap();
+    assert_eq!(
+        codex
+            .reveal_quota_access_token("main", &codex_id, &codex.view().revision)
+            .unwrap(),
+        "fixture-access-token"
+    );
+    for result in [
+        codex.reveal_quota_access_token("settings", &codex_id, &codex.view().revision),
+        codex.reveal_quota_access_token("main", &codex_id, "stale-revision"),
+        claude.reveal_quota_access_token("main", &claude_id, &claude.view().revision),
+    ] {
+        assert!(!result.unwrap_err().message.contains("fixture-"));
+    }
+
     let codex_view = serde_json::to_string(&codex.view()).unwrap();
     let claude_view = serde_json::to_string(&claude.view()).unwrap();
     assert!(!codex_view.contains("fixture-codex-token"));
+    assert!(!codex_view.contains("fixture-access-token"));
     assert!(!claude_view.contains("fixture-claude-token"));
 }
 

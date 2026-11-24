@@ -64,7 +64,7 @@ CLAUDE_CONFIG_DIR=/home/ubuntu/.claude
 - Antigravity（`agy`）网关接管，以及 Antigravity 账号的导入和导出。服务器上 `agy` 登录的账号会列出（读取 `~/.gemini/antigravity-cli/antigravity-oauth-token`，没有时读取旧版的 `~/.gemini/jetski-standalone-oauth-token`），可以在已保存的账号之间切换，运行中的 `agy` 需重新启动后生效；额度经服务器上的 `agy` 命令读取。
 - 需要浏览器的登录：Codex／ChatGPT 账号登录、Claude 官方登录。请在服务器上用客户端自己的命令登录；已有的 Codex 账号可以切换。
 - 需要本机文件对话框的导入导出（账号、账单、价格表等）。
-- 查看已保存供应商的完整令牌；编辑供应商时令牌留空表示不修改。
+- 查看已保存供应商的完整令牌和账号访问令牌；编辑供应商时这两项留空表示不修改。
 - 强制退出客户端进程、合盖不休眠、系统通知、开机启动和 `ccswitch:` 链接。
 
 这些入口在选中服务器时隐藏或停用。

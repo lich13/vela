@@ -99,6 +99,7 @@ describe("gateway controls", () => {
         expectedRevision: "latest-on-retry",
         edit: {
           op: "saveProvider",
+          bufferCompleteResponse: false,
           token: "fixture-key",
           baseUrl: "https://new.invalid/v1",
         },
@@ -381,6 +382,7 @@ describe("gateway controls", () => {
         clientId: "codex",
         edit: {
           op: "saveProvider",
+          bufferCompleteResponse: false,
           id: null,
           name: "主力供应商",
           baseUrl: "https://new.example.com/sub/v1",

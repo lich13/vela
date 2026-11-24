@@ -52,6 +52,7 @@ fn gateway(home: &Path) -> Gateway {
         .store
         .edit(
             Edit::SaveDshProvider {
+                buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
@@ -527,6 +528,7 @@ fn official_api_key_route_is_discoverable_and_matched_as_provider() {
     store
         .edit(
             Edit::SaveDshProvider {
+                buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,

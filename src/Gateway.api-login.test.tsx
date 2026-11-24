@@ -233,6 +233,7 @@ describe("Codex API login gateway controls", () => {
       clientId: "codex",
       edit: {
         op: "saveProvider",
+        bufferCompleteResponse: false,
         id: null,
         name: "",
         baseUrl: "https://api.fixture.invalid/v1",

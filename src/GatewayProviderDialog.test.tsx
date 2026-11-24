@@ -122,7 +122,7 @@ describe("Claude reliability controls", () => {
 
 describe("endless mode retry settings", () => {
   const open = (
-    clientId: "codex" | "claude" | "grok" | "dsh",
+    clientId: "codex" | "claude" | "grok" | "dsh" | "agy",
     save = vi.fn().mockResolvedValue(undefined),
   ) => {
     render(
@@ -187,6 +187,27 @@ describe("endless mode retry settings", () => {
           riskCodes: [403, 520, 524],
           retryIntensity: 0,
         }),
+        "fixture-revision",
+      );
+    },
+  );
+
+  it.each([
+    ["codex", "saveProvider"],
+    ["grok", "saveGrokProvider"],
+    ["dsh", "saveDshProvider"],
+    ["agy", "saveProvider"],
+  ] as const)(
+    "offers %s a provider that sends complete responses only",
+    async (clientId, op) => {
+      const user = userEvent.setup();
+      const save = open(clientId);
+      const whole = screen.getByRole("checkbox", { name: "完整响应后发送" });
+      expect(whole).not.toBeChecked();
+      await user.click(whole);
+      await user.click(screen.getByRole("button", { name: "保存" }));
+      expect(save).toHaveBeenCalledWith(
+        expect.objectContaining({ op, bufferCompleteResponse: true }),
         "fixture-revision",
       );
     },
@@ -568,6 +589,7 @@ describe("request takeover", () => {
     expect(save).toHaveBeenCalledWith(
       {
         op: "saveGrokProvider",
+        bufferCompleteResponse: false,
         id: null,
         name: "",
         baseUrl: "https://fixture.example.invalid/v1",

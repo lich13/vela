@@ -764,6 +764,7 @@ mod tests {
                 store
                     .edit(
                         super::super::Edit::SaveGrokProvider {
+                            buffer_complete_response: None,
                             delegate: Default::default(),
                             quota_access_token: None,
                             id: None,

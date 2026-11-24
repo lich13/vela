@@ -31,6 +31,96 @@ const KEEPALIVE: Duration = Duration::from_secs(20);
 // Only bounds late usage observation after a settled turn. It never closes
 // the upstream connection or limits forwarding / generation progress.
 const USAGE_TAIL: Duration = Duration::from_secs(2);
+/// How often a client waiting for a turn held back whole is sent an event.
+const HELD_KEEPALIVE: Duration = Duration::from_secs(5);
+/// Codex counts text messages alone against its idle limit and passes this
+/// one over.
+const IN_PROGRESS: &str = r#"{"type":"response.in_progress"}"#;
+const HELD_MEMORY: usize = 2 * 1024 * 1024;
+const HELD_LIMIT: u64 = 1024 * 1024 * 1024;
+
+/// The frames of a turn not handed to the client yet. A turn is held until
+/// its first output, which a few frames in memory are enough for; a provider
+/// answering whole holds it to its end, and what memory is not given to goes
+/// to a private file of the gateway's spool, each frame behind its length.
+#[derive(Default)]
+struct Held {
+    frames: Vec<Frame>,
+    bytes: usize,
+    spill: Option<(tempfile::NamedTempFile, tokio::fs::File, u64)>,
+}
+impl Held {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+    async fn push(
+        &mut self,
+        frame: Frame,
+        spool: &std::path::Path,
+        whole: bool,
+    ) -> Result<(), Failure> {
+        use tokio::io::AsyncWriteExt;
+        const TOO_LARGE: Failure = (1011, code::UPSTREAM_BODY);
+        self.bytes = self.bytes.saturating_add(frame.payload().len());
+        if self.spill.is_none() && (self.bytes > HELD_MEMORY || self.frames.len() >= 4096) {
+            if !whole {
+                return Err(TOO_LARGE);
+            }
+            let file = crate::storage::private_tempfile(spool).map_err(|_| TOO_LARGE)?;
+            let writer = file.reopen().map_err(|_| TOO_LARGE)?;
+            self.spill = Some((file, tokio::fs::File::from_std(writer), 0));
+        }
+        let Some((_, writer, written)) = &mut self.spill else {
+            self.frames.push(frame);
+            return Ok(());
+        };
+        let payload = frame.payload();
+        *written += payload.len() as u64 + 5;
+        if *written > HELD_LIMIT {
+            return Err(TOO_LARGE);
+        }
+        let mut head = [u8::from(frame.opcode() == OpCode::Binary); 5];
+        head[1..].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+        writer.write_all(&head).await.map_err(|_| TOO_LARGE)?;
+        writer.write_all(payload).await.map_err(|_| TOO_LARGE)
+    }
+    /// Hands everything held to `client`, in the order it came.
+    async fn send(&mut self, client: &Peer) -> Result<(), Failure> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        const UNREADABLE: Failure = (1011, code::UPSTREAM_BODY);
+        let held = std::mem::take(self);
+        for frame in held.frames {
+            client.send(frame).await?;
+        }
+        let Some((file, mut writer, written)) = held.spill else {
+            return Ok(());
+        };
+        writer.flush().await.map_err(|_| UNREADABLE)?;
+        let mut reader = tokio::io::BufReader::new(tokio::fs::File::from_std(
+            file.reopen().map_err(|_| UNREADABLE)?,
+        ));
+        let mut read = 0;
+        while read < written {
+            let mut head = [0; 5];
+            reader.read_exact(&mut head).await.map_err(|_| UNREADABLE)?;
+            let length = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
+            let mut payload = vec![0; length];
+            reader
+                .read_exact(&mut payload)
+                .await
+                .map_err(|_| UNREADABLE)?;
+            read += length as u64 + 5;
+            client
+                .send(if head[0] == 1 {
+                    Frame::binary(payload)
+                } else {
+                    Frame::text(payload)
+                })
+                .await?;
+        }
+        Ok(())
+    }
+}
 
 async fn cancelled_usage_tail(
     upstream: &mut Upstream,
@@ -1783,8 +1873,9 @@ struct Session<'a> {
     pending_started: tokio::time::Instant,
     confirmed_model: Option<String>,
     received: bool,
-    initial_frames: Vec<Frame>,
-    initial_bytes: usize,
+    held: Held,
+    /// When a client waiting for a turn held back whole is next sent an event.
+    keep_alive: tokio::time::Instant,
     terminal_error: bool,
     receive_started: tokio::time::Instant,
     deadline: tokio::time::Instant,
@@ -1979,8 +2070,6 @@ impl<'a> Session<'a> {
         let pending_started = tokio::time::Instant::now();
         let confirmed_model: Option<String> = None;
         let received = false;
-        let initial_frames: Vec<Frame> = Vec::new();
-        let initial_bytes = 0usize;
         let terminal_error = false;
         let receive_started = tokio::time::Instant::now();
         if !admit_ownership(
@@ -2070,8 +2159,8 @@ impl<'a> Session<'a> {
             pending_started,
             confirmed_model,
             received,
-            initial_frames,
-            initial_bytes,
+            held: Held::default(),
+            keep_alive: tokio::time::Instant::now() + HELD_KEEPALIVE,
             terminal_error,
             receive_started,
             deadline,
@@ -2591,8 +2680,8 @@ impl<'a> Session<'a> {
             return Ok(Flow::Again);
         }
         self.received = false;
-        self.initial_frames.clear();
-        self.initial_bytes = 0;
+        self.held.clear();
+        self.keep_alive = tokio::time::Instant::now() + HELD_KEEPALIVE;
         self.deadline =
             tokio::time::Instant::now() + Duration::from_secs(self.cfg.first_byte_seconds);
         Ok(Flow::Proceed)
@@ -2995,8 +3084,8 @@ impl<'a> Session<'a> {
         next_protocol.websocket_status(101);
         self.protocol = Some(next_protocol);
         self.received = false;
-        self.initial_frames.clear();
-        self.initial_bytes = 0;
+        self.held.clear();
+        self.keep_alive = tokio::time::Instant::now() + HELD_KEEPALIVE;
         self.receive_started = tokio::time::Instant::now();
         {
             if matches!(self.upstream, Upstream::Disconnected) {
@@ -3205,8 +3294,10 @@ impl<'a> Session<'a> {
                 return Ok(Flow::Again);
             }
             let native = matches!(self.upstream, Upstream::Native(_));
-            let response_started =
-                response_data_started(&self.upstream, self.received, self.receive_started);
+            // A turn held back whole can be sent again until it is handed on.
+            let response_started = self.received
+                || (!self.whole()
+                    && response_data_started(&self.upstream, false, self.receive_started));
             let unfinished_native_turn = native
                 && self.turn.is_some()
                 && !response_started
@@ -3250,6 +3341,7 @@ impl<'a> Session<'a> {
             }
         }
         let mut settled_turn = None;
+        let mut failed_whole = false;
         if let Some(v) = value(&frame) {
             let mut observed = super::protocol::Observation::default();
             observed.value(&v);
@@ -3421,8 +3513,7 @@ impl<'a> Session<'a> {
                     self.ordinary_attempts = self.ordinary_attempts.saturating_sub(1);
                     self.capacity_protected = true;
                 }
-                self.initial_frames.clear();
-                self.initial_bytes = 0;
+                self.held.clear();
                 self.rejected_frame = Some(frame);
                 self.fallback_capacity |= failure.capacity;
                 self.retry_capacity = self.fallback_capacity;
@@ -3479,6 +3570,7 @@ impl<'a> Session<'a> {
                 if let Some(mut admission) = self.turn.take() {
                     if let Some(u) = self.protocol.as_mut() {
                         u.finish(Some(101), code::UPSTREAM_ERROR);
+                        failed_whole = u.explicit_failure();
                         self.terminal_error = !matches!(
                             u.terminal(),
                             Some(
@@ -3523,34 +3615,45 @@ impl<'a> Session<'a> {
                 }
             }
         }
-        let business = !frame.opcode().is_control()
+        let output = !frame.opcode().is_control()
             && self.protocol.as_ref().is_none_or(|u| u.business_observed());
+        // A provider answering whole hands a turn on at its end, all at once.
+        let business = output
+            && (self.received
+                || !self.whole()
+                || self
+                    .protocol
+                    .as_ref()
+                    .is_none_or(|u| u.terminal().is_some()));
         if !self.received && !business && !frame.opcode().is_control() {
-            self.initial_bytes = self.initial_bytes.saturating_add(frame.payload().len());
-            if self.initial_bytes > 2 * 1024 * 1024 || self.initial_frames.len() >= 4096 {
-                return Err((1011, code::UPSTREAM_BODY));
+            if output && self.held.spill.is_none() {
+                self.traffic.streaming();
+                self.request_budget.buffering();
             }
-            self.initial_frames.push(frame);
+            let whole = self.whole();
+            self.held.push(frame, self.g.0.spool.path(), whole).await?;
             return Ok(Flow::Again);
         }
         if business {
+            // Its failure is all a turn that failed has to say.
+            if failed_whole && !self.received {
+                self.held.clear();
+            }
             self.received = true;
             self.failover.finish(super::failover::Exit::Forwarded);
         }
-        let frame_bytes = frame.payload().len() + if business { self.initial_bytes } else { 0 };
-        let mut outgoing = if business {
-            self.initial_bytes = 0;
-            std::mem::take(&mut self.initial_frames)
-        } else {
-            Vec::new()
-        };
-        outgoing.push(frame);
+        let frame_bytes = frame.payload().len() + if business { self.held.bytes } else { 0 };
         let sending = tokio::time::Instant::now();
-        for frame in outgoing {
-            if let Err(error) = client.send(frame).await {
-                self.abandon(&client.activity, true).await;
-                return Err(error);
+        let sent = async {
+            if business {
+                self.held.send(client).await?;
             }
+            client.send(frame).await
+        }
+        .await;
+        if let Err(error) = sent {
+            self.abandon(&client.activity, true).await;
+            return Err(error);
         }
         // Do not charge time blocked by the downstream reader to the
         // upstream silence timer. Peer::send has its own progress limit.
@@ -3667,6 +3770,8 @@ impl<'a> Session<'a> {
         }
 
         let native = matches!(self.upstream, Upstream::Native(_));
+        // A turn held back whole can be sent again until it is handed on.
+        let handed = self.received || (body_started && !self.whole());
         self.retry_pending = disconnect_turn(
             self.g,
             &self.route,
@@ -3674,7 +3779,7 @@ impl<'a> Session<'a> {
             self.current_model.as_deref(),
             &mut self.turn,
             &mut self.protocol,
-            body_started,
+            handed,
             self.attempts,
             self.ordinary_attempts,
             native && !self.unknown_affinity,
@@ -3706,6 +3811,10 @@ impl<'a> Session<'a> {
             admission.permits.neutral(self.cfg);
         }
         cancelled_usage_tail(&mut self.upstream, &mut self.protocol, activity, writing).await;
+    }
+    /// The provider of the turn answers whole or not at all.
+    fn whole(&self) -> bool {
+        self.route.provider.buffer_complete_response
     }
     /// Drops the accounting of a turn that can no longer report anything.
     fn release(&mut self) {
@@ -3835,6 +3944,16 @@ async fn session_once(
                 flow!(session.upstream_event(client, event).await)
             },
             frame = client.incoming.recv() => flow!(session.client_frame(client, frame).await),
+            _ = tokio::time::sleep_until(session.keep_alive), if session.turn.is_some()
+                && session.whole()
+                && !session.received =>
+            {
+                session.keep_alive = tokio::time::Instant::now() + HELD_KEEPALIVE;
+                if let Err(error) = client.send(Frame::text(IN_PROGRESS)).await {
+                    session.abandon(&client.activity, true).await;
+                    return Err(error);
+                }
+            },
             _ = tokio::time::sleep_until(session.deadline), if session.turn.is_some()
                 && !request_budget.executing_compaction() =>
             {

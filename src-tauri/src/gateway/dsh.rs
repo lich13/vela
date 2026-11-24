@@ -1488,6 +1488,7 @@ fn import_selection(
             store.settings.port = port;
             store.edit(
                 super::model::Edit::SaveDshProvider {
+                    buffer_complete_response: None,
                     endless_mode: None,
                     upstream_retry_seconds: None,
                     normal_retry_seconds: None,
@@ -1769,6 +1770,7 @@ mod tests {
                 store
                     .edit(
                         super::super::Edit::SaveDshProvider {
+                            buffer_complete_response: None,
                             endless_mode: None,
                             upstream_retry_seconds: None,
                             normal_retry_seconds: None,

@@ -312,6 +312,7 @@ fn add_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) {
         ClientId::Dsh => panic!("DSH profile path is covered separately"),
         ClientId::Agy => panic!("Antigravity has its own tests beside agy.rs"),
         ClientId::Grok => Edit::SaveGrokProvider {
+            buffer_complete_response: None,
             delegate: Default::default(),
             quota_access_token: None,
             id: None,

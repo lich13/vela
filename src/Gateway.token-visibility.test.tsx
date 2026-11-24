@@ -178,6 +178,7 @@ describe("gateway provider token visibility", () => {
           clientId,
           edit: {
             op: "saveProvider",
+            bufferCompleteResponse: false,
             id: null,
             baseUrl,
             token: `fixture-user-${clientId}-token`,
@@ -387,6 +388,53 @@ describe("gateway provider token visibility", () => {
     await user.click(screen.getByRole("button", { name: "隐藏 Token" }));
     expect(token).toHaveAttribute("type", "password");
     expect(token).toHaveValue("fixture-user-draft-token");
+  });
+
+  it("shows a saved access token on request, read apart from the provider's token", async () => {
+    selectInitialClient("codex");
+    gateways.codex.providers[0].hasQuotaAccessToken = true;
+    mock.command.mockImplementation(async (name: string, args?: CommandArgs) =>
+      name === "get_gateway"
+        ? structuredClone(gateways.codex)
+        : name === "reveal_provider_token"
+          ? (args as { quotaAccess?: boolean }).quotaAccess
+            ? "fixture-stored-access-token"
+            : "fixture-stored-codex-token"
+          : undefined,
+    );
+    const user = userEvent.setup();
+    render(<Gateway notify={() => {}} />);
+    const provider = await openProviderEditor(user, "codex");
+    const access = screen.getByLabelText(/^账号访问令牌/);
+    expect(access).toHaveAttribute("type", "password");
+
+    await user.click(screen.getByRole("button", { name: "显示访问令牌" }));
+    await waitFor(() =>
+      expect(access).toHaveValue("fixture-stored-access-token"),
+    );
+    expect(access).toHaveAttribute("type", "text");
+    expect(mock.command).toHaveBeenCalledWith("reveal_provider_token", {
+      clientId: "codex",
+      providerId: provider.id,
+      expectedRevision: "preview-gateway",
+      quotaAccess: true,
+    });
+    // The provider's own token stays as it was.
+    expect(screen.getByLabelText(tokenLabel("codex"))).toHaveValue("");
+
+    await user.click(screen.getByRole("button", { name: "隐藏访问令牌" }));
+    expect(access).toHaveAttribute("type", "password");
+    expect(access).toHaveValue("");
+
+    // What is typed is shown without asking for the saved one.
+    await user.type(access, "fixture-typed-access-token");
+    await user.click(screen.getByRole("button", { name: "显示访问令牌" }));
+    expect(access).toHaveValue("fixture-typed-access-token");
+    expect(
+      mock.command.mock.calls.filter(
+        ([name]) => name === "reveal_provider_token",
+      ),
+    ).toHaveLength(1);
   });
 
   it.each(["close", "client switch"] as const)(

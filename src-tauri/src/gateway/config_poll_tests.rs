@@ -382,6 +382,7 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
     let grok_v1 = grok
         .edit(
             Edit::SaveGrokProvider {
+                buffer_complete_response: None,
                 delegate: Default::default(),
                 quota_access_token: None,
                 id: None,

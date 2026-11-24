@@ -688,6 +688,8 @@ pub enum Edit {
         name: Option<String>,
     },
     SaveGrokProvider {
+        #[serde(default)]
+        buffer_complete_response: Option<bool>,
         /// Of these a Grok provider may take web searches only.
         #[serde(flatten)]
         delegate: DelegateEdit,
@@ -701,6 +703,8 @@ pub enum Edit {
         protocol: super::grok_config::Protocol,
     },
     SaveDshProvider {
+        #[serde(default)]
+        buffer_complete_response: Option<bool>,
         #[serde(default)]
         endless_mode: Option<bool>,
         #[serde(default)]
@@ -1028,6 +1032,7 @@ impl Store {
                 }
             }
             Edit::SaveGrokProvider {
+                buffer_complete_response,
                 delegate,
                 id,
                 base_url,
@@ -1043,7 +1048,7 @@ impl Store {
                         delegate,
                         end_on_message_stop: None,
                         filter_count_tokens: None,
-                        buffer_complete_response: None,
+                        buffer_complete_response,
                         endless_mode: None,
                         upstream_retry_seconds: None,
                         normal_retry_seconds: None,
@@ -1062,6 +1067,7 @@ impl Store {
                 self.save_connection(existing, replacing_token, protocol)?;
             }
             Edit::SaveDshProvider {
+                buffer_complete_response,
                 endless_mode,
                 upstream_retry_seconds,
                 normal_retry_seconds,
@@ -1083,7 +1089,7 @@ impl Store {
                         delegate: Default::default(),
                         end_on_message_stop: None,
                         filter_count_tokens: None,
-                        buffer_complete_response: None,
+                        buffer_complete_response,
                         endless_mode,
                         upstream_retry_seconds,
                         normal_retry_seconds,

@@ -115,6 +115,7 @@ fn incompatible_protocol_is_explained_and_ambiguous_mapping_is_left_empty() {
     assert!(Store::default()
         .edit(
             Edit::SaveDshProvider {
+                buffer_complete_response: None,
                 endless_mode: None,
                 upstream_retry_seconds: None,
                 normal_retry_seconds: None,
@@ -165,6 +166,7 @@ impl Fixture {
             store
                 .edit(
                     Edit::SaveDshProvider {
+                        buffer_complete_response: None,
                         endless_mode: None,
                         upstream_retry_seconds: None,
                         normal_retry_seconds: None,
@@ -264,6 +266,7 @@ async fn a_profile_attaches_with_no_provider_and_the_last_one_can_go_while_it_ru
             .unwrap()
     };
     let id = edit(Edit::SaveDshProvider {
+        buffer_complete_response: None,
         endless_mode: None,
         upstream_retry_seconds: None,
         normal_retry_seconds: None,
@@ -1093,6 +1096,7 @@ fn endless_settings(fixture: &Fixture, class: RetryClass, codes: Option<Vec<u16>
         .gateway
         .edit(
             Edit::SaveDshProvider {
+                buffer_complete_response: None,
                 endless_mode: Some(true),
                 upstream_retry_seconds: seconds(RetryClass::Risk),
                 limit_retry_seconds: seconds(RetryClass::Limit),
@@ -1186,4 +1190,65 @@ async fn endless_mode_sorts_a_dsh_failure_and_retries_it_past_the_limit() {
         }
         fixture.gateway.stop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn a_dsh_provider_answering_whole_drops_a_cut_stream_and_sends_the_whole_one() {
+    const PARTIAL: &str = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"discard-partial\"},\"finish_reason\":null}]}\n\n";
+    const COMPLETE: &str = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"complete\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
+    let calls = Arc::new(Mutex::new(0));
+    let seen = calls.clone();
+    let upstream = server(move |_| {
+        let seen = seen.clone();
+        async move {
+            let first = {
+                let mut count = seen.lock();
+                *count += 1;
+                *count == 1
+            };
+            Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(replay::full(if first { PARTIAL } else { COMPLETE }))
+                .unwrap()
+        }
+    })
+    .await;
+    let fixture = Fixture::new(&[upstream.url("/v1")], false).await;
+    retry_settings(&fixture, 1);
+    let mut settings = fixture.gateway.view().settings;
+    settings.rate_limit_seconds = 1;
+    let view = fixture.gateway.view();
+    let provider = &view.providers[0];
+    for edit in [
+        Edit::Settings { settings },
+        Edit::SaveDshProvider {
+            buffer_complete_response: Some(true),
+            endless_mode: None,
+            upstream_retry_seconds: None,
+            limit_retry_seconds: None,
+            limit_rest_seconds: None,
+            normal_retry_seconds: None,
+            risk_codes: None,
+            retry_intensity: None,
+            quota_access_token: None,
+            id: Some(provider.id.clone()),
+            name: None,
+            base_url: provider.base_url.clone(),
+            token: String::new(),
+            protocol: Protocol::ChatCompletions,
+        },
+    ] {
+        fixture
+            .gateway
+            .edit(edit, &fixture.gateway.view().revision, fixture.home.path())
+            .unwrap();
+    }
+    assert!(fixture.gateway.view().providers[0].buffer_complete_response);
+    let response = fixture.request(models::FLASH, true).await;
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(!body.contains("discard-partial"), "{body}");
+    assert!(body.contains("complete") && body.contains("data: [DONE]"));
+    assert_eq!(*calls.lock(), 2);
+    fixture.gateway.stop().await.unwrap();
 }

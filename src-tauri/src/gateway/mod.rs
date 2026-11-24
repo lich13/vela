@@ -1,6 +1,5 @@
 mod agy;
 mod agy_shell;
-mod claude_stream;
 pub mod gemini;
 mod response_decoder;
 pub mod vertex;
@@ -16,6 +15,7 @@ pub(crate) mod dsh;
 pub(crate) mod grok_config;
 mod grok_import;
 mod grok_layers;
+mod held_stream;
 pub mod provider_protocol;
 pub use grok_import::Preview as GrokImportPreview;
 #[cfg(test)]
@@ -899,6 +899,41 @@ impl Gateway {
         provider_id: &str,
         expected_revision: &str,
     ) -> Result<String> {
+        self.reveal(window_label, expected_revision, |store| {
+            store
+                .providers
+                .iter()
+                .find(|provider| provider.id == provider_id)
+                .map(|provider| provider.token.clone())
+                .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))
+        })
+    }
+    /// The token a provider's account balance is asked with, for the form
+    /// that edits it.
+    #[cfg(any(feature = "desktop", test))]
+    pub fn reveal_quota_access_token(
+        &self,
+        window_label: &str,
+        provider_id: &str,
+        expected_revision: &str,
+    ) -> Result<String> {
+        self.reveal(window_label, expected_revision, |store| {
+            store
+                .quota_access_tokens
+                .get(provider_id)
+                .cloned()
+                .ok_or_else(|| AppError::new(code::PROVIDER, "供应商没有账号访问令牌"))
+        })
+    }
+    /// Reads a credential for the main window's provider form, which must
+    /// have been opened on the configuration as it now is.
+    #[cfg(any(feature = "desktop", test))]
+    fn reveal(
+        &self,
+        window_label: &str,
+        expected_revision: &str,
+        read: impl FnOnce(&model::Store) -> Result<String>,
+    ) -> Result<String> {
         if window_label != "main" {
             return Err(AppError::new(code::FORBIDDEN, "仅主窗口可查看供应商凭据"));
         }
@@ -913,13 +948,7 @@ impl Gateway {
                 "供应商配置已变化，请重新打开编辑",
             ));
         }
-        state
-            .store
-            .providers
-            .iter()
-            .find(|provider| provider.id == provider_id)
-            .map(|provider| provider.token.clone())
-            .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))
+        read(&state.store)
     }
     fn view_revision(&self, s: &Inner) -> Result<String> {
         Ok(self.view_revision_with_listener(s, &self.try_listener_view()?.revision))
@@ -1414,6 +1443,7 @@ impl Gateway {
                 name,
             },
             Edit::SaveGrokProvider {
+                buffer_complete_response,
                 delegate,
                 id: None,
                 base_url,
@@ -1422,6 +1452,7 @@ impl Gateway {
                 name,
                 protocol,
             } => Edit::SaveGrokProvider {
+                buffer_complete_response,
                 delegate: delegate.or_everything(self.0.client),
                 id: None,
                 base_url,

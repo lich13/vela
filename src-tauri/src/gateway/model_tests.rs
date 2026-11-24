@@ -580,6 +580,7 @@ fn auxiliary_endpoint_clear_preserves_connection_and_deleted_providers_leave_no_
     store
         .edit(
             Edit::SaveGrokProvider {
+                buffer_complete_response: None,
                 delegate: Default::default(),
                 id: None,
                 name: Some("fixture".into()),
@@ -976,6 +977,7 @@ fn a_provider_form_carries_its_takeover_and_rest_settings_beside_the_others() {
 fn a_copy_takes_everything_but_the_identity_and_sits_below_its_original() {
     let mut store = Store::default();
     let save = |name: &str| Edit::SaveDshProvider {
+        buffer_complete_response: None,
         id: None,
         name: Some(name.into()),
         base_url: "https://primary.example.invalid".into(),

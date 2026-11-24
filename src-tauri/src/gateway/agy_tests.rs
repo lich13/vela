@@ -610,3 +610,119 @@ async fn providers_come_as_gemini_addresses_and_from_nowhere_else() {
     assert!(f.agy.read_config(&f.home).is_err());
     assert!(std::fs::read_dir(&f.home).unwrap().next().is_none());
 }
+
+/// An upstream that gives `answers` in turn and the last of them from then
+/// on, and how often it was asked.
+async fn answering(
+    content_type: &'static str,
+    answers: &'static [&'static str],
+) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let port = server({
+        let hits = hits.clone();
+        move |_| {
+            let turn = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                hyper::Response::builder()
+                    .header("content-type", content_type)
+                    .body(replay::full(answers[turn.min(answers.len() - 1)]))
+                    .unwrap()
+            }
+        }
+    })
+    .await;
+    (port, hits)
+}
+
+#[tokio::test]
+async fn a_provider_answering_whole_never_hands_on_a_cut_gemini_response() {
+    const PARTIAL: &str = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"discard-partial\"}]}}],\"responseId\":\"fixture-response\"}\n\n";
+    const ARRAY: &str = r#"[{"candidates":[{"content":{"parts":[{"text":"fixture"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5}}]"#;
+    const WHOLE: &str = r#"{"candidates":[{"content":{"parts":[{"text":"fixture"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5}}"#;
+    let body = r#"{"contents":[{"role":"user","parts":[{"text":"fixture"}]}]}"#;
+    let events = "/v1beta/models/gemini-fixture:streamGenerateContent?alt=sse";
+    for (content_type, answers, path, status, hits, expected) in [
+        // A stream cut before its finish reason is asked for again.
+        (
+            "text/event-stream",
+            &[PARTIAL, STREAM][..],
+            events,
+            200,
+            2,
+            Some(STREAM),
+        ),
+        // Never whole: the stream already opened ends with Google's error.
+        ("text/event-stream", &[PARTIAL][..], events, 200, 2, None),
+        // A stream of a JSON array is sent on as before; a plain answer is held.
+        (
+            "application/json",
+            &[ARRAY][..],
+            "/v1beta/models/gemini-fixture:streamGenerateContent",
+            200,
+            1,
+            Some(ARRAY),
+        ),
+        (
+            "application/json",
+            &[r#"{"candidates":[{"content""#, WHOLE][..],
+            "/v1beta/models/gemini-fixture:generateContent",
+            200,
+            2,
+            Some(WHOLE),
+        ),
+        (
+            "application/json",
+            &[r#"{"candidates":[{"content""#][..],
+            "/v1beta/models/gemini-fixture:generateContent",
+            502,
+            2,
+            None,
+        ),
+    ] {
+        let f = fixture().await;
+        let (port, asked) = answering(content_type, answers).await;
+        let id = f.save(&format!("http://127.0.0.1:{port}"));
+        f.edit(form(json!({
+            "id": id,
+            "baseUrl": format!("http://127.0.0.1:{port}"),
+            "token": "",
+            "bufferCompleteResponse": true,
+        })));
+        let mut settings = f.agy.view().settings;
+        settings.max_retries = 1;
+        settings.rate_limit_seconds = 1;
+        settings.network_probe = false;
+        f.edit(Edit::Settings { settings });
+        f.start().await;
+        let response = f
+            .request(reqwest::Method::POST, path)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{path}");
+        let text = response.text().await.unwrap();
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            hits,
+            "{path} {text}"
+        );
+        assert!(!text.contains("discard-partial"), "{text}");
+        match expected {
+            Some(expected) => assert!(text.ends_with(expected), "{path} {text}"),
+            None if status == 200 => {
+                let failed = text
+                    .split("\n\n")
+                    .find_map(|event| event.trim().strip_prefix("data: "))
+                    .expect("an error object");
+                let failed: serde_json::Value = serde_json::from_str(failed).unwrap();
+                assert_eq!(failed["error"]["code"], 502);
+                assert_eq!(failed["error"]["status"], "UNAVAILABLE");
+                assert!(failed["error"]["message"].is_string());
+            }
+            None => assert!(text.contains("vela_gateway"), "{text}"),
+        }
+        f.agy.stop().await.unwrap();
+    }
+}

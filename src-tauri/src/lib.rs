@@ -1355,10 +1355,15 @@ fn reveal_provider_token(
     client_id: gateway::ClientId,
     provider_id: String,
     expected_revision: String,
+    quota_access: Option<bool>,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<String> {
-    r.gateway(client_id)
-        .reveal_provider_token(window.label(), &provider_id, &expected_revision)
+    let gateway = r.gateway(client_id);
+    if quota_access == Some(true) {
+        gateway.reveal_quota_access_token(window.label(), &provider_id, &expected_revision)
+    } else {
+        gateway.reveal_provider_token(window.label(), &provider_id, &expected_revision)
+    }
 }
 #[cfg(feature = "desktop")]
 #[tauri::command]

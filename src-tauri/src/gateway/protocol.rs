@@ -908,22 +908,35 @@ impl Protocol {
     pub(super) fn buffer_output(&mut self, enabled: bool) {
         self.buffering = enabled;
     }
+    /// Settles a response read to its end before any of it is handed on,
+    /// and says whether it is whole. A Messages stream is whole at its
+    /// `message_stop`. Any other protocol is whole once it has ended in its
+    /// own terms without reporting an error, also where that end says the
+    /// output was cut short or withheld: the client is owed that as said.
     pub(super) fn finish_buffer(
         &mut self,
         status: u16,
         failure: Option<&str>,
         end_at_stop: bool,
+        messages: bool,
     ) -> bool {
         if end_at_stop && self.message_stopped() && failure.is_none() {
             self.finish_at_terminal(Some(status));
         } else {
             self.finish(Some(status), failure.unwrap_or(code::OK));
         }
-        let complete = failure.is_none()
-            && !self.observation.incomplete
-            && self.terminal_received
-            && self.succeeded()
-            && (!self.stream || self.message_stopped());
+        let ended = if messages {
+            self.succeeded() && (!self.stream || self.message_stopped())
+        } else {
+            self.succeeded()
+                || (self.observation.fault_sequence == 0
+                    && matches!(
+                        self.terminal(),
+                        Some(Terminal::Rejected | Terminal::Unknown)
+                    ))
+        };
+        let complete =
+            failure.is_none() && !self.observation.incomplete && self.terminal_received && ended;
         if !complete && !self.explicit_failure() {
             self.observation.terminal = Some(Terminal::Failure);
             self.transport_failure = true;

@@ -75,6 +75,70 @@ const parseVertexUrl = (publisher: string, url: string) => {
 export type ProviderTab = "api" | "whitelist" | "modelMap" | "endpoints";
 type ProviderDialog = { kind: "provider"; item?: Provider; tab?: ProviderTab };
 
+/** A saved credential shown in its field on request. `read` fetches it
+ *  from this machine's store and is absent where the field holds what was
+ *  typed, or nothing is saved. What was read is dropped whenever the form
+ *  is hidden or stands on other state. */
+function useReveal(
+  read: (() => Promise<string>) | null,
+  revision: string,
+  fail: (message: string) => void,
+) {
+  const [shown, setShown] = useState(false);
+  const [revealed, setRevealed] = useState<{
+    value: string;
+    revision: string;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const sequence = useRef(0);
+  const current = useRef(revision);
+  current.current = revision;
+  const hide = useCallback(() => {
+    sequence.current += 1;
+    setShown(false);
+    setRevealed(null);
+    setBusy(false);
+  }, []);
+  /** The field was typed in: what was read no longer stands in it. */
+  const edited = () => {
+    sequence.current += 1;
+    setRevealed(null);
+    setBusy(false);
+  };
+  const toggle = async () => {
+    if (shown) {
+      hide();
+      return;
+    }
+    fail("");
+    setShown(true);
+    if (!read) return;
+    const turn = ++sequence.current;
+    const live = () =>
+      turn === sequence.current && current.current === revision;
+    setBusy(true);
+    try {
+      const value = await read();
+      if (live()) setRevealed({ value, revision });
+    } catch (e) {
+      if (live()) {
+        setShown(false);
+        fail(errorOf(e).message);
+      }
+    } finally {
+      if (turn === sequence.current) setBusy(false);
+    }
+  };
+  return {
+    shown,
+    busy,
+    value: shown && revealed?.revision === revision ? revealed.value : null,
+    hide,
+    edited,
+    toggle,
+  };
+}
+
 function ProviderApiForm({
   clientId,
   connectionMode,
@@ -132,7 +196,6 @@ function ProviderApiForm({
       ? "chat_completions"
       : (dialog.item?.protocol ?? "responses"),
   );
-  const [showToken, setShowToken] = useState(false);
   const [quotaAccessToken, setQuotaAccessToken] = useState<
     string | undefined
   >();
@@ -322,70 +385,53 @@ function ProviderApiForm({
     };
   }, [clientId, providerId, seenAddress, endlessMode]);
 
-  const [revealed, setRevealed] = useState<{
-    value: string;
-    revision: string;
-  } | null>(null);
-  const [revealing, setRevealing] = useState(false);
-  const revealSequence = useRef(0);
-  const currentRevision = useRef(revision);
-  currentRevision.current = revision;
-  const hideToken = useCallback(() => {
-    revealSequence.current += 1;
-    setShowToken(false);
-    setRevealed(null);
-    setRevealing(false);
-  }, []);
+  const secret = useReveal(
+    dialog.item && !token
+      ? () =>
+          command("reveal_provider_token", {
+            clientId,
+            providerId: dialog.item!.id,
+            expectedRevision: revision,
+          })
+      : null,
+    revision,
+    setError,
+  );
+  const access = useReveal(
+    dialog.item?.hasQuotaAccessToken && quotaAccessToken === undefined
+      ? () =>
+          command("reveal_provider_token", {
+            clientId,
+            providerId: dialog.item!.id,
+            expectedRevision: revision,
+            quotaAccess: true,
+          })
+      : null,
+    revision,
+    setError,
+  );
+  const hideSecret = secret.hide,
+    hideAccess = access.hide;
   useEffect(() => {
-    hideToken();
+    const hide = () => {
+      hideSecret();
+      hideAccess();
+    };
+    hide();
     const events = subscriptions((e) => setError(errorOf(e).message));
     const visibility = () => {
-      if (document.visibilityState === "hidden") hideToken();
+      if (document.visibilityState === "hidden") hide();
     };
     document.addEventListener("visibilitychange", visibility);
     events.watch("app-visibility", (visible) => {
-      if (!visible) hideToken();
+      if (!visible) hide();
     });
     return () => {
-      revealSequence.current += 1;
+      hide();
       events.dispose();
       document.removeEventListener("visibilitychange", visibility);
     };
-  }, [clientId, dialog.item?.id, revision, hideToken]);
-  const toggleToken = async () => {
-    if (showToken) {
-      hideToken();
-      return;
-    }
-    setError("");
-    setShowToken(true);
-    if (token || !dialog.item) return;
-    const sequence = ++revealSequence.current;
-    setRevealing(true);
-    try {
-      const value = await command("reveal_provider_token", {
-        clientId,
-        providerId: dialog.item.id,
-        expectedRevision: revision,
-      });
-      if (
-        sequence === revealSequence.current &&
-        currentRevision.current === revision
-      ) {
-        setRevealed({ value, revision });
-      }
-    } catch (e) {
-      if (
-        sequence === revealSequence.current &&
-        currentRevision.current === revision
-      ) {
-        setShowToken(false);
-        setError(errorOf(e).message);
-      }
-    } finally {
-      if (sequence === revealSequence.current) setRevealing(false);
-    }
-  };
+  }, [clientId, dialog.item?.id, revision, hideSecret, hideAccess]);
   // The fields that make the form dirty, as one comparable string.
   const snapshot = JSON.stringify([
     name,
@@ -489,22 +535,30 @@ function ProviderApiForm({
         };
         const payload: GatewayEdit =
           clientId === "grok"
-            ? { op: "saveGrokProvider", ...draft, protocol, ...search }
+            ? {
+                op: "saveGrokProvider",
+                ...draft,
+                protocol,
+                ...search,
+                bufferCompleteResponse,
+              }
             : clientId === "dsh"
-              ? { op: "saveDshProvider", ...draft, protocol, ...endless }
+              ? {
+                  op: "saveDshProvider",
+                  ...draft,
+                  protocol,
+                  ...endless,
+                  bufferCompleteResponse,
+                }
               : {
                   op: "saveProvider",
                   ...draft,
                   ...endless,
                   ...takeover,
+                  bufferCompleteResponse,
                   ...(clientId === "codex" ? search : {}),
                   ...(clientId === "claude"
-                    ? {
-                        ...search,
-                        endOnMessageStop,
-                        filterCountTokens,
-                        bufferCompleteResponse,
-                      }
+                    ? { ...search, endOnMessageStop, filterCountTokens }
                     : {}),
                 };
         void (async () => {
@@ -674,18 +728,12 @@ function ProviderApiForm({
           <span className="provider-token-input">
             <input
               required={!dialog.item}
-              type={showToken ? "text" : "password"}
+              type={secret.shown ? "text" : "password"}
               autoComplete="new-password"
               spellCheck={false}
-              value={
-                showToken && revealed?.revision === revision
-                  ? revealed.value
-                  : token
-              }
+              value={secret.value ?? token}
               onChange={(e) => {
-                revealSequence.current += 1;
-                setRevealed(null);
-                setRevealing(false);
+                secret.edited();
                 setToken(e.target.value);
               }}
               placeholder={dialog.item ? "留空保留当前 Token" : "输入 Token"}
@@ -693,9 +741,9 @@ function ProviderApiForm({
             <button
               type="button"
               className="icon-button"
-              aria-label={showToken ? "隐藏 Token" : "显示 Token"}
-              aria-pressed={showToken}
-              aria-busy={revealing}
+              aria-label={secret.shown ? "隐藏 Token" : "显示 Token"}
+              aria-pressed={secret.shown}
+              aria-busy={secret.busy}
               // A saved token is revealed from this machine's store only.
               disabled={remote && !token && !!dialog.item}
               title={
@@ -703,11 +751,11 @@ function ProviderApiForm({
                   ? "服务器上保存的 Token 不能在本机显示"
                   : undefined
               }
-              onClick={() => void toggleToken()}
+              onClick={() => void secret.toggle()}
             >
-              {revealing ? (
+              {secret.busy ? (
                 <LoaderCircle size={16} className="spin" aria-hidden="true" />
-              ) : showToken ? (
+              ) : secret.shown ? (
                 <EyeOff size={16} aria-hidden="true" />
               ) : (
                 <Eye size={16} aria-hidden="true" />
@@ -720,11 +768,14 @@ function ProviderApiForm({
         账号访问令牌（可选）
         <span className="provider-token-input">
           <input
-            type="password"
+            type={access.shown ? "text" : "password"}
             autoComplete="new-password"
             spellCheck={false}
-            value={quotaAccessToken ?? ""}
-            onChange={(e) => setQuotaAccessToken(e.target.value || undefined)}
+            value={access.value ?? quotaAccessToken ?? ""}
+            onChange={(e) => {
+              access.edited();
+              setQuotaAccessToken(e.target.value || undefined);
+            }}
             placeholder={
               quotaAccessToken === ""
                 ? "保存后清除"
@@ -733,380 +784,413 @@ function ProviderApiForm({
                   : "用于 New API 账户余额查询"
             }
           />
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={access.shown ? "隐藏访问令牌" : "显示访问令牌"}
+            aria-pressed={access.shown}
+            aria-busy={access.busy}
+            // A saved token is revealed from this machine's store only.
+            disabled={
+              remote &&
+              quotaAccessToken === undefined &&
+              !!dialog.item?.hasQuotaAccessToken
+            }
+            title={
+              remote &&
+              quotaAccessToken === undefined &&
+              dialog.item?.hasQuotaAccessToken
+                ? "服务器上保存的访问令牌不能在本机显示"
+                : undefined
+            }
+            onClick={() => void access.toggle()}
+          >
+            {access.busy ? (
+              <LoaderCircle size={16} className="spin" aria-hidden="true" />
+            ) : access.shown ? (
+              <EyeOff size={16} aria-hidden="true" />
+            ) : (
+              <Eye size={16} aria-hidden="true" />
+            )}
+          </button>
           {(dialog.item?.hasQuotaAccessToken || quotaAccessToken) && (
             <button
               type="button"
               className="text-button"
-              onClick={() => setQuotaAccessToken("")}
+              onClick={() => {
+                access.edited();
+                setQuotaAccessToken("");
+              }}
             >
               清除
             </button>
           )}
         </span>
       </label>
-      {(clientId !== "grok" || searchOffered) && (
-        <div className="provider-switches">
-          {/* Ahead of the options, so that an opened block is the last child
+      <div className="provider-switches">
+        {/* Ahead of the options, so that an opened block is the last child
                 when nothing follows it. */}
-          {models.length > 0 && (
-            <datalist id={suggestions}>
-              {models.map((model) => (
-                <option key={model} value={model} />
-              ))}
-            </datalist>
-          )}
-          {clientId === "claude" && (
-            <>
-              <label className="provider-search-setting">
-                <input
-                  type="checkbox"
-                  checked={endOnMessageStop}
-                  disabled={busy}
-                  onChange={(e) => setEndOnMessageStop(e.target.checked)}
-                />
-                <span>收到 message_stop 后立即结束响应</span>
-              </label>
-              <label className="provider-search-setting">
-                <input
-                  type="checkbox"
-                  checked={filterCountTokens}
-                  disabled={busy}
-                  onChange={(e) => setFilterCountTokens(e.target.checked)}
-                />
-                <span>过滤 Token 计数请求</span>
-              </label>
-              <label className="provider-search-setting">
-                <input
-                  type="checkbox"
-                  checked={bufferCompleteResponse}
-                  disabled={busy}
-                  onChange={(e) => setBufferCompleteResponse(e.target.checked)}
-                />
-                <span>完整响应后发送</span>
-              </label>
-            </>
-          )}
-          {takeoverOffered && (
-            <>
-              <label
-                className="provider-search-setting"
-                title="开启后，本供应商加入压缩队列：压缩请求按列表顺序交给队列里的供应商，都未能完成时返回错误，不回到普通队列"
-              >
-                <input
-                  type="checkbox"
-                  checked={takeCompaction}
-                  disabled={busy}
-                  onChange={(e) => setTakeCompaction(e.target.checked)}
-                />
-                <span>接管压缩请求</span>
-              </label>
-              {takeCompaction && (
-                <div className="provider-retry-settings">
-                  <label
-                    className="provider-retry-setting provider-takeover-model"
-                    title="填写后，不论客户端请求什么模型，压缩请求都改用该模型；留空则沿用客户端请求的模型"
-                  >
-                    <span>压缩模型</span>
-                    <input
-                      type="text"
-                      list={models.length ? suggestions : undefined}
-                      maxLength={256}
-                      spellCheck={false}
-                      value={compactionModel}
-                      disabled={busy}
-                      placeholder="留空则沿用客户端模型"
-                      onChange={(e) => setCompactionModel(e.target.value)}
-                    />
-                  </label>
-                  <label
-                    className="provider-retry-setting provider-takeover-model"
-                    title="选定后，压缩请求改用该思考强度，不沿用原线程的；跟随客户端则不改动"
-                  >
-                    <span>思考强度</span>
-                    <select
-                      aria-label="压缩思考强度"
-                      value={compactionEffort}
-                      disabled={busy}
-                      onChange={(e) => setCompactionEffort(e.target.value)}
-                    >
-                      <option value="">跟随客户端</option>
-                      {efforts(savedTakeover.compactionEffort).map((effort) => (
-                        <option key={effort} value={effort}>
-                          {effort}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-              )}
-              <label
-                className="provider-search-setting"
-                title="开启后，本供应商加入辅助队列：自动审批、标题、摘要、记忆等非主对话请求按列表顺序交给队列里的供应商，都未能完成时返回错误，不回到普通队列"
-              >
-                <input
-                  type="checkbox"
-                  checked={takeAuxiliary}
-                  disabled={busy}
-                  onChange={(e) => setTakeAuxiliary(e.target.checked)}
-                />
-                <span>接管辅助请求</span>
-              </label>
-              {takeAuxiliary && (
-                <div className="provider-retry-settings">
-                  <label
-                    className="provider-retry-setting provider-takeover-model"
-                    title="填写后，不论客户端请求什么模型，辅助请求都改用该模型；留空则沿用客户端请求的模型"
-                  >
-                    <span>辅助模型</span>
-                    <input
-                      type="text"
-                      list={models.length ? suggestions : undefined}
-                      maxLength={256}
-                      spellCheck={false}
-                      value={auxiliaryModel}
-                      disabled={busy}
-                      placeholder="留空则沿用客户端模型"
-                      onChange={(e) => setAuxiliaryModel(e.target.value)}
-                    />
-                  </label>
-                  <label
-                    className="provider-retry-setting provider-takeover-model"
-                    title="选定后，辅助请求改用该思考强度，不沿用原线程的；跟随客户端则不改动"
-                  >
-                    <span>思考强度</span>
-                    <select
-                      aria-label="辅助思考强度"
-                      value={auxiliaryEffort}
-                      disabled={busy}
-                      onChange={(e) => setAuxiliaryEffort(e.target.value)}
-                    >
-                      <option value="">跟随客户端</option>
-                      {efforts(savedTakeover.auxiliaryEffort).map((effort) => (
-                        <option key={effort} value={effort}>
-                          {effort}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-              )}
-            </>
-          )}
-          {searchOffered && (
-            <>
-              <label
-                className="provider-search-setting"
-                title="开启后，本供应商加入搜索队列：客户端搜索工具发出的网络搜索请求按列表顺序交给队列里的供应商，都未能完成时返回错误，不回到普通队列。请只在供应商支持网络搜索时开启"
-              >
-                <input
-                  type="checkbox"
-                  checked={takeWebSearch}
-                  disabled={busy}
-                  onChange={(e) => setTakeWebSearch(e.target.checked)}
-                />
-                <span
-                  title={
-                    clientId === "grok"
-                      ? "Grok 的搜索模型需指向 vela 或 vela/<模型 ID>（config.toml 的 [models] web_search），搜索请求才会经过网关"
-                      : undefined
-                  }
-                >
-                  接管网络搜索请求
-                </span>
-              </label>
-              {takeWebSearch && (
-                <div className="provider-retry-settings">
-                  <label
-                    className="provider-retry-setting provider-takeover-model"
-                    title="填写后，不论客户端请求什么模型，网络搜索请求都改用该模型；留空则沿用客户端请求的模型"
-                  >
-                    <span>搜索模型</span>
-                    <input
-                      type="text"
-                      list={models.length ? suggestions : undefined}
-                      maxLength={256}
-                      spellCheck={false}
-                      value={webSearchModel}
-                      disabled={busy}
-                      placeholder="留空则沿用客户端模型"
-                      onChange={(e) => setWebSearchModel(e.target.value)}
-                    />
-                  </label>
-                  <label
-                    className="provider-retry-setting provider-takeover-model"
-                    title="选定后，网络搜索请求改用该思考强度；跟随客户端则不改动"
-                  >
-                    <span>思考强度</span>
-                    <select
-                      aria-label="搜索思考强度"
-                      value={webSearchEffort}
-                      disabled={busy}
-                      onChange={(e) => setWebSearchEffort(e.target.value)}
-                    >
-                      <option value="">跟随客户端</option>
-                      {efforts(savedTakeover.webSearchEffort).map((effort) => (
-                        <option key={effort} value={effort}>
-                          {effort}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-              )}
-            </>
-          )}
-          {clientId !== "grok" && (
+        {models.length > 0 && (
+          <datalist id={suggestions}>
+            {models.map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
+        )}
+        {clientId === "claude" && (
+          <>
             <label className="provider-search-setting">
               <input
                 type="checkbox"
-                checked={endlessMode}
+                checked={endOnMessageStop}
                 disabled={busy}
-                onChange={(e) => setEndlessMode(e.target.checked)}
+                onChange={(e) => setEndOnMessageStop(e.target.checked)}
               />
-              <span>无尽模式</span>
+              <span>收到 message_stop 后立即结束响应</span>
             </label>
-          )}
-          {clientId !== "grok" && endlessMode && (
-            <div className="provider-retry-settings">
-              <label
-                className="provider-retry-setting"
-                title="上游状态码在风控代码内时的重试间隔"
-              >
-                <span>风控重试</span>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  required
-                  value={upstreamRetrySeconds}
-                  disabled={busy}
-                  onChange={(e) => setUpstreamRetrySeconds(e.target.value)}
-                />
-                <span>秒</span>
-              </label>
-              {riskOptions.length > 0 && (
-                <fieldset
-                  className="provider-risk-options"
-                  disabled={busy}
-                  title="勾选后，该状态码按风控重试处理；列出的是同域名供应商近 7 天遇到过的上游报错"
+            <label className="provider-search-setting">
+              <input
+                type="checkbox"
+                checked={filterCountTokens}
+                disabled={busy}
+                onChange={(e) => setFilterCountTokens(e.target.checked)}
+              />
+              <span>过滤 Token 计数请求</span>
+            </label>
+          </>
+        )}
+        <label
+          className="provider-search-setting"
+          title="开启后，网关收完整个响应才交给客户端：中途断开或未收完整的响应会丢弃，并向本供应商重新请求；等待期间保持连接"
+        >
+          <input
+            type="checkbox"
+            checked={bufferCompleteResponse}
+            disabled={busy}
+            onChange={(e) => setBufferCompleteResponse(e.target.checked)}
+          />
+          <span>完整响应后发送</span>
+        </label>
+        {takeoverOffered && (
+          <>
+            <label
+              className="provider-search-setting"
+              title="开启后，本供应商加入压缩队列：压缩请求按列表顺序交给队列里的供应商，都未能完成时返回错误，不回到普通队列"
+            >
+              <input
+                type="checkbox"
+                checked={takeCompaction}
+                disabled={busy}
+                onChange={(e) => setTakeCompaction(e.target.checked)}
+              />
+              <span>接管压缩请求</span>
+            </label>
+            {takeCompaction && (
+              <div className="provider-retry-settings">
+                <label
+                  className="provider-retry-setting provider-takeover-model"
+                  title="填写后，不论客户端请求什么模型，压缩请求都改用该模型；留空则沿用客户端请求的模型"
                 >
-                  <legend>风控代码</legend>
-                  {riskOptions.map((option) => (
-                    <label key={option.status}>
-                      <input
-                        type="checkbox"
-                        checked={checkedCodes.includes(option.status)}
-                        onChange={(e) =>
-                          setCheckedCodes((old) =>
-                            e.target.checked
-                              ? [...old, option.status]
-                              : old.filter((code) => code !== option.status),
-                          )
-                        }
-                      />
-                      <span>
-                        {[
-                          option.status,
-                          option.count ? `${option.count} 次` : "未遇到",
-                          limitLabel({ errorBasis: option.basis }),
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
-                      </span>
-                    </label>
-                  ))}
-                </fieldset>
-              )}
-              <label
-                className="provider-retry-setting provider-risk-codes"
-                title="按风控重试处理的上游状态码（400–599），以空格或逗号分隔，最多 16 个，可留空"
+                  <span>压缩模型</span>
+                  <input
+                    type="text"
+                    list={models.length ? suggestions : undefined}
+                    maxLength={256}
+                    spellCheck={false}
+                    value={compactionModel}
+                    disabled={busy}
+                    placeholder="留空则沿用客户端模型"
+                    onChange={(e) => setCompactionModel(e.target.value)}
+                  />
+                </label>
+                <label
+                  className="provider-retry-setting provider-takeover-model"
+                  title="选定后，压缩请求改用该思考强度，不沿用原线程的；跟随客户端则不改动"
+                >
+                  <span>思考强度</span>
+                  <select
+                    aria-label="压缩思考强度"
+                    value={compactionEffort}
+                    disabled={busy}
+                    onChange={(e) => setCompactionEffort(e.target.value)}
+                  >
+                    <option value="">跟随客户端</option>
+                    {efforts(savedTakeover.compactionEffort).map((effort) => (
+                      <option key={effort} value={effort}>
+                        {effort}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
+            <label
+              className="provider-search-setting"
+              title="开启后，本供应商加入辅助队列：自动审批、标题、摘要、记忆等非主对话请求按列表顺序交给队列里的供应商，都未能完成时返回错误，不回到普通队列"
+            >
+              <input
+                type="checkbox"
+                checked={takeAuxiliary}
+                disabled={busy}
+                onChange={(e) => setTakeAuxiliary(e.target.checked)}
+              />
+              <span>接管辅助请求</span>
+            </label>
+            {takeAuxiliary && (
+              <div className="provider-retry-settings">
+                <label
+                  className="provider-retry-setting provider-takeover-model"
+                  title="填写后，不论客户端请求什么模型，辅助请求都改用该模型；留空则沿用客户端请求的模型"
+                >
+                  <span>辅助模型</span>
+                  <input
+                    type="text"
+                    list={models.length ? suggestions : undefined}
+                    maxLength={256}
+                    spellCheck={false}
+                    value={auxiliaryModel}
+                    disabled={busy}
+                    placeholder="留空则沿用客户端模型"
+                    onChange={(e) => setAuxiliaryModel(e.target.value)}
+                  />
+                </label>
+                <label
+                  className="provider-retry-setting provider-takeover-model"
+                  title="选定后，辅助请求改用该思考强度，不沿用原线程的；跟随客户端则不改动"
+                >
+                  <span>思考强度</span>
+                  <select
+                    aria-label="辅助思考强度"
+                    value={auxiliaryEffort}
+                    disabled={busy}
+                    onChange={(e) => setAuxiliaryEffort(e.target.value)}
+                  >
+                    <option value="">跟随客户端</option>
+                    {efforts(savedTakeover.auxiliaryEffort).map((effort) => (
+                      <option key={effort} value={effort}>
+                        {effort}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
+          </>
+        )}
+        {searchOffered && (
+          <>
+            <label
+              className="provider-search-setting"
+              title="开启后，本供应商加入搜索队列：客户端搜索工具发出的网络搜索请求按列表顺序交给队列里的供应商，都未能完成时返回错误，不回到普通队列。请只在供应商支持网络搜索时开启"
+            >
+              <input
+                type="checkbox"
+                checked={takeWebSearch}
+                disabled={busy}
+                onChange={(e) => setTakeWebSearch(e.target.checked)}
+              />
+              <span
+                title={
+                  clientId === "grok"
+                    ? "Grok 的搜索模型需指向 vela 或 vela/<模型 ID>（config.toml 的 [models] web_search），搜索请求才会经过网关"
+                    : undefined
+                }
               >
-                <span>{riskOptions.length ? "其他代码" : "风控代码"}</span>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  spellCheck={false}
-                  value={riskCodes}
-                  disabled={busy}
-                  placeholder="无"
-                  onChange={(e) => setRiskCodes(e.target.value)}
-                />
-              </label>
-              {!riskOptions.length && (
-                <small className="muted provider-risk-options">
-                  暂无已遇到的报错
-                </small>
-              )}
-              <label
-                className="provider-retry-setting"
-                title="上游返回 429（余额不足等永久拒绝除外），或内容判定为限流的拒绝时的重试间隔"
+                接管网络搜索请求
+              </span>
+            </label>
+            {takeWebSearch && (
+              <div className="provider-retry-settings">
+                <label
+                  className="provider-retry-setting provider-takeover-model"
+                  title="填写后，不论客户端请求什么模型，网络搜索请求都改用该模型；留空则沿用客户端请求的模型"
+                >
+                  <span>搜索模型</span>
+                  <input
+                    type="text"
+                    list={models.length ? suggestions : undefined}
+                    maxLength={256}
+                    spellCheck={false}
+                    value={webSearchModel}
+                    disabled={busy}
+                    placeholder="留空则沿用客户端模型"
+                    onChange={(e) => setWebSearchModel(e.target.value)}
+                  />
+                </label>
+                <label
+                  className="provider-retry-setting provider-takeover-model"
+                  title="选定后，网络搜索请求改用该思考强度；跟随客户端则不改动"
+                >
+                  <span>思考强度</span>
+                  <select
+                    aria-label="搜索思考强度"
+                    value={webSearchEffort}
+                    disabled={busy}
+                    onChange={(e) => setWebSearchEffort(e.target.value)}
+                  >
+                    <option value="">跟随客户端</option>
+                    {efforts(savedTakeover.webSearchEffort).map((effort) => (
+                      <option key={effort} value={effort}>
+                        {effort}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
+          </>
+        )}
+        {clientId !== "grok" && (
+          <label className="provider-search-setting">
+            <input
+              type="checkbox"
+              checked={endlessMode}
+              disabled={busy}
+              onChange={(e) => setEndlessMode(e.target.checked)}
+            />
+            <span>无尽模式</span>
+          </label>
+        )}
+        {clientId !== "grok" && endlessMode && (
+          <div className="provider-retry-settings">
+            <label
+              className="provider-retry-setting"
+              title="上游状态码在风控代码内时的重试间隔"
+            >
+              <span>风控重试</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                required
+                value={upstreamRetrySeconds}
+                disabled={busy}
+                onChange={(e) => setUpstreamRetrySeconds(e.target.value)}
+              />
+              <span>秒</span>
+            </label>
+            {riskOptions.length > 0 && (
+              <fieldset
+                className="provider-risk-options"
+                disabled={busy}
+                title="勾选后，该状态码按风控重试处理；列出的是同域名供应商近 7 天遇到过的上游报错"
               >
-                <span>限流重试</span>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  required
-                  value={limitRetrySeconds}
-                  disabled={busy}
-                  onChange={(e) => setLimitRetrySeconds(e.target.value)}
-                />
-                <span>秒</span>
-              </label>
-              <label
-                className="provider-retry-setting"
-                title="供应商返回 429 等限流后，至少隔这么多秒才向它发出下一个请求：重试和新请求都等待，期间再次限流则重新计时；0 为不限制"
-              >
-                <span>限流静默</span>
-                <input
-                  type="number"
-                  min="0"
-                  max="86400"
-                  step="1"
-                  required
-                  value={limitRestSeconds}
-                  disabled={busy}
-                  onChange={(e) => setLimitRestSeconds(e.target.value)}
-                />
-                <span>秒</span>
-              </label>
-              <label
-                className="provider-retry-setting"
-                title="其余会重试的失败（连接失败、超时、5xx 等）的重试间隔"
-              >
-                <span>普通重试</span>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  required
-                  value={normalRetrySeconds}
-                  disabled={busy}
-                  onChange={(e) => setNormalRetrySeconds(e.target.value)}
-                />
-                <span>秒</span>
-              </label>
-              <label
-                className="provider-retry-setting"
-                title="风控与限流重试的间隔随该供应商处理中与等待重试的请求数变化的幅度：0 为固定间隔；5 时 3 个以内约为设定值的 1/5，6～7 个为设定值，10 个以上为 5/3；数值越大变化越陡。大于 0 时每次重试的间隔和限流静默另随机延长 0–20%，只延长不缩短"
-              >
-                <span>动态强度</span>
-                <input
-                  type="number"
-                  min="0"
-                  max="10"
-                  step="1"
-                  required
-                  value={retryIntensity}
-                  disabled={busy}
-                  onChange={(e) => setRetryIntensity(e.target.value)}
-                />
-                <span>0–10</span>
-              </label>
-            </div>
-          )}
-        </div>
-      )}
+                <legend>风控代码</legend>
+                {riskOptions.map((option) => (
+                  <label key={option.status}>
+                    <input
+                      type="checkbox"
+                      checked={checkedCodes.includes(option.status)}
+                      onChange={(e) =>
+                        setCheckedCodes((old) =>
+                          e.target.checked
+                            ? [...old, option.status]
+                            : old.filter((code) => code !== option.status),
+                        )
+                      }
+                    />
+                    <span>
+                      {[
+                        option.status,
+                        option.count ? `${option.count} 次` : "未遇到",
+                        limitLabel({ errorBasis: option.basis }),
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+            )}
+            <label
+              className="provider-retry-setting provider-risk-codes"
+              title="按风控重试处理的上游状态码（400–599），以空格或逗号分隔，最多 16 个，可留空"
+            >
+              <span>{riskOptions.length ? "其他代码" : "风控代码"}</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                spellCheck={false}
+                value={riskCodes}
+                disabled={busy}
+                placeholder="无"
+                onChange={(e) => setRiskCodes(e.target.value)}
+              />
+            </label>
+            {!riskOptions.length && (
+              <small className="muted provider-risk-options">
+                暂无已遇到的报错
+              </small>
+            )}
+            <label
+              className="provider-retry-setting"
+              title="上游返回 429（余额不足等永久拒绝除外），或内容判定为限流的拒绝时的重试间隔"
+            >
+              <span>限流重试</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                required
+                value={limitRetrySeconds}
+                disabled={busy}
+                onChange={(e) => setLimitRetrySeconds(e.target.value)}
+              />
+              <span>秒</span>
+            </label>
+            <label
+              className="provider-retry-setting"
+              title="供应商返回 429 等限流后，至少隔这么多秒才向它发出下一个请求：重试和新请求都等待，期间再次限流则重新计时；0 为不限制"
+            >
+              <span>限流静默</span>
+              <input
+                type="number"
+                min="0"
+                max="86400"
+                step="1"
+                required
+                value={limitRestSeconds}
+                disabled={busy}
+                onChange={(e) => setLimitRestSeconds(e.target.value)}
+              />
+              <span>秒</span>
+            </label>
+            <label
+              className="provider-retry-setting"
+              title="其余会重试的失败（连接失败、超时、5xx 等）的重试间隔"
+            >
+              <span>普通重试</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                required
+                value={normalRetrySeconds}
+                disabled={busy}
+                onChange={(e) => setNormalRetrySeconds(e.target.value)}
+              />
+              <span>秒</span>
+            </label>
+            <label
+              className="provider-retry-setting"
+              title="风控与限流重试的间隔随该供应商处理中与等待重试的请求数变化的幅度：0 为固定间隔；5 时 3 个以内约为设定值的 1/5，6～7 个为设定值，10 个以上为 5/3；数值越大变化越陡。大于 0 时每次重试的间隔和限流静默另随机延长 0–20%，只延长不缩短"
+            >
+              <span>动态强度</span>
+              <input
+                type="number"
+                min="0"
+                max="10"
+                step="1"
+                required
+                value={retryIntensity}
+                disabled={busy}
+                onChange={(e) => setRetryIntensity(e.target.value)}
+              />
+              <span>0–10</span>
+            </label>
+          </div>
+        )}
+      </div>
       {error && (
         <div className="banner error" role="alert">
           {error}

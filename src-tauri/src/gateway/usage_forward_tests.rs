@@ -1398,5 +1398,8 @@ mod claude_resilience_tests;
 #[path = "connectivity_tests.rs"]
 mod connectivity_tests;
 
+#[path = "held_response_tests.rs"]
+mod held_response_tests;
+
 #[path = "delegation_tests.rs"]
 mod delegation_tests;

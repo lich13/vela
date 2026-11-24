@@ -89,6 +89,7 @@ it("switches to Grok and saves a provider with the selected upstream protocol", 
         expectedRevision: grok.revision,
         edit: {
           op: "saveGrokProvider",
+          bufferCompleteResponse: false,
           protocol: "messages",
           id: null,
           baseUrl: "https://api.example.invalid/v1",

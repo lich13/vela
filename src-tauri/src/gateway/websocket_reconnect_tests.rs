@@ -765,3 +765,216 @@ async fn native_websocket_second_turn_has_a_fresh_wait_budget() {
     drop(client);
     g.stop().await.unwrap();
 }
+
+/// Sets the fixture's one provider to answer whole.
+fn answer_whole(g: &Gateway, t: &tempfile::TempDir) {
+    let provider = g.view().providers[0].clone();
+    update(
+        g,
+        t,
+        crate::gateway::test_support::form(json!({
+            "id": provider.id,
+            "baseUrl": provider.base_url,
+            "token": "",
+            "bufferCompleteResponse": true,
+        })),
+    );
+    assert!(g.view().providers[0].buffer_complete_response);
+}
+fn native_delta(text: &str) -> yawc::Frame {
+    yawc::Frame::text(json!({"type": "response.output_text.delta", "delta": text}).to_string())
+}
+
+#[tokio::test]
+async fn a_turn_held_whole_is_sent_again_after_a_cut_and_handed_on_once() {
+    let (port, state) = native_server(|connection, mut ws, state| async move {
+        let Some(frame) = native_next("held fixture waiting for response.create", &mut ws).await
+        else {
+            return;
+        };
+        record_native_request(&state, &frame);
+        ws.send(yawc::Frame::text(NATIVE_CREATED.to_owned()))
+            .await
+            .unwrap();
+        if connection == 1 {
+            // Output had begun: without the hold this turn is not sent again.
+            ws.send(native_delta("discard-partial")).await.unwrap();
+            let _ = ws
+                .send(yawc::Frame::close(1011.into(), "fixture disconnect"))
+                .await;
+            return;
+        }
+        ws.send(native_delta("complete")).await.unwrap();
+        ws.send(yawc::Frame::text(NATIVE_COMPLETED.to_owned()))
+            .await
+            .unwrap();
+        while let Some(frame) = ws.next().await {
+            if frame.opcode() == yawc::OpCode::Close {
+                break;
+            }
+        }
+    })
+    .await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
+    native_retry_settings(&g, &t, 1, 600);
+    answer_whole(&g, &t);
+    start(&g, &t).await;
+    let mut client = concurrency::responses_client(&g).await;
+    client
+        .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    while !seen
+        .last()
+        .is_some_and(|text: &String| text.contains("response.completed"))
+    {
+        let frame = native_next("held client waiting for the turn", &mut client)
+            .await
+            .unwrap();
+        seen.push(frame.as_str().to_owned());
+    }
+    assert!(seen.iter().all(|text| !text.contains("discard-partial")));
+    assert_eq!(
+        seen.iter()
+            .filter(|text| text.contains("response.created"))
+            .count(),
+        1
+    );
+    assert!(seen.iter().any(|text| text.contains("\"complete\"")));
+    assert_eq!(state.connections.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        state.requests.lock().as_slice(),
+        &[NATIVE_CREATE.as_bytes(), NATIVE_CREATE.as_bytes()]
+    );
+    drop(client);
+    g.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_long_turn_held_whole_keeps_the_client_waiting_and_arrives_in_order() {
+    // Past what is held in memory, so that most of the turn goes to the spool.
+    const FRAMES: usize = 48;
+    let (port, _state) = native_server(|_connection, mut ws, state| async move {
+        let Some(frame) = native_next("long fixture waiting for response.create", &mut ws).await
+        else {
+            return;
+        };
+        record_native_request(&state, &frame);
+        ws.send(yawc::Frame::text(NATIVE_CREATED.to_owned()))
+            .await
+            .unwrap();
+        for index in 0..FRAMES {
+            let text = format!("{index:04}-{}", "x".repeat(64 * 1024));
+            ws.send(native_delta(&text)).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(5500)).await;
+        ws.send(yawc::Frame::text(NATIVE_COMPLETED.to_owned()))
+            .await
+            .unwrap();
+        while let Some(frame) = ws.next().await {
+            if frame.opcode() == yawc::OpCode::Close {
+                break;
+            }
+        }
+    })
+    .await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
+    native_retry_settings(&g, &t, 1, 600);
+    let mut settings = g.view().settings;
+    settings.idle_seconds = 10;
+    update(&g, &t, Edit::Settings { settings });
+    answer_whole(&g, &t);
+    start(&g, &t).await;
+    let mut client = concurrency::responses_client(&g).await;
+    client
+        .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
+        .await
+        .unwrap();
+    let next = |client| async move {
+        let mut client: yawc::TcpWebSocket = client;
+        let frame = tokio::time::timeout(Duration::from_secs(8), client.next())
+            .await
+            .expect("the client was left without a frame")
+            .unwrap();
+        (client, frame.as_str().to_owned())
+    };
+    // Nothing of the turn before its end; an event Codex passes over instead.
+    let (client, first) = next(client).await;
+    assert_eq!(first, r#"{"type":"response.in_progress"}"#);
+    assert!(std::fs::read_dir(g.0.spool.path())
+        .unwrap()
+        .next()
+        .is_some());
+    let (mut client, mut text) = next(client).await;
+    while text == r#"{"type":"response.in_progress"}"# {
+        (client, text) = next(client).await;
+    }
+    assert!(text.contains("response.created"));
+    for index in 0..FRAMES {
+        (client, text) = next(client).await;
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert!(value["delta"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{index:04}-")));
+    }
+    (client, text) = next(client).await;
+    assert!(text.contains("response.completed"));
+    assert!(std::fs::read_dir(g.0.spool.path())
+        .unwrap()
+        .next()
+        .is_none());
+    drop(client);
+    g.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_turn_held_whole_that_fails_hands_on_its_failure_alone() {
+    let (port, _state) = native_server(|_connection, mut ws, state| async move {
+        let Some(frame) = native_next("failing fixture waiting for response.create", &mut ws).await
+        else {
+            return;
+        };
+        record_native_request(&state, &frame);
+        ws.send(yawc::Frame::text(NATIVE_CREATED.to_owned()))
+            .await
+            .unwrap();
+        ws.send(native_delta("discard-partial")).await.unwrap();
+        ws.send(yawc::Frame::text(
+            json!({"type": "response.failed", "response": {
+                "id": "fixture-native-response", "status": "failed",
+                "error": {"code": "invalid_prompt", "message": "fixture failure"},
+            }})
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        while let Some(frame) = ws.next().await {
+            if frame.opcode() == yawc::OpCode::Close {
+                break;
+            }
+        }
+    })
+    .await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
+    native_retry_settings(&g, &t, 0, 600);
+    answer_whole(&g, &t);
+    start(&g, &t).await;
+    let mut client = concurrency::responses_client(&g).await;
+    client
+        .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
+        .await
+        .unwrap();
+    let frame = native_next("held client waiting for the failure", &mut client)
+        .await
+        .unwrap();
+    assert!(
+        frame.as_str().contains("response.failed"),
+        "{}",
+        frame.as_str()
+    );
+    assert!(frame.as_str().contains("fixture failure"));
+    drop(client);
+    g.stop().await.unwrap();
+}
