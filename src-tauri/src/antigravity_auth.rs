@@ -103,6 +103,10 @@ struct Vault {
     #[serde(default)]
     activations: Vec<ActivationSpan>,
 }
+const LEGACY_LOGIN: &str = "jetski-standalone-oauth-token";
+const CLI_LOGIN: &str = "antigravity-cli/antigravity-oauth-token";
+/// Whether `agy` keeps its login in a file here, having no system store.
+const FILE_LOGIN: bool = cfg!(test) || !cfg!(any(target_os = "macos", windows));
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub gemini_home: PathBuf,
@@ -121,8 +125,16 @@ impl Paths {
             data_dir: data_dir.to_path_buf(),
         }
     }
+    /// The file a login is read from and written to. Where no system store
+    /// holds the login, `agy` keeps it in a file of its own; that one is used
+    /// once it is there, and the file earlier versions wrote otherwise.
     pub fn oauth_file(&self) -> PathBuf {
-        self.gemini_home.join("jetski-standalone-oauth-token")
+        let cli = self.gemini_home.join(CLI_LOGIN);
+        if FILE_LOGIN && cli.is_file() {
+            cli
+        } else {
+            self.gemini_home.join(LEGACY_LOGIN)
+        }
     }
     pub fn vault_file(&self) -> PathBuf {
         self.data_dir.join("antigravity-accounts.json")
@@ -140,6 +152,12 @@ impl Paths {
     pub fn watched_files(&self) -> Vec<PathBuf> {
         if cfg!(target_os = "macos") && self.system_store() {
             Vec::new()
+        } else if FILE_LOGIN {
+            // Either may appear later, whichever is read now.
+            vec![
+                self.gemini_home.join(LEGACY_LOGIN),
+                self.gemini_home.join(CLI_LOGIN),
+            ]
         } else {
             vec![self.oauth_file()]
         }

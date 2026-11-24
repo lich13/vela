@@ -88,6 +88,58 @@ fn two_accounts(paths: &Paths) -> (String, String, AntigravityAuthState) {
     (first, second, state)
 }
 
+/// The login file of `agy` 1.5 on a machine without a system store, with
+/// its keys as written there.
+#[test]
+fn the_login_agy_keeps_in_its_own_file_is_read_and_switched_in_place() {
+    let (_tmp, paths) = setup_paths();
+    let legacy = paths.oauth_file();
+    let login = |email: &str, token: &str| {
+        serde_json::json!({
+            "token": {
+                "access_token": token,
+                "token_type": "Bearer",
+                "refresh_token": format!("refresh-{token}"),
+                "expiry": "2026-01-01T00:00:00.000000000+00:00",
+                "expires_in": 3599
+            },
+            "auth_method": "consumer",
+            "id_token_email": email,
+            "writer_id": "fixture-writer"
+        })
+        .to_string()
+    };
+    let own = paths
+        .gemini_home
+        .join("antigravity-cli/antigravity-oauth-token");
+    fs::create_dir_all(own.parent().unwrap()).unwrap();
+    write_private_file(&own, login("one@example.invalid", "tok-1").as_bytes()).unwrap();
+    assert_eq!(paths.oauth_file(), own);
+
+    let state = state_at(&paths).unwrap();
+    assert_eq!(state.accounts.len(), 1);
+    assert_eq!(
+        state.accounts[0].email.as_deref(),
+        Some("one@example.invalid")
+    );
+    assert!(state.accounts[0].current);
+    let first = state.accounts[0].id.clone();
+
+    let second_login = login("two@example.invalid", "tok-2");
+    write_private_file(&own, second_login.as_bytes()).unwrap();
+    let state = state_at(&paths).unwrap();
+    assert_eq!(state.accounts.len(), 2);
+
+    let lifecycle = MockLifecycle::new(false);
+    switch_account_at(&paths, &lifecycle, &first, &state.revision).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&own).unwrap()).unwrap();
+    assert_eq!(written["id_token_email"], "one@example.invalid");
+    assert_eq!(written["token"]["access_token"], "tok-1");
+    // The file earlier versions wrote is not brought back.
+    assert!(!legacy.exists());
+}
+
 #[test]
 fn oauth_auto_recognizes_disk_login_and_deduplicates_on_token_refresh() {
     let (_tmp, paths) = setup_paths();

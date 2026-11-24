@@ -288,7 +288,9 @@ export default function AntigravityAccounts({
                               : `已切换到 ${item.name}`) +
                             (next.cliClosed
                               ? `；已关闭 ${next.cliClosed} 个 agy 会话`
-                              : ""),
+                              : remote
+                                ? "；运行中的 agy 需重新启动后生效"
+                                : ""),
                         )
                       }
                     >
