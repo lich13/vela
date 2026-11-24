@@ -82,11 +82,22 @@ pub fn resolve_cli(configured: &str) -> Result<PathBuf> {
             "配置的 Codex CLI 不存在，请在设置中重新选择",
         ));
     }
-    let names = if cfg!(windows) {
-        vec!["codex.exe", "codex.cmd"]
+    let names: &[&str] = if cfg!(windows) {
+        &["codex.exe", "codex.cmd"]
     } else {
-        vec!["codex"]
+        &["codex"]
     };
+    find_cli(names).ok_or_else(|| {
+        AppError::new(
+            code::CLI_MISSING,
+            "未找到官方 Codex CLI，请安装后在设置中选择其路径",
+        )
+    })
+}
+/// The first of `names` on PATH, then in the directories command-line tools
+/// are usually installed to. An app opened from the desktop does not inherit
+/// the shell's PATH.
+pub(crate) fn find_cli(names: &[&str]) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
     if let Some(home) = dirs::home_dir() {
@@ -107,18 +118,9 @@ pub fn resolve_cli(configured: &str) -> Result<PathBuf> {
     if let Some(appdata) = std::env::var_os("APPDATA") {
         dirs.push(PathBuf::from(appdata).join("npm"));
     }
-    for dir in dirs {
-        for name in &names {
-            let p = dir.join(name);
-            if p.is_file() {
-                return Ok(p);
-            }
-        }
-    }
-    Err(AppError::new(
-        code::CLI_MISSING,
-        "未找到官方 Codex CLI，请安装后在设置中选择其路径",
-    ))
+    dirs.iter()
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|p| p.is_file())
 }
 fn command(path: &Path) -> Result<tokio::process::Command> {
     #[cfg(windows)]

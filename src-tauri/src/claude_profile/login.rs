@@ -28,36 +28,12 @@ pub struct Session {
     pub cancel: Option<oneshot::Sender<()>>,
 }
 fn executable() -> Result<PathBuf> {
-    let mut paths: Vec<PathBuf> =
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
-    if let Some(home) = dirs::home_dir() {
-        paths.extend([
-            home.join(".local/bin"),
-            home.join(".npm-global/bin"),
-            PathBuf::from("/opt/homebrew/bin"),
-            PathBuf::from("/usr/local/bin"),
-        ]);
-        if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
-            let mut versions: Vec<_> = entries.flatten().map(|e| e.path().join("bin")).collect();
-            versions.sort();
-            versions.reverse();
-            paths.extend(versions);
-        }
-    }
-    #[cfg(windows)]
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        paths.push(PathBuf::from(appdata).join("npm"));
-    }
-    let names = if cfg!(windows) {
-        vec!["claude.exe", "claude.cmd"]
+    let names: &[&str] = if cfg!(windows) {
+        &["claude.exe", "claude.cmd"]
     } else {
-        vec!["claude"]
+        &["claude"]
     };
-    paths
-        .iter()
-        .flat_map(|p| names.iter().map(move |n| p.join(n)))
-        .find(|p| p.is_file())
-        .ok_or_else(|| fail("未找到 Claude Code CLI"))
+    crate::login::find_cli(names).ok_or_else(|| fail("未找到 Claude Code CLI"))
 }
 #[cfg(any(windows, test))]
 fn windows_command(path: &Path) -> Result<Command> {

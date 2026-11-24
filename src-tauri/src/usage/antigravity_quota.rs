@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
 
+#[path = "antigravity_quota_cli.rs"]
+mod cli;
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Period {
@@ -51,9 +54,13 @@ fn parse_remaining_percent(bucket: &Value) -> Option<f64> {
         .map(|pct| (pct.clamp(0.0, 100.0) * 10.0).round() / 10.0)
 }
 pub fn parse(value: &Value) -> Periods {
-    let response = &value["response"];
+    periods(&value["response"]["groups"])
+}
+/// The periods of the quota groups, as the app's local service and
+/// `agy /usage` both report them.
+fn periods(groups: &Value) -> Periods {
     let mut periods = Periods::new();
-    for b in response["groups"]
+    for b in groups
         .as_array()
         .into_iter()
         .flatten()
@@ -62,7 +69,7 @@ pub fn parse(value: &Value) -> Periods {
         if b["disabled"] == true {
             continue;
         }
-        let Some(id) = b["bucketId"].as_str() else {
+        let Some(id) = b["bucketId"].as_str().or_else(|| b["id"].as_str()) else {
             continue;
         };
         let duration = match id {
@@ -70,7 +77,7 @@ pub fn parse(value: &Value) -> Periods {
             "gemini-weekly" | "3p-weekly" => 7 * 86_400_000,
             _ => continue,
         };
-        let Some(end) = time(&b["resetTime"]) else {
+        let Some(end) = time(&b["resetTime"]).or_else(|| time(&b["reset_time"])) else {
             continue;
         };
         let remaining_percent = parse_remaining_percent(b);
@@ -136,15 +143,25 @@ impl Api {
         last_error.map_or(Ok(None), Err)
     }
 }
+/// The quota of the signed-in account: from the running app, or from the
+/// `agy` CLI when the app has no answer.
 pub async fn observe(data: &Path) -> Result<Option<(String, Periods)>> {
     let home = crate::antigravity::home()?;
+    // A signed-out `agy` opens the browser by itself, so nothing is asked
+    // without a login.
     let Some((id, email)) = auth::current_oauth_identity(data, &home)? else {
         return Ok(None);
     };
-    match Api::connect(&home).await? {
-        Some(api) => Ok(api.quota_for(&email).await?.map(|periods| (id, periods))),
-        None => Ok(None),
+    let from_app = match Api::connect(&home).await {
+        Ok(Some(api)) => api.quota_for(&email).await,
+        Ok(None) => Ok(None),
+        Err(error) => Err(error),
+    };
+    if let Ok(Some(periods)) = from_app {
+        return Ok(Some((id, periods)));
     }
+    let periods = cli::quota(&id).await?;
+    Ok(Some((id, periods)))
 }
 pub(in crate::usage) struct AccountAccumulator {
     account: Account,
