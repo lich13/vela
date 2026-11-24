@@ -620,74 +620,38 @@ async fn catalog_limits_response_size_and_request_duration() {
 }
 
 #[test]
-fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
-    for legacy in [false, true] {
+fn provider_message_stop_edits_remain_independent() {
+    for stored in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gateway.json");
         let mut value = serde_json::to_value(Store::default()).unwrap();
-        value["settings"]["endOnMessageStop"] = json!(legacy);
         value["providers"] = json!([
-            {"id":"inherited","name":"Inherited","baseUrl":"https://one.example.invalid","token":"fixture","queued":true,"version":"one"},
-            {"id":"second","name":"Second","baseUrl":"https://two.example.invalid","token":"fixture","queued":true,"version":"two"}
+            {"id":"edited","name":"Edited","baseUrl":"https://one.example.invalid","token":"fixture","queued":true,"version":"one","endOnMessageStop":stored},
+            {"id":"second","name":"Second","baseUrl":"https://two.example.invalid","token":"fixture","queued":true,"version":"two","endOnMessageStop":stored}
         ]);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         let (mut store, revision) = Store::load(&path).unwrap();
-        assert_eq!(store.providers[0].end_on_message_stop, legacy);
-        assert_eq!(store.providers[1].end_on_message_stop, legacy);
+        assert_eq!(store.providers[0].end_on_message_stop, stored);
+        assert_eq!(store.providers[1].end_on_message_stop, stored);
         store
             .edit(
-                Edit::SaveProvider {
-                    delegate: Default::default(),
-                    id: None,
-                    name: None,
-                    base_url: "https://new.example.invalid".into(),
-                    token: "fixture".into(),
-                    quota_access_token: None,
-                    end_on_message_stop: None,
-                    filter_count_tokens: None,
-                    buffer_complete_response: None,
-                    endless_mode: None,
-                    upstream_retry_seconds: None,
-                    normal_retry_seconds: None,
-                    risk_codes: None,
-                    retry_intensity: None,
-                    limit_retry_seconds: None,
-                    limit_rest_seconds: None,
-                },
+                form(json!({"baseUrl": "https://new.example.invalid"})),
                 false,
             )
             .unwrap();
         assert!(!store.providers[2].end_on_message_stop);
         store
             .edit(
-                Edit::SaveProvider {
-                    delegate: Default::default(),
-                    id: Some("inherited".into()),
-                    name: None,
-                    base_url: "https://one.example.invalid".into(),
-                    token: String::new(),
-                    quota_access_token: None,
-                    end_on_message_stop: Some(!legacy),
-                    filter_count_tokens: None,
-                    buffer_complete_response: None,
-                    endless_mode: None,
-                    upstream_retry_seconds: None,
-                    normal_retry_seconds: None,
-                    risk_codes: None,
-                    retry_intensity: None,
-                    limit_retry_seconds: None,
-                    limit_rest_seconds: None,
-                },
+                form(json!({"id": "edited", "token": "", "endOnMessageStop": !stored})),
                 false,
             )
             .unwrap();
-        assert_eq!(store.providers[0].end_on_message_stop, !legacy);
-        assert_eq!(store.providers[1].end_on_message_stop, legacy);
+        assert_eq!(store.providers[0].end_on_message_stop, !stored);
+        assert_eq!(store.providers[1].end_on_message_stop, stored);
         store.persist(&path, &revision).unwrap();
-        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert!(saved["settings"].get("endOnMessageStop").is_none());
         let (reloaded, _) = Store::load(&path).unwrap();
-        assert_eq!(reloaded.providers[0].end_on_message_stop, !legacy);
+        assert_eq!(reloaded.providers[0].end_on_message_stop, !stored);
+        assert_eq!(reloaded.providers[1].end_on_message_stop, stored);
         assert!(!reloaded.providers[2].end_on_message_stop);
     }
 }

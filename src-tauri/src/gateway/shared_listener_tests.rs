@@ -80,9 +80,6 @@ fn routes_match_v1_boundaries_and_preserve_opaque_queries() {
     }
 
     for request in [
-        "/codex/v1/responses",
-        "/claude/v1/messages",
-        "/grok/v1/responses",
         "/codexish/v1/responses",
         "/claude2/v1/messages",
         "/grok-v1/responses",

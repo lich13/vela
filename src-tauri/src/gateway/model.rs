@@ -899,23 +899,6 @@ impl Store {
             Some(raw) => {
                 let mut value: serde_json::Value =
                     serde_json::from_slice(raw).map_err(|_| invalid())?;
-                if let Some(legacy) = value
-                    .get_mut("settings")
-                    .and_then(serde_json::Value::as_object_mut)
-                    .and_then(|settings| settings.remove("endOnMessageStop"))
-                {
-                    let enabled: bool = serde_json::from_value(legacy).map_err(|_| invalid())?;
-                    if let Some(providers) = value
-                        .get_mut("providers")
-                        .and_then(serde_json::Value::as_array_mut)
-                    {
-                        for provider in providers {
-                            if let Some(provider) = provider.as_object_mut() {
-                                provider.insert("endOnMessageStop".into(), enabled.into());
-                            }
-                        }
-                    }
-                }
                 // A provider once kept for web searches alone now takes them
                 // over, on the model and effort the request names.
                 let searching: Vec<String> = value
