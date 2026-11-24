@@ -71,12 +71,17 @@ pub struct ActivationSpan {
 #[derive(Clone, Debug, Default)]
 pub struct ProviderTimeline {
     spans: Vec<ActivationSpan>,
+    /// The system keeps the login and says nothing of when it began, so the
+    /// first span starts when Vela first saw it. The login was in use before
+    /// that, and what came earlier is its as well.
+    open_start: bool,
 }
 impl ProviderTimeline {
     pub fn provider_at(&self, started_at: i64) -> Option<&str> {
         self.spans
             .iter()
             .rfind(|s| s.since_ms <= started_at)
+            .or_else(|| self.spans.first().filter(|_| self.open_start))
             .map(|s| s.account_id.as_str())
     }
 }
@@ -1287,11 +1292,15 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
         return ProviderTimeline::default();
     };
     let mut spans = vault.activations;
-    if let Some(g) = gemini_home {
-        let p = Paths {
+    let paths = match gemini_home {
+        Some(g) => Some(Paths {
             gemini_home: g.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
-        };
+        }),
+        None => Paths::resolve(data_dir).ok(),
+    };
+    let open_start = paths.as_ref().is_some_and(Paths::system_store);
+    if let Some(p) = paths.filter(|_| gemini_home.is_some()) {
         if let Some(raw) = read_oauth(&p, false).ok().flatten() {
             let d = payload_digest(&raw);
             let em = parse_oauth_metadata(&raw).ok().and_then(|(_, email)| email);
@@ -1315,7 +1324,7 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
             push_span(&mut spans, &vault.entries[0].id, now_ms());
         }
     }
-    ProviderTimeline { spans }
+    ProviderTimeline { spans, open_start }
 }
 pub fn poll_state(
     paths: &Paths,

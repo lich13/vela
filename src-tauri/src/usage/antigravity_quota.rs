@@ -15,10 +15,23 @@ pub struct Period {
     pub end: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining_percent: Option<f64>,
+    /// Set where the account's quota was reported with no period to show;
+    /// `start` and `end` say nothing then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub without: Option<Without>,
+}
+/// Why a reported quota has no period.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Without {
+    /// The account does not have this quota.
+    Disabled,
+    /// It came without the time it resets.
+    NoReset,
 }
 impl Period {
     fn current(&self, now: i64) -> bool {
-        self.start <= now && now < self.end
+        self.without.is_some() || (self.start <= now && now < self.end)
     }
     fn contains(&self, at: i64) -> bool {
         self.start <= at && at < self.end
@@ -66,9 +79,6 @@ fn periods(groups: &Value) -> Periods {
         .flatten()
         .flat_map(|g| g["buckets"].as_array().into_iter().flatten())
     {
-        if b["disabled"] == true {
-            continue;
-        }
         let Some(id) = b["bucketId"].as_str().or_else(|| b["id"].as_str()) else {
             continue;
         };
@@ -77,7 +87,19 @@ fn periods(groups: &Value) -> Periods {
             "gemini-weekly" | "3p-weekly" => 7 * 86_400_000,
             _ => continue,
         };
-        let Some(end) = time(&b["resetTime"]).or_else(|| time(&b["reset_time"])) else {
+        let end = time(&b["resetTime"]).or_else(|| time(&b["reset_time"]));
+        let disabled = b["disabled"] == true;
+        let (Some(end), false) = (end, disabled) else {
+            // A period reported for the same quota elsewhere stands.
+            periods.entry(id.to_owned()).or_insert(Period {
+                remaining_percent: parse_remaining_percent(b).filter(|_| !disabled),
+                without: Some(if disabled {
+                    Without::Disabled
+                } else {
+                    Without::NoReset
+                }),
+                ..Period::default()
+            });
             continue;
         };
         let remaining_percent = parse_remaining_percent(b);
@@ -85,8 +107,10 @@ fn periods(groups: &Value) -> Periods {
             start: end.saturating_sub(duration),
             end,
             remaining_percent,
+            without: None,
         };
         match periods.get_mut(id) {
+            Some(existing) if existing.without.is_some() => *existing = next,
             Some(existing) => {
                 existing.start = next.start;
                 existing.end = next.end;
@@ -180,7 +204,11 @@ impl AccountAccumulator {
         }
     }
     pub(in crate::usage) fn earliest(&self) -> Option<i64> {
-        self.periods.values().map(|p| p.start).min()
+        self.periods
+            .values()
+            .filter(|p| p.without.is_none())
+            .map(|p| p.start)
+            .min()
     }
     pub(super) fn ingest(&mut self, at: i64, track: Option<&str>, amounts: &WindowAcc) {
         let add = |w: &mut WindowAcc| {
@@ -212,11 +240,15 @@ impl AccountAccumulator {
         ] {
             let mut window = |key: &str| {
                 let spent = self.windows.remove(key).unwrap_or_default();
-                let period = self.periods.remove(key);
+                let reported = self.periods.remove(key);
+                let without = reported.as_ref().and_then(|p| p.without);
+                let remaining_percent = reported.as_ref().and_then(|p| p.remaining_percent);
+                let period = reported.filter(|p| p.without.is_none());
                 let hourly = cost_per_hour(spent.cost, period.as_ref(), self.now);
                 let mut w = spent.into_view();
                 w.cost_per_hour = hourly;
-                w.remaining_percent = period.as_ref().and_then(|p| p.remaining_percent);
+                w.remaining_percent = remaining_percent;
+                w.without = without;
                 w.period = period;
                 w
             };

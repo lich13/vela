@@ -2368,6 +2368,9 @@ pub struct AntigravityTokenMix {
 #[serde(rename_all = "camelCase")]
 pub struct AntigravityTrackWindow {
     pub period: Option<quota::Period>,
+    /// Why there is no period, where the account's quota said so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub without: Option<quota::Without>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining_percent: Option<f64>,
     pub requests: u64,
@@ -2503,6 +2506,7 @@ impl WindowAcc {
     fn into_view(self) -> AntigravityTrackWindow {
         AntigravityTrackWindow {
             period: None,
+            without: None,
             remaining_percent: None,
             requests: self.requests,
             tokens: self.tokens,
@@ -2538,6 +2542,8 @@ pub(super) struct UsageStatsAggregator {
     filter_start: i64,
     filter_end: i64,
     pub(super) accounts: BTreeMap<String, (usize, quota::AccountAccumulator)>,
+    /// Names the account of a row stored without one.
+    pub(super) timeline: crate::antigravity::auth::ProviderTimeline,
     provider_filter: Option<String>,
     model_filter: Option<String>,
     session_filter: Option<String>,
@@ -2567,6 +2573,7 @@ impl UsageStatsAggregator {
             filter_start: filter.start.unwrap_or(0),
             filter_end: anchor,
             accounts: BTreeMap::new(),
+            timeline: Default::default(),
             provider_filter: filter
                 .provider
                 .as_deref()
@@ -2602,7 +2609,14 @@ impl UsageStatsAggregator {
         }
     }
 
-    pub(super) fn ingest(&mut self, row: super::storage_v12::AntigravityAttemptRow) {
+    pub(super) fn ingest(&mut self, mut row: super::storage_v12::AntigravityAttemptRow) {
+        let account = || self.timeline.provider_at(row.time).map(str::to_owned);
+        if row.provider.is_none() {
+            row.provider = account();
+        }
+        if row.final_provider.is_none() {
+            row.final_provider = account();
+        }
         let matches_provider = match self.provider_filter.as_deref() {
             Some("session") => {
                 row.final_provider.is_none() || row.final_provider.as_deref() == Some("session")

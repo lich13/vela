@@ -175,6 +175,94 @@ fn account_periods_ignore_history_filters_and_expire_without_extrapolation() {
 }
 
 #[test]
+fn a_row_stored_without_an_account_takes_the_one_in_use_then_and_a_quota_without_a_period_says_why()
+{
+    let mut periods = parse(&summary());
+    let now = periods["gemini-5h"].start + 3_600_000;
+    periods.insert(
+        "3p-5h".into(),
+        Period {
+            without: Some(Without::Disabled),
+            ..Period::default()
+        },
+    );
+    periods.insert(
+        "3p-weekly".into(),
+        Period {
+            remaining_percent: Some(100.0),
+            without: Some(Without::NoReset),
+            ..Period::default()
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    std::fs::write(
+        dir.path().join("antigravity-accounts.json"),
+        serde_json::to_vec(&json!({
+            "schema": 1,
+            "entries": [{"id":"a","name":"Fixture a","kind":"oauth","sourceType":"fixture","payload":"{}","updatedAt":0}],
+            "activations": [{"accountId": "a", "sinceMs": 0}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    store.save_antigravity_quota("a", &periods).unwrap();
+    let mut row = Record {
+        id: "unowned".into(),
+        client: "antigravity".into(),
+        source: "antigravity".into(),
+        started_at: now,
+        finished_at: Some(now),
+        completed: true,
+        attempts: vec![Attempt {
+            id: "unowned-attempt".into(),
+            requested_model: Some("gemini-3-flash".into()),
+            response_model: Some("gemini-3-flash".into()),
+            pricing_model: Some("gemini-3-flash".into()),
+            started_at: now,
+            outcome: "success".into(),
+            usage_status: "reported".into(),
+            tokens: Tokens {
+                input: Some(100),
+                output: Some(20),
+                ..Tokens::default()
+            },
+            ..Attempt::default()
+        }],
+        ..Record::default()
+    };
+    super::super::normalize_record(&mut row);
+    store.write_batch(&[row], None).unwrap();
+
+    let stats = store.antigravity_stats(&Filter::default(), now).unwrap();
+    let account = &stats.accounts[0];
+    assert_eq!(account.tracks[0].burst_5h.requests, 1);
+    assert_eq!(
+        stats
+            .providers
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a"]
+    );
+    // The periods that say nothing do not widen what is read or counted.
+    let third_party = &account.tracks[1];
+    assert_eq!(
+        (&third_party.burst_5h.period, third_party.burst_5h.without),
+        (&None, Some(Without::Disabled))
+    );
+    assert_eq!(
+        (
+            &third_party.weekly_7d.period,
+            third_party.weekly_7d.without,
+            third_party.weekly_7d.remaining_percent
+        ),
+        (&None, Some(Without::NoReset), Some(100.0))
+    );
+    assert_eq!(third_party.weekly_7d.requests, 0);
+}
+
+#[test]
 fn hourly_cost_is_the_period_spend_over_the_time_since_it_began() {
     let periods = parse(&summary());
     let start = periods["gemini-5h"].start;

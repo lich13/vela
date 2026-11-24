@@ -767,6 +767,42 @@ describe("Usage Antigravity statistics tab", () => {
   });
 });
 
+it("a quota reported without a period says why in place of the period", () => {
+  const base = buildStats();
+  const [gemini, thirdParty] = base.accounts[0].tracks;
+  const account = {
+    ...base.accounts[0],
+    tracks: [
+      gemini,
+      {
+        ...thirdParty,
+        burst5h: {
+          ...thirdParty.burst5h,
+          period: null,
+          without: "disabled" as const,
+        },
+        weekly7d: {
+          ...thirdParty.weekly7d,
+          period: null,
+          without: "noReset" as const,
+          remainingPercent: 100,
+        },
+      },
+    ],
+  };
+  render(
+    <UsageAntigravity
+      stats={{ ...base, accounts: [account] }}
+      busy={false}
+      currentAccountId={account.id}
+    />,
+  );
+  const card = within(screen.getByLabelText(account.name));
+  expect(card.getByText("此账号未开放")).toBeInTheDocument();
+  expect(card.getByText("未返回重置时间 · 剩余 100.0%")).toBeInTheDocument();
+  expect(card.queryByText("未获取当前周期")).not.toBeInTheDocument();
+});
+
 it("selects one account, retains manual selection on refresh, follows the current account and handles deletion", async () => {
   const user = userEvent.setup();
   const base = buildStats();

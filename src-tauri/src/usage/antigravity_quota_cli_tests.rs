@@ -105,16 +105,32 @@ async fn usage_envelope_reads_as_the_four_periods_the_app_reports() {
 }
 
 #[tokio::test]
-async fn disabled_buckets_are_left_out() {
+async fn a_bucket_without_a_period_says_why() {
+    use super::super::Without;
     let mut off = bucket("3p-5h", "2026-01-08T06:00:00Z", 1.0);
     off["disabled"] = true.into();
+    let mut unset = bucket("3p-weekly", "2026-01-10T00:00:00Z", 1.0);
+    unset.as_object_mut().unwrap().remove("resetTime");
+    unset.as_object_mut().unwrap().remove("reset_time");
     let output = envelope(json!([{"buckets": [
         bucket("gemini-5h", "2026-01-08T05:00:00Z", 0.5),
         off,
+        unset,
     ]}]));
     let agy = Fixture::new("1.2.0", vec![printed(&output)]);
     let read = agy.quota(&session(), "account-a").await.unwrap();
-    assert_eq!(read.keys().collect::<Vec<_>>(), ["gemini-5h"]);
+    assert_eq!(read["gemini-5h"].without, None);
+    assert_eq!(
+        (read["3p-5h"].without, read["3p-5h"].remaining_percent),
+        (Some(Without::Disabled), None)
+    );
+    assert_eq!(
+        (
+            read["3p-weekly"].without,
+            read["3p-weekly"].remaining_percent
+        ),
+        (Some(Without::NoReset), Some(100.0))
+    );
 }
 
 #[tokio::test]

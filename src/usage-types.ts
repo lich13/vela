@@ -250,6 +250,8 @@ export type AntigravityTrackWindow = {
     end: number;
     remainingPercent?: number | null;
   } | null;
+  /** Why there is no period, where the account's quota said so. */
+  without?: "disabled" | "noReset" | null;
   remainingPercent?: number | null;
   requests: number;
   tokens: number;

@@ -668,9 +668,12 @@ fn initial_activation_uses_current_credentials_and_preserves_existing_zero_histo
             since_ms: 2_000
         }]
     );
-    let timeline = provider_timeline(&paths.data_dir, Some(&paths.gemini_home));
+    let mut timeline = provider_timeline(&paths.data_dir, Some(&paths.gemini_home));
     assert_eq!(timeline.provider_at(1_999), None);
     assert_eq!(timeline.provider_at(2_000), Some(id.as_str()));
+    // A login the system keeps has no time of its own to begin at.
+    timeline.open_start = true;
+    assert_eq!(timeline.provider_at(1_999), Some(id.as_str()));
     vault.activations[0].since_ms = 0;
     save_vault(&paths, &vault).unwrap();
     state_at(&paths).unwrap();

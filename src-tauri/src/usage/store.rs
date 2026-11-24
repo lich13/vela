@@ -386,9 +386,11 @@ impl Store {
         };
         let _snapshot = self.read_snapshot()?;
         let mut agg = super::antigravity::UsageStatsAggregator::new(f, now_ms);
-        let accounts = (client == "antigravity")
-            .then(|| self.data_dir())
-            .flatten()
+        let data = (client == "antigravity").then(|| self.data_dir()).flatten();
+        if let Some(data) = data {
+            agg.timeline = crate::antigravity::auth::provider_timeline(data, None);
+        }
+        let accounts = data
             .map(crate::antigravity::auth::usage_accounts)
             .transpose()?
             .unwrap_or_default();

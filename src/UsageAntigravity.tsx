@@ -47,7 +47,16 @@ function TrackWindowBlock({
         <div className="usage-ag-window-head">
           <span>{title}</span>
         </div>
-        <p className="usage-empty">未获取当前周期</p>
+        <p className="usage-empty">
+          {w.without === "disabled"
+            ? "此账号未开放"
+            : w.without === "noReset"
+              ? "未返回重置时间" +
+                (w.remainingPercent != null
+                  ? ` · 剩余 ${w.remainingPercent.toFixed(1)}%`
+                  : "")
+              : "未获取当前周期"}
+        </p>
       </div>
     );
   const remaining = windowRemainingPercent(w);
