@@ -101,7 +101,7 @@ export function missingReason(
 
 // Folds aliases of one model together: case, `models/` and vendor prefixes,
 // trailing release dates and `-latest`.
-export function normalizeModelName(model: string): string {
+function normalizeModelName(model: string): string {
   let name = model.trim().toLowerCase();
   name = name.slice(name.lastIndexOf("/") + 1);
   for (;;) {
@@ -111,7 +111,7 @@ export function normalizeModelName(model: string): string {
   }
 }
 
-export type ModelRelation = {
+type ModelRelation = {
   // The upstream was asked for a different model than the client requested.
   mapped: boolean;
   // The upstream answered with a different model than the one it was sent.

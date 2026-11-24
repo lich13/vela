@@ -1,4 +1,4 @@
-export type LatencySeverity = "good" | "warn" | "slow" | "critical";
+type LatencySeverity = "good" | "warn" | "slow" | "critical";
 
 export function firstTokenSeverity(ms: number): LatencySeverity {
   if (ms >= 60_000) return "critical";

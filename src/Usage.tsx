@@ -78,7 +78,7 @@ export function syncStatus(state: UsageState | null, client: string) {
   return reports.every((r) => r.completedAt != null) ? "已同步" : "";
 }
 /** Why the shown sources are not fully synced, for the status tooltip. */
-export function syncReason(state: UsageState | null, client: string) {
+function syncReason(state: UsageState | null, client: string) {
   if (!state) return undefined;
   const reports = client
     ? [state.reports[client]].filter(Boolean)
@@ -997,7 +997,7 @@ function TimeRange({
     </dialog>
   );
 }
-export function Pagination({
+function Pagination({
   page,
   total,
   onChange,

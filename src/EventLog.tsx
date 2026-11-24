@@ -27,7 +27,7 @@ import { command } from "./bridge";
 import { confirmAction } from "./confirmation";
 import { errorOf, type ClientId, type GatewayState } from "./types";
 
-export const reasons = {
+const reasons = {
   model_unavailable: "模型不支持",
   authentication: "认证失败",
   upstream_service: "上游服务异常",

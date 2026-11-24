@@ -31,7 +31,7 @@ export function nodeAt(
 }
 
 /** Stands for a value the form cannot show or edit. */
-export const opaque: Json = Object.freeze({});
+const opaque: Json = Object.freeze({});
 
 export function plain(node: ConfigTreeNode): Json {
   switch (node.kind) {

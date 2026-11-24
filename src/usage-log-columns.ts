@@ -127,7 +127,7 @@ export function generationSpeed(a: Attempt): number | null {
 }
 export const estimatedTimeNote = "按下一步开始时间估算";
 const speedFloorNote = "输出不足 200 Token 或耗时不足 1 秒，不计算速度";
-export type LogTiming = {
+type LogTiming = {
   duration: number | null;
   // No duration was reported; this one is inferred.
   estimated: boolean;

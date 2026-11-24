@@ -27,7 +27,7 @@ export const failureCategories: { category: string; label: string }[] = [
   { category: "request_too_large", label: "单次请求超限" },
   { category: "safety_rejection", label: "安全拒绝" },
 ];
-export type ErrorResponseHeader = {
+type ErrorResponseHeader = {
   name: string;
   value: string;
   base64: boolean;

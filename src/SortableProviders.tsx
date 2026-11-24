@@ -22,7 +22,7 @@ import { GripVertical } from "lucide-react";
 import type { EditRevision } from "./gateway-edit";
 import { errorOf, type Provider } from "./types";
 
-export type ProviderEdit =
+type ProviderEdit =
   | { op: "reorder"; ids: string[] }
   | { op: "queueProvider"; id: string; queued: boolean }
   | { op: "concurrencyProvider"; id: string; maxConcurrency: number }
