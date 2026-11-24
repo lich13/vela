@@ -98,7 +98,7 @@ export const gatewayDemo: GatewayState = {
     maxWaiting: 100,
     networkProbe: true,
     networkProbeAttempts: 3,
-    stallSeconds: 120,
+    stallSeconds: 300,
     holdIdleSeconds: 60,
   },
   providers: [

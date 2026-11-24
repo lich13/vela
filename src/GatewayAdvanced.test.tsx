@@ -284,7 +284,7 @@ describe("gateway advanced settings", () => {
         expect(stall).not.toBeInTheDocument();
         return;
       }
-      expect(stall).toHaveValue(120);
+      expect(stall).toHaveValue(300);
       expect(stall).toHaveAttribute("min", "1");
       expect(stall).toHaveAttribute("max", "86400");
       await user.clear(stall!);

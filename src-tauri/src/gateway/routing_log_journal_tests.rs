@@ -381,25 +381,8 @@ fn cancellation_release_is_logged_after_save_even_without_protocol_attachment() 
 }
 
 #[test]
-fn legacy_details_unknown_enums_and_sensitive_attempt_ids_are_safe() {
+fn unknown_enums_and_sensitive_attempt_ids_are_safe() {
     let dir = tempfile::tempdir().unwrap();
-    let mut old = serde_json::to_value(route_record(
-        RoutingDecision::ExistingThread,
-        RoutingOutcome::OwnerPreserved,
-        None,
-    ))
-    .unwrap();
-    old.as_object_mut().unwrap().remove("details");
-    std::fs::write(
-        dir.path().join("diagnostics.jsonl"),
-        format!("{}\n", serde_json::to_string(&old).unwrap()),
-    )
-    .unwrap();
-    let legacy = events::Service::new(dir.path());
-    let rows = legacy.query(events::Filter::default());
-    assert_eq!(rows.total, 1);
-    assert!(rows.items[0].record.details.routing.is_none());
-
     let mut unknown = serde_json::to_value(route_record(
         RoutingDecision::ExistingThread,
         RoutingOutcome::OwnerPreserved,

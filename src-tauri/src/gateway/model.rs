@@ -460,7 +460,7 @@ fn default_network_probe_attempts() -> u32 {
     3
 }
 fn default_stall_seconds() -> u64 {
-    120
+    300
 }
 fn default_hold_idle_seconds() -> u64 {
     60

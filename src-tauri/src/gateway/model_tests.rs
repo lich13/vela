@@ -804,7 +804,7 @@ fn endless_pacing_is_checked_on_saving_and_unset_fields_keep_what_was_saved() {
             store.settings.stall_seconds,
             store.settings.hold_idle_seconds
         ),
-        (120, 60)
+        (300, 60)
     );
     for (stall, hold, valid) in [
         (1, 1, true),

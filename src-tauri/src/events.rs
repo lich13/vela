@@ -244,7 +244,6 @@ pub struct Record {
     pub attempt: Option<u32>,
     pub error_code: ErrorCode,
     pub notified_at: u64,
-    #[serde(default)]
     pub details: Details,
 }
 impl Record {
@@ -2285,28 +2284,6 @@ mod diagnostic_record_tests {
         b = a.clone();
         b.details.ws_close_code = Some(1013);
         assert!(!a.same(&b));
-    }
-    #[test]
-    fn legacy_records_read_without_details() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("diagnostics.jsonl");
-        let a = Record::new(
-            None,
-            None,
-            None,
-            Reason::ModelUnavailable,
-            Action::Returned,
-            Some(200),
-            None,
-        );
-        let mut old = serde_json::to_value(&a).unwrap();
-        old.as_object_mut().unwrap().remove("details");
-        std::fs::write(&path, format!("{}\n", old)).unwrap();
-        let loaded = load(&path);
-        assert!(loaded.error.is_none());
-        assert_eq!(loaded.records.len(), 1);
-        assert_eq!(loaded.records[0].status, Some(200));
-        assert_eq!(loaded.records[0].details, Details::default());
     }
 }
 #[cfg(test)]
