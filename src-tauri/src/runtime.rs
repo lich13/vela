@@ -283,7 +283,10 @@ impl Runtime {
         self.grok.observe_home(&self.home(gateway::ClientId::Grok)?);
         self.dsh.observe_home(&self.home(gateway::ClientId::Dsh)?);
         self.report_services();
-        self.keep_usage();
+        // Told, round after round of the polling below, that someone is
+        // watching: whatever rests for want of a watcher goes on.
+        let watched = Arc::new(tokio::sync::Notify::new());
+        self.keep_usage(watched.clone());
         {
             let r = self.clone();
             tokio::spawn(async move {
@@ -466,6 +469,9 @@ impl Runtime {
                 if runtime.quitting.load(Ordering::Relaxed) {
                     break;
                 }
+                if runtime.sink.attentive() {
+                    watched.notify_waiters();
+                }
                 runtime
                     .gateway
                     .freeze_gate()
@@ -617,8 +623,9 @@ impl Runtime {
     }
 
     /// Keeps prices current and, when the user asked for it, reads the
-    /// clients' sessions every minute.
-    fn keep_usage(self: &Arc<Self>) {
+    /// clients' sessions every minute, or as rarely as the host lets them be
+    /// read while nobody is watching. `watched` ends that rest.
+    fn keep_usage(self: &Arc<Self>, watched: Arc<tokio::sync::Notify>) {
         // Price checks must not wait behind a session scan or historical compaction.
         self.usage.schedule_price_backfill();
         let runtime = Arc::downgrade(self);
@@ -675,8 +682,9 @@ impl Runtime {
                 }
                 let maintenance = runtime.usage.clone();
                 let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
+                let attentive = runtime.sink.attentive();
                 drop(runtime);
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                wait_next_usage_scan(attentive, UNWATCHED_USAGE_SCAN_INTERVAL, &watched).await;
             }
         });
     }
@@ -857,6 +865,35 @@ pub(crate) async fn wait_next_background_poll(
     }
 }
 
+pub(crate) const USAGE_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long the clients' sessions go unread while nobody is watching. The
+/// desktop does not let them: the Antigravity app answers for a conversation
+/// only while it runs, so a session read late may be read without its details.
+/// A server has no such app, and what it reads are files that stay.
+pub(crate) const UNWATCHED_USAGE_SCAN_INTERVAL: std::time::Duration = if cfg!(feature = "desktop") {
+    USAGE_SCAN_INTERVAL
+} else {
+    std::time::Duration::from_secs(600)
+};
+
+/// Waits for the next reading of the clients' sessions. The wait of a run
+/// nobody watches is `unwatched` long, and when `wake` says someone has come
+/// it ends where it would have, had they been there from its start.
+pub(crate) async fn wait_next_usage_scan(
+    watched: bool,
+    unwatched: std::time::Duration,
+    wake: &tokio::sync::Notify,
+) {
+    let watched_next = tokio::time::Instant::now() + USAGE_SCAN_INTERVAL;
+    if !watched {
+        tokio::select! {
+            _ = tokio::time::sleep(unwatched) => return,
+            _ = wake.notified() => {}
+        }
+    }
+    tokio::time::sleep_until(watched_next).await;
+}
+
 pub(crate) const fn should_poll_editor_configs(
     has_visible_windows: bool,
     background_active: bool,
@@ -965,6 +1002,79 @@ mod gateway_broadcast_tests {
             rx.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Closed)
         ));
+    }
+}
+
+#[cfg(test)]
+mod unwatched_tests {
+    use super::*;
+    use std::time::Duration;
+
+    const REST: Duration = Duration::from_secs(600);
+    const MOMENT: Duration = Duration::from_millis(1);
+
+    /// Lets `wait` run as far as it can and tells whether it has ended.
+    async fn ended(wait: &tokio::task::JoinHandle<()>) -> bool {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        wait.is_finished()
+    }
+
+    /// A wait for the next reading that has begun.
+    async fn waiting(
+        watched: bool,
+        wake: &Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
+        let wake = wake.clone();
+        let wait = tokio::spawn(async move { wait_next_usage_scan(watched, REST, &wake).await });
+        assert!(!ended(&wait).await);
+        wait
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sessions_are_read_every_minute_while_someone_watches() {
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let wait = waiting(true, &wake).await;
+        tokio::time::advance(USAGE_SCAN_INTERVAL - MOMENT).await;
+        assert!(!ended(&wait).await);
+        tokio::time::advance(MOMENT).await;
+        assert!(ended(&wait).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unwatched_sessions_rest_until_someone_comes() {
+        let wake = Arc::new(tokio::sync::Notify::new());
+
+        // Nobody comes: the whole rest, and no longer.
+        let wait = waiting(false, &wake).await;
+        tokio::time::advance(REST - MOMENT).await;
+        assert!(!ended(&wait).await);
+        tokio::time::advance(MOMENT).await;
+        assert!(ended(&wait).await);
+
+        // Someone comes early: the minute they would have waited is kept.
+        let wait = waiting(false, &wake).await;
+        tokio::time::advance(Duration::from_secs(20)).await;
+        wake.notify_waiters();
+        tokio::time::advance(Duration::from_secs(40) - MOMENT).await;
+        assert!(!ended(&wait).await);
+        tokio::time::advance(MOMENT).await;
+        assert!(ended(&wait).await);
+
+        // Someone comes after that minute: the sessions are read at once.
+        let wait = waiting(false, &wake).await;
+        tokio::time::advance(Duration::from_secs(200)).await;
+        assert!(!ended(&wait).await);
+        wake.notify_waiters();
+        assert!(ended(&wait).await);
+
+        // Having been told while nothing waited leaves nothing behind.
+        wake.notify_waiters();
+        let wait = waiting(false, &wake).await;
+        tokio::time::advance(REST - MOMENT).await;
+        assert!(!ended(&wait).await);
+        wait.abort();
     }
 }
 
