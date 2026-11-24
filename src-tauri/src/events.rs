@@ -879,22 +879,27 @@ fn recent_file(path: std::path::PathBuf, cutoff: u64) -> Option<SourceFile> {
         .as_secs();
     (meta.is_file() && secs >= cutoff).then_some((secs, meta, path))
 }
-fn antigravity_files(home: &Path, cutoff: u64) -> (Vec<SourceFile>, [Vec<SourceFile>; 2]) {
+/// The step files and the logs Antigravity wrote since `cutoff`: the app's,
+/// and those `agy` keeps in a directory of its own.
+fn antigravity_files(home: &Path, cutoff: u64) -> (Vec<SourceFile>, [Vec<SourceFile>; 3]) {
     let mut transcripts = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(home.join(".gemini/antigravity/brain")) {
+    for (brain, steps) in [
+        (".gemini/antigravity/brain", "transcript.jsonl"),
+        (".gemini/antigravity-cli/brain", "transcript_full.jsonl"),
+    ] {
+        let Ok(entries) = std::fs::read_dir(home.join(brain)) else {
+            continue;
+        };
         for entry in entries.flatten() {
-            if let Some(file) = recent_file(
-                entry.path().join(".system_generated/logs/transcript.jsonl"),
-                cutoff,
-            ) {
-                transcripts.push(file);
-            }
+            let steps = entry.path().join(".system_generated/logs").join(steps);
+            transcripts.extend(recent_file(steps, cutoff));
         }
     }
-    let mut logs = [Vec::new(), Vec::new()];
+    let mut logs = [Vec::new(), Vec::new(), Vec::new()];
     for (logs, root) in logs.iter_mut().zip([
         home.join("Library/Logs/Antigravity"),
         home.join(".gemini/antigravity/logs"),
+        home.join(".gemini/antigravity-cli/log"),
     ]) {
         if let Ok(entries) = std::fs::read_dir(root) {
             logs.extend(
@@ -2637,6 +2642,56 @@ mod routing_visibility_tests {
         service.clear(None, None).await.unwrap();
         assert_eq!(service.query(Filter::default()).total, 0);
         assert!(service.detail(&alias_id).is_none());
+    }
+
+    #[test]
+    fn agy_errors_are_read_from_its_own_steps_and_logs_as_antigravity() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let cli = dir.path().join(".gemini/antigravity-cli");
+        let steps = cli.join("brain/session-1/.system_generated/logs");
+        std::fs::create_dir_all(&steps).unwrap();
+        // A tool that failed is the session's own business; the model call
+        // that failed and the step agy wrote about it are not.
+        let lines = [
+            r#"{"step_index":3,"type":"GENERIC","status":"ERROR","source":"MODEL","error":"file does not exist"}"#,
+            r#"{"step_index":4,"type":"PLANNER_RESPONSE","status":"ERROR","source":"MODEL","model":"fixture-model","error":"stream reading error: unexpected EOF"}"#,
+            r#"{"step_index":5,"type":"ERROR_MESSAGE","status":"DONE","source":"SYSTEM","error":"API error (attempt 1): RESOURCE_EXHAUSTED"}"#,
+            r#"{"step_index":6,"type":"PLANNER_RESPONSE","status":"DONE","source":"MODEL","model":"fixture-model"}"#,
+        ];
+        std::fs::write(steps.join("transcript_full.jsonl"), lines.join("\n") + "\n").unwrap();
+        std::fs::create_dir_all(cli.join("log")).unwrap();
+        std::fs::write(
+            cli.join("log/cli-fixture_000000.log"),
+            "I1125 07:41:06.000000      1 server.go:10] Started\n\
+             E1125 07:41:06.000000      1 errorreport.go:282] error getting token source: not signed in\n\
+             E1125 07:41:07.000000      1 errorreport.go:282] transport error (ResourceExhausted): RESOURCE_EXHAUSTED\n",
+        )
+        .unwrap();
+
+        service.sync_antigravity_logs(dir.path());
+        let page = service.query(Filter::default());
+        let mut found: Vec<_> = page
+            .items
+            .iter()
+            .map(|r| {
+                assert_eq!(r.client_id.unwrap().name(), "Antigravity");
+                (r.details.upstream_code.clone().unwrap(), r.model.clone())
+            })
+            .collect();
+        found.sort();
+        let model = Some("fixture-model".to_string());
+        assert_eq!(
+            found,
+            [
+                ("RESOURCE_EXHAUSTED".to_string(), None),
+                ("RESOURCE_EXHAUSTED".to_string(), None),
+                ("STREAM_INTERRUPTED".to_string(), model),
+            ]
+        );
+        // Read once: the same files give nothing more.
+        service.sync_antigravity_logs(dir.path());
+        assert_eq!(service.query(Filter::default()).total, 3);
     }
 
     #[test]
