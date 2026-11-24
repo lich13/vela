@@ -22,6 +22,7 @@ import type {
 } from "./usage-types";
 
 import { mock } from "./test-bridge";
+import { usageAttempt, usageRecord } from "./test-fixtures";
 vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 vi.mock("./confirmation", () => ({ confirmAction: mock.confirm }));
 
@@ -55,23 +56,11 @@ function totals(overrides: Partial<Totals> = {}): Totals {
 }
 
 function attempt(overrides: Partial<Attempt> = {}): Attempt {
-  return {
-    id: "fixture-attempt",
+  return usageAttempt({
     provider: "fixture-provider-1",
-    requestedModel: "fixture-request",
-    responseModel: "fixture-response",
-    pricingModel: "fixture-priced",
-    responseId: null,
     pricingBasis: "response",
-    status: 200,
-    outcome: "success",
     startedAt: timestamp,
-    durationMs: 5000,
-    firstTokenMs: 250,
-    stream: true,
-    transport: "http",
     tokens: { input: 1000, output: 200, cacheRead: 300, cacheWrite: 50 },
-    serviceTier: null,
     price: {
       version: "fixture-price-version",
       source: "fixture",
@@ -81,22 +70,15 @@ function attempt(overrides: Partial<Attempt> = {}): Attempt {
       cost: "0.001",
     },
     ...overrides,
-  };
+  });
 }
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
-  return {
-    id: "fixture-request",
-    client: "codex",
-    source: "proxy",
+  return usageRecord({
     startedAt: timestamp,
-    sessionId: null,
     attempts: [attempt()],
-    completed: true,
-    duplicateOf: null,
-    deduplication: "",
     ...overrides,
-  };
+  });
 }
 
 function groups(prefix: "provider" | "model"): Group[] {

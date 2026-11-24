@@ -22,6 +22,7 @@ import type {
 import type { ViewState } from "./types";
 
 import { mock } from "./test-bridge";
+import { usageAttempt, usageRecord } from "./test-fixtures";
 vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 vi.mock("./confirmation", () => ({ confirmAction: mock.confirm }));
 
@@ -60,22 +61,15 @@ const automaticPrices: PricingView["models"] = {
 };
 
 function attempt(overrides: Partial<Attempt> = {}): Attempt {
-  return {
+  return usageAttempt({
     id: "fixture-final-attempt",
     provider: "provider-final",
     requestedModel: "fixture-request-model",
     responseModel: "fixture-response-model",
     pricingModel: "fixture-response-model",
-    responseId: null,
-    status: 200,
-    outcome: "success",
     startedAt: timestamp,
-    durationMs: 5_000,
     firstTokenMs: 1_000,
-    stream: true,
-    transport: "http",
     tokens: { input: 0, output: 400, cacheRead: 20, cacheWrite: null },
-    serviceTier: null,
     price: {
       version: "fixture-price-version",
       source: "fixture",
@@ -85,22 +79,16 @@ function attempt(overrides: Partial<Attempt> = {}): Attempt {
       cost: "0.0045678",
     },
     ...overrides,
-  };
+  });
 }
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
-  return {
-    id: "fixture-request",
-    client: "codex",
-    source: "proxy",
+  return usageRecord({
     startedAt: timestamp,
-    sessionId: null,
     attempts: [attempt()],
-    completed: true,
-    duplicateOf: null,
     deduplication: "独立记录",
     ...overrides,
-  };
+  });
 }
 
 let records: UsageRecord[];

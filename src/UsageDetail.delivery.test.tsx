@@ -2,37 +2,24 @@ import { render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import Detail from "./UsageDetail";
 import type { UsageRecord } from "./usage-types";
+import { usageAttempt, usageRecord } from "./test-fixtures";
 
 function record(): UsageRecord {
-  return {
+  return usageRecord({
     // Historical usage rows retain delivery evidence even when new expected
     // downstream-close diagnostics are silent in v0.25.11.
     id: "fixture-v02510-legacy-delivery",
-    client: "codex",
-    source: "proxy",
     startedAt: 1000,
-    sessionId: null,
-    completed: true,
-    duplicateOf: null,
-    deduplication: "",
     attempts: [
-      {
-        id: "fixture-attempt",
-        provider: "fixture-provider",
+      usageAttempt({
         requestedModel: "fixture-model",
         responseModel: "fixture-model",
         pricingModel: "fixture-model",
         responseId: "fixture-response",
-        status: 200,
-        outcome: "success",
         startedAt: 1000,
         durationMs: 100,
         firstTokenMs: 10,
-        stream: true,
-        transport: "http",
         tokens: { input: 10, output: 2, cacheRead: null, cacheWrite: null },
-        serviceTier: null,
-        price: null,
         end: {
           cause: "client_disconnected",
           terminalReceived: true,
@@ -54,9 +41,9 @@ function record(): UsageRecord {
           clientRequestHash: null,
           responseHash: null,
         },
-      },
+      }),
     ],
-  };
+  });
 }
 
 it("keeps historical v0.25.10 terminal and failed delivery facts independent", () => {

@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EventRecord } from "./EventLog";
 
 import { mock } from "./test-bridge";
+import { eventRecord } from "./test-fixtures";
 vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 vi.mock("./confirmation", () => ({
@@ -19,23 +20,15 @@ vi.mock("./confirmation", () => ({
 
 import EventLog from "./EventLog";
 
-const record: EventRecord = {
+const record = eventRecord({
   id: "event-1",
-  firstAt: 1_760_000_000,
-  lastAt: 1_760_000_030,
   count: 2,
-  clientId: "codex",
-  providerId: "provider-1",
-  model: "fixture-model",
   reason: "model_unavailable",
   action: "trying_next",
   level: "warning",
   status: 404,
-  origin: "upstream",
-  category: "ordinary_error",
   errorCode: "MODEL_UNAVAILABLE",
-  attempt: 1,
-};
+});
 
 let eventRecords: EventRecord[];
 
