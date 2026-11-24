@@ -1,7 +1,7 @@
 ; Vela: copied from tauri-bundler 2.10.4 (embedded in @tauri-apps/cli 2.12.4),
-; src/bundle/windows/nsis/installer.nsi. The only functional difference is marked
-; with `Vela:` in PageReinstall. When upgrading the CLI, copy the upstream template
-; again and reapply that change.
+; src/bundle/windows/nsis/installer.nsi. The functional differences are marked
+; with `Vela:`, in PageReinstall and in the Uninstall section. When upgrading the
+; CLI, copy the upstream template again and reapply them.
 Unicode true
 ManifestDPIAware true
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
@@ -456,6 +456,7 @@ FunctionEnd
 ; 1. Confirm uninstall page
 Var DeleteAppDataCheckbox
 Var DeleteAppDataCheckboxState
+Var VelaCleanup
 !define /ifndef WS_EX_LAYOUTRTL         0x00400000
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ConfirmShow
 Function un.ConfirmShow ; Add add a `Delete app data` check box
@@ -832,6 +833,15 @@ Section Uninstall
 
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
+  ; Vela: ~\.vela holds what every taken-over client is restored from, so with
+  ; "delete application data" selected the app hands the clients' settings back
+  ; first, while it is still installed. Only a clean exit lets the data go.
+  StrCpy $VelaCleanup 1
+  ${If} $DeleteAppDataCheckboxState = 1
+  ${AndIf} $UpdateMode <> 1
+    ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --vela-uninstall-cleanup' $VelaCleanup
+  ${EndIf}
+
   ; Delete the app directory and its content from disk
   ; Copy main executable
   Delete "$INSTDIR\${MAINBINARYNAME}.exe"
@@ -932,6 +942,12 @@ Section Uninstall
     SetShellVarContext current
     RmDir /r "$APPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+    ; Vela: the data is in ~\.vela.
+    ${If} $VelaCleanup = 0
+      RmDir /r "$PROFILE\.vela"
+    ${Else}
+      MessageBox MB_OK|MB_ICONEXCLAMATION "未能还原客户端配置，已保留 $PROFILE\.vela。请重新安装 Vela 并停用网关后再卸载。" /SD IDOK
+    ${EndIf}
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL

@@ -1388,6 +1388,25 @@ fn tray_is_dark() -> bool {
         .unwrap_or(0)
         == 0
 }
+/// The argument of the Windows uninstaller's run before it deletes `~/.vela`.
+#[cfg(feature = "desktop")]
+pub const UNINSTALL_CLEANUP_ARG: &str = "--vela-uninstall-cleanup";
+/// Hands every client's settings back without opening the app, and answers
+/// with the exit code: 0 only when no client is left pointing at the gateway.
+/// `~/.vela` holds what the clients are restored from, so the uninstaller
+/// keeps it on anything else.
+#[cfg(feature = "desktop")]
+pub fn uninstall_cleanup() -> i32 {
+    let Ok(tokio) = tokio::runtime::Runtime::new() else {
+        return 1;
+    };
+    let released = tokio.block_on(async {
+        Runtime::new(Arc::new(runtime::Silent))?
+            .release_clients()
+            .await
+    });
+    i32::from(released.is_err())
+}
 #[cfg(feature = "desktop")]
 pub fn run() {
     // Setup, sync commands and window callbacks all run on this thread, and

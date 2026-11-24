@@ -105,6 +105,17 @@ pub(crate) trait Sink: Send + Sync + 'static {
     fn tick(&self) {}
 }
 
+/// The sink of a run nobody watches.
+#[cfg(any(feature = "desktop", test))]
+pub(crate) struct Silent;
+#[cfg(any(feature = "desktop", test))]
+impl Sink for Silent {
+    fn emit(&self, _event: Event<'_>) {}
+    fn attentive(&self) -> bool {
+        false
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SignIns {
     /// A Codex sign-in is starting, waiting or being cancelled.
@@ -719,6 +730,27 @@ impl Runtime {
             ("antigravity".into(), Ok(self.antigravity_home())),
         ]
     }
+    /// Hands every client back for good, as turning each gateway off does.
+    /// Building the runtime has already settled a run that was killed, so
+    /// nothing is started: each gateway gives up coming back with the next
+    /// run, and the agy function leaves the shell profiles. An error means a
+    /// client may still point at the gateway.
+    #[cfg(any(feature = "desktop", test))]
+    pub(crate) async fn release_clients(&self) -> Result<()> {
+        let _official_guard = self.official_tx.lock().await;
+        let mut outcome = Ok(());
+        for gateway in self.gateways() {
+            let released = gateway.stop_checked(None).await.and_then(|view| {
+                if view.running || view.recovery_pending {
+                    Err(AppError::new(code::RECOVERY, "客户端配置尚未还原"))
+                } else {
+                    Ok(())
+                }
+            });
+            outcome = outcome.and(released);
+        }
+        outcome
+    }
     pub(crate) fn emit(&self, event: Event<'_>) {
         self.sink.emit(event);
     }
@@ -933,5 +965,85 @@ mod gateway_broadcast_tests {
             rx.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Closed)
         ));
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    use crate::gateway::{test_support::form, Edit, Settings};
+    use serde_json::json;
+
+    /// A runtime whose every directory is under `root`.
+    fn runtime(root: &std::path::Path) -> Arc<Runtime> {
+        let client = |name: &str| root.join(name).to_string_lossy().into_owned();
+        std::fs::create_dir_all(root.join(".vela")).unwrap();
+        std::fs::write(
+            root.join(".vela/accounts.json"),
+            json!({
+                "schema": 1,
+                "profiles": [],
+                "preferences": {
+                    "codexHome": client(".codex"),
+                    "claudeHome": client(".claude"),
+                    "grokHome": client(".grok"),
+                    "dshHome": client(".dsh"),
+                    "cliPath": "",
+                    "theme": "system",
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        Runtime::at(Arc::new(Silent), root.to_path_buf(), root.join(".codex")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_run_that_was_killed_is_handed_back_and_does_not_come_back() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join(".codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let config = home.join("config.toml");
+        std::fs::write(
+            &config,
+            "model_provider='custom'\n[model_providers.custom]\nbase_url = \"https://a.example.invalid\"\nexperimental_bearer_token = \"upstream-fixture-token\"\nwire_api='responses'\n",
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let first = runtime(root.path());
+        let codex = &first.gateway;
+        for edit in [
+            Edit::Settings {
+                settings: Settings {
+                    port,
+                    network_probe: false,
+                    ..Default::default()
+                },
+            },
+            form(
+                json!({"baseUrl": "https://a.example.invalid", "token": "upstream-fixture-token"}),
+            ),
+        ] {
+            codex.edit(edit, &codex.view().revision, &home).unwrap();
+        }
+        codex.start(&codex.view().revision, &home).await.unwrap();
+        let taken = std::fs::read_to_string(&config).unwrap();
+        assert!(taken.contains(&format!("127.0.0.1:{port}")), "{taken}");
+        // The run ends without its exit handler: `first` is simply forgotten.
+
+        let cleanup = runtime(root.path());
+        cleanup.release_clients().await.unwrap();
+        let released = std::fs::read_to_string(&config).unwrap();
+        assert!(released.contains("https://a.example.invalid"), "{released}");
+        assert!(!released.contains("127.0.0.1"), "{released}");
+
+        let next = runtime(root.path());
+        next.gateway.resume(&home).await.unwrap();
+        assert!(!next.gateway.view().running);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), released);
+        drop(first);
     }
 }
