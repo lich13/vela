@@ -6,7 +6,7 @@ import {
   routingBoundary,
   routingOutcome,
 } from "./routing-labels";
-import { Drawer } from "./UsageDrawer";
+import { Drawer } from "./Drawer";
 import {
   preciseDate,
   promptTokens,

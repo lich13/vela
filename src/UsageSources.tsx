@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Drawer } from "./UsageDrawer";
+import { Drawer } from "./Drawer";
 import { command } from "./bridge";
 import { errorOf } from "./types";
 import { confirmAction } from "./confirmation";

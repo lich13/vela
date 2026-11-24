@@ -1,15 +1,14 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ComponentProps, type ReactNode } from "react";
 import { X } from "lucide-react";
 
-export function Drawer({
-  title,
+/**
+ * A modal dialog docked to the right edge. Escape or a click on the backdrop
+ * closes it, and focus goes back to the opener once it is gone.
+ */
+export function DrawerShell({
   onClose,
-  children,
-}: {
-  title: string;
-  onClose: () => void;
-  children: React.ReactNode;
-}) {
+  ...rest
+}: { onClose: () => void } & ComponentProps<"dialog">) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const focus = document.activeElement as HTMLElement | null;
@@ -25,9 +24,8 @@ export function Drawer({
   }, []);
   return (
     <dialog
+      {...rest}
       ref={ref}
-      className="usage-drawer"
-      aria-label={title}
       onCancel={(e) => {
         e.preventDefault();
         onClose();
@@ -38,7 +36,21 @@ export function Drawer({
           if (e.clientX < r.left) onClose();
         }
       }}
-    >
+    />
+  );
+}
+
+export function Drawer({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <DrawerShell className="usage-drawer" aria-label={title} onClose={onClose}>
       <header>
         <h2>{title}</h2>
         <button className="icon-button" aria-label="关闭详情" onClick={onClose}>
@@ -46,6 +58,6 @@ export function Drawer({
         </button>
       </header>
       <div className="usage-drawer-body">{children}</div>
-    </dialog>
+    </DrawerShell>
   );
 }

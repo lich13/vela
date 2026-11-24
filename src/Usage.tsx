@@ -3,7 +3,6 @@ import { useInstance } from "./instance";
 import Detail from "./UsageDetail";
 import Sources from "./UsageSources";
 import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
-export { Drawer } from "./UsageDrawer";
 import { subscriptions } from "./subscriptions";
 import { useVisible } from "./visibility";
 import type {

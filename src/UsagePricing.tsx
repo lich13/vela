@@ -17,7 +17,7 @@ import { errorOf } from "./types";
 import { confirmAction } from "./confirmation";
 import ProviderPriceMappings from "./ProviderPriceMappings";
 import UsageCostCalculator from "./UsageCostCalculator";
-import { Drawer } from "./UsageDrawer";
+import { Drawer } from "./Drawer";
 import type {
   ModelsDevState,
   PriceComparison,
