@@ -98,6 +98,28 @@ fn read_file_bounded(file: fs::File, limit: u64) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+/// Which file an open handle is, apart from its name. Windows tells it of an
+/// open file only; the time a file was created does not, as it passes to
+/// whatever replaces the file under the same name.
+#[cfg(windows)]
+pub(crate) fn file_id(file: &std::fs::File) -> Option<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    // SAFETY: the struct is plain integers, the handle is open for as long as
+    // `file` is borrowed, and the call writes only into `information`.
+    let information = unsafe {
+        let mut information: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        if GetFileInformationByHandle(file.as_raw_handle(), &mut information) == 0 {
+            return None;
+        }
+        information
+    };
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Some((u64::from(information.dwVolumeSerialNumber), index))
+}
 pub fn revision(bytes: Option<&[u8]>) -> String {
     bytes.map(digest).unwrap_or_else(|| "missing".into())
 }

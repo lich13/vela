@@ -192,6 +192,10 @@ async fn any_answer_to_the_probe_keeps_the_ordinary_retry_and_the_switch_turns_i
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "a refused loopback connection takes Windows about two seconds, which these timings do not allow for"
+)]
 async fn held_requests_share_one_probe_and_a_resend_is_held_again() {
     let port = free_port().await;
     let (f, _dir, mut changes) = fixture(port, true, true).await;
@@ -279,6 +283,10 @@ async fn a_freeze_stops_the_probe_and_the_thaw_resumes_it() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "a refused loopback connection takes Windows about two seconds, which these timings do not allow for"
+)]
 async fn a_request_awaiting_the_verdict_does_not_block_the_thaw() {
     let port = free_port().await;
     let (f, _dir, _changes) = fixture(port, true, true).await;

@@ -14,9 +14,8 @@ struct Stamp {
     len: u64,
     modified: Option<SystemTime>,
     /// Which file it is: a replacement of the same length can carry the same
-    /// time where the clock behind it is coarse, as on Linux.
-    #[cfg(unix)]
-    file: (u64, u64),
+    /// time where the clock behind it is coarse, as on Linux and Windows.
+    file: Option<(u64, u64)>,
 }
 
 fn stamp(path: &Path) -> Option<Stamp> {
@@ -24,14 +23,19 @@ fn stamp(path: &Path) -> Option<Stamp> {
     if !m.is_file() || m.len() > 2 * 1024 * 1024 {
         return None;
     }
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::MetadataExt;
+        Some((m.dev(), m.ino()))
+    };
+    #[cfg(windows)]
+    let file = fs::File::open(path)
+        .ok()
+        .and_then(|file| storage::file_id(&file));
     Some(Stamp {
         len: m.len(),
         modified: m.modified().ok(),
-        #[cfg(unix)]
-        file: {
-            use std::os::unix::fs::MetadataExt;
-            (m.dev(), m.ino())
-        },
+        file,
     })
 }
 

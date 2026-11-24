@@ -756,6 +756,13 @@ fn scan_new_lines(
     let previous = cursors
         .get(path)
         .filter(|c| c.identity == identity && file_len >= c.offset);
+    // On Windows the identity is the time the file was created, which passes
+    // to a file that replaces it under the same name; the open file says
+    // whether it is still the one that was read.
+    #[cfg(windows)]
+    let opened = storage::file_id(&file);
+    #[cfg(windows)]
+    let previous = previous.filter(|c| c.file == opened);
     let mut offset = previous.map_or_else(
         || {
             cleared
@@ -826,6 +833,8 @@ fn scan_new_lines(
             discarding,
             stamp,
             identity,
+            #[cfg(windows)]
+            file: opened,
         },
     );
 }
@@ -1130,6 +1139,8 @@ struct FileCursor {
     discarding: bool,
     stamp: SourceStamp,
     identity: String,
+    #[cfg(windows)]
+    file: Option<(u64, u64)>,
 }
 type FileCursors = std::collections::HashMap<std::path::PathBuf, FileCursor>;
 const ANTIGRAVITY_BACKLOG: u64 = 4 * 1024 * 1024;
@@ -2760,6 +2771,15 @@ mod external_scan_tests {
         );
         let replacement = dir.path().join("replacement");
         std::fs::write(&replacement, b"other\n").unwrap();
+        // A time of its own: unopened, Windows tells a file of the same
+        // length from the one it replaced only by when it was written.
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_modified(written + std::time::Duration::from_secs(5))
+            .unwrap();
         std::fs::rename(replacement, &path).unwrap();
         let mut rotated = Vec::new();
         scan_new_lines(
