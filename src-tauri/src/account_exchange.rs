@@ -1,16 +1,20 @@
 //! Account exchange is deliberately separate from native authentication files.
-use super::{auth_info, claims, clean_name, now, older, Core, Profile};
+//! A server keeps what each account was imported from and never reads or
+//! writes an exchange file itself.
+#[cfg(feature = "desktop")]
+use super::{auth_info, now, older, Core, Profile};
+use super::{claims, clean_name};
 use crate::errors::code;
-use crate::{
-    exchange_template as template,
-    storage::{self, AppError, Result},
-};
+use crate::storage::{AppError, Result};
+#[cfg(feature = "desktop")]
+use crate::{exchange_template as template, storage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::{collections::BTreeMap, sync::Arc};
+#[cfg(feature = "desktop")]
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -44,6 +48,7 @@ pub(super) fn rebind_sources(
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 fn source_extensions(source: &Source, format: &str) -> Value {
     let mut value = source.account.clone();
     let keys = if format == "sub2api" {
@@ -89,6 +94,7 @@ fn source_extensions(source: &Source, format: &str) -> Value {
     value
 }
 
+#[cfg(feature = "desktop")]
 pub(super) fn merge_sources(
     target: &mut BTreeMap<String, Source>,
     source: &BTreeMap<String, Source>,
@@ -153,6 +159,8 @@ impl<'de> Deserialize<'de> for Envelope {
         Value::deserialize(deserializer).map(|v| Self(Arc::new(v)))
     }
 }
+// A server parses an account only to learn whose it is.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 struct Candidate {
     auth: String,
     name: String,
@@ -160,6 +168,7 @@ struct Candidate {
     source: Option<(String, Source)>,
     duplicate: Option<(String, String)>,
 }
+#[cfg(feature = "desktop")]
 struct Pending {
     token: String,
     at: Instant,
@@ -167,12 +176,14 @@ struct Pending {
     file_revision: String,
     candidates: Vec<Option<Candidate>>,
 }
+#[cfg(feature = "desktop")]
 #[derive(Default)]
 pub struct Service {
     pending: Option<Pending>,
     pub templates: template::Service,
 }
 
+#[cfg(feature = "desktop")]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Row {
@@ -183,24 +194,28 @@ pub struct Row {
     pub duplicate: bool,
     pub error: Option<String>,
 }
+#[cfg(feature = "desktop")]
 #[derive(Serialize)]
 pub struct Preview {
     pub token: String,
     pub revision: String,
     pub rows: Vec<Row>,
 }
+#[cfg(feature = "desktop")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Selection {
     pub id: usize,
     pub update: bool,
 }
+#[cfg(feature = "desktop")]
 #[derive(Serialize)]
 pub struct ExportRow {
     pub id: String,
     pub name: String,
     pub error: Option<String>,
 }
+#[cfg(feature = "desktop")]
 #[derive(Serialize)]
 pub struct ExportPreview {
     pub revision: String,
@@ -216,6 +231,7 @@ fn conflict() -> AppError {
 fn text(value: &Value) -> Option<&str> {
     value.as_str().filter(|s| !s.is_empty())
 }
+#[cfg(feature = "desktop")]
 fn expiry(value: &Value) -> Option<i64> {
     value
         .as_i64()
@@ -232,11 +248,13 @@ fn expiry(value: &Value) -> Option<i64> {
                 })
         })
 }
+#[cfg(feature = "desktop")]
 fn datetime(seconds: i64) -> Result<String> {
     chrono::DateTime::from_timestamp(seconds, 0)
         .map(|v| v.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
         .ok_or_else(|| invalid("有效期无法转换"))
 }
+#[cfg(feature = "desktop")]
 fn refresh_time(value: &Value) -> Result<Value> {
     if let Some(value) = value
         .as_str()
@@ -361,6 +379,7 @@ fn parse_account(value: &Value, format: &str, envelope: Option<Envelope>) -> Res
     })
 }
 
+#[cfg(feature = "desktop")]
 impl Core {
     pub fn exchange_revision(&self) -> String {
         // Includes names, metadata and preferences as well as credential versions.
@@ -736,12 +755,14 @@ impl Core {
         storage::atomic_write(path, &bytes, None)
     }
 }
+#[cfg(feature = "desktop")]
 fn source<'a>(profile: &'a Profile, format: &str) -> Option<&'a Source> {
     profile
         .exchange
         .get(format)
         .filter(|s| s.identity == profile.identity)
 }
+#[cfg(feature = "desktop")]
 fn export_account(profile: &Profile, format: &str, prototype: Option<&Value>) -> Result<Value> {
     if profile.kind != "chatgpt" {
         return Err(invalid("仅支持 ChatGPT/Codex 官方 OAuth 账号"));

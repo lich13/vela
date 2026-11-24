@@ -1,11 +1,15 @@
 use super::{catalog, fail};
 use crate::storage::Result;
+#[cfg(feature = "desktop")]
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
 };
-use tokio::{process::Command, sync::oneshot};
+use tokio::process::Command;
+#[cfg(feature = "desktop")]
+use tokio::sync::oneshot;
+#[cfg(feature = "desktop")]
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct State {
@@ -13,6 +17,7 @@ pub struct State {
     pub authenticated: bool,
     pub error: Option<String>,
 }
+#[cfg(feature = "desktop")]
 impl Default for State {
     fn default() -> Self {
         Self {
@@ -22,6 +27,7 @@ impl Default for State {
         }
     }
 }
+#[cfg(feature = "desktop")]
 #[derive(Default)]
 pub struct Session {
     pub state: State,
@@ -139,6 +145,7 @@ fn parse_status(bytes: &[u8]) -> Result<bool> {
         .ok_or_else(|| fail("Claude 登录状态无效"))?;
     Ok(matches!(method, "claude.ai" | "oauth_token"))
 }
+#[cfg(feature = "desktop")]
 pub async fn run(home: &Path, mut cancel: oneshot::Receiver<()>) -> Result<bool> {
     let mut cmd = command(home)?;
     cmd.args(["auth", "login", "--claudeai"])

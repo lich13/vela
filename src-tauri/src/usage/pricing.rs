@@ -335,6 +335,7 @@ impl Pricing {
             sync: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
+    #[cfg(feature = "desktop")]
     pub fn path(&self) -> &Path {
         &self.path
     }

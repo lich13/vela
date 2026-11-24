@@ -59,6 +59,7 @@ impl Reason {
             Self::CircuitOpen | Self::ThreadHandoff | Self::NetworkHold | Self::NetworkRestored
         )
     }
+    #[cfg(any(feature = "desktop", test))]
     pub fn text(self) -> &'static str {
         match self {
             Self::ModelUnavailable => "指定模型不存在或无权使用",
@@ -118,6 +119,7 @@ pub enum Action {
     NotRetried,
 }
 impl Action {
+    #[cfg(any(feature = "desktop", test))]
     pub fn text(self) -> &'static str {
         match self {
             Self::TryingNext => "尝试下一供应商",
@@ -542,9 +544,11 @@ impl Record {
             details: Details::default(),
         }
     }
+    #[cfg(any(feature = "desktop", test))]
     pub fn notification(&self) -> String {
         self.notification_at(now())
     }
+    #[cfg(any(feature = "desktop", test))]
     fn notification_at(&self, timestamp: u64) -> String {
         if self.reason == Reason::CircuitOpen {
             let provider = self
@@ -1035,6 +1039,8 @@ pub fn safe_model(s: &str) -> Option<String> {
 pub struct Change {
     pub record: Option<Record>,
     pub error: Option<String>,
+    /// Whether the desktop app should raise a system notification for it.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     #[serde(skip)]
     pub notify: bool,
 }
@@ -1114,6 +1120,7 @@ enum Job {
         oneshot::Sender<Result<()>>,
     ),
     Prune,
+    #[cfg(any(feature = "desktop", test))]
     NotificationAccepted(String),
 }
 struct FileCursor {
@@ -1599,6 +1606,7 @@ impl Service {
                                 }
                             }
                         }
+                        #[cfg(any(feature = "desktop", test))]
                         Job::NotificationAccepted(id) => {
                             let mut journal = j.lock();
                             if let Some(r_arc) = journal.records.iter_mut().find(|r| r.id == id) {
@@ -1691,6 +1699,7 @@ impl Service {
         }
         true
     }
+    #[cfg(feature = "desktop")]
     pub fn notification_accepted(&self, id: String) {
         // Failure to persist acknowledgment never blocks gateway delivery.
         let _ = self.sender.try_send(Job::NotificationAccepted(id));

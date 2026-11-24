@@ -1,5 +1,3 @@
-// The desktop-only parts of the shared modules are gated in the next step.
-#![cfg_attr(not(feature = "desktop"), allow(dead_code, unused_imports))]
 #[cfg(all(feature = "desktop", not(any(target_os = "macos", windows))))]
 compile_error!("The Vela desktop app supports only macOS and Windows");
 
@@ -17,8 +15,10 @@ mod download;
 mod errors;
 mod event_raw;
 mod events;
+// Accounts are imported from and exported to files by the desktop app alone.
+#[cfg(feature = "desktop")]
 mod exchange_template;
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod exchange_template_tests;
 mod gateway;
 #[cfg(feature = "desktop")]
@@ -52,6 +52,10 @@ mod startup;
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 mod startup_macos;
+// `storage` is being reworked elsewhere; the two helpers of it that only the
+// desktop app calls, `publish_batch` and `PrivateTempDir::close`, are left
+// for that to gate.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 mod storage;
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
@@ -428,7 +432,9 @@ impl runtime::Sink for Host {
                 #[cfg(target_os = "macos")]
                 quick_macos::push_quota(app, *client_id, (*quota).clone());
             }
-            Event::Config { key, state } => emit_main_config_state(app, key, (*state).clone()),
+            Event::Config(state) => {
+                emit_main_config_state(app, &state["clientId"].to_string(), (*state).clone())
+            }
             Event::AntigravityAuth(state) => emit_antigravity_auth_state(app, state),
             Event::Notice(message) => emit_switch_notice(app, *message),
             Event::ClaudeProfile(view) => {

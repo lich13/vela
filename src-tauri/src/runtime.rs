@@ -32,12 +32,9 @@ pub(crate) enum Event<'a> {
         client_id: gateway::ClientId,
         quota: &'a gateway::QuotaView,
     },
-    /// A client's configuration file changed. `key` names the client, so a
-    /// host that holds events back keeps only the latest one for each.
-    Config {
-        key: &'a str,
-        state: &'a serde_json::Value,
-    },
+    /// A client's configuration file changed. Its `clientId` names the
+    /// client, so a host that holds events back keeps the latest for each.
+    Config(&'a serde_json::Value),
     AntigravityAuth(&'a antigravity::auth::AntigravityAuthState),
     /// A sentence telling the user what a change they just made means.
     Notice(&'a str),
@@ -58,7 +55,7 @@ impl Event<'_> {
             Self::Gateway(_) => "gateway-state",
             Self::Freeze(_) => "gateway-freeze",
             Self::Quota { .. } => "provider-quota",
-            Self::Config { .. } => "config-state",
+            Self::Config(_) => "config-state",
             Self::AntigravityAuth(_) => "antigravity-auth-state",
             Self::Notice(_) => "switch-notice",
             Self::ClaudeProfile(_) => "claude-profile-state",
@@ -82,7 +79,7 @@ impl serde::Serialize for Event<'_> {
             Self::Quota { client_id, quota } => {
                 serde_json::json!({"clientId": client_id, "quota": quota}).serialize(serializer)
             }
-            Self::Config { state, .. } => state.serialize(serializer),
+            Self::Config(state) => state.serialize(serializer),
             Self::AntigravityAuth(state) => state.serialize(serializer),
             Self::Notice(message) => message.serialize(serializer),
             Self::ClaudeProfile(view) => view.serialize(serializer),
@@ -513,10 +510,7 @@ impl Runtime {
                         &mut agy_config_cache,
                     ) {
                         if agy_config_version.as_ref() != Some(&rev) {
-                            runtime.sink.emit(Event::Config {
-                                key: "antigravity",
-                                state: &serde_json::json!({"clientId":"antigravity","revision":rev,"guarded":false}),
-                            });
+                            runtime.sink.emit(Event::Config(&serde_json::json!({"clientId":"antigravity","revision":rev,"guarded":false})));
                             agy_config_version = Some(rev);
                         }
                     }
@@ -736,11 +730,9 @@ impl Runtime {
     }
     /// Announces a client's configuration file as it now stands.
     pub(crate) fn publish_config(&self, client: gateway::ClientId, revision: &str, guarded: bool) {
-        let key = serde_json::to_string(&client).unwrap_or_default();
-        self.sink.emit(Event::Config {
-            key: &key,
-            state: &serde_json::json!({"clientId":client,"revision":revision,"guarded":guarded}),
-        });
+        self.sink.emit(Event::Config(
+            &serde_json::json!({"clientId":client,"revision":revision,"guarded":guarded}),
+        ));
     }
     pub(crate) fn set_quota_interval(&self, seconds: u64) {
         for gateway in [

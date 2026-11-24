@@ -43,9 +43,9 @@ mod business_ua_tests;
 pub mod catalog;
 pub(crate) mod circuit;
 mod compaction;
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, feature = "desktop", target_os = "macos"))]
 pub(crate) use admission::CapacityRetry;
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, feature = "desktop", target_os = "macos"))]
 pub(crate) use compaction::HandoffWaiting;
 #[cfg(test)]
 mod config_poll_tests;
@@ -890,6 +890,7 @@ impl Gateway {
     pub fn client_id(&self) -> ClientId {
         self.0.client
     }
+    #[cfg(any(feature = "desktop", test))]
     pub fn reveal_provider_token(
         &self,
         window_label: &str,
@@ -1430,6 +1431,7 @@ impl Gateway {
             edit => edit,
         }
     }
+    #[cfg(any(feature = "desktop", test))]
     pub fn edit(&self, edit: Edit, expected: &str, home: &Path) -> Result<View> {
         self.edit_checked(edit, expected, home, None)
     }
