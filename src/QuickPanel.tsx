@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { command, preview } from "./bridge";
 import { useInstance } from "./instance";
+import { useOwnPreferences } from "./own-preferences";
 import { QuickInstances } from "./InstanceSwitch";
 import { errorOf, type GatewayState, type ViewState } from "./types";
 import { QuotaInfo, useProviderQuota } from "./Quota";
@@ -175,17 +176,20 @@ function QuickContent({
       media.removeEventListener("change", change);
     };
   }, []);
-  const themeKnown = !!accounts;
+  const [own] = useOwnPreferences(accounts?.preferences, (e) =>
+    setError(errorOf(e).message),
+  );
+  const themeKnown = !!own;
   useEffect(() => {
     // Starting over for another instance keeps the theme until its state arrives.
     if (!themeKnown && document.documentElement.dataset.theme) return;
     document.documentElement.dataset.theme =
-      !accounts || accounts.preferences.theme === "system"
+      !own || own.theme === "system"
         ? systemDark
           ? "dark"
           : "light"
-        : accounts.preferences.theme;
-  }, [themeKnown, accounts?.preferences.theme, systemDark]);
+        : own.theme;
+  }, [themeKnown, own?.theme, systemDark]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 6500);

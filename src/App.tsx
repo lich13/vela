@@ -37,6 +37,7 @@ import {
 } from "lucide-react";
 import { command } from "./bridge";
 import { useInstance } from "./instance";
+import { useOwnPreferences } from "./own-preferences";
 import InstanceSwitch from "./InstanceSwitch";
 import { AccountEdit, AddAccount, AppModal, SettingsForm } from "./AppDialogs";
 import AuthSyncNotice from "./AuthSyncNotice";
@@ -351,7 +352,11 @@ function Shell() {
     const t = setTimeout(() => setMessage(""), 6500);
     return () => clearTimeout(t);
   }, [message]);
-  const selectedTheme = themePreview ?? state?.preferences.theme ?? "system";
+  const [preferences, keepPreferences] = useOwnPreferences(
+    state?.preferences,
+    (e) => setError(errorOf(e).message),
+  );
+  const selectedTheme = themePreview ?? preferences?.theme ?? "system";
   const theme: "dark" | "light" =
     selectedTheme === "dark"
       ? "dark"
@@ -360,7 +365,7 @@ function Shell() {
         : systemDark
           ? "dark"
           : "light";
-  const themeKnown = Boolean(state || themePreview);
+  const themeKnown = Boolean(preferences || themePreview);
   useEffect(() => {
     // Starting over for another instance keeps the theme until its state arrives.
     if (themeKnown || !document.documentElement.dataset.theme)
@@ -916,11 +921,13 @@ function Shell() {
             />
           ) : dialog === "settings" ? (
             <SettingsForm
-              preferences={state.preferences}
+              preferences={preferences ?? state.preferences}
               onThemePreview={setThemePreview}
               onDirtyChange={dialogDraftChanged}
               onDone={(s) => {
-                setState(s);
+                // Saved on this machine, which is not what a server's pages show.
+                if (remote) keepPreferences(s.preferences);
+                else setState(s);
                 setThemePreview(null);
                 setDialog(null);
               }}

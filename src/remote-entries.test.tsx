@@ -1,4 +1,5 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mock } from "./test-bridge";
 vi.mock("./bridge", async () => ({
@@ -32,6 +33,8 @@ beforeEach(() => {
   localStorage.clear();
   mock.listeners.clear();
   mock.command.mockReset();
+  mock.local.mockReset();
+  mock.local.mockImplementation(async () => structuredClone(demo));
   mock.command.mockImplementation(
     async (name: string, args?: { clientId?: string }) => {
       switch (name) {
@@ -189,4 +192,26 @@ it("the quick panel of this machine keeps them", async () => {
     await screen.findByRole("button", { name: "退出 Claude Code" }),
   ).toBeInTheDocument();
   await waitFor(() => expect(calls("get_clamshell_state")).not.toHaveLength(0));
+});
+
+it("the look and the notification switch stay this machine's", async () => {
+  const own = { ...structuredClone(demo).preferences, theme: "dark" as const };
+  mock.local.mockImplementation(async (name: string, args?: { preferences: typeof own }) => ({
+    ...structuredClone(demo),
+    preferences: name === "set_preferences" ? args!.preferences : own,
+  }));
+  render(<App />);
+  await screen.findAllByRole("button", { name: /^切换到 / });
+  await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
+
+  await userEvent.click(screen.getByRole("button", { name: /^设置/ }));
+  await userEvent.click(await screen.findByRole("button", { name: "浅色" }));
+  await userEvent.click(screen.getByRole("button", { name: "保存设置" }));
+  await waitFor(() =>
+    expect(mock.local).toHaveBeenCalledWith("set_preferences", {
+      preferences: { ...own, theme: "light" },
+    }),
+  );
+  expect(calls("set_preferences")).toHaveLength(0);
+  await waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
 });

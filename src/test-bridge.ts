@@ -3,6 +3,8 @@ import { vi } from "vitest";
 /** What a test drives: the stubs and the listeners the page registered. */
 export const mock = {
   command: vi.fn(),
+  /** `local.command`: this machine whichever instance is shown. */
+  local: vi.fn(),
   /** For `vi.mock("./confirmation", () => ({ confirmAction: mock.confirm }))`. */
   confirm: vi.fn(),
   listeners: new Map<string, (value?: unknown) => void>(),
@@ -15,6 +17,7 @@ export const mock = {
 export const bridge = {
   preview: false,
   command: mock.command,
+  local: { command: mock.local },
   subscribe: vi.fn(async (name: string, listener: (value: unknown) => void) => {
     mock.listeners.set(name, listener);
     return () => mock.listeners.delete(name);

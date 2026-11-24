@@ -8,6 +8,7 @@ import {
   type CommandResult,
   type EventMap,
   type RemoteEvent,
+  type SharedCommands,
 } from "./bridge-contracts";
 import { currentInstance, setInstanceState } from "./instance";
 export const native = "__TAURI_INTERNALS__" in window;
@@ -38,6 +39,20 @@ export async function command<K extends CommandName>(
     >;
   throw new Error("请在 Vela 桌面客户端中打开");
 }
+/**
+ * A shared command on this machine whichever instance is shown, for what
+ * belongs to this app rather than to the instance.
+ */
+export const local = {
+  command<K extends keyof SharedCommands>(
+    name: K,
+    ...params: CommandParams<K>
+  ): Promise<CommandResult<K>> {
+    return native
+      ? invoke<CommandResult<K>>("call", { name, args: params[0] ?? {} })
+      : command(name, ...params);
+  },
+};
 /**
  * Shared events arrive from this machine under their own name and from servers
  * as `remote-event`; only the current instance's reach `fn`.

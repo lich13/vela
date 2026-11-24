@@ -58,6 +58,17 @@ test("desktop commands are invoked by name whichever instance is current", async
   expect(tauri.invoke).not.toHaveBeenCalledWith("remote_call", expect.anything());
 });
 
+test("local.command stays on this machine with a server selected", async () => {
+  const { local, ready } = await load(instances("m1"));
+  await ready;
+  await local.command("get_state");
+  expect(tauri.invoke).toHaveBeenLastCalledWith("call", {
+    name: "get_state",
+    args: {},
+  });
+  expect(tauri.invoke).not.toHaveBeenCalledWith("remote_call", expect.anything());
+});
+
 test("shared commands go through call on this machine", async () => {
   const { command } = await load(instances("local"));
   await expect(command("get_gateway", { clientId: "codex" })).resolves.toBe(

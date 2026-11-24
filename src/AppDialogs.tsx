@@ -24,7 +24,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { command } from "./bridge";
+import { command, local } from "./bridge";
 import { useInstance } from "./instance";
 import { useDialogFocus } from "./Modal";
 import NotificationPermission from "./NotificationPermission";
@@ -360,7 +360,10 @@ export function SettingsForm({
       onSubmit={(e) => {
         e.preventDefault();
         setBusy(true);
-        void command("set_preferences", { preferences: prefs })
+        // The look and the notification switch are saved on this machine.
+        void (remote ? local.command : command)("set_preferences", {
+          preferences: prefs,
+        })
           .then(onDone)
           .catch((e) => setError(errorOf(e).message))
           .finally(() => setBusy(false));
