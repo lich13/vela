@@ -1,4 +1,4 @@
-//! Private identity matching and revision-checked normalization of legacy vaults.
+//! Private identity matching and credential replacement for saved profiles.
 use super::*;
 
 fn conflict() -> AppError {

@@ -3,11 +3,6 @@
   ${If} $0 != ""
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Vela" '$\"$INSTDIR\vela.exe$\" --vela-login-startup'
   ${EndIf}
-  ; Link identifiers used before v0.27.0.
-  DeleteRegKey HKCU "Software\Classes\gptSwitch.CCSwitch.0"
-  DeleteRegKey HKCU "Software\gpt-Switch\LinkHandlers\0"
-  DeleteRegKey /ifempty HKCU "Software\gpt-Switch\LinkHandlers"
-  DeleteRegKey /ifempty HKCU "Software\gpt-Switch"
   WriteRegStr HKCU "Software\Classes\Vela.CCSwitch" "" "Vela CC Switch Link"
   WriteRegStr HKCU "Software\Classes\Vela.CCSwitch" "URL Protocol" ""
   WriteRegStr HKCU "Software\Classes\Vela.CCSwitch\shell\open\command" "" '$\"$INSTDIR\vela.exe$\" $\"%1$\"'

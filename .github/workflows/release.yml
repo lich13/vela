@@ -105,8 +105,6 @@ jobs:
           Set-Item $protocol '"C:\fixture\other-app.exe" "%1"'
           $beforeProtocol = (Get-Item $protocol).GetValue('')
           $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
-          $legacy = 'HKCU:\Software\Classes\gptSwitch.CCSwitch.0'
-          New-Item $legacy -Force | Out-Null
           $install = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw 'Installer failed' }
           $exe = Get-ChildItem $installDir -Filter 'vela.exe' -Recurse | Select-Object -First 1
@@ -114,7 +112,6 @@ jobs:
           $entry = Get-ItemProperty "$uninstall/Vela"
           if ($entry.DisplayName -ne 'Vela' -or $entry.DisplayVersion -ne $expectedVersion) { throw 'Invalid install registration' }
           if ((Get-Content $marker).Trim() -ne 'preserve-user-data') { throw 'Install changed user data' }
-          if (Test-Path $legacy) { throw 'Legacy link identifiers survived the upgrade' }
           $selfCommand = 'HKCU:\Software\Classes\Vela.CCSwitch\shell\open\command'
           if ((Get-Item $selfCommand).GetValue('') -ne ('"' + $exe.FullName + '" "%1"')) { throw 'Self link registration is missing' }
           if ((Get-Item $protocol).GetValue('') -ne $beforeProtocol) { throw 'Install changed the default protocol' }

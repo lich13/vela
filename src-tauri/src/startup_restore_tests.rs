@@ -128,44 +128,6 @@ async fn restart_diagnostics_wait_for_real_failures_instead_of_unrestored_views(
     fixture.gateway.stop().await.unwrap();
 }
 
-#[tokio::test]
-async fn old_restore_flags_are_ignored_and_do_not_block_desired_resume() {
-    for legacy in [
-        Some(r#"{"restoreGateway":false}"#),
-        Some(r#"{"restoreGateway":true}"#),
-        Some("{}"),
-        None,
-    ] {
-        let fixture = resumable_codex().await;
-        if let Some(legacy) = legacy {
-            std::fs::write(fixture.data.join("startup.json"), legacy).unwrap();
-        }
-        let legacy_description = legacy.unwrap_or("<missing startup.json>");
-
-        fixture.gateway.resume(&fixture.home).await.unwrap();
-        let running_view = fixture.gateway.view();
-        assert!(running_view.running, "legacy value: {legacy_description}");
-        let managed_config = std::fs::read(fixture.home.join("config.toml")).unwrap();
-
-        fixture.gateway.resume(&fixture.home).await.unwrap();
-        let repeated_resume = fixture.gateway.view();
-        assert!(
-            repeated_resume.running,
-            "legacy value: {legacy_description}"
-        );
-        assert_eq!(
-            repeated_resume.revision, running_view.revision,
-            "legacy value: {legacy_description}"
-        );
-        assert_eq!(
-            std::fs::read(fixture.home.join("config.toml")).unwrap(),
-            managed_config,
-            "legacy value: {legacy_description}"
-        );
-        fixture.gateway.stop().await.unwrap();
-    }
-}
-
 #[test]
 fn startup_view_and_silent_mode_have_no_restore_gateway_setting() {
     let view = View {

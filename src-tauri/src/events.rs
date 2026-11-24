@@ -1278,7 +1278,7 @@ fn load(path: &Path) -> Journal {
                 match serde_json::from_slice::<Record>(&line) {
                     Ok(mut r) => {
                         r.classify_stored();
-                        if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
+                        if r.last_at >= now().saturating_sub(RETENTION) {
                             j.records.push_back(Arc::new(r))
                         } else {
                             j.dirty = true;
@@ -2400,7 +2400,7 @@ mod routing_visibility_tests {
     }
 
     #[test]
-    fn routine_routing_is_hidden_on_emit_and_legacy_load_but_faults_remain() {
+    fn routine_routing_is_hidden_on_emit_and_query_but_faults_remain() {
         let dir = tempfile::tempdir().unwrap();
         let service = Service::new(dir.path());
         let mut lines = Vec::new();
@@ -2428,14 +2428,13 @@ mod routing_visibility_tests {
                 failure: None,
             });
             assert!(!service.emit_checked(record.clone()));
-            lines.push(serde_json::to_string(&record).unwrap());
             record.details.routing.as_mut().unwrap().failure =
                 Some(crate::gateway::failover::Failure::Transport);
             assert!(record.visible());
             lines.push(serde_json::to_string(&record).unwrap());
         }
         assert_eq!(service.query(Filter::default()).total, 0);
-        let path = dir.path().join("legacy.jsonl");
+        let path = dir.path().join("faults.jsonl");
         std::fs::write(&path, lines.join("\n")).unwrap();
         let loaded = load(&path);
         assert_eq!(loaded.records.len(), 5);

@@ -1,4 +1,4 @@
-//! End-to-end checks for the v11-to-v12 usage storage migration.
+//! End-to-end checks for the v12 usage storage layout.
 //!
 //! These fixtures are synthetic and intentionally use a private temporary
 //! directory.  The tests exercise the public Store API; physical v12 tables
@@ -187,7 +187,7 @@ fn views(store: &Store) -> Value {
     })
 }
 
-fn migrated_empty() -> (tempfile::TempDir, Store) {
+fn empty_store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     (dir, store)
@@ -200,82 +200,6 @@ fn compact_diagnostics_until_done(store: &mut Store) {
         }
     }
     panic!("v12 diagnostic compaction did not finish");
-}
-
-#[test]
-fn fresh_database_matches_migrated_schema_and_needs_no_historical_repairs() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut fresh = Store::open(dir.path()).unwrap();
-    let (_old_dir, mut migrated) = migrated_empty();
-    let schema = |store: &Store| {
-        store.connection.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").unwrap()
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?.replace([' ', '\n', '"'], ""))))
-            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
-    };
-    assert_eq!(schema(&fresh), schema(&migrated));
-    assert_eq!(
-        fresh
-            .connection
-            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        13
-    );
-    let metadata = |store: &Store| {
-        store
-            .connection
-            .prepare("SELECT key,value FROM metadata ORDER BY key")
-            .unwrap()
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap()
-    };
-    let before = metadata(&fresh);
-    assert!(!fresh.compact_storage_batch().unwrap());
-    fresh.reclaim_space().unwrap();
-    assert!(fresh.maintenance_status().is_none());
-    assert_eq!(metadata(&fresh), before);
-    assert_eq!(
-        before,
-        vec![
-            ("record_sequence".into(), "0".into()),
-            ("storage_v12".into(), "ready".into()),
-        ]
-    );
-
-    let gateway = priced_record("fixture-fresh", BASE, 100, 20, "1.4");
-    let mut session = gateway.clone();
-    session.id = "fixture-fresh-session".into();
-    session.source = "codex".into();
-    session.attempts[0].provider = None;
-    for store in [&mut fresh, &mut migrated] {
-        store
-            .write_batch(&[gateway.clone(), session.clone()], None)
-            .unwrap();
-    }
-    assert_eq!(
-        page_value(&fresh, &all_time()),
-        page_value(&migrated, &all_time())
-    );
-    assert_eq!(fresh.logs(&all_time()).unwrap().total, 1);
-    assert_eq!(
-        serde_json::to_value(fresh.detail(&gateway.id).unwrap()).unwrap(),
-        serde_json::to_value(migrated.detail(&gateway.id).unwrap()).unwrap()
-    );
-    let totals = dashboard_value(&fresh, &all_time());
-    for store in [&mut fresh, &mut migrated] {
-        store
-            .archive_batch(&[gateway.id.clone(), session.id.clone()])
-            .unwrap();
-    }
-    assert_eq!(
-        dashboard_value(&fresh, &all_time()),
-        dashboard_value(&migrated, &all_time())
-    );
-    assert_eq!(
-        dashboard_value(&fresh, &all_time())["totals"],
-        totals["totals"]
-    );
 }
 
 #[test]
@@ -440,7 +364,7 @@ fn v12_migration_preserves_zero_tokens_and_price_snapshot() {
 
 #[test]
 fn v12_snapshot_stays_on_one_committed_view_while_writer_switches_rows() {
-    let (dir, mut store) = migrated_empty();
+    let (dir, mut store) = empty_store();
     let initial = record(
         "fixture-v12-snapshot-initial",
         "codex",
@@ -477,7 +401,7 @@ fn v12_snapshot_stays_on_one_committed_view_while_writer_switches_rows() {
 
 #[test]
 fn v12_zero_and_ambiguous_merges_are_reversible_by_source_rebuild() {
-    let (_dir, mut store) = migrated_empty();
+    let (_dir, mut store) = empty_store();
     let zero_proxy = record(
         "fixture-v12-zero-proxy",
         "proxy",
@@ -552,7 +476,7 @@ fn v12_zero_and_ambiguous_merges_are_reversible_by_source_rebuild() {
 
 #[test]
 fn v12_donor_cache_does_not_recompute_reported_input_or_gateway_view() {
-    let (_dir, mut store) = migrated_empty();
+    let (_dir, mut store) = empty_store();
     let response = "fixture-v12-cache-donor-response";
     let mut gateway = record(
         "fixture-v12-cache-original",
@@ -594,7 +518,7 @@ fn v12_donor_cache_does_not_recompute_reported_input_or_gateway_view() {
 
 #[test]
 fn v12_filter_and_compaction_keep_seven_and_thirty_day_boundaries_inclusive() {
-    let (_dir, mut store) = migrated_empty();
+    let (_dir, mut store) = empty_store();
     let at = BASE + 80 * DAY + 1234;
     let cutoff_30 = local_boundary(at - 30 * DAY, 0);
     let cutoff_7 = local_boundary(at - 7 * DAY, 0);
@@ -681,7 +605,7 @@ fn v12_filter_and_compaction_keep_seven_and_thirty_day_boundaries_inclusive() {
 
 #[test]
 fn v12_seven_day_cold_archive_preserves_zero_tokens_and_price_snapshot() {
-    let (_dir, mut store) = migrated_empty();
+    let (_dir, mut store) = empty_store();
     let at = BASE + 80 * DAY;
     let cold = priced_record("fixture-v12-cold-zero", at - 8 * DAY, 0, 0, "0.1234");
     let hot = priced_record("fixture-v12-hot", at - 6 * DAY, 12, 3, "0.5678");
@@ -733,7 +657,7 @@ fn v12_seven_day_cold_archive_preserves_zero_tokens_and_price_snapshot() {
 
 #[test]
 fn v12_cold_archive_rejects_incomplete_transfer_states() {
-    let (_dir, mut store) = migrated_empty();
+    let (_dir, mut store) = empty_store();
     let at = BASE + 80 * DAY;
     let mut terminal_failed = priced_record(
         "fixture-v12-cold-terminal-status",
@@ -850,7 +774,7 @@ fn v12_cold_archive_rejects_incomplete_transfer_states() {
 fn v12_short_hint_collisions_keep_full_record_and_entity_ids_distinct() {
     const FIRST: &str = "1975542fda9b754583df5cae86a69cdf9a1af17c55c9121e6194312e27659f6c";
     const SECOND: &str = "678b2eea8ee668c10b705efa4dce68ddde3011f715ad4070b31612700832e674";
-    let (dir, mut store) = migrated_empty();
+    let (dir, mut store) = empty_store();
 
     let mut first = record(FIRST, "proxy", BASE, Some(FIRST), 10, 2);
     first.session_id = Some(FIRST.into());
@@ -945,7 +869,7 @@ fn v12_short_hint_collisions_keep_full_record_and_entity_ids_distinct() {
 
 #[test]
 fn v12_source_rebuild_invalidates_missing_file_cursor_without_touching_other_source() {
-    let (dir, mut store) = migrated_empty();
+    let (dir, mut store) = empty_store();
     let pricing = Pricing::new(dir.path()).unwrap();
     let home = dir.path().join("fixture-v12-cursor-home");
     let codex_path = home.join("sessions").join("001-codex.jsonl");
@@ -1134,7 +1058,7 @@ fn v12_source_rebuild_invalidates_missing_file_cursor_without_touching_other_sou
 
 #[test]
 fn v12_corrupt_narrow_body_keeps_the_record_and_isolated_detail_failure() {
-    let (dir, mut store) = migrated_empty();
+    let (dir, mut store) = empty_store();
     let broken = record(
         "fixture-v12-narrow-corrupt",
         "codex",
@@ -1187,7 +1111,7 @@ fn v12_corrupt_narrow_body_keeps_the_record_and_isolated_detail_failure() {
 
 #[test]
 fn v12_reclaim_with_a_busy_writer_is_nonfatal() {
-    let (dir, mut store) = migrated_empty();
+    let (dir, mut store) = empty_store();
     let row = record(
         "fixture-v12-busy-reclaim",
         "codex",
@@ -1206,7 +1130,7 @@ fn v12_reclaim_with_a_busy_writer_is_nonfatal() {
 
 #[test]
 fn v12_interrupted_rebuild_keeps_old_source_until_finish() {
-    let (dir, mut store) = migrated_empty();
+    let (dir, mut store) = empty_store();
     let old = record(
         "fixture-v12-interrupted-old",
         "codex",
@@ -1285,7 +1209,7 @@ fn v12_interrupted_rebuild_keeps_old_source_until_finish() {
 
 #[test]
 fn v12_diagnostic_block_compaction_preserves_detail_fields() {
-    let (dir, mut store) = migrated_empty();
+    let (dir, mut store) = empty_store();
     let row = priced_record(
         "fixture-v12-diagnostic-block-equivalence",
         BASE,
@@ -1332,7 +1256,7 @@ fn v12_diagnostic_block_compaction_preserves_detail_fields() {
 
 #[test]
 fn v12_estimated_duration_survives_storage_and_compaction_and_enters_no_total() {
-    let (_dir, mut store) = migrated_empty();
+    let (_dir, mut store) = empty_store();
     let mut estimated = record("fixture-estimated", "antigravity", BASE, None, 100, 20);
     estimated.attempts[0].duration_ms = 0;
     estimated.attempts[0].parse_reasons = vec!["attempt_time_unreported".into()];
@@ -1353,7 +1277,7 @@ fn v12_estimated_duration_survives_storage_and_compaction_and_enters_no_total() 
 
 #[test]
 fn v12_antigravity_reasoning_survives_compaction_and_old_snapshots() {
-    let (dir, mut writer) = migrated_empty();
+    let (dir, mut writer) = empty_store();
     let mut row = record("fixture-ag-reasoning", "antigravity", BASE, None, 100, 20);
     row.client = "antigravity".into();
     row.attempts[0].tokens.reasoning = Some(9);
@@ -1414,7 +1338,7 @@ fn v12_antigravity_reasoning_survives_compaction_and_old_snapshots() {
 
 #[test]
 fn v12_diagnostic_slots_survive_update_delete_cold_and_prune() {
-    let (dir, mut store) = migrated_empty();
+    let (dir, mut store) = empty_store();
     let at = BASE + 80 * DAY;
     let old_at = at - 8 * DAY;
     let mut deleted = priced_record("fixture-v12-diagnostic-delete", old_at, 10, 2, "0.1");
@@ -1478,7 +1402,7 @@ fn v12_diagnostic_slots_survive_update_delete_cold_and_prune() {
 
 #[test]
 fn v12_old_snapshot_reads_a_retired_diagnostic_block() {
-    let (dir, mut writer) = migrated_empty();
+    let (dir, mut writer) = empty_store();
     let row = priced_record("fixture-v12-diagnostic-snapshot", BASE, 11, 4, "0.11");
     writer
         .write_batch(std::slice::from_ref(&row), None)
@@ -1513,7 +1437,7 @@ fn v12_old_snapshot_reads_a_retired_diagnostic_block() {
 
 #[test]
 fn v12_corrupt_diagnostic_block_fails_read_and_maintenance_without_delete() {
-    let (dir, mut store) = migrated_empty();
+    let (dir, mut store) = empty_store();
     let row = priced_record("fixture-v12-diagnostic-corrupt-block", BASE, 7, 2, "0.07");
     let survivor = priced_record(
         "fixture-v12-diagnostic-corrupt-survivor",
@@ -1587,7 +1511,7 @@ fn v12_uuid_identifiers_survive_diagnostic_compaction_losslessly() {
     const SESSION_ID: &str = "123e4567-e89b-12d3-a456-426614174002";
     const ATTEMPT_ID: &str = "123e4567-e89b-12d3-a456-426614174003";
 
-    let (_dir, mut store) = migrated_empty();
+    let (_dir, mut store) = empty_store();
     let mut row = priced_record(RECORD_ID, BASE, 8, 3, "0.08");
     row.session_id = Some(SESSION_ID.into());
     row.attempts[0].id = ATTEMPT_ID.into();
@@ -1632,48 +1556,39 @@ fn native_reads_backfill_counts_and_archive_match_legacy() {
             r
         })
         .collect();
-    let mut results = Vec::new();
-    for native in [false, true] {
-        let mut store =
-            Store::open(&dir.path().join(if native { "native" } else { "legacy" })).unwrap();
-        store.write_batch(&rows, None).unwrap();
+    let mut store = Store::open(&dir.path().join("native")).unwrap();
+    store.write_batch(&rows, None).unwrap();
+    store
+        .connection
+        .execute("UPDATE v12_rows SET effective=2 WHERE time%3=0", [])
+        .unwrap();
+    store
+        .connection
+        .execute("UPDATE v12_rows SET effective=0 WHERE time%3=1", [])
+        .unwrap();
+    assert_eq!(store.source_counts("codex").unwrap(), (46, 46, 0));
+    assert_eq!(store.source_counts("missing").unwrap(), (0, 0, 0));
+    store.backfill(&pricing).unwrap();
+    assert!(store.detail(&rows[0].id).unwrap().attempts[0]
+        .price
+        .is_some());
+    store
+        .logs(&Filter {
+            page: 2,
+            ..Default::default()
+        })
+        .unwrap();
+    let before = store.dashboard(&Filter::default()).unwrap().totals;
+    for chunk in rows.chunks(50) {
         store
-            .connection
-            .execute("UPDATE v12_rows SET effective=2 WHERE time%3=0", [])
+            .archive_batch(&chunk.iter().map(|r| r.id.clone()).collect::<Vec<_>>())
             .unwrap();
-        store
-            .connection
-            .execute("UPDATE v12_rows SET effective=0 WHERE time%3=1", [])
-            .unwrap();
-        assert_eq!(store.source_counts("codex").unwrap(), (46, 46, 0));
-        assert_eq!(store.source_counts("missing").unwrap(), (0, 0, 0));
-        store.backfill(&pricing).unwrap();
-        assert!(store.detail(&rows[0].id).unwrap().attempts[0]
-            .price
-            .is_some());
-        let page = store
-            .logs(&Filter {
-                page: 2,
-                ..Default::default()
-            })
-            .unwrap();
-        let before = store.dashboard(&Filter::default()).unwrap().totals;
-        for chunk in rows.chunks(50) {
-            store
-                .archive_batch(&chunk.iter().map(|r| r.id.clone()).collect::<Vec<_>>())
-                .unwrap();
-        }
-        let after = store.dashboard(&Filter::default()).unwrap().totals;
-        assert_eq!(
-            serde_json::to_value(&before).unwrap(),
-            serde_json::to_value(&after).unwrap()
-        );
-        results.push((
-            serde_json::to_value(page.rows).unwrap(),
-            serde_json::to_value(after).unwrap(),
-        ));
     }
-    assert_eq!(results[0], results[1]);
+    let after = store.dashboard(&Filter::default()).unwrap().totals;
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&after).unwrap()
+    );
 }
 
 #[test]
@@ -1710,63 +1625,53 @@ fn native_archive_preserves_all_scopes_operations_and_receipts() {
     duplicate.source = "codex".into();
     duplicate.attempts[0].id = "fixture-duplicate-attempt".into();
     rows.push(duplicate);
-    let mut results = Vec::new();
-    for native in [false, true] {
-        let root = dir.path().join(if native { "native" } else { "legacy" });
-        let mut store = Store::open(&root).unwrap();
-        store.write_batch(&rows, None).unwrap();
-        assert!(store
-            .detail("fixture-archive-duplicate")
-            .unwrap()
-            .duplicate_of
-            .is_some());
-        let filters: Vec<_> = [None, Some("proxy"), Some("sessions"), Some("grok_sessions")]
-            .into_iter()
-            .flat_map(|scope| {
-                [None, Some("model"), Some("compaction"), Some("web_search")]
-                    .into_iter()
-                    .map(move |op| Filter {
-                        source: scope.map(str::to_owned),
-                        operation: op.map(str::to_owned),
-                        ..Filter::default()
-                    })
-            })
-            .collect();
-        let totals = |s: &Store| {
-            filters
-                .iter()
-                .map(|f| serde_json::to_value(s.dashboard(f).unwrap().totals).unwrap())
-                .collect::<Vec<_>>()
-        };
-        let before = totals(&store);
-        store
-            .archive_batch(&rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>())
-            .unwrap();
-        assert_eq!(totals(&store), before);
-        let receipts: Vec<(String, String, Option<String>, String)> = store
-            .connection
-            .prepare("SELECT id,operation,signature,source FROM receipts ORDER BY id")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        for row in &rows {
-            assert_eq!(
-                receipts.iter().find(|r| r.0 == row.id).unwrap().1,
-                row.final_attempt().unwrap().operation.as_str()
-            );
-        }
-        results.push((before, receipts));
-        if native {
-            drop(store);
-            assert_eq!(
-                totals(&Store::open(&root).unwrap()),
-                results.last().unwrap().0
-            );
-        }
+    let root = dir.path().join("native");
+    let mut store = Store::open(&root).unwrap();
+    store.write_batch(&rows, None).unwrap();
+    assert!(store
+        .detail("fixture-archive-duplicate")
+        .unwrap()
+        .duplicate_of
+        .is_some());
+    let filters: Vec<_> = [None, Some("proxy"), Some("sessions"), Some("grok_sessions")]
+        .into_iter()
+        .flat_map(|scope| {
+            [None, Some("model"), Some("compaction"), Some("web_search")]
+                .into_iter()
+                .map(move |op| Filter {
+                    source: scope.map(str::to_owned),
+                    operation: op.map(str::to_owned),
+                    ..Filter::default()
+                })
+        })
+        .collect();
+    let totals = |s: &Store| {
+        filters
+            .iter()
+            .map(|f| serde_json::to_value(s.dashboard(f).unwrap().totals).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let before = totals(&store);
+    store
+        .archive_batch(&rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>())
+        .unwrap();
+    assert_eq!(totals(&store), before);
+    let receipts: Vec<(String, String, Option<String>, String)> = store
+        .connection
+        .prepare("SELECT id,operation,signature,source FROM receipts ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for row in &rows {
+        assert_eq!(
+            receipts.iter().find(|r| r.0 == row.id).unwrap().1,
+            row.final_attempt().unwrap().operation.as_str()
+        );
     }
-    assert_eq!(results[0], results[1]);
+    drop(store);
+    assert_eq!(totals(&Store::open(&root).unwrap()), before);
 }
 
 #[test]
