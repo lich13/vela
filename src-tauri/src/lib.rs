@@ -2016,6 +2016,10 @@ fn tray_is_dark() -> bool {
         == 0
 }
 pub fn run() {
+    // Setup, sync commands and window callbacks all run on this thread, and
+    // the services they call spawn onto whichever tokio runtime is current.
+    let tokio = tauri::async_runtime::handle();
+    let _tokio = tokio.inner().enter();
     let args: Vec<_> = std::env::args().collect();
     let context = tauri::generate_context!();
     tauri::Builder::default()

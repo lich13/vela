@@ -620,7 +620,7 @@ impl Service {
     }
     fn launch(&self, id: String, mut cancel: watch::Receiver<bool>) {
         let service = self.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             let started = Instant::now();
             let work = async {
                 let _permit = service
