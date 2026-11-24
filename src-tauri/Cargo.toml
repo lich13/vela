@@ -10,22 +10,51 @@ license = "MIT"
 name = "vela_lib"
 crate-type = ["rlib"]
 
+[[bin]]
+name = "vela"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+# The desktop app: windows, tray, notifications and whatever else needs Tauri
+# or the system's own UI. Without it the crate is the services alone.
+desktop = [
+    "dep:tauri",
+    "dep:tauri-macros",
+    "dep:tauri-runtime",
+    "dep:tauri-runtime-wry",
+    "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-clipboard-manager",
+    "dep:tauri-build",
+    "dep:tauri-codegen",
+    "dep:open",
+    "dep:auto-launch",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+    "dep:block2",
+    "dep:winreg",
+    "dep:windows",
+]
+
 [build-dependencies]
 # Keep generated context code compatible with the Tauri 2.11 Windows API.
-tauri-build = { version = "~2.6.3", features = [] }
-tauri-codegen = "~2.6.3"
+tauri-build = { version = "~2.6.3", features = [], optional = true }
+tauri-codegen = { version = "~2.6.3", optional = true }
 
 [dependencies]
 parking_lot = "0.12"
 lmfpd = { path = "vendor/lmfpd" }
-tauri = { version = "~2.11", features = ["tray-icon", "image-png"] }
+tauri = { version = "~2.11", features = ["tray-icon", "image-png"], optional = true }
 # Keep the runtime and menu macro interfaces compatible with Tauri 2.11.
-tauri-macros = "~2.6.3"
-tauri-runtime = "~2.11.3"
-tauri-runtime-wry = { version = "~2.11.4", default-features = false }
-tauri-plugin-single-instance = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-clipboard-manager = "2"
+tauri-macros = { version = "~2.6.3", optional = true }
+tauri-runtime = { version = "~2.11.3", optional = true }
+tauri-runtime-wry = { version = "~2.11.4", default-features = false, optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-clipboard-manager = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 semver = "1"
 serde_json = { version = "1", features = ["arbitrary_precision"] }
@@ -38,7 +67,7 @@ uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 toml = "0.9"
 tokio = { version = "1", features = ["process", "io-util", "time", "sync", "macros", "net", "fs", "rt-multi-thread"] }
-open = "5"
+open = { version = "5", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
@@ -61,7 +90,7 @@ flate2 = "1"
 brotli = "8"
 zstd = "0.14.3"
 yawc = { version = "0.4.2", default-features = false, features = ["zlib", "rustls-ring"] }
-auto-launch = "0.5"
+auto-launch = { version = "0.5", optional = true }
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 rusqlite = { version = "0.41", features = ["bundled", "functions", "fallible_uint"] }
 rust_decimal = { version = "1", features = ["serde-str"] }
@@ -70,10 +99,10 @@ yaml-edit = "=0.3.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSStatusItem", "NSStatusBarButton", "NSMenu", "NSWorkspace", "NSRunningApplication", "block2"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services", "NSBundle", "NSURL", "NSError", "NSString"] }
-block2 = "0.6"
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSStatusItem", "NSStatusBarButton", "NSMenu", "NSWorkspace", "NSRunningApplication", "block2"], optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services", "NSBundle", "NSURL", "NSError", "NSString"], optional = true }
+block2 = { version = "0.6", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
@@ -84,8 +113,8 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_Console"] }
-winreg = "0.55"
-windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom"] }
+winreg = { version = "0.55", optional = true }
+windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom"], optional = true }
 
 [profile.release]
 lto = "thin"
