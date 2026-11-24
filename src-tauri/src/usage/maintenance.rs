@@ -19,14 +19,6 @@ fn vacuum_has_room(connection: &Connection, copies: u64) -> rusqlite::Result<boo
         .saturating_mul(page_size)
         .saturating_mul(copies)
         .saturating_add(WAL_LIMIT as u64);
-    #[cfg(test)]
-    if let Ok(available) = connection.query_row(
-        "SELECT cast(value AS INTEGER) FROM metadata WHERE key='fixture_available_bytes'",
-        [],
-        |r| r.get::<_, u64>(0),
-    ) {
-        return Ok(available >= required);
-    }
     #[cfg(target_os = "macos")]
     let available = {
         use std::os::unix::ffi::OsStrExt;

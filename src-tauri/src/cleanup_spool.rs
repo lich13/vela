@@ -67,8 +67,6 @@ pub fn clean(data: &Path) -> usize {
         data.join("antigravity"),
         data.join("grok"),
         data.join("dsh"),
-        // Left by the Antigravity gateway of an earlier version.
-        data.join("agy"),
     ] {
         if root != data && !owned(&root, true) {
             continue;

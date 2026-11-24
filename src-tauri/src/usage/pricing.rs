@@ -867,14 +867,9 @@ async fn fetch(client: &reqwest::Client, url: &str, limit: u64) -> Result<Vec<u8
     if r.status().as_u16() != 200 {
         return Err(failure("价格源暂不可用，正在使用缓存"));
     }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = r.chunk().await.map_err(|_| failure("价格下载中断"))? {
-        if bytes.len() as u64 + chunk.len() as u64 > limit {
-            return Err(failure("价格响应超过限制"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
+    crate::download::body(&mut r, limit, "价格下载中断", "价格响应超过限制")
+        .await
+        .map_err(failure)
 }
 /// Calculate cache-read savings from the unit rates saved with each bill.
 /// Never mix the current catalog or multiplier with a historical bill.

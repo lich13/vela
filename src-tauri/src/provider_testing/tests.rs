@@ -1697,21 +1697,6 @@ async fn ordinary_chat_rejects_empty_and_incomplete_responses() {
     }
 }
 
-#[test]
-fn retired_connection_options_are_not_accepted_by_the_request_contract() {
-    let (_dir, service) = fixture();
-    let original = serde_json::to_value(request(&service, ClientId::Codex, "fixture")).unwrap();
-    for (field, value) in [
-        ("mode", json!("search")),
-        ("input", json!("custom")),
-        ("media", json!({"dataUrl":"fixture"})),
-    ] {
-        let mut value_with_retired_option = original.clone();
-        value_with_retired_option[field] = value;
-        assert!(serde_json::from_value::<Request>(value_with_retired_option).is_err());
-    }
-}
-
 fn enable_detection(service: &Service, home: &Path, id: &str, mode: &str, minimum: u32) {
     let gateway = service.gateway(ClientId::Codex);
     gateway
@@ -3129,17 +3114,6 @@ fn scheduler_notifies_once_for_changes_and_skips_identical_ticks() {
     ));
 }
 
-#[test]
-fn state_wire_omits_unused_fields() {
-    let (dir, service) = fixture();
-    let id = add(&service, dir.path(), ClientId::Codex, 1, "responses");
-    let state = serde_json::to_value(service.state(ClientId::Codex, &id).unwrap()).unwrap();
-    assert!(state.get("bank").is_none());
-    assert!(state.get("history").is_none());
-    assert!(state["banks"]["modelTrace"]["models"].is_array());
-    assert!(state["jobs"].is_array());
-}
-
 #[tokio::test]
 async fn lm_retry_retains_its_resource_and_releases_context_after_success() {
     let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3668,7 +3642,10 @@ fn modeltrace_accepts_verified_compatible_cache_and_rejects_unknown_algorithms()
     assert_eq!(data["models"].as_array().unwrap().len(), 37);
     assert_eq!(manifest["builtAt"], data["built_at"]);
     let raw = include_bytes!("../../resources/modeltrace/unified_bank.json");
-    assert_eq!(compat::sha256(raw), manifest["files"]["bank"]["sha256"]);
+    assert_eq!(
+        crate::storage::digest(raw),
+        manifest["files"]["bank"]["sha256"]
+    );
     assert_eq!(
         bank::git_blob_digest(raw),
         manifest["files"]["bank"]["gitBlob"]

@@ -75,13 +75,8 @@ pub(super) async fn refresh(data: &Path, source: &str, force: bool) -> Result<bo
     Ok(changed)
 }
 async fn download(source: &str) -> Result<Vec<u8>> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .user_agent(concat!("vela/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|_| failure("官方模型列表连接初始化失败"))?;
+    let client =
+        crate::download::catalog_client().map_err(|_| failure("官方模型列表连接初始化失败"))?;
     let mut response = client
         .get(source)
         .header("accept-encoding", "identity")
@@ -91,17 +86,14 @@ async fn download(source: &str) -> Result<Vec<u8>> {
     if !response.status().is_success() {
         return Err(failure("官方模型列表响应未成功"));
     }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| failure("官方模型列表下载中断"))?
-    {
-        if bytes.len() + chunk.len() > LIMIT {
-            return Err(failure("官方模型列表超过 8 MiB"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+    let bytes = crate::download::body(
+        &mut response,
+        LIMIT as u64,
+        "官方模型列表下载中断",
+        "官方模型列表超过 8 MiB",
+    )
+    .await
+    .map_err(failure)?;
     if super::catalog::codex_models(&bytes).is_none() {
         return Err(failure("官方模型列表格式无效"));
     }

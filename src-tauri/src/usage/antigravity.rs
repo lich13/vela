@@ -1329,20 +1329,17 @@ impl Api {
             .await
             .map_err(|_| failure("Antigravity 本地只读接口不可用，请启动 app 后同步"))?;
         let status = response.status();
-        let mut bytes = Vec::new();
         if !status.is_success() {
-            return Ok((status, bytes));
+            return Ok((status, Vec::new()));
         }
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| failure("Antigravity 本地响应未完整读取"))?
-        {
-            if bytes.len().saturating_add(chunk.len()) > LIMIT {
-                return Err(failure("Antigravity 单页用量超过读取限制"));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+        let bytes = crate::download::body(
+            &mut response,
+            LIMIT as u64,
+            "Antigravity 本地响应未完整读取",
+            "Antigravity 单页用量超过读取限制",
+        )
+        .await
+        .map_err(failure)?;
         Ok((status, bytes))
     }
     async fn bytes(request: reqwest::RequestBuilder) -> Result<Vec<u8>> {

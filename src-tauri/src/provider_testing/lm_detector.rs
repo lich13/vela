@@ -276,18 +276,9 @@ async fn read(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     if !response.status().is_success() {
         return Err(failure("指纹库更新被上游拒绝或限流"));
     }
-    let mut raw = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
+    crate::download::body(&mut response, LIMIT, "指纹库下载中断", "指纹库文件过大")
         .await
-        .map_err(|_| failure("指纹库下载中断"))?
-    {
-        if raw.len() + chunk.len() > LIMIT as usize {
-            return Err(failure("指纹库文件过大"));
-        }
-        raw.extend_from_slice(&chunk);
-    }
-    Ok(raw)
+        .map_err(failure)
 }
 async fn tree(client: &reqwest::Client, api: &str, revision: &str) -> Result<Value> {
     let tree: Value =

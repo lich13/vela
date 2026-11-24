@@ -182,18 +182,14 @@ async fn read(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     {
         return Err(failure("指纹库文件过大"));
     }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| failure("指纹库下载中断"))?
-    {
-        if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
-            return Err(failure("指纹库文件过大"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
+    crate::download::body(
+        &mut response,
+        8 * 1024 * 1024,
+        "指纹库下载中断",
+        "指纹库文件过大",
+    )
+    .await
+    .map_err(failure)
 }
 pub async fn update() -> Result<super::types::SavedBank> {
     let client = reqwest::Client::builder()
@@ -250,7 +246,7 @@ pub async fn update() -> Result<super::types::SavedBank> {
     }
     let data: Value = serde_json::from_slice(&raw).map_err(|_| failure("指纹库 JSON 无效"))?;
     validate(&data)?;
-    let version = json!({"revision":revision,"sha256":super::compat::sha256(&raw),"built_at":data["built_at"],"analyzer_version":manifest["analyzerVersion"]});
+    let version = json!({"revision":revision,"sha256":crate::storage::digest(&raw),"built_at":data["built_at"],"analyzer_version":manifest["analyzerVersion"]});
     Ok(super::types::SavedBank {
         data: Some(data),
         version: Some(version),
