@@ -18,7 +18,7 @@ const instances = (active: string): InstanceState => ({
   revision: `r-${active}`,
   active,
   machines: [
-    { id: "m1", name: "东京", sshHost: "tokyo", fallbackHost: null, useSudo: false },
+    { id: "m1", name: "东京", kind: "linux", sshHost: "tokyo", fallbackHost: null, useSudo: false },
   ],
   connection: {
     status: active === "local" ? "local" : "connected",

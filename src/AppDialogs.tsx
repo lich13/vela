@@ -330,7 +330,8 @@ export function SettingsForm({
   const { remote } = useInstance();
   const isDirty =
     prefs.theme !== preferences.theme ||
-    prefs.systemNotifications !== preferences.systemNotifications;
+    prefs.systemNotifications !== preferences.systemNotifications ||
+    prefs.remoteControl !== preferences.remoteControl;
   useDirtyReport(isDirty, onDirtyChange);
   useEffect(() => () => onThemePreview(null), [onThemePreview]);
   const checkForUpdates = () => {
@@ -402,6 +403,22 @@ export function SettingsForm({
           />
         </label>
         <NotificationPermission />
+        {/* Only a Mac's app can be the far end of another machine. */}
+        {navigator.userAgent.includes("Macintosh") && (
+          <label
+            className="setting-row"
+            title="开启后，其他设备上的 Vela 可以经 SSH 登录本机当前用户来查看和操作这里的网关、账号、配置和用量；Vela 需保持打开，系统设置里需开启“远程登录”。"
+          >
+            <span>允许其他设备经 SSH 控制这台 Mac</span>
+            <input
+              type="checkbox"
+              checked={prefs.remoteControl}
+              onChange={(e) =>
+                setPrefs({ ...prefs, remoteControl: e.target.checked })
+              }
+            />
+          </label>
+        )}
       </div>
       <QuickPlatformSettings />
       <StartupSettings />

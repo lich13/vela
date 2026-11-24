@@ -175,6 +175,7 @@ beforeEach(() => {
               theme: "dark",
               quotaRefreshSeconds: 60,
               systemNotifications: true,
+              remoteControl: false,
             },
             authSync: null,
             error: null,

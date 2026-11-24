@@ -131,6 +131,7 @@ export const demo: ViewState = {
         : "system",
     quotaRefreshSeconds: 60,
     systemNotifications: true,
+    remoteControl: false,
   },
   authSync: null,
   error: null,

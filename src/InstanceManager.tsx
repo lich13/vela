@@ -11,6 +11,7 @@ import { errorOf } from "./types";
 type Draft = {
   id: string | null;
   name: string;
+  kind: Machine["kind"];
   sshHost: string;
   fallbackHost: string;
   useSudo: boolean;
@@ -157,7 +158,9 @@ export default function InstanceManager({ close }: { close: () => void }) {
     if (!validAlias(sshHost)) throw new Error(`SSH 主机别名${aliasRule}`);
     if (fallbackHost && !validAlias(fallbackHost))
       throw new Error(`备用别名${aliasRule}`);
-    return { sshHost, fallbackHost, useSudo: d.useSudo };
+    // A Mac's app belongs to the user who logs in.
+    const useSudo = d.kind === "linux" && d.useSudo;
+    return { kind: d.kind, sshHost, fallbackHost, useSudo };
   };
   const remove = (machine: Machine) =>
     run("正在删除…", async () => {
@@ -186,6 +189,7 @@ export default function InstanceManager({ close }: { close: () => void }) {
                 <div>
                   <strong>{machine.name}</strong>
                   <span>
+                    {machine.kind === "mac" && "Mac · "}
                     {machine.sshHost}
                     {machine.fallbackHost && ` · 备用 ${machine.fallbackHost}`}
                   </span>
@@ -235,6 +239,7 @@ export default function InstanceManager({ close }: { close: () => void }) {
               edit({
                 id: null,
                 name: "",
+                kind: "linux",
                 sshHost: "",
                 fallbackHost: "",
                 useSudo: false,
@@ -285,6 +290,25 @@ export default function InstanceManager({ close }: { close: () => void }) {
             onChange={(e) => change({ name: e.target.value })}
           />
         </label>
+        <label>
+          类型
+          <select
+            value={draft.kind}
+            disabled={!!busy}
+            onChange={(e) =>
+              change({ kind: e.target.value as Machine["kind"] })
+            }
+          >
+            <option value="linux">Linux 服务器</option>
+            <option value="mac">Mac（已打开的 Vela）</option>
+          </select>
+          {draft.kind === "mac" && (
+            <small>
+              那台 Mac 需打开 Vela，并在设置里开启“允许其他设备经 SSH 控制这台
+              Mac”
+            </small>
+          )}
+        </label>
         <AliasField
           label="SSH 主机别名"
           value={draft.sshHost}
@@ -301,16 +325,18 @@ export default function InstanceManager({ close }: { close: () => void }) {
           disabled={!!busy}
           onChange={(fallbackHost) => change({ fallbackHost })}
         />
-        <label className="check-label instance-sudo">
-          <input
-            type="checkbox"
-            checked={draft.useSudo}
-            disabled={!!busy}
-            onChange={(e) => change({ useSudo: e.target.checked })}
-          />
-          使用 sudo
-          <small>登录用户不是 root 时勾选</small>
-        </label>
+        {draft.kind === "linux" && (
+          <label className="check-label instance-sudo">
+            <input
+              type="checkbox"
+              checked={draft.useSudo}
+              disabled={!!busy}
+              onChange={(e) => change({ useSudo: e.target.checked })}
+            />
+            使用 sudo
+            <small>登录用户不是 root 时勾选</small>
+          </label>
+        )}
         {(busy || tested) && <p role="status">{busy || tested}</p>}
         {error && (
           <p className="form-error" role="alert">

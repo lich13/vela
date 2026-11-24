@@ -85,6 +85,7 @@ const savedState: ViewState = {
     theme: "system",
     quotaRefreshSeconds: 60,
     systemNotifications: true,
+    remoteControl: false,
   },
   authSync: null,
   error: null,

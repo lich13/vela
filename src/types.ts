@@ -9,6 +9,8 @@ export type Preferences = {
   theme: "system" | "dark" | "light";
   quotaRefreshSeconds: number;
   systemNotifications: boolean;
+  /** Whether this Mac's app lets another machine control it over SSH. */
+  remoteControl: boolean;
 };
 export type Account = {
   id: string;

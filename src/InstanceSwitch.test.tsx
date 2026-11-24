@@ -11,6 +11,7 @@ import { instanceState, setInstanceState } from "./instance";
 const tokyo: Machine = {
   id: "m1",
   name: "东京",
+  kind: "linux",
   sshHost: "tokyo",
   fallbackHost: null,
   useSudo: false,
@@ -107,6 +108,33 @@ it("shows this machine alone, without a connection status, and still offers the 
   expect(dialog.getByText(/还没有服务器/)).toBeInTheDocument();
 });
 
+it("adds a Mac by its app, which is never asked for sudo", async () => {
+  const user = userEvent.setup();
+  const dialog = await manage(user);
+  await user.click(dialog.getByRole("button", { name: "添加服务器" }));
+  await user.type(dialog.getByLabelText("名称"), "Studio");
+  await user.type(dialog.getByLabelText(/^SSH 主机别名/), "studio");
+  await user.click(dialog.getByLabelText(/^使用 sudo/));
+  await user.selectOptions(dialog.getByLabelText(/^类型/), "mac");
+  expect(dialog.queryByLabelText(/^使用 sudo/)).not.toBeInTheDocument();
+  expect(dialog.getByText(/允许其他设备经 SSH 控制这台/)).toBeInTheDocument();
+  await user.click(dialog.getByRole("button", { name: "保存" }));
+  await waitFor(() =>
+    expect(calls("save_instance")[0][1]).toEqual({
+      expectedRevision: "r1",
+      machine: {
+        id: null,
+        name: "Studio",
+        kind: "mac",
+        sshHost: "studio",
+        fallbackHost: null,
+        useSudo: false,
+      },
+    }),
+  );
+  expect(await dialog.findByText("Mac · studio")).toBeInTheDocument();
+});
+
 it("adds a server only once both aliases pass the rule", async () => {
   const user = userEvent.setup();
   const dialog = await manage(user);
@@ -137,6 +165,7 @@ it("adds a server only once both aliases pass the rule", async () => {
           machine: {
             id: null,
             name: "东京",
+            kind: "linux",
             sshHost: "tokyo",
             fallbackHost: null,
             useSudo: true,
@@ -218,6 +247,7 @@ it("offers the aliases of the SSH configuration and saves the ones chosen", asyn
           machine: {
             id: null,
             name: "大阪",
+            kind: "linux",
             sshHost: "osaka",
             fallbackHost: "tokyo-lan",
             useSudo: false,
@@ -296,7 +326,9 @@ it("keeps the text boxes when the SSH configuration names no alias or cannot be 
     "",
   );
   expect(dialog.getByRole("textbox", { name: "备用别名" })).toHaveValue("");
-  expect(dialog.queryByRole("combobox")).not.toBeInTheDocument();
+  expect(
+    dialog.queryByRole("combobox", { name: /别名/ }),
+  ).not.toBeInTheDocument();
   expect(
     dialog.queryByRole("button", { name: "从列表选择" }),
   ).not.toBeInTheDocument();
@@ -309,7 +341,9 @@ it("keeps the text boxes when the SSH configuration names no alias or cannot be 
   expect(dialog.getByRole("textbox", { name: /^SSH 主机别名/ })).toHaveValue(
     "",
   );
-  expect(dialog.queryByRole("combobox")).not.toBeInTheDocument();
+  expect(
+    dialog.queryByRole("combobox", { name: /别名/ }),
+  ).not.toBeInTheDocument();
   expect(dialog.queryByRole("alert")).not.toBeInTheDocument();
 });
 
@@ -344,7 +378,12 @@ it("tests the connection with the typed values and shows the server version", as
   expect(calls("test_instance")).toEqual([
     [
       "test_instance",
-      { sshHost: "tokyo", fallbackHost: "tokyo-lan", useSudo: false },
+      {
+        kind: "linux",
+        sshHost: "tokyo",
+        fallbackHost: "tokyo-lan",
+        useSudo: false,
+      },
     ],
   ]);
   // The result describes the values it was run with.

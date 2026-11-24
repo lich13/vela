@@ -548,6 +548,8 @@ type Revision = { expectedRevision: string };
 export type Machine = {
   id: string;
   name: string;
+  /** A Linux server's service, or the open Vela app of a Mac. */
+  kind: "linux" | "mac";
   sshHost: string;
   fallbackHost: string | null;
   useSudo: boolean;
@@ -684,7 +686,7 @@ export type DesktopCommands = {
   /** Connects and handshakes before it commits. */
   select_instance: Call<Revision & { id: string }, InstanceState>;
   test_instance: Call<
-    { sshHost: string; fallbackHost: string | null; useSudo: boolean },
+    Pick<Machine, "kind" | "sshHost" | "fallbackHost" | "useSudo">,
     { version: string }
   >;
   /** The `Host` aliases of this machine's SSH configuration, names only. */
