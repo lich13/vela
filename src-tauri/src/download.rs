@@ -1,4 +1,4 @@
-//! Pieces shared by the catalog, price and fingerprint downloads.
+//! Pieces shared by the modules that download a whole response into memory.
 use std::time::Duration;
 
 /// Client for the public catalogs: direct, no redirects, 30 seconds in all.
