@@ -2,6 +2,7 @@
 //! through loopback upstreams.
 use super::super::model::DelegateEdit;
 use super::*;
+use crate::gateway::test_support::form;
 use crate::usage::model::RoutingDecision;
 
 const ASKED: &[u8] = br#" { "model" : "claude-fixture", "stream": false,
@@ -329,24 +330,11 @@ async fn a_request_its_taker_does_not_serve_is_answered_and_stays_out_of_the_que
         if failure.is_none() {
             let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let provider = &f.gateway.view().providers[1];
-            f.edit(Edit::SaveProvider {
-                delegate: Default::default(),
-                id: Some(provider.id.clone()),
-                base_url: format!("http://127.0.0.1:{}", closed.local_addr().unwrap().port()),
-                token: FIXTURE_KEY.into(),
-                name: None,
-                quota_access_token: None,
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-            });
+            f.edit(form(serde_json::json!({
+                "id": provider.id,
+                "baseUrl": format!("http://127.0.0.1:{}", closed.local_addr().unwrap().port()),
+                "token": FIXTURE_KEY,
+            })));
         }
         takes(&f, 1, None, Some("aux-model"));
         f.edit(Edit::QueueProvider {

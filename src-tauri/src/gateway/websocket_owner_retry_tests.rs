@@ -2,7 +2,7 @@
 use super::*;
 use crate::events::{Action, Reason, Record};
 use crate::gateway::circuit::{Circuit, CircuitState, Outcome};
-use crate::gateway::test_support::loopback::{COMPLETED, CREATED};
+use crate::gateway::test_support::loopback::{ws_client, COMPLETED, CREATED};
 use crate::gateway::test_support::settled;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::{
@@ -43,26 +43,6 @@ async fn next_frame(ws: &mut yawc::TcpWebSocket) -> yawc::Frame {
         .await
         .expect("fixture websocket timed out")
         .expect("fixture websocket closed")
-}
-
-async fn responses_client(gateway: &Gateway, session: &str) -> yawc::TcpWebSocket {
-    let (token, port) = {
-        let state = gateway.0.inner.lock();
-        (state.store.local_token.clone(), state.store.settings.port)
-    };
-    yawc::WebSocket::connect(
-        format!("ws://127.0.0.1:{port}/v1/responses?future=keep")
-            .parse()
-            .unwrap(),
-    )
-    .with_options(yawc::Options::default().with_balanced_compression())
-    .with_request(
-        yawc::HttpRequest::builder()
-            .header("authorization", format!("Bearer {token}"))
-            .header("session_id", session),
-    )
-    .await
-    .unwrap()
 }
 
 async fn native_upstream() -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
@@ -145,7 +125,7 @@ async fn established_owner_native_websocket_retries_500_507_without_failover() {
     assert_eq!(first.status(), 200);
     first.into_body().collect().await.unwrap();
 
-    let mut client = responses_client(&gateway, "fixture-sticky-ws").await;
+    let mut client = ws_client(&gateway, "fixture-sticky-ws").await;
     client
         .send(yawc::Frame::text(CREATE.to_owned()))
         .await
@@ -198,7 +178,7 @@ async fn native_websocket_connect_failure_and_handshake_timeout_retry_the_owner(
         } else {
             None
         };
-        let mut client = responses_client(
+        let mut client = ws_client(
             &gateway,
             if new_thread {
                 "fixture-new-ws-network-owner"
@@ -310,7 +290,7 @@ async fn a_dead_network_holds_the_websocket_turn_until_the_owner_answers() {
             mode: "manual".into(),
         },
     );
-    let mut client = responses_client(&gateway, "fixture-owner-network").await;
+    let mut client = ws_client(&gateway, "fixture-owner-network").await;
     client
         .send(yawc::Frame::text(CREATE.to_owned()))
         .await

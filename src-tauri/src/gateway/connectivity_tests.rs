@@ -2,6 +2,7 @@
 //! the network back.
 use super::*;
 use crate::events::{Change, Reason};
+use crate::gateway::test_support::form;
 use std::sync::atomic::AtomicBool;
 
 const MESSAGE: &[u8] = br#"{"id":"msg_fixture","type":"message","model":"claude-fixture","stop_reason":"end_turn","content":[{"type":"text","text":"complete"}],"usage":{"input_tokens":5,"output_tokens":3}}"#;
@@ -64,24 +65,15 @@ async fn fixture(
 ) {
     let f = Fixture::new(ClientId::Claude, &[format!("http://127.0.0.1:{port}/v1")]).await;
     let provider = &f.gateway.view().providers[0];
-    f.edit(Edit::SaveProvider {
-        delegate: Default::default(),
-        id: Some(provider.id.clone()),
-        base_url: provider.base_url.clone(),
-        token: String::new(),
-        name: None,
-        quota_access_token: None,
-        end_on_message_stop: None,
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: Some(endless),
-        upstream_retry_seconds: Some(1),
-        normal_retry_seconds: Some(1),
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: Some(0),
-    });
+    f.edit(form(serde_json::json!({
+        "id": provider.id,
+        "baseUrl": provider.base_url,
+        "token": "",
+        "endlessMode": endless,
+        "upstreamRetrySeconds": 1,
+        "normalRetrySeconds": 1,
+        "limitRestSeconds": 0,
+    })));
     let mut settings = f.gateway.view().settings;
     settings.retry_budget_seconds = 10;
     settings.network_probe = probe;

@@ -1,5 +1,6 @@
 //! RPM send-window ledger and scheduler boundaries.
 use super::*;
+use crate::gateway::test_support::form;
 use crate::gateway::test_support::route;
 use crate::gateway::{
     admission::{Budget, Rejected, Scheduler},
@@ -359,24 +360,7 @@ async fn started_http_gateway(
         .unwrap();
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url,
-                token: "fixture-token".into(),
-                name: Some("fixture-rpm".into()),
-            },
+            form(json!({"name": "fixture-rpm", "baseUrl": base_url, "token": "fixture-token"})),
             &gateway.view().revision,
             dir.path(),
         )
@@ -434,24 +418,7 @@ async fn started_native_gateway(upstream_port: u16, max_rpm: u32) -> (tempfile::
         .unwrap();
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url,
-                token: "fixture-token".into(),
-                name: Some("fixture-rpm-ws".into()),
-            },
+            form(json!({"name": "fixture-rpm-ws", "baseUrl": base_url, "token": "fixture-token"})),
             &gateway.view().revision,
             dir.path(),
         )

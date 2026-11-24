@@ -1,4 +1,5 @@
 use super::*;
+use crate::gateway::test_support::form;
 use protocol::Protocol;
 use serde_json::json;
 
@@ -54,24 +55,7 @@ fn codex_identity_is_atomic_success_only_private_and_bound_to_home() {
     let gateway = Gateway::new(data.clone()).unwrap();
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                id: None,
-                name: None,
-                base_url: "https://example.invalid/v1".into(),
-                token: "fixture-provider-key".into(),
-                quota_access_token: None,
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-            },
+            form(json!({"baseUrl": "https://example.invalid/v1", "token": "fixture-provider-key"})),
             &gateway.view().revision,
             &home,
         )
@@ -200,27 +184,12 @@ fn a_provider_that_takes_searches_stays_in_model_union_exit_and_generation_route
         for (name, searching) in [("search", true), ("ordinary", false)] {
             store
                 .edit(
-                    Edit::SaveProvider {
-                        delegate: crate::gateway::model::DelegateEdit {
-                            take_web_search: Some(searching),
-                            ..Default::default()
-                        },
-                        end_on_message_stop: None,
-                        filter_count_tokens: None,
-                        buffer_complete_response: None,
-                        endless_mode: None,
-                        upstream_retry_seconds: None,
-                        normal_retry_seconds: None,
-                        risk_codes: None,
-                        retry_intensity: None,
-                        limit_retry_seconds: None,
-                        limit_rest_seconds: None,
-                        id: None,
-                        name: Some(name.into()),
-                        base_url: format!("https://{name}.example.invalid/v1"),
-                        token: "fixture-token".into(),
-                        quota_access_token: None,
-                    },
+                    form(json!({
+                        "name": name,
+                        "baseUrl": format!("https://{name}.example.invalid/v1"),
+                        "token": "fixture-token",
+                        "takeWebSearch": searching,
+                    })),
                     false,
                 )
                 .unwrap();

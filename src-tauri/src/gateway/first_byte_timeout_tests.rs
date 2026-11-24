@@ -4,6 +4,7 @@ use crate::gateway::test_support::downstream::{
     attach_observers, downstream_websocket, edit, local_auth, read_http_request, usage_records,
     REQUEST_BODY,
 };
+use crate::gateway::test_support::form;
 use crate::{
     events::{
         Action, ClassifiedRecord, Filter as EventFilter, Phase, Reason as EventReason,
@@ -59,24 +60,11 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
         edit(
             &gateway,
             &dir,
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: url,
-                token: "fixture-upstream-token".into(),
-                name: Some("fixture-upstream".into()),
-            },
+            form(serde_json::json!({
+                "name": "fixture-upstream",
+                "baseUrl": url,
+                "token": "fixture-upstream-token",
+            })),
         );
     }
     edit(

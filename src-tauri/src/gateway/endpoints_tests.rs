@@ -3,37 +3,13 @@ use super::super::{
     replay, Gateway,
 };
 use super::{Batch, Measurement, Service};
+use crate::gateway::test_support::form;
+use crate::gateway::test_support::provider_at;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, header, Request, Response};
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use std::{convert::Infallible, sync::Arc, time::Instant};
-
-fn v0212_provider(base_url: &str) -> Provider {
-    Provider {
-        id: "fixture-provider".into(),
-        name: "fixture-provider".into(),
-        base_url: base_url.into(),
-        token: "fixture-token".into(),
-        queued: true,
-        version: "fixture-version".into(),
-        max_concurrency: 0,
-        max_rpm: 0,
-        allowed_models: None,
-        handoff_after_compaction: false,
-        take_new_threads: false,
-        end_on_message_stop: false,
-        filter_count_tokens: false,
-        buffer_complete_response: false,
-        endless_mode: false,
-        upstream_retry_seconds: 5,
-        normal_retry_seconds: 3,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
-    }
-}
 
 #[test]
 fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_provider_identity() {
@@ -41,24 +17,11 @@ fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_pr
     let primary_raw = "HTTPS://PRIMARY.example.invalid:443/v1/";
     store
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: primary_raw.into(),
-                token: "fixture-token".into(),
-                name: Some("fixture".into()),
-            },
+            form(serde_json::json!({
+                "name": "fixture",
+                "baseUrl": primary_raw,
+                "token": "fixture-token",
+            })),
             false,
         )
         .unwrap();
@@ -154,24 +117,11 @@ fn v0212_gateway_rejects_stale_edit_revision_and_persists_endpoints_across_resta
     let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://primary.example.invalid/v1".into(),
-                token: "fixture-token".into(),
-                name: Some("fixture".into()),
-            },
+            form(serde_json::json!({
+                "name": "fixture",
+                "baseUrl": "https://primary.example.invalid/v1",
+                "token": "fixture-token",
+            })),
             &gateway.view().revision,
             dir.path(),
         )
@@ -230,7 +180,7 @@ fn v0212_service_prefers_fastest_endpoint_and_keeps_thread_and_response_pins_aft
         .trim_end_matches('/')
         .to_owned();
     let secondary = "https://secondary.example.invalid/v1".to_owned();
-    let provider = v0212_provider(primary_raw);
+    let provider = provider_at(primary_raw);
     let urls = vec![primary_raw.to_owned(), secondary.clone()];
     let config = Service::config(&provider, &urls);
     service.samples.lock().insert(
@@ -335,24 +285,11 @@ async fn v0212_loopback_probe_sends_no_authorization_or_business_rpm_and_keeps_e
     let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: format!("http://127.0.0.1:{upstream_port}/v1"),
-                token: "fixture-token".into(),
-                name: Some("loopback".into()),
-            },
+            form(serde_json::json!({
+                "name": "loopback",
+                "baseUrl": format!("http://127.0.0.1:{upstream_port}/v1"),
+                "token": "fixture-token",
+            })),
             &gateway.view().revision,
             dir.path(),
         )

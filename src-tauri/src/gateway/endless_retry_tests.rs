@@ -2,6 +2,7 @@
 //! already in flight, and the requests it holds.
 use super::*;
 use crate::events::ErrorBasis;
+use crate::gateway::test_support::form;
 use crate::gateway::{model::RetryClass, test_support::until};
 
 /// An upstream that answers its `n`th request, from 0, with `answer(n)`.
@@ -559,24 +560,11 @@ async fn a_token_replaced_during_the_wait_is_the_one_the_retry_sends() {
     let response = request(&f.gateway, "/v1/messages", STREAM_REQUEST).await;
     waiting(&f, &hits, 1).await;
     let provider = f.gateway.view().providers[0].clone();
-    f.edit(Edit::SaveProvider {
-        delegate: Default::default(),
-        id: Some(provider.id),
-        base_url: provider.base_url,
-        token: "fixture-rotated-key".into(),
-        name: None,
-        quota_access_token: None,
-        end_on_message_stop: None,
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: None,
-        upstream_retry_seconds: None,
-        normal_retry_seconds: None,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
-    });
+    f.edit(form(serde_json::json!({
+        "id": provider.id,
+        "baseUrl": provider.base_url,
+        "token": "fixture-rotated-key",
+    })));
     // The edited provider is a fresh start: the retry does not sit out the
     // minute its old credentials earned.
     completes(response).await;
@@ -646,24 +634,13 @@ async fn a_request_outwaits_the_queue_limit_for_whichever_endless_provider_frees
         .collect();
     let f = Fixture::new(ClientId::Claude, &urls).await;
     for provider in f.gateway.view().providers {
-        f.edit(Edit::SaveProvider {
-            delegate: Default::default(),
-            id: Some(provider.id.clone()),
-            base_url: provider.base_url,
-            token: String::new(),
-            name: None,
-            quota_access_token: None,
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: Some(true),
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: Some(0),
-        });
+        f.edit(form(serde_json::json!({
+            "id": provider.id,
+            "baseUrl": provider.base_url,
+            "token": "",
+            "endlessMode": true,
+            "limitRestSeconds": 0,
+        })));
         f.edit(Edit::ConcurrencyProvider {
             id: provider.id,
             max_concurrency: 1,

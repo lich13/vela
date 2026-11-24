@@ -920,27 +920,28 @@ async fn fetch(
         if !cursors.insert(cursor.to_owned()) || cursors.len() > 100 {
             return Err(fail("模型分页重复或超出上限"));
         }
-        let pairs: Vec<_> = url
-            .query_pairs()
-            .filter(|(key, _)| key != after)
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect();
-        url.query_pairs_mut()
-            .clear()
-            .extend_pairs(pairs)
-            .append_pair(after, cursor);
+        next_page(&mut url, after, cursor);
     }
     models.sort();
     models.dedup();
     Ok(models)
 }
+/// Points `url` at the page after `cursor`, in place of any `after` it had.
+pub(crate) fn next_page(url: &mut url::Url, after: &str, cursor: &str) {
+    let pairs: Vec<_> = url
+        .query_pairs()
+        .filter(|(key, _)| key != after)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(pairs)
+        .append_pair(after, cursor);
+}
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        model::{Edit, Store},
-        ClientId, Gateway,
-    };
+    use super::super::{model::Store, ClientId, Gateway};
     use super::*;
     const LIMIT: usize = 2 * 1024 * 1024;
     #[test]
@@ -1255,24 +1256,10 @@ mod tests {
         {
             store
                 .edit(
-                    Edit::SaveProvider {
-                        delegate: Default::default(),
-                        end_on_message_stop: None,
-                        filter_count_tokens: None,
-                        buffer_complete_response: None,
-                        endless_mode: None,
-                        upstream_retry_seconds: None,
-                        normal_retry_seconds: None,
-                        risk_codes: None,
-                        retry_intensity: None,
-                        limit_retry_seconds: None,
-                        limit_rest_seconds: None,
-                        quota_access_token: None,
-                        id: None,
-                        base_url: format!("https://p{n}.example.invalid"),
-                        token: format!("fixture-{n}"),
-                        name: None,
-                    },
+                    crate::gateway::test_support::form(serde_json::json!({
+                        "baseUrl": format!("https://p{n}.example.invalid"),
+                        "token": format!("fixture-{n}"),
+                    })),
                     false,
                 )
                 .unwrap();

@@ -1,4 +1,5 @@
 use super::*;
+use crate::gateway::test_support::form;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ACCOUNT_TOKEN: &str = "fixture-account-access-token";
@@ -13,24 +14,12 @@ fn save_account(g: &Gateway, t: &tempfile::TempDir, token: Option<&str>, base: O
     update(
         g,
         t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            id: Some(p.id.clone()),
-            base_url: base.unwrap_or(&p.base_url).into(),
-            token: String::new(),
-            quota_access_token: token.map(str::to_owned),
-            name: None,
-        },
+        form(serde_json::json!({
+            "id": p.id,
+            "baseUrl": base.unwrap_or(&p.base_url),
+            "token": "",
+            "quotaAccessToken": token.map(str::to_owned),
+        })),
     );
 }
 

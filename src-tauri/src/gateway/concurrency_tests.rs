@@ -1,6 +1,7 @@
 use super::*;
 use crate::gateway::admission::{Budget, Rejected};
 use crate::gateway::routing::Requirement;
+use crate::gateway::test_support::form;
 use crate::gateway::test_support::until;
 
 fn limit(g: &Gateway, t: &tempfile::TempDir, index: usize, max: u32) {
@@ -211,24 +212,7 @@ async fn capacity_spills_over_and_returns_to_priority_without_circuit_failures()
     assert_eq!(g.view().revision, editor_revision);
     let selected = g.view().selected;
     g.edit(
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: None,
-            base_url: "https://new.invalid/v1".into(),
-            token: "fixture-new".into(),
-            name: None,
-        },
+        form(serde_json::json!({"baseUrl": "https://new.invalid/v1", "token": "fixture-new"})),
         &editor_revision,
         t.path(),
     )
@@ -363,24 +347,10 @@ async fn rpm_windows_are_isolated_between_codex_and_claude() {
         super::claude_tests::claude_fixture("https://shared.example.test", "fixture-key").await;
     codex
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://shared.example.test".into(),
-                token: "fixture-key".into(),
-                name: None,
-            },
+            form(serde_json::json!({
+                "baseUrl": "https://shared.example.test",
+                "token": "fixture-key",
+            })),
             &codex.view().revision,
             &t.path().join("codex-home"),
         )
@@ -482,24 +452,11 @@ async fn dynamic_limits_keep_slots_across_route_edits_and_do_not_oversubscribe()
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: Some(r[0].provider.id.clone()),
-            base_url: "https://changed.invalid".into(),
-            token: "new-fixture".into(),
-            name: None,
-        },
+        form(serde_json::json!({
+            "id": r[0].provider.id,
+            "baseUrl": "https://changed.invalid",
+            "token": "new-fixture",
+        })),
     );
     assert_eq!(g.view().providers[0].active_requests, 2);
     let scheduler = g.0.admission.clone();
@@ -581,24 +538,11 @@ async fn panel_edits_preserve_live_slots_files_and_persist_queue_priority() {
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: Some(ids[0].clone()),
-            base_url: g.view().providers[1].base_url.clone(),
-            token: String::new(),
-            name: None,
-        },
+        form(serde_json::json!({
+            "id": ids[0],
+            "baseUrl": g.view().providers[1].base_url,
+            "token": "",
+        })),
     );
     assert_eq!(g.view().providers[1].active_requests, 2);
     assert_eq!(g.view().providers[1].max_concurrency, 1);

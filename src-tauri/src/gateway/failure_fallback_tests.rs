@@ -8,19 +8,18 @@ use super::{
     replay::{self, WireBody},
     *,
 };
+use crate::gateway::test_support::loopback::{
+    json_response, probing_fixture, response_bytes, response_value, serve, start, thread_request,
+    update,
+};
+use crate::gateway::test_support::settled;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, StreamBody};
-use hyper::{
-    body::{Frame, Incoming},
-    Request, Response, StatusCode,
-};
-use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use hyper::{body::Frame, Response, StatusCode};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::{
-    convert::Infallible,
-    future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -142,42 +141,6 @@ fn v024_assert_failover_evidence(
     }
 }
 
-async fn v024_server<F, Fut>(handler: F) -> u16
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handler = Arc::new(handler);
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        hyper_util::rt::TokioIo::new(stream),
-                        hyper::service::service_fn(move |request| {
-                            let handler = handler.clone();
-                            async move { Ok::<_, Infallible>(handler(request).await) }
-                        }),
-                    )
-                    .with_upgrades()
-                    .await;
-            });
-        }
-    });
-    port
-}
-
-fn v024_json_response(status: StatusCode, body: impl Into<Bytes>) -> Response<WireBody> {
-    Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(replay::full(body))
-        .unwrap()
-}
-
 fn v024_sse_response(status: StatusCode, body: impl Into<Bytes>) -> Response<WireBody> {
     Response::builder()
         .status(status)
@@ -187,7 +150,7 @@ fn v024_sse_response(status: StatusCode, body: impl Into<Bytes>) -> Response<Wir
 }
 
 fn v024_completed_response(provider: &str, id: &str, output: Value) -> Response<WireBody> {
-    v024_json_response(
+    json_response(
         StatusCode::OK,
         json!({
             "id": id,
@@ -197,121 +160,8 @@ fn v024_completed_response(provider: &str, id: &str, output: Value) -> Response<
             "output": output,
         })
         .to_string(),
+        None,
     )
-}
-
-async fn v024_fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
-    let dir = tempfile::tempdir().unwrap();
-    let first = urls
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "https://fixture.example.invalid/v1".into());
-    std::fs::write(
-        dir.path().join("config.toml"),
-        format!(
-            "model_provider='custom'\n[model_providers.custom]\nbase_url = {}\nexperimental_bearer_token = \"fixture-token\"\nwire_api='responses'\nsupports_websockets=false\n",
-            serde_json::to_string(&first).unwrap()
-        ),
-    )
-    .unwrap();
-    let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let mut settings = gateway.view().settings;
-    settings.port = port;
-    v024_update(&gateway, &dir, Edit::Settings { settings });
-    for url in urls {
-        v024_update(
-            &gateway,
-            &dir,
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: url,
-                token: "fixture-token".into(),
-                name: None,
-            },
-        );
-    }
-    v024_update(
-        &gateway,
-        &dir,
-        Edit::Mode {
-            mode: "auto".into(),
-        },
-    );
-    (dir, gateway)
-}
-
-fn v024_update(gateway: &Gateway, dir: &tempfile::TempDir, edit: Edit) {
-    gateway
-        .edit(edit, &gateway.view().revision, dir.path())
-        .unwrap();
-}
-
-async fn v024_start(gateway: &Gateway, dir: &tempfile::TempDir) {
-    gateway
-        .start(&gateway.view().revision, dir.path())
-        .await
-        .unwrap();
-}
-
-async fn v024_request(
-    gateway: &Gateway,
-    path: &str,
-    thread: &str,
-    body: Vec<u8>,
-) -> Response<Incoming> {
-    let client: Client<_, WireBody> = Client::builder(TokioExecutor::new())
-        .build(super::connector::Connector::new(Duration::from_secs(3), 0));
-    let (token, port) = {
-        let state = gateway.0.inner.lock();
-        (state.store.local_token.clone(), state.store.settings.port)
-    };
-    let request = Request::builder()
-        .method("POST")
-        .uri(format!("http://127.0.0.1:{port}{path}"))
-        .header("authorization", format!("Bearer {token}"))
-        .header("content-type", "application/json")
-        .header("thread-id", thread)
-        .body(replay::full(body))
-        .unwrap();
-    client.request(request).await.unwrap()
-}
-
-async fn v024_body(response: Response<Incoming>) -> Bytes {
-    response.into_body().collect().await.unwrap().to_bytes()
-}
-
-async fn v024_response_value(response: Response<Incoming>) -> Value {
-    serde_json::from_slice(&v024_body(response).await).unwrap()
-}
-
-async fn v024_wait_settled(gateway: &Gateway) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while gateway
-            .view()
-            .providers
-            .iter()
-            .any(|provider| provider.active_requests != 0)
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("fixture request did not settle");
 }
 
 #[derive(Clone, Copy)]
@@ -357,16 +207,17 @@ async fn v024_seeded_http(
     let owner_capture = owner_seen.clone();
     let temporary_attempts = Arc::new(AtomicUsize::new(0));
     let temporary_capture = temporary_attempts.clone();
-    let owner_port = v024_server(move |request| {
+    let owner_port = serve(move |request| {
         let owner_capture = owner_capture.clone();
         let temporary_capture = temporary_capture.clone();
         async move {
             let path = request.uri().path().to_owned();
             let method = request.method().clone();
             if method == hyper::Method::GET && path.ends_with("/models") {
-                return v024_json_response(
+                return json_response(
                     StatusCode::OK,
                     r#"{"object":"list","data":[{"id":"fixture-model","object":"model"}]}"#,
+                    None,
                 );
             }
             let body = request
@@ -391,11 +242,11 @@ async fn v024_seeded_http(
             {
                 match next_response {
                     V024NextResponse::HttpRejection(body) => {
-                        v024_json_response(StatusCode::TOO_MANY_REQUESTS, body)
+                        json_response(StatusCode::TOO_MANY_REQUESTS, body, None)
                     }
                     V024NextResponse::HttpTemporaryThenSuccess(body) => {
                         if temporary_capture.fetch_add(1, Ordering::SeqCst) == 0 {
-                            v024_json_response(StatusCode::TOO_MANY_REQUESTS, body)
+                            json_response(StatusCode::TOO_MANY_REQUESTS, body, None)
                         } else {
                             v024_completed_response(
                                 "owner",
@@ -421,16 +272,17 @@ async fn v024_seeded_http(
         let provider = format!("ordinary-{}", index + 1);
         let seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let capture = seen.clone();
-        let port = v024_server(move |request| {
+        let port = serve(move |request| {
             let capture = capture.clone();
             let provider = provider.clone();
             async move {
                 if request.method() == hyper::Method::GET
                     && request.uri().path().ends_with("/models")
                 {
-                    return v024_json_response(
+                    return json_response(
                         StatusCode::OK,
                         r#"{"object":"list","data":[{"id":"fixture-model","object":"model"}]}"#,
+                        None,
                     );
                 }
                 let body = request
@@ -453,14 +305,14 @@ async fn v024_seeded_http(
         receivers_seen.push(seen);
     }
 
-    let (dir, gateway) = v024_fixture(urls).await;
+    let (dir, gateway) = probing_fixture(urls).await;
     let mut settings = gateway.view().settings;
     settings.max_retries = 3;
     settings.capacity_retry_seconds = 60;
     settings.queue_seconds = 2;
     settings.first_byte_seconds = 2;
     settings.idle_seconds = 2;
-    v024_update(&gateway, &dir, Edit::Settings { settings });
+    update(&gateway, &dir, Edit::Settings { settings });
     let providers = gateway.view().providers;
     assert_eq!(providers.len(), receiver_count + 1);
     let owner_id = providers[0].id.clone();
@@ -468,10 +320,10 @@ async fn v024_seeded_http(
         .iter()
         .map(|provider| provider.id.clone())
         .collect();
-    v024_start(&gateway, &dir).await;
+    start(&gateway, &dir).await;
 
     let session = crate::storage::digest(thread.as_bytes());
-    let initial = v024_request(
+    let initial = thread_request(
         &gateway,
         "/v1/responses",
         thread,
@@ -479,14 +331,14 @@ async fn v024_seeded_http(
     )
     .await;
     assert_eq!(initial.status(), StatusCode::OK);
-    assert_eq!(v024_response_value(initial).await["provider"], "owner");
-    v024_wait_settled(&gateway).await;
+    assert_eq!(response_value(initial).await["provider"], "owner");
+    settled(&gateway).await;
     assert_eq!(
         gateway.0.compaction.owner(&session).as_deref(),
         Some(owner_id.as_str())
     );
 
-    let compact = v024_request(
+    let compact = thread_request(
         &gateway,
         "/v1/responses/compact",
         thread,
@@ -494,8 +346,8 @@ async fn v024_seeded_http(
     )
     .await;
     assert_eq!(compact.status(), StatusCode::OK);
-    assert_eq!(v024_response_value(compact).await["provider"], "owner");
-    v024_wait_settled(&gateway).await;
+    assert_eq!(response_value(compact).await["provider"], "owner");
+    settled(&gateway).await;
     let boundary = crate::storage::digest(V024_WINDOW.as_bytes());
     assert!(gateway
         .0
@@ -521,7 +373,7 @@ fn v024_set_policy(
     handoff_after_compaction: bool,
     take_new_threads: bool,
 ) {
-    v024_update(
+    update(
         &fixture.gateway,
         &fixture.dir,
         Edit::TakeoverProvider {
@@ -535,7 +387,7 @@ fn v024_set_policy(
 async fn v024_send_compacted_http(fixture: &V024SeededHttp) -> (StatusCode, Vec<u8>) {
     let response = tokio::time::timeout(
         Duration::from_secs(12),
-        v024_request(
+        thread_request(
             &fixture.gateway,
             "/v1/responses",
             &fixture.thread,
@@ -545,7 +397,26 @@ async fn v024_send_compacted_http(fixture: &V024SeededHttp) -> (StatusCode, Vec<
     .await
     .expect("compacted HTTP request exceeded its bounded deadline");
     let status = response.status();
-    (status, v024_body(response).await.to_vec())
+    (status, response_bytes(response).await.to_vec())
+}
+
+/// Sends the compacted request and stops the gateway once it has settled:
+/// the reply, what the first receiver saw, the thread's owner, and whether
+/// its boundary still matches.
+async fn v024_compacted_http_outcome(
+    fixture: &V024SeededHttp,
+) -> (StatusCode, Vec<u8>, Vec<Vec<u8>>, Option<String>, bool) {
+    let (status, body) = v024_send_compacted_http(fixture).await;
+    settled(&fixture.gateway).await;
+    let receiver_requests = fixture.receivers_seen[0].lock().clone();
+    let owner = fixture.gateway.0.compaction.owner(&fixture.session);
+    let boundary_fresh = fixture
+        .gateway
+        .0
+        .compaction
+        .boundary_matches(&fixture.session, Some(&fixture.boundary));
+    fixture.gateway.stop().await.unwrap();
+    (status, body, receiver_requests, owner, boundary_fresh)
 }
 
 async fn v024_ws_endpoint(
@@ -567,15 +438,15 @@ async fn v024_ws_endpoint_with_recovery(
     temporary_then_success: bool,
 ) -> u16 {
     let compacted_attempts = Arc::new(AtomicUsize::new(0));
-    v024_server(move |mut request| {
+    serve(move |mut request| {
         let seen = seen.clone();
         let compacted_attempts = compacted_attempts.clone();
         async move {
             if request.headers().get("upgrade").is_none() {
                 let _ = request.into_body().collect().await;
-                return v024_json_response(
+                return json_response(
                     StatusCode::NOT_IMPLEMENTED,
-                    r#"{"error":{"code":"UNSUPPORTED_HTTP","message":"fixture websocket endpoint requires an upgrade"}}"#,
+                    r#"{"error":{"code":"UNSUPPORTED_HTTP","message":"fixture websocket endpoint requires an upgrade"}}"#, None,
                 );
             }
             let (handshake, upgrade) = yawc::WebSocket::upgrade(&mut request).unwrap();
@@ -675,7 +546,7 @@ async fn v024_compacted_websocket_fails_over(
         v024_ws_endpoint("owner", true, owner_seen.clone(), error_status, error_code).await;
     let receiver_seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let receiver_port = v024_ws_endpoint("ordinary", false, receiver_seen.clone(), None, "").await;
-    let (dir, gateway) = v024_fixture(vec![
+    let (dir, gateway) = probing_fixture(vec![
         format!("http://127.0.0.1:{owner_port}/v1"),
         format!("http://127.0.0.1:{receiver_port}/v1"),
     ])
@@ -686,14 +557,14 @@ async fn v024_compacted_websocket_fails_over(
     settings.queue_seconds = 3;
     settings.first_byte_seconds = 3;
     settings.idle_seconds = 3;
-    v024_update(&gateway, &dir, Edit::Settings { settings });
+    update(&gateway, &dir, Edit::Settings { settings });
     let providers = gateway.view().providers;
     assert_eq!(providers.len(), 2);
     let owner_id = providers[0].id.clone();
     let receiver_id = providers[1].id.clone();
     assert!(!providers[1].handoff_after_compaction);
     assert!(!providers[1].take_new_threads);
-    v024_start(&gateway, &dir).await;
+    start(&gateway, &dir).await;
 
     let thread = "fixture-v024-ws-compacted-thread";
     let session = crate::storage::digest(thread.as_bytes());
@@ -734,7 +605,7 @@ async fn v024_compacted_websocket_fails_over(
         v024_ws_turn(&mut peer, compact).await["response"]["provider"],
         "owner"
     );
-    v024_wait_settled(&gateway).await;
+    settled(&gateway).await;
     let boundary = crate::storage::digest(V024_WINDOW.as_bytes());
     assert!(gateway
         .0
@@ -752,7 +623,7 @@ async fn v024_compacted_websocket_fails_over(
     })
     .to_string();
     let response = v024_ws_turn(&mut peer, compacted).await;
-    v024_wait_settled(&gateway).await;
+    settled(&gateway).await;
     let owner_after = gateway.0.compaction.owner(&session);
     let boundary_fresh = gateway
         .0
@@ -797,7 +668,7 @@ async fn v024_compacted_websocket_temporary_waits_on_owner(
     .await;
     let receiver_seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let receiver_port = v024_ws_endpoint("ordinary", false, receiver_seen.clone(), None, "").await;
-    let (dir, gateway) = v024_fixture(vec![
+    let (dir, gateway) = probing_fixture(vec![
         format!("http://127.0.0.1:{owner_port}/v1"),
         format!("http://127.0.0.1:{receiver_port}/v1"),
     ])
@@ -810,13 +681,13 @@ async fn v024_compacted_websocket_temporary_waits_on_owner(
     settings.websocket_retry_seconds = 1;
     settings.capacity_retry_seconds = 1;
     settings.rate_limit_seconds = 1;
-    v024_update(&gateway, &dir, Edit::Settings { settings });
+    update(&gateway, &dir, Edit::Settings { settings });
     let providers = gateway.view().providers;
     assert_eq!(providers.len(), 2);
     let owner_id = providers[0].id.clone();
     assert!(!providers[1].handoff_after_compaction);
     assert!(!providers[1].take_new_threads);
-    v024_start(&gateway, &dir).await;
+    start(&gateway, &dir).await;
 
     let thread = "fixture-v024-ws-temporary-owner-thread";
     let session = crate::storage::digest(thread.as_bytes());
@@ -857,7 +728,7 @@ async fn v024_compacted_websocket_temporary_waits_on_owner(
         v024_ws_turn(&mut peer, compact).await["response"]["provider"],
         "owner"
     );
-    v024_wait_settled(&gateway).await;
+    settled(&gateway).await;
     let boundary = crate::storage::digest(V024_WINDOW.as_bytes());
     assert!(gateway
         .0
@@ -877,7 +748,7 @@ async fn v024_compacted_websocket_temporary_waits_on_owner(
     let started = std::time::Instant::now();
     let response = v024_ws_turn(&mut peer, compacted).await;
     let waited = started.elapsed();
-    v024_wait_settled(&gateway).await;
+    settled(&gateway).await;
     let owner_after = gateway.0.compaction.owner(&session);
     let boundary_fresh = gateway
         .0
@@ -913,15 +784,16 @@ async fn v024_compacted_websocket_temporary_waits_on_owner(
 async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordinary_provider() {
     let old_seen = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let old_capture = old_seen.clone();
-    let old_port = v024_server(move |request| {
+    let old_port = serve(move |request| {
         let old_capture = old_capture.clone();
         async move {
             let path = request.uri().path().to_owned();
             let method = request.method().clone();
             if method == hyper::Method::GET && path.ends_with("/models") {
-                return v024_json_response(
+                return json_response(
                     StatusCode::OK,
                     r#"{"object":"list","data":[{"id":"fixture-model","object":"model"}]}"#,
+                    None,
                 );
             }
             let body = request
@@ -944,7 +816,7 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
                 .windows(V024_WINDOW.len())
                 .any(|window| window == V024_WINDOW.as_bytes())
             {
-                v024_json_response(StatusCode::TOO_MANY_REQUESTS, V024_BALANCE_429)
+                json_response(StatusCode::TOO_MANY_REQUESTS, V024_BALANCE_429, None)
             } else {
                 v024_completed_response("owner", "fixture-v024-initial-response", json!([]))
             }
@@ -954,13 +826,14 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
 
     let ordinary_seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let ordinary_capture = ordinary_seen.clone();
-    let ordinary_port = v024_server(move |request| {
+    let ordinary_port = serve(move |request| {
         let ordinary_capture = ordinary_capture.clone();
         async move {
             if request.method() == hyper::Method::GET && request.uri().path().ends_with("/models") {
-                return v024_json_response(
+                return json_response(
                     StatusCode::OK,
                     r#"{"object":"list","data":[{"id":"fixture-model","object":"model"}]}"#,
+                    None,
                 );
             }
             let body = request
@@ -976,7 +849,7 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
     })
     .await;
 
-    let (dir, gateway) = v024_fixture(vec![
+    let (dir, gateway) = probing_fixture(vec![
         format!("http://127.0.0.1:{old_port}/v1"),
         format!("http://127.0.0.1:{ordinary_port}/v1"),
     ])
@@ -988,18 +861,18 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
     settings.queue_seconds = 2;
     settings.first_byte_seconds = 2;
     settings.idle_seconds = 2;
-    v024_update(&gateway, &dir, Edit::Settings { settings });
+    update(&gateway, &dir, Edit::Settings { settings });
     let providers = gateway.view().providers;
     assert_eq!(providers.len(), 2);
     let owner_id = providers[0].id.clone();
     let ordinary_id = providers[1].id.clone();
     assert!(!providers[1].handoff_after_compaction);
     assert!(!providers[1].take_new_threads);
-    v024_start(&gateway, &dir).await;
+    start(&gateway, &dir).await;
 
     let thread = "fixture-v024-http-compacted-thread";
     let session = crate::storage::digest(thread.as_bytes());
-    let initial = v024_request(
+    let initial = thread_request(
         &gateway,
         "/v1/responses",
         thread,
@@ -1007,14 +880,14 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
     )
     .await;
     assert_eq!(initial.status(), StatusCode::OK);
-    assert_eq!(v024_response_value(initial).await["provider"], "owner");
-    v024_wait_settled(&gateway).await;
+    assert_eq!(response_value(initial).await["provider"], "owner");
+    settled(&gateway).await;
     assert_eq!(
         gateway.0.compaction.owner(&session).as_deref(),
         Some(owner_id.as_str())
     );
 
-    let compact = v024_request(
+    let compact = thread_request(
         &gateway,
         "/v1/responses/compact",
         thread,
@@ -1022,8 +895,8 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
     )
     .await;
     assert_eq!(compact.status(), StatusCode::OK);
-    assert_eq!(v024_response_value(compact).await["provider"], "owner");
-    v024_wait_settled(&gateway).await;
+    assert_eq!(response_value(compact).await["provider"], "owner");
+    settled(&gateway).await;
     let boundary = crate::storage::digest(V024_WINDOW.as_bytes());
     assert!(gateway
         .0
@@ -1033,12 +906,12 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
     let compacted = br#" {"model":"fixture-model","input":[{"type":"compaction","encrypted_content":"fixture-v024-compaction-window"},{"role":"user","content":"fixture-followup"}],"future":{"unchanged":true},"large":90071992547409931234567890} "#.to_vec();
     let final_response = tokio::time::timeout(
         Duration::from_secs(12),
-        v024_request(&gateway, "/v1/responses", thread, compacted.clone()),
+        thread_request(&gateway, "/v1/responses", thread, compacted.clone()),
     )
     .await
     .expect("compacted hard-429 request exceeded its bounded deadline");
     let final_status = final_response.status();
-    let final_body = v024_body(final_response).await.to_vec();
+    let final_body = response_bytes(final_response).await.to_vec();
     let failover_record = v024_wait_failover_record(&usage, &owner_id, &ordinary_id).await;
     let ordinary_requests = ordinary_seen.lock().clone();
     let old_requests = old_seen.lock().clone();
@@ -1080,11 +953,12 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
 
 #[tokio::test]
 async fn v024_http_first_sse_account_rejection_fails_over_with_bounded_evidence() {
-    let first_port = v024_server(|request| async move {
+    let first_port = serve(|request| async move {
         if request.method() == hyper::Method::GET && request.uri().path().ends_with("/models") {
-            return v024_json_response(
+            return json_response(
                 StatusCode::OK,
                 r#"{"object":"list","data":[{"id":"fixture-model","object":"model"}]}"#,
+                None,
             );
         }
         v024_sse_response(
@@ -1102,17 +976,18 @@ async fn v024_http_first_sse_account_rejection_fails_over_with_bounded_evidence(
         )
     })
     .await;
-    let second_port = v024_server(|request| async move {
+    let second_port = serve(|request| async move {
         if request.method() == hyper::Method::GET && request.uri().path().ends_with("/models") {
-            return v024_json_response(
+            return json_response(
                 StatusCode::OK,
                 r#"{"object":"list","data":[{"id":"fixture-model","object":"model"}]}"#,
+                None,
             );
         }
         v024_completed_response("ordinary", "fixture-v024-sse-fallback", json!([]))
     })
     .await;
-    let (dir, gateway) = v024_fixture(vec![
+    let (dir, gateway) = probing_fixture(vec![
         format!("http://127.0.0.1:{first_port}/v1"),
         format!("http://127.0.0.1:{second_port}/v1"),
     ])
@@ -1122,13 +997,13 @@ async fn v024_http_first_sse_account_rejection_fails_over_with_bounded_evidence(
     gateway.set_diagnostics(diagnostics.clone());
     let mut settings = gateway.view().settings;
     settings.max_retries = 1;
-    v024_update(&gateway, &dir, Edit::Settings { settings });
+    update(&gateway, &dir, Edit::Settings { settings });
     let providers = gateway.view().providers;
     let first_id = providers[0].id.clone();
     let fallback_id = providers[1].id.clone();
-    v024_start(&gateway, &dir).await;
+    start(&gateway, &dir).await;
 
-    let response = v024_request(
+    let response = thread_request(
         &gateway,
         "/v1/responses",
         "fixture-v024-sse-account-rejection",
@@ -1136,8 +1011,8 @@ async fn v024_http_first_sse_account_rejection_fails_over_with_bounded_evidence(
     )
     .await;
     let status = response.status();
-    let body = v024_body(response).await;
-    v024_wait_settled(&gateway).await;
+    let body = response_bytes(response).await;
+    settled(&gateway).await;
     let failover_record = v024_wait_failover_record(&usage, &first_id, &fallback_id).await;
     let rejection_event = v024_wait_diagnostic_record(&diagnostics, &first_id, |record| {
         record.reason == crate::events::Reason::UpstreamService && record.status == Some(200)
@@ -1177,25 +1052,26 @@ async fn v024_http_first_sse_account_rejection_fails_over_with_bounded_evidence(
 
 #[tokio::test]
 async fn v024_http_insufficient_balance_429_without_backup_records_terminal_evidence() {
-    let port = v024_server(|request| async move {
+    let port = serve(|request| async move {
         if request.method() == hyper::Method::GET && request.uri().path().ends_with("/models") {
-            return v024_json_response(
+            return json_response(
                 StatusCode::OK,
                 r#"{"object":"list","data":[{"id":"fixture-model","object":"model"}]}"#,
+                None,
             );
         }
-        v024_json_response(StatusCode::TOO_MANY_REQUESTS, V024_BALANCE_429)
+        json_response(StatusCode::TOO_MANY_REQUESTS, V024_BALANCE_429, None)
     })
     .await;
-    let (dir, gateway) = v024_fixture(vec![format!("http://127.0.0.1:{port}/v1")]).await;
+    let (dir, gateway) = probing_fixture(vec![format!("http://127.0.0.1:{port}/v1")]).await;
     let usage = v024_attach_usage(&gateway, &dir);
     let mut settings = gateway.view().settings;
     settings.max_retries = 1;
-    v024_update(&gateway, &dir, Edit::Settings { settings });
+    update(&gateway, &dir, Edit::Settings { settings });
     let provider_id = gateway.view().providers[0].id.clone();
-    v024_start(&gateway, &dir).await;
+    start(&gateway, &dir).await;
 
-    let response = v024_request(
+    let response = thread_request(
         &gateway,
         "/v1/responses",
         "fixture-v024-hard-429-without-backup",
@@ -1203,8 +1079,8 @@ async fn v024_http_insufficient_balance_429_without_backup_records_terminal_evid
     )
     .await;
     let status = response.status();
-    let body = v024_body(response).await;
-    v024_wait_settled(&gateway).await;
+    let body = response_bytes(response).await;
+    settled(&gateway).await;
     let rejection_record = v024_wait_usage_record(&usage, |record| {
         record.attempts.len() == 1
             && record.attempts[0].provider.as_deref() == Some(provider_id.as_str())
@@ -1230,17 +1106,9 @@ async fn v024_compacted_http_insufficient_balance_429_fails_over_to_ordinary_pro
         V024NextResponse::HttpRejection(V024_BALANCE_429),
     )
     .await;
-    let (status, body) = v024_send_compacted_http(&fixture).await;
-    v024_wait_settled(&fixture.gateway).await;
-    let receiver_requests = fixture.receivers_seen[0].lock().clone();
+    let (status, body, receiver_requests, owner, boundary_fresh) =
+        v024_compacted_http_outcome(&fixture).await;
     let old_requests = fixture.owner_seen.lock().clone();
-    let owner = fixture.gateway.0.compaction.owner(&fixture.session);
-    let boundary_fresh = fixture
-        .gateway
-        .0
-        .compaction
-        .boundary_matches(&fixture.session, Some(&fixture.boundary));
-    fixture.gateway.stop().await.unwrap();
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(receiver_requests.len(), 1);
@@ -1264,16 +1132,8 @@ async fn v024_compacted_http_can_use_a_lower_priority_compaction_receiver() {
     let receiver_id = fixture.receiver_ids[0].clone();
     v024_set_policy(&fixture, &receiver_id, true, false);
 
-    let (status, body) = v024_send_compacted_http(&fixture).await;
-    v024_wait_settled(&fixture.gateway).await;
-    let receiver_requests = fixture.receivers_seen[0].lock().clone();
-    let owner = fixture.gateway.0.compaction.owner(&fixture.session);
-    let boundary_fresh = fixture
-        .gateway
-        .0
-        .compaction
-        .boundary_matches(&fixture.session, Some(&fixture.boundary));
-    fixture.gateway.stop().await.unwrap();
+    let (status, body, receiver_requests, owner, boundary_fresh) =
+        v024_compacted_http_outcome(&fixture).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(receiver_requests.len(), 1);
@@ -1295,12 +1155,12 @@ async fn v024_compacted_http_temporary_usage_limit_waits_on_owner_and_recovers_w
     let mut settings = fixture.gateway.view().settings;
     settings.rate_limit_seconds = 1;
     settings.capacity_retry_seconds = 1;
-    v024_update(&fixture.gateway, &fixture.dir, Edit::Settings { settings });
+    update(&fixture.gateway, &fixture.dir, Edit::Settings { settings });
 
     let started = std::time::Instant::now();
     let (status, body) = v024_send_compacted_http(&fixture).await;
     let waited = started.elapsed();
-    v024_wait_settled(&fixture.gateway).await;
+    settled(&fixture.gateway).await;
     let owner_requests = fixture.owner_seen.lock().clone();
     let backup_requests = fixture.receivers_seen[0].lock().clone();
     let owner = fixture.gateway.0.compaction.owner(&fixture.session);
@@ -1349,19 +1209,11 @@ async fn v024_compacted_http_account_rejection_never_fails_over_to_a_new_thread_
         fixture.owner_id.clone(),
         fixture.receiver_ids[1].clone(),
     ];
-    v024_update(&fixture.gateway, &fixture.dir, Edit::Reorder { ids });
+    update(&fixture.gateway, &fixture.dir, Edit::Reorder { ids });
 
-    let (status, body) = v024_send_compacted_http(&fixture).await;
-    v024_wait_settled(&fixture.gateway).await;
-    let new_only_requests = fixture.receivers_seen[0].lock().clone();
+    let (status, body, new_only_requests, owner, boundary_fresh) =
+        v024_compacted_http_outcome(&fixture).await;
     let ordinary_requests = fixture.receivers_seen[1].lock().clone();
-    let owner = fixture.gateway.0.compaction.owner(&fixture.session);
-    let boundary_fresh = fixture
-        .gateway
-        .0
-        .compaction
-        .boundary_matches(&fixture.session, Some(&fixture.boundary));
-    fixture.gateway.stop().await.unwrap();
 
     assert_eq!(status, StatusCode::OK);
     assert!(new_only_requests.is_empty());
@@ -1383,10 +1235,10 @@ async fn v024_compacted_http_idle_failure_after_output_does_not_replay_to_backup
     .await;
     let mut settings = fixture.gateway.view().settings;
     settings.idle_seconds = 1;
-    v024_update(&fixture.gateway, &fixture.dir, Edit::Settings { settings });
+    update(&fixture.gateway, &fixture.dir, Edit::Settings { settings });
     let response = tokio::time::timeout(
         Duration::from_secs(12),
-        v024_request(
+        thread_request(
             &fixture.gateway,
             "/v1/responses",
             &fixture.thread,
@@ -1408,7 +1260,7 @@ async fn v024_compacted_http_idle_failure_after_output_does_not_replay_to_backup
         .expect("post-output idle failure did not settle")
         .expect("post-output idle failure did not reach the downstream body");
     let second_is_error = second.is_err();
-    v024_wait_settled(&fixture.gateway).await;
+    settled(&fixture.gateway).await;
     let receiver_requests = fixture.receivers_seen[0].lock().clone();
     let owner = fixture.gateway.0.compaction.owner(&fixture.session);
     let boundary_fresh = fixture

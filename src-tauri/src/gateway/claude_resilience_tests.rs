@@ -1,4 +1,5 @@
 use super::*;
+use crate::gateway::test_support::form;
 use std::io::Write;
 
 const MESSAGE: &[u8] = br#"{"id":"msg_fixture","type":"message","model":"claude-fixture","stop_reason":"end_turn","content":[{"type":"text","text":"complete"}],"usage":{"input_tokens":5,"output_tokens":3}}"#;
@@ -9,24 +10,17 @@ const PARTIAL: &[u8] = b"event: content_block_delta\ndata: {\"type\":\"content_b
 
 fn options(f: &Fixture, buffer: bool, endless: bool, filter: bool) {
     let provider = &f.gateway.view().providers[0];
-    f.edit(Edit::SaveProvider {
-        delegate: Default::default(),
-        id: Some(provider.id.clone()),
-        base_url: provider.base_url.clone(),
-        token: String::new(),
-        name: None,
-        quota_access_token: None,
-        end_on_message_stop: None,
-        filter_count_tokens: Some(filter),
-        buffer_complete_response: Some(buffer),
-        endless_mode: Some(endless),
-        upstream_retry_seconds: Some(1),
-        normal_retry_seconds: Some(1),
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: Some(0),
-    });
+    f.edit(form(serde_json::json!({
+        "id": provider.id,
+        "baseUrl": provider.base_url,
+        "token": "",
+        "filterCountTokens": filter,
+        "bufferCompleteResponse": buffer,
+        "endlessMode": endless,
+        "upstreamRetrySeconds": 1,
+        "normalRetrySeconds": 1,
+        "limitRestSeconds": 0,
+    })));
     let mut settings = f.gateway.view().settings;
     settings.max_retries = 1;
     settings.rate_limit_seconds = 1;
@@ -46,24 +40,17 @@ struct Pacing {
 }
 fn pacing(f: &Fixture, pacing: Pacing) {
     let provider = &f.gateway.view().providers[0];
-    f.edit(Edit::SaveProvider {
-        delegate: Default::default(),
-        id: Some(provider.id.clone()),
-        base_url: provider.base_url.clone(),
-        token: String::new(),
-        name: None,
-        quota_access_token: None,
-        end_on_message_stop: None,
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: None,
-        upstream_retry_seconds: pacing.risk,
-        normal_retry_seconds: pacing.normal,
-        risk_codes: pacing.codes,
-        retry_intensity: pacing.intensity,
-        limit_retry_seconds: pacing.limit,
-        limit_rest_seconds: pacing.rest,
-    });
+    f.edit(form(serde_json::json!({
+        "id": provider.id,
+        "baseUrl": provider.base_url,
+        "token": "",
+        "upstreamRetrySeconds": pacing.risk,
+        "normalRetrySeconds": pacing.normal,
+        "riskCodes": pacing.codes,
+        "retryIntensity": pacing.intensity,
+        "limitRetrySeconds": pacing.limit,
+        "limitRestSeconds": pacing.rest,
+    })));
 }
 fn sse(bytes: impl Into<Bytes>) -> Response<WireBody> {
     Response::builder()
@@ -1024,24 +1011,12 @@ async fn buffered_declared_length_must_finish_even_after_message_stop() {
     let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
     options(&f, true, false, false);
     let provider = f.gateway.view().providers[0].clone();
-    f.edit(Edit::SaveProvider {
-        delegate: Default::default(),
-        id: Some(provider.id),
-        base_url: provider.base_url,
-        token: String::new(),
-        name: None,
-        quota_access_token: None,
-        end_on_message_stop: Some(true),
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: None,
-        upstream_retry_seconds: None,
-        normal_retry_seconds: None,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
-    });
+    f.edit(form(serde_json::json!({
+        "id": provider.id,
+        "baseUrl": provider.base_url,
+        "token": "",
+        "endOnMessageStop": true,
+    })));
     f.start().await;
     let body = response_bytes(request(&f.gateway, "/v1/messages", STREAM_REQUEST).await).await;
     assert_eq!(

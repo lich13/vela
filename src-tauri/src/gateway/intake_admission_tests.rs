@@ -4,6 +4,7 @@
 //! This file is registered by the v0.20 fixture module so it can reuse its
 //! loopback server, gateway, and request helpers.
 use super::*;
+use crate::gateway::test_support::form;
 use crate::gateway::test_support::policy_provider;
 use crate::gateway::test_support::settled;
 use crate::gateway::{
@@ -179,24 +180,11 @@ fn takeover_edit_updates_one_field_and_rejects_an_empty_operation() {
     let mut store = Store::default();
     store
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://fixture.example.invalid/v1".into(),
-                token: "fixture-token".into(),
-                name: Some("fixture".into()),
-            },
+            form(json!({
+                "name": "fixture",
+                "baseUrl": "https://fixture.example.invalid/v1",
+                "token": "fixture-token",
+            })),
             false,
         )
         .unwrap();

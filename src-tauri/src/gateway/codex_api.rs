@@ -244,57 +244,21 @@ fn patch_base(config: &str, id: &str, value: &str) -> Result<String> {
             .ok_or_else(|| invalid("无法定位 base_url"))?;
         output.replace_range(span, &toml_edit::Value::from(value).to_string());
     } else {
-        let parent = doc.get("model_providers").unwrap();
-        let encoded_id = toml_edit::Key::new(id).to_string();
-        let (container, prefix, root) = if p.as_table().is_some_and(|t| t.is_implicit())
-            || p.as_inline_table().is_some_and(|t| t.is_dotted())
-        {
-            if parent.as_table().is_some_and(|t| t.is_implicit()) {
-                (
-                    doc.as_item(),
-                    format!("model_providers.{encoded_id}."),
-                    true,
-                )
-            } else {
-                (parent, format!("{encoded_id}."), false)
-            }
-        } else {
-            (p, String::new(), false)
-        };
-        let assignment = format!("{prefix}base_url = {}", toml_edit::Value::from(value));
-        if let Some(table) = container.as_inline_table() {
-            let span = table
-                .span()
-                .ok_or_else(|| invalid("无法定位供应商内联表"))?;
-            output.insert_str(
-                span.end - 1,
-                &format!("{}{assignment}", if table.is_empty() { "" } else { ", " }),
-            );
-        } else {
-            let newline = if config.contains("\r\n") {
-                "\r\n"
-            } else {
-                "\n"
-            };
-            let end = if root {
-                0
-            } else {
-                let span = container
-                    .as_table()
-                    .and_then(|t| t.span())
-                    .ok_or_else(|| invalid("无法定位供应商表"))?;
-                config[span.end..]
-                    .find('\n')
-                    .map(|i| span.end + i + 1)
-                    .unwrap_or(config.len())
-            };
-            let lead = if end > 0 && !config[..end].ends_with('\n') {
-                newline
-            } else {
-                ""
-            };
-            output.insert_str(end, &format!("{lead}{assignment}{newline}"));
-        }
+        let (at, assignment) = super::takeover::missing_assignments(
+            config,
+            &doc,
+            p,
+            &toml_edit::Key::new(id).to_string(),
+            &[("base_url", toml_edit::Value::from(value).to_string())],
+            |inline| {
+                invalid(if inline {
+                    "无法定位供应商内联表"
+                } else {
+                    "无法定位供应商表"
+                })
+            },
+        )?;
+        output.insert_str(at.start, &assignment);
     }
     Ok(output)
 }

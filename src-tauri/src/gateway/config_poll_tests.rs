@@ -1,4 +1,5 @@
 use super::*;
+use crate::gateway::test_support::form;
 
 #[test]
 fn cached_poll_tracks_replacement_guard_and_invalid_text_without_weakening_save_conflicts() {
@@ -99,24 +100,11 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
     let rev = codex.view().revision;
     codex
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://a.example.invalid/v1".into(),
-                token: "tok-a".into(),
-                name: Some("Alpha".into()),
-            },
+            form(serde_json::json!({
+                "name": "Alpha",
+                "baseUrl": "https://a.example.invalid/v1",
+                "token": "tok-a",
+            })),
             &rev,
             &codex_home,
         )
@@ -124,24 +112,11 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
     let rev = codex.view().revision;
     let second = codex
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://b.example.invalid/v1".into(),
-                token: "tok-b".into(),
-                name: Some("Beta".into()),
-            },
+            form(serde_json::json!({
+                "name": "Beta",
+                "baseUrl": "https://b.example.invalid/v1",
+                "token": "tok-b",
+            })),
             &rev,
             &codex_home,
         )
@@ -196,24 +171,11 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
     let claude_rev = claude.view().revision;
     let claude_v1 = claude
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://a.example.invalid".into(),
-                token: "c-a".into(),
-                name: Some("ClaudeA".into()),
-            },
+            form(serde_json::json!({
+                "name": "ClaudeA",
+                "baseUrl": "https://a.example.invalid",
+                "token": "c-a",
+            })),
             &claude_rev,
             &claude_home,
         )

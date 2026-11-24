@@ -6,6 +6,7 @@
 //! the compaction boundary or changing ownership. With a provider set to take
 //! web searches, a search is that queue's alone.
 use super::*;
+use crate::gateway::test_support::form;
 use crate::usage::{
     model::{Filter, Operation, Record},
     Service,
@@ -135,7 +136,7 @@ fn update_max(max: &AtomicUsize, current: usize) {
 }
 
 fn configure_search_owner(gateway: &Gateway, dir: &tempfile::TempDir, owner: &str) {
-    super::v022_update(
+    super::update(
         gateway,
         dir,
         Edit::PolicyProvider {
@@ -145,7 +146,7 @@ fn configure_search_owner(gateway: &Gateway, dir: &tempfile::TempDir, owner: &st
             take_new_threads: Some(true),
         },
     );
-    super::v022_update(
+    super::update(
         gateway,
         dir,
         Edit::ConcurrencyProvider {
@@ -163,12 +164,13 @@ async fn seed_owner(
 ) -> (Service, String) {
     let usage = Service::new(dir.path());
     gateway.set_usage(usage.clone());
-    super::v022_start(gateway, dir).await;
+    super::start(gateway, dir).await;
 
-    let seed = super::v022_request(gateway, thread, super::v022_initial_body()).await;
+    let seed =
+        super::thread_request(gateway, "/v1/responses", thread, super::v022_initial_body()).await;
     assert_eq!(seed.status(), StatusCode::OK);
     assert_eq!(
-        super::v022_body(seed).await,
+        super::response_bytes(seed).await,
         super::v022_seed_response().as_bytes()
     );
 
@@ -187,7 +189,7 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
     let owner_bodies = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let owner_hit_count = owner_hits.clone();
     let owner_seen = owner_bodies.clone();
-    let owner_port = super::v022_server(move |request| {
+    let owner_port = super::serve(move |request| {
         let owner_hit_count = owner_hit_count.clone();
         let owner_seen = owner_seen.clone();
         async move {
@@ -196,31 +198,31 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
             owner_hit_count.fetch_add(1, Ordering::SeqCst);
             owner_seen.lock().push(body.to_vec());
             if path.ends_with("/alpha/search") {
-                super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
+                super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
             } else {
-                super::v022_json_response(StatusCode::OK, super::v022_seed_response())
+                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
             }
         }
     })
     .await;
     let ordinary_hits = Arc::new(AtomicUsize::new(0));
     let ordinary_hit_count = ordinary_hits.clone();
-    let ordinary_port = super::v022_server(move |request| {
+    let ordinary_port = super::serve(move |request| {
         let ordinary_hit_count = ordinary_hit_count.clone();
         async move {
             let _ = request.into_body().collect().await.unwrap();
             ordinary_hit_count.fetch_add(1, Ordering::SeqCst);
-            super::v022_json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE))
+            super::json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE), None)
         }
     })
     .await;
 
-    let (dir, gateway) = super::v022_fixture(vec![
+    let (dir, gateway) = super::probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{owner_port}/v1"),
     ])
     .await;
-    let ids = super::v022_ids(&gateway);
+    let ids = super::provider_ids(&gateway);
     let owner = ids[1].clone();
     configure_search_owner(&gateway, &dir, &owner);
     assert!(gateway
@@ -301,7 +303,7 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
     let owner_release = release.clone();
     let owner_active = active.clone();
     let owner_max = max_active.clone();
-    let owner_port = super::v022_server(move |request| {
+    let owner_port = super::serve(move |request| {
         let owner_events = owner_events.clone();
         let owner_entered = owner_entered.clone();
         let owner_release = owner_release.clone();
@@ -317,9 +319,9 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
                 owner_entered.send("owner").unwrap();
                 owner_release.acquire().await.unwrap().forget();
                 owner_active.fetch_sub(1, Ordering::AcqRel);
-                super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
+                super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
             } else {
-                super::v022_json_response(StatusCode::OK, super::v022_seed_response())
+                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
             }
         }
     })
@@ -328,7 +330,7 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
     let ordinary_events = events.clone();
     let ordinary_entered = entered_tx.clone();
     let ordinary_hit_count = ordinary_hits.clone();
-    let ordinary_port = super::v022_server(move |request| {
+    let ordinary_port = super::serve(move |request| {
         let ordinary_events = ordinary_events.clone();
         let ordinary_entered = ordinary_entered.clone();
         let ordinary_hit_count = ordinary_hit_count.clone();
@@ -337,17 +339,17 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
             ordinary_hit_count.fetch_add(1, Ordering::SeqCst);
             ordinary_events.lock().push(("ordinary", body.to_vec()));
             ordinary_entered.send("ordinary").unwrap();
-            super::v022_json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE))
+            super::json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE), None)
         }
     })
     .await;
 
-    let (dir, gateway) = super::v022_fixture(vec![
+    let (dir, gateway) = super::probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{owner_port}/v1"),
     ])
     .await;
-    let ids = super::v022_ids(&gateway);
+    let ids = super::provider_ids(&gateway);
     let ordinary = ids[0].clone();
     let owner = ids[1].clone();
     configure_search_owner(&gateway, &dir, &owner);
@@ -421,38 +423,38 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
 async fn v02513_search_without_thread_or_with_conflicting_thread_does_not_borrow_reserved_owner() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let owner_hit_count = owner_hits.clone();
-    let owner_port = super::v022_server(move |request| {
+    let owner_port = super::serve(move |request| {
         let owner_hit_count = owner_hit_count.clone();
         async move {
             let path = request.uri().path().to_owned();
             let _ = request.into_body().collect().await.unwrap();
             owner_hit_count.fetch_add(1, Ordering::SeqCst);
             if path.ends_with("/alpha/search") {
-                super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
+                super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
             } else {
-                super::v022_json_response(StatusCode::OK, super::v022_seed_response())
+                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
             }
         }
     })
     .await;
     let ordinary_hits = Arc::new(AtomicUsize::new(0));
     let ordinary_hit_count = ordinary_hits.clone();
-    let ordinary_port = super::v022_server(move |request| {
+    let ordinary_port = super::serve(move |request| {
         let ordinary_hit_count = ordinary_hit_count.clone();
         async move {
             let _ = request.into_body().collect().await.unwrap();
             ordinary_hit_count.fetch_add(1, Ordering::SeqCst);
-            super::v022_json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE))
+            super::json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE), None)
         }
     })
     .await;
 
-    let (dir, gateway) = super::v022_fixture(vec![
+    let (dir, gateway) = super::probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{owner_port}/v1"),
     ])
     .await;
-    let ids = super::v022_ids(&gateway);
+    let ids = super::provider_ids(&gateway);
     let ordinary = ids[0].clone();
     let owner = ids[1].clone();
     configure_search_owner(&gateway, &dir, &owner);
@@ -508,26 +510,27 @@ async fn v02513_search_without_thread_or_with_conflicting_thread_does_not_borrow
 async fn v02513_search_failure_falls_back_without_moving_owner_or_retaining_fallback() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let seen = owner_hits.clone();
-    let owner_port = super::v022_server(move |request| {
+    let owner_port = super::serve(move |request| {
         let seen = seen.clone();
         async move {
             seen.fetch_add(1, Ordering::SeqCst);
             let search = request.uri().path().ends_with("/alpha/search");
             let _ = request.into_body().collect().await.unwrap();
             if search {
-                super::v022_json_response(
+                super::json_response(
                     StatusCode::TOO_MANY_REQUESTS,
                     json!({"error":{"reason":"DAILY_LIMIT_EXCEEDED"}}).to_string(),
+                    None,
                 )
             } else {
-                super::v022_json_response(StatusCode::OK, super::v022_seed_response())
+                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
             }
         }
     })
     .await;
     let fallback_hits = Arc::new(AtomicUsize::new(0));
     let seen = fallback_hits.clone();
-    let fallback_port = super::v022_server(move |request| {
+    let fallback_port = super::serve(move |request| {
         let seen = seen.clone();
         async move {
             seen.fetch_add(1, Ordering::SeqCst);
@@ -535,16 +538,16 @@ async fn v02513_search_failure_falls_back_without_moving_owner_or_retaining_fall
                 request.into_body().collect().await.unwrap().to_bytes(),
                 SEARCH_REQUEST
             );
-            super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
+            super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
         }
     })
     .await;
-    let (dir, gateway) = super::v022_fixture(vec![
+    let (dir, gateway) = super::probing_fixture(vec![
         format!("http://127.0.0.1:{fallback_port}/v1"),
         format!("http://127.0.0.1:{owner_port}/v1"),
     ])
     .await;
-    let ids = super::v022_ids(&gateway);
+    let ids = super::provider_ids(&gateway);
     configure_search_owner(&gateway, &dir, &ids[1]);
     let thread = "fixture-v02513-search-fallback";
     let (usage, digest) = seed_owner(&dir, &gateway, thread, &ids[1]).await;
@@ -594,7 +597,7 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
     let owner_bodies = Arc::new(Mutex::new(Vec::<(Vec<u8>, Vec<Vec<u8>>)>::new()));
     let owner_hit_count = owner_hits.clone();
     let owner_seen = owner_bodies.clone();
-    let owner_port = super::v022_server(move |request| {
+    let owner_port = super::serve(move |request| {
         let owner_hit_count = owner_hit_count.clone();
         let owner_seen = owner_seen.clone();
         async move {
@@ -609,31 +612,31 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
             owner_hit_count.fetch_add(1, Ordering::SeqCst);
             owner_seen.lock().push((body.to_vec(), metadata));
             if path.ends_with("/alpha/search") {
-                super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
+                super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
             } else {
-                super::v022_json_response(StatusCode::OK, super::v022_seed_response())
+                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
             }
         }
     })
     .await;
     let ordinary_hits = Arc::new(AtomicUsize::new(0));
     let ordinary_hit_count = ordinary_hits.clone();
-    let ordinary_port = super::v022_server(move |request| {
+    let ordinary_port = super::serve(move |request| {
         let ordinary_hit_count = ordinary_hit_count.clone();
         async move {
             let _ = request.into_body().collect().await.unwrap();
             ordinary_hit_count.fetch_add(1, Ordering::SeqCst);
-            super::v022_json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE))
+            super::json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE), None)
         }
     })
     .await;
 
-    let (dir, gateway) = super::v022_fixture(vec![
+    let (dir, gateway) = super::probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{owner_port}/v1"),
     ])
     .await;
-    let ids = super::v022_ids(&gateway);
+    let ids = super::provider_ids(&gateway);
     let owner = ids[1].clone();
     configure_search_owner(&gateway, &dir, &owner);
     let (usage, thread_hash) = seed_owner(&dir, &gateway, METADATA_THREAD, &owner).await;
@@ -799,38 +802,38 @@ fn v02513_search_metadata_identity_rejects_unsafe_shapes() {
 async fn v02513_invalid_search_metadata_and_body_id_never_borrow_owner() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let owner_hit_count = owner_hits.clone();
-    let owner_port = super::v022_server(move |request| {
+    let owner_port = super::serve(move |request| {
         let owner_hit_count = owner_hit_count.clone();
         async move {
             let path = request.uri().path().to_owned();
             let _ = request.into_body().collect().await.unwrap();
             owner_hit_count.fetch_add(1, Ordering::SeqCst);
             if path.ends_with("/alpha/search") {
-                super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
+                super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
             } else {
-                super::v022_json_response(StatusCode::OK, super::v022_seed_response())
+                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
             }
         }
     })
     .await;
     let ordinary_hits = Arc::new(AtomicUsize::new(0));
     let ordinary_hit_count = ordinary_hits.clone();
-    let ordinary_port = super::v022_server(move |request| {
+    let ordinary_port = super::serve(move |request| {
         let ordinary_hit_count = ordinary_hit_count.clone();
         async move {
             let _ = request.into_body().collect().await.unwrap();
             ordinary_hit_count.fetch_add(1, Ordering::SeqCst);
-            super::v022_json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE))
+            super::json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE), None)
         }
     })
     .await;
 
-    let (dir, gateway) = super::v022_fixture(vec![
+    let (dir, gateway) = super::probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{owner_port}/v1"),
     ])
     .await;
-    let ids = super::v022_ids(&gateway);
+    let ids = super::provider_ids(&gateway);
     let owner = ids[1].clone();
     configure_search_owner(&gateway, &dir, &owner);
     let (_usage, thread_hash) = seed_owner(&dir, &gateway, METADATA_THREAD, &owner).await;
@@ -897,12 +900,12 @@ async fn v02513_invalid_search_metadata_and_body_id_never_borrow_owner() {
 
 #[tokio::test]
 async fn v02513_search_lease_is_readonly_and_rejects_changed_owner_before_send() {
-    let (_dir, gateway) = super::v022_fixture(vec![
+    let (_dir, gateway) = super::probing_fixture(vec![
         "https://owner.example.invalid/v1".into(),
         "https://receiver.example.invalid/v1".into(),
     ])
     .await;
-    let ids = super::v022_ids(&gateway);
+    let ids = super::provider_ids(&gateway);
     let thread = crate::storage::digest(b"fixture-search-stale-lease");
     let boundary = crate::storage::digest(b"fixture-search-boundary");
     assert!(gateway
@@ -965,7 +968,7 @@ async fn v02513_search_lease_is_readonly_and_rejects_changed_owner_before_send()
 async fn a_search_taken_over_leaves_the_conversation_and_its_owner_alone() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let seen = owner_hits.clone();
-    let owner_port = super::v022_server(move |request| {
+    let owner_port = super::serve(move |request| {
         let seen = seen.clone();
         async move {
             seen.fetch_add(1, Ordering::SeqCst);
@@ -974,13 +977,13 @@ async fn a_search_taken_over_leaves_the_conversation_and_its_owner_alone() {
                 "the owner takes no searches"
             );
             let _ = request.into_body().collect().await.unwrap();
-            super::v022_json_response(StatusCode::OK, super::v022_seed_response())
+            super::json_response(StatusCode::OK, super::v022_seed_response(), None)
         }
     })
     .await;
     let taker_hits = Arc::new(AtomicUsize::new(0));
     let seen = taker_hits.clone();
-    let taker_port = super::v022_server(move |request| {
+    let taker_port = super::serve(move |request| {
         let seen = seen.clone();
         async move {
             seen.fetch_add(1, Ordering::SeqCst);
@@ -988,17 +991,17 @@ async fn a_search_taken_over_leaves_the_conversation_and_its_owner_alone() {
                 request.into_body().collect().await.unwrap().to_bytes(),
                 SEARCH_REQUEST
             );
-            super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
+            super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
         }
     })
     .await;
-    let (dir, gateway) = super::v022_fixture(vec![
+    let (dir, gateway) = super::probing_fixture(vec![
         format!("http://127.0.0.1:{owner_port}/v1"),
         format!("http://127.0.0.1:{taker_port}/v1"),
     ])
     .await;
-    let ids = super::v022_ids(&gateway);
-    super::v022_update(&gateway, &dir, searching(&gateway, &ids[1], false));
+    let ids = super::provider_ids(&gateway);
+    super::update(&gateway, &dir, searching(&gateway, &ids[1], false));
     configure_search_owner(&gateway, &dir, &ids[0]);
     let thread = "fixture-v02513-search-fallback";
     let (usage, digest) = seed_owner(&dir, &gateway, thread, &ids[0]).await;
@@ -1039,30 +1042,31 @@ async fn a_search_taken_over_leaves_the_conversation_and_its_owner_alone() {
 
 #[tokio::test]
 async fn search_safety_rejection_is_not_sent_to_another_provider() {
-    let owner = super::v022_server(|request| async move {
+    let owner = super::serve(|request| async move {
         if !request.uri().path().ends_with("/alpha/search") {
-            return super::v022_json_response(StatusCode::OK, super::v022_seed_response());
+            return super::json_response(StatusCode::OK, super::v022_seed_response(), None);
         }
-        super::v022_json_response(
+        super::json_response(
             StatusCode::FORBIDDEN,
             json!({"error":{"code":"content_policy_violation"}}).to_string(),
+            None,
         )
     })
     .await;
     let hits = Arc::new(AtomicUsize::new(0));
     let count = hits.clone();
-    let other = super::v022_server(move |_| {
+    let other = super::serve(move |_| {
         count.fetch_add(1, Ordering::SeqCst);
-        async { super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE)) }
+        async { super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None) }
     })
     .await;
     // No provider takes searches: the search is the ordinary queue's.
-    let (dir, gateway) = super::v022_fixture(vec![
+    let (dir, gateway) = super::probing_fixture(vec![
         format!("http://127.0.0.1:{owner}/v1"),
         format!("http://127.0.0.1:{other}/v1"),
     ])
     .await;
-    let ids = super::v022_ids(&gateway);
+    let ids = super::provider_ids(&gateway);
     configure_search_owner(&gateway, &dir, &ids[0]);
     let thread = "fixture-search-safety";
     seed_owner(&dir, &gateway, thread, &ids[0]).await;
@@ -1085,7 +1089,7 @@ async fn a_search_visits_its_takers_in_list_order_and_never_the_ordinary_queue()
         let mut bases = vec![];
         for index in 0..3 {
             let hits = hits.clone();
-            let port = super::v022_server(move |request| {
+            let port = super::serve(move |request| {
                 let hits = hits.clone();
                 async move {
                     hits.lock()[index] += 1;
@@ -1096,27 +1100,28 @@ async fn a_search_visits_its_takers_in_list_order_and_never_the_ordinary_queue()
                         "the ordinary queue received a search"
                     );
                     if !search || (index == 2 && !all_fail) {
-                        super::v022_json_response(
+                        super::json_response(
                             StatusCode::OK,
                             Bytes::from_static(SEARCH_RESPONSE),
+                            None,
                         )
                     } else {
-                        super::v022_json_response(StatusCode::BAD_GATEWAY, "{}")
+                        super::json_response(StatusCode::BAD_GATEWAY, "{}", None)
                     }
                 }
             })
             .await;
             bases.push(format!("http://127.0.0.1:{port}/v1"));
         }
-        let (dir, gateway) = super::v022_fixture(bases).await;
-        let ids = super::v022_ids(&gateway);
+        let (dir, gateway) = super::probing_fixture(bases).await;
+        let ids = super::provider_ids(&gateway);
         for id in &ids[1..] {
-            super::v022_update(&gateway, &dir, searching(&gateway, id, false));
+            super::update(&gateway, &dir, searching(&gateway, id, false));
         }
         let mut settings = gateway.0.inner.lock().store.settings.clone();
         settings.max_retries = 0;
-        super::v022_update(&gateway, &dir, Edit::Settings { settings });
-        super::v022_start(&gateway, &dir).await;
+        super::update(&gateway, &dir, Edit::Settings { settings });
+        super::start(&gateway, &dir).await;
         let response = search_request(&gateway, "/alpha/search", &[], SEARCH_REQUEST).await;
         assert_eq!(
             response.status(),
@@ -1130,7 +1135,7 @@ async fn a_search_visits_its_takers_in_list_order_and_never_the_ordinary_queue()
         assert_eq!(*hits.lock(), [0, 1, 1]);
         // A provider that takes searches is still one of the ordinary queue:
         // with the first provider out of it, the conversation is theirs.
-        super::v022_update(
+        super::update(
             &gateway,
             &dir,
             Edit::QueueProvider {
@@ -1158,7 +1163,7 @@ async fn an_endless_search_taker_retries_a_rate_limit_where_it_was() {
     let mut bases = vec![];
     for index in 0..3 {
         let hits = hits.clone();
-        let port = super::v022_server(move |request| {
+        let port = super::serve(move |request| {
             let hits = hits.clone();
             async move {
                 let n = {
@@ -1168,24 +1173,25 @@ async fn an_endless_search_taker_retries_a_rate_limit_where_it_was() {
                 };
                 let _ = request.into_body().collect().await.unwrap();
                 if index == 1 && n == 1 {
-                    super::v022_json_response(
+                    super::json_response(
                         StatusCode::TOO_MANY_REQUESTS,
                         json!({"error":{"type":"rate_limit_error","message":"rate limit"}})
                             .to_string(),
+                        None,
                     )
                 } else {
-                    super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
+                    super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
                 }
             }
         })
         .await;
         bases.push(format!("http://127.0.0.1:{port}/v1"));
     }
-    let (dir, gateway) = super::v022_fixture(bases).await;
-    let ids = super::v022_ids(&gateway);
-    super::v022_update(&gateway, &dir, searching(&gateway, &ids[1], true));
-    super::v022_update(&gateway, &dir, searching(&gateway, &ids[2], false));
-    super::v022_start(&gateway, &dir).await;
+    let (dir, gateway) = super::probing_fixture(bases).await;
+    let ids = super::provider_ids(&gateway);
+    super::update(&gateway, &dir, searching(&gateway, &ids[1], true));
+    super::update(&gateway, &dir, searching(&gateway, &ids[2], false));
+    super::start(&gateway, &dir).await;
     let started = std::time::Instant::now();
     let response = search_request(&gateway, "/alpha/search", &[], SEARCH_REQUEST).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1206,25 +1212,16 @@ fn searching(gateway: &Gateway, id: &str, endless: bool) -> Edit {
         .into_iter()
         .find(|p| p.id == id)
         .unwrap();
-    Edit::SaveProvider {
-        delegate: super::super::model::DelegateEdit {
-            take_web_search: Some(true),
-            ..Default::default()
-        },
-        id: Some(id.to_owned()),
-        base_url: provider.base_url,
-        token: String::new(),
-        quota_access_token: None,
-        name: None,
-        end_on_message_stop: None,
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: Some(endless),
-        upstream_retry_seconds: Some(1),
-        normal_retry_seconds: Some(1),
-        risk_codes: None,
-        retry_intensity: Some(0),
-        limit_retry_seconds: Some(1),
-        limit_rest_seconds: Some(0),
-    }
+    form(json!({
+        "id": id,
+        "baseUrl": provider.base_url,
+        "token": "",
+        "endlessMode": endless,
+        "upstreamRetrySeconds": 1,
+        "normalRetrySeconds": 1,
+        "retryIntensity": 0,
+        "limitRetrySeconds": 1,
+        "limitRestSeconds": 0,
+        "takeWebSearch": true,
+    }))
 }

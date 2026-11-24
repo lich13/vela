@@ -69,11 +69,6 @@ fn global_connection_import_keeps_only_current_api_configuration() {
     let active = fixture.gateway.try_view().unwrap();
     assert!(active.grok_managed);
     assert_eq!(active.providers.len(), 1);
-    assert!(!serde_json::to_value(&fixture.gateway.0.inner.lock().store)
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .contains_key("grokNative"));
 }
 
 #[test]

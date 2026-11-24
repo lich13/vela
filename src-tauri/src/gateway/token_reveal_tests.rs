@@ -1,28 +1,16 @@
 // 覆盖按需查看供应商凭据与版本校验。
 use super::*;
+use crate::gateway::test_support::form;
 use std::path::Path;
 
 fn save_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) -> String {
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: base_url.into(),
-                token: token.into(),
-                name: Some("fixture provider".into()),
-            },
+            form(serde_json::json!({
+                "name": "fixture provider",
+                "baseUrl": base_url,
+                "token": token,
+            })),
             &gateway.view().revision,
             home,
         )
@@ -174,24 +162,7 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
 
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: Some(id.clone()),
-                base_url: base_url.into(),
-                token: String::new(),
-                name: None,
-            },
+            form(serde_json::json!({"id": id, "baseUrl": base_url, "token": ""})),
             &initial_view.revision,
             temp.path(),
         )
@@ -210,24 +181,7 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
     let updated_token = "fixture-updated-token";
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: Some(id.clone()),
-                base_url: base_url.into(),
-                token: updated_token.into(),
-                name: None,
-            },
+            form(serde_json::json!({"id": id, "baseUrl": base_url, "token": updated_token})),
             &unchanged_view.revision,
             temp.path(),
         )
@@ -247,24 +201,7 @@ fn saving_an_empty_token_without_changing_the_url_preserves_provider_identity() 
     let updated_base_url = "https://provider-renewed.example.invalid/v2";
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: Some(id.clone()),
-                base_url: updated_base_url.into(),
-                token: String::new(),
-                name: None,
-            },
+            form(serde_json::json!({"id": id, "baseUrl": updated_base_url, "token": ""})),
             &token_changed_view.revision,
             temp.path(),
         )

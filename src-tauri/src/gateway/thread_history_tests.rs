@@ -5,9 +5,10 @@
 //! fixtures deliberately use the new header spellings so the HTTP and native
 //! WebSocket paths exercise the same ownership key.
 use super::*;
+use crate::gateway::test_support::{loopback::response_value, policy_provider, settled};
 use crate::gateway::{
     compaction::{self, Intake, Registry},
-    model::{Edit, Provider},
+    model::Edit,
     replay,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -23,32 +24,6 @@ use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 
 const WINDOW: &str = "fixture-v0211-window";
-
-fn provider_with_policy(id: &str, handoff: bool, take: bool) -> Provider {
-    Provider {
-        id: id.into(),
-        name: id.into(),
-        base_url: format!("https://{id}.example.invalid/v1"),
-        token: "fixture-token".into(),
-        queued: true,
-        version: format!("{id}-version"),
-        max_concurrency: 0,
-        max_rpm: 0,
-        allowed_models: None,
-        handoff_after_compaction: handoff,
-        take_new_threads: take,
-        end_on_message_stop: false,
-        filter_count_tokens: false,
-        buffer_complete_response: false,
-        endless_mode: false,
-        upstream_retry_seconds: 5,
-        normal_retry_seconds: 3,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
-    }
-}
 
 fn new_headers(thread: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -88,10 +63,6 @@ async fn request_with_headers(
         request.headers_mut().append(name.clone(), value.clone());
     }
     client.request(request).await.unwrap()
-}
-
-async fn response_value(response: Response<Incoming>) -> Value {
-    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
 fn automatic(gateway: &Gateway, dir: &tempfile::TempDir) {
@@ -147,21 +118,6 @@ fn promote_last(gateway: &Gateway, dir: &tempfile::TempDir) {
         .collect();
     ids.reverse();
     update(gateway, dir, Edit::Reorder { ids });
-}
-
-async fn wait_settled(gateway: &Gateway) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while gateway
-            .view()
-            .providers
-            .iter()
-            .any(|provider| provider.active_requests != 0)
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("fixture request did not settle");
 }
 
 #[test]
@@ -231,8 +187,8 @@ fn v0211_same_cache_affinity_with_different_threads_isolated_in_registry() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let providers = [
-        provider_with_policy("old", false, false),
-        provider_with_policy("new", false, false),
+        policy_provider("old", false, false),
+        policy_provider("new", false, false),
     ];
     let first_hints = hints(json!({"input":[{"role":"user","content":"a"}]}));
     let second_hints = hints(json!({"input":[{"role":"user","content":"b"}]}));
@@ -283,8 +239,8 @@ fn v0211_unadmitted_history_cannot_be_upgraded_to_new_thread() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let session = digest("fixture-history-before-admission");
-    let ordinary = provider_with_policy("ordinary", false, false);
-    let new_only = provider_with_policy("new-only", false, true);
+    let ordinary = policy_provider("ordinary", false, false);
+    let new_only = policy_provider("new-only", false, true);
     let providers = [ordinary.clone(), new_only.clone()];
 
     // A history-shaped request can create an establishing entry, but it never
@@ -365,8 +321,8 @@ fn v0211_unadmitted_first_turn_cannot_keep_new_thread_intake_for_history() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let session = digest("fixture-unadmitted-first-turn");
-    let ordinary = provider_with_policy("ordinary", false, false);
-    let new_only = provider_with_policy("new-only", false, true);
+    let ordinary = policy_provider("ordinary", false, false);
+    let new_only = policy_provider("new-only", false, true);
     let providers = [ordinary.clone(), new_only.clone()];
 
     // Prepare the first-turn lease but leave it unadmitted, as a competing
@@ -413,8 +369,8 @@ fn v0211_old_cursor_cannot_authorize_compaction_handoff() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let session = digest("fixture-cursor-thread");
-    let old = provider_with_policy("old", true, false);
-    let new = provider_with_policy("new", true, false);
+    let old = policy_provider("old", true, false);
+    let new = policy_provider("new", true, false);
     let initial = registry
         .prepare_policy(
             session.clone(),
@@ -444,8 +400,8 @@ fn v0211_parallel_compaction_boundary_claims_once() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let session = digest("fixture-parallel-thread");
-    let old = provider_with_policy("old", true, false);
-    let new = provider_with_policy("new", true, false);
+    let old = policy_provider("old", true, false);
+    let new = policy_provider("new", true, false);
     let initial = registry
         .prepare_policy(
             session.clone(),
@@ -487,8 +443,8 @@ fn v0211_restart_restores_owner_and_compaction_boundary_from_thread_identity() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("owners.json");
     let session = header_session(&new_headers("fixture-restart-thread"));
-    let old = provider_with_policy("old", true, false);
-    let new = provider_with_policy("new", true, false);
+    let old = policy_provider("old", true, false);
+    let new = policy_provider("new", true, false);
     let boundary = digest(WINDOW);
     let registry = Registry::new(path.clone());
     let first = registry
@@ -798,7 +754,7 @@ async fn v0211_native_ws_reuses_thread_identity_across_turns_and_hands_off_once(
         ws_turn(&mut peer, window.clone()).await["response"]["provider"],
         "new"
     );
-    wait_settled(&gateway).await;
+    settled(&gateway).await;
     assert_eq!(old_seen.lock().len(), 3);
     assert_eq!(
         new_seen.lock().last().map(Vec::as_slice),

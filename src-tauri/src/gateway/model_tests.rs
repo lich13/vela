@@ -1,5 +1,6 @@
 use super::*;
 use crate::gateway::routing::Requirement;
+use crate::gateway::test_support::form;
 use crate::gateway::test_support::settle;
 use serde_json::json;
 use std::fs;
@@ -23,24 +24,11 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
     let mut store = Store::default();
     store
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://api.example.invalid/deployment".into(),
-                token: "fixture-token".into(),
-                name: Some("  主力供应商  ".into()),
-            },
+            form(json!({
+                "name": "  主力供应商  ",
+                "baseUrl": "https://api.example.invalid/deployment",
+                "token": "fixture-token",
+            })),
             false,
         )
         .unwrap();
@@ -48,48 +36,22 @@ fn provider_display_name_is_trimmed_and_host_is_the_blank_fallback() {
 
     store
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://fallback.example.invalid/v1".into(),
-                token: "fixture-token-2".into(),
-                name: Some("  ".into()),
-            },
+            form(json!({
+                "name": "  ",
+                "baseUrl": "https://fallback.example.invalid/v1",
+                "token": "fixture-token-2",
+            })),
             false,
         )
         .unwrap();
     assert_eq!(store.providers[1].name, "fallback.example.invalid");
 
     let invalid = store.edit(
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: None,
-            base_url: "https://invalid.example.invalid".into(),
-            token: "fixture-token-3".into(),
-            name: Some("x".repeat(121)),
-        },
+        form(json!({
+            "name": "x".repeat(121),
+            "baseUrl": "https://invalid.example.invalid",
+            "token": "fixture-token-3",
+        })),
         false,
     );
     assert_eq!(invalid.unwrap_err().code, "NAME");
@@ -378,24 +340,7 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: None,
-            base_url: format!("http://127.0.0.1:{port}"),
-            token: "fixture-local".into(),
-            name: None,
-        },
+        form(json!({"baseUrl": format!("http://127.0.0.1:{port}"), "token": "fixture-local"})),
     );
     let id = g.view().providers[0].id.clone();
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -442,24 +387,11 @@ async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: Some(id.clone()),
-            base_url: format!("http://127.0.0.1:{blocked}"),
-            token: "fixture-new".into(),
-            name: None,
-        },
+        form(json!({
+            "id": id,
+            "baseUrl": format!("http://127.0.0.1:{blocked}"),
+            "token": "fixture-new",
+        })),
     );
     assert!(g.list_models(&id, false).await.unwrap().stale);
     let next = g.clone();
@@ -520,24 +452,11 @@ async fn catalog_errors_and_changed_credentials_do_not_expose_raw_responses() {
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: Some(id),
-            base_url: format!("http://127.0.0.1:{port}"),
-            token: "changed-fixture".into(),
-            name: None,
-        },
+        form(json!({
+            "id": id,
+            "baseUrl": format!("http://127.0.0.1:{port}"),
+            "token": "changed-fixture",
+        })),
     );
     gate.add_permits(1);
     assert_eq!(task.await.unwrap().unwrap_err().code, "STALE");
@@ -620,74 +539,38 @@ async fn catalog_limits_response_size_and_request_duration() {
 }
 
 #[test]
-fn legacy_message_stop_migrates_once_and_provider_edits_remain_independent() {
-    for legacy in [false, true] {
+fn provider_message_stop_edits_remain_independent() {
+    for stored in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gateway.json");
         let mut value = serde_json::to_value(Store::default()).unwrap();
-        value["settings"]["endOnMessageStop"] = json!(legacy);
         value["providers"] = json!([
-            {"id":"inherited","name":"Inherited","baseUrl":"https://one.example.invalid","token":"fixture","queued":true,"version":"one"},
-            {"id":"second","name":"Second","baseUrl":"https://two.example.invalid","token":"fixture","queued":true,"version":"two"}
+            {"id":"edited","name":"Edited","baseUrl":"https://one.example.invalid","token":"fixture","queued":true,"version":"one","endOnMessageStop":stored},
+            {"id":"second","name":"Second","baseUrl":"https://two.example.invalid","token":"fixture","queued":true,"version":"two","endOnMessageStop":stored}
         ]);
         fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         let (mut store, revision) = Store::load(&path).unwrap();
-        assert_eq!(store.providers[0].end_on_message_stop, legacy);
-        assert_eq!(store.providers[1].end_on_message_stop, legacy);
+        assert_eq!(store.providers[0].end_on_message_stop, stored);
+        assert_eq!(store.providers[1].end_on_message_stop, stored);
         store
             .edit(
-                Edit::SaveProvider {
-                    delegate: Default::default(),
-                    id: None,
-                    name: None,
-                    base_url: "https://new.example.invalid".into(),
-                    token: "fixture".into(),
-                    quota_access_token: None,
-                    end_on_message_stop: None,
-                    filter_count_tokens: None,
-                    buffer_complete_response: None,
-                    endless_mode: None,
-                    upstream_retry_seconds: None,
-                    normal_retry_seconds: None,
-                    risk_codes: None,
-                    retry_intensity: None,
-                    limit_retry_seconds: None,
-                    limit_rest_seconds: None,
-                },
+                form(json!({"baseUrl": "https://new.example.invalid"})),
                 false,
             )
             .unwrap();
         assert!(!store.providers[2].end_on_message_stop);
         store
             .edit(
-                Edit::SaveProvider {
-                    delegate: Default::default(),
-                    id: Some("inherited".into()),
-                    name: None,
-                    base_url: "https://one.example.invalid".into(),
-                    token: String::new(),
-                    quota_access_token: None,
-                    end_on_message_stop: Some(!legacy),
-                    filter_count_tokens: None,
-                    buffer_complete_response: None,
-                    endless_mode: None,
-                    upstream_retry_seconds: None,
-                    normal_retry_seconds: None,
-                    risk_codes: None,
-                    retry_intensity: None,
-                    limit_retry_seconds: None,
-                    limit_rest_seconds: None,
-                },
+                form(json!({"id": "edited", "token": "", "endOnMessageStop": !stored})),
                 false,
             )
             .unwrap();
-        assert_eq!(store.providers[0].end_on_message_stop, !legacy);
-        assert_eq!(store.providers[1].end_on_message_stop, legacy);
+        assert_eq!(store.providers[0].end_on_message_stop, !stored);
+        assert_eq!(store.providers[1].end_on_message_stop, stored);
         store.persist(&path, &revision).unwrap();
-        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert!(saved["settings"].get("endOnMessageStop").is_none());
         let (reloaded, _) = Store::load(&path).unwrap();
-        assert_eq!(reloaded.providers[0].end_on_message_stop, !legacy);
+        assert_eq!(reloaded.providers[0].end_on_message_stop, !stored);
+        assert_eq!(reloaded.providers[1].end_on_message_stop, stored);
         assert!(!reloaded.providers[2].end_on_message_stop);
     }
 }
@@ -763,23 +646,14 @@ fn endless_retry_waits_longer_for_risk_control_and_older_stores_keep_their_inter
     let seconds = |p: &Provider| (p.upstream_retry_seconds, p.normal_retry_seconds);
     assert_eq!(seconds(&store.providers[0]), (5, 3));
     assert_eq!(seconds(&store.providers[1]), (33, 3));
-    let save = |id: Option<&str>, risk, normal| Edit::SaveProvider {
-        delegate: Default::default(),
-        id: id.map(str::to_owned),
-        name: None,
-        base_url: "https://one.example.invalid".into(),
-        token: "fixture".into(),
-        quota_access_token: None,
-        end_on_message_stop: None,
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: None,
-        upstream_retry_seconds: risk,
-        normal_retry_seconds: normal,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
+    let save = |id: Option<&str>, risk: Option<u64>, normal: Option<u64>| {
+        form(json!({
+            "id": id.map(str::to_owned),
+            "baseUrl": "https://one.example.invalid",
+            "token": "fixture",
+            "upstreamRetrySeconds": risk,
+            "normalRetrySeconds": normal,
+        }))
     };
     store
         .edit(save(Some("saved"), None, Some(9)), false)
@@ -853,23 +727,15 @@ fn endless_pacing_is_checked_on_saving_and_unset_fields_keep_what_was_saved() {
     assert!(ClientId::Codex.default_risk_codes().is_empty());
     assert!(ClientId::Grok.default_risk_codes().is_empty());
 
-    let save = |id: Option<&str>, codes: Option<Vec<u16>>, intensity, limit| Edit::SaveProvider {
-        delegate: Default::default(),
-        id: id.map(str::to_owned),
-        name: None,
-        base_url: "https://one.example.invalid".into(),
-        token: "fixture".into(),
-        quota_access_token: None,
-        end_on_message_stop: None,
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: None,
-        upstream_retry_seconds: None,
-        normal_retry_seconds: None,
-        risk_codes: codes,
-        retry_intensity: intensity,
-        limit_retry_seconds: limit,
-        limit_rest_seconds: None,
+    let save = |id: Option<&str>, codes: Option<Vec<u16>>, intensity, limit| {
+        form(json!({
+            "id": id.map(str::to_owned),
+            "baseUrl": "https://one.example.invalid",
+            "token": "fixture",
+            "riskCodes": codes,
+            "retryIntensity": intensity,
+            "limitRetrySeconds": limit,
+        }))
     };
     let pacing = |store: &Store| {
         let p = &store.providers[0];
@@ -955,21 +821,6 @@ fn endless_pacing_is_checked_on_saving_and_unset_fields_keep_what_was_saved() {
         };
         assert_eq!(settings.validate().is_ok(), valid, "{stall} {hold}");
     }
-}
-
-/// A provider form as the interface sends it, with `fields` over a new
-/// provider's.
-fn form(fields: serde_json::Value) -> Edit {
-    let mut edit = json!({
-        "op": "saveProvider",
-        "id": null,
-        "baseUrl": "https://one.example.invalid",
-        "token": "fixture",
-    });
-    edit.as_object_mut()
-        .unwrap()
-        .extend(fields.as_object().unwrap().clone());
-    serde_json::from_value(edit).unwrap()
 }
 
 #[test]
@@ -1251,24 +1102,7 @@ fn a_model_mapping_holds_complete_model_ids_and_is_dropped_with_its_provider() {
     let mut store = Store::default();
     store
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                id: None,
-                name: None,
-                base_url: "https://one.example.invalid".into(),
-                token: "fixture".into(),
-                quota_access_token: None,
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-            },
+            form(json!({"baseUrl": "https://one.example.invalid", "token": "fixture"})),
             false,
         )
         .unwrap();

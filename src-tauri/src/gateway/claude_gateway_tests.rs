@@ -1,6 +1,7 @@
 // 覆盖 Claude 原生 Messages 网关及配置恢复。
 use super::*;
 use crate::gateway::admission::{Budget, Rejected};
+use crate::gateway::test_support::form;
 
 const CODEX_TOKEN: &str = "codex-v080-fixture-token";
 const CLAUDE_TOKEN: &str = "claude-v080-fixture-token";
@@ -89,24 +90,7 @@ async fn dual_fixture(codex_urls: Vec<String>, claude_urls: Vec<String>) -> Dual
             edit_client(
                 gateway,
                 home,
-                Edit::SaveProvider {
-                    delegate: Default::default(),
-                    end_on_message_stop: None,
-                    filter_count_tokens: None,
-                    buffer_complete_response: None,
-                    endless_mode: None,
-                    upstream_retry_seconds: None,
-                    normal_retry_seconds: None,
-                    risk_codes: None,
-                    retry_intensity: None,
-                    limit_retry_seconds: None,
-                    limit_rest_seconds: None,
-                    quota_access_token: None,
-                    id: None,
-                    base_url,
-                    token: token.into(),
-                    name: None,
-                },
+                form(serde_json::json!({"baseUrl": base_url, "token": token})),
             );
         }
     }
@@ -767,24 +751,10 @@ async fn peer_gateway_urls_are_rejected_when_saved() {
         ] {
             let error = gateway
                 .edit(
-                    Edit::SaveProvider {
-                        delegate: Default::default(),
-                        end_on_message_stop: None,
-                        filter_count_tokens: None,
-                        buffer_complete_response: None,
-                        endless_mode: None,
-                        upstream_retry_seconds: None,
-                        normal_retry_seconds: None,
-                        risk_codes: None,
-                        retry_intensity: None,
-                        limit_retry_seconds: None,
-                        limit_rest_seconds: None,
-                        quota_access_token: None,
-                        id: None,
-                        base_url: format!("http://{host}:{}/loop", peer.view().settings.port),
-                        token: "loop-fixture".into(),
-                        name: None,
-                    },
+                    form(serde_json::json!({
+                        "baseUrl": format!("http://{host}:{}/loop", peer.view().settings.port),
+                        "token": "loop-fixture",
+                    })),
                     &revision,
                     home,
                 )

@@ -8,12 +8,16 @@
 mod thread_retention_tests;
 use super::{
     compaction::Registry,
-    model::{Provider, Store},
+    model::Store,
     replay::{self, RequestHints, WireBody},
     *,
 };
 use crate::gateway::test_support::digest;
-use crate::gateway::test_support::loopback::{start, update};
+use crate::gateway::test_support::form;
+use crate::gateway::test_support::loopback::{
+    probing_fixture as fixture, serve as server, start, update,
+};
+use crate::gateway::test_support::policy_provider as provider;
 use crate::usage::Service;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Request, Response};
@@ -21,39 +25,12 @@ use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use serde_json::{json, Value};
 use std::{
     convert::Infallible,
-    future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
 };
-
-fn provider(id: &str, handoff: bool, take: bool) -> Provider {
-    Provider {
-        id: id.into(),
-        name: id.into(),
-        base_url: format!("https://{id}.example.invalid/v1"),
-        token: "fixture-token".into(),
-        queued: true,
-        version: format!("{id}-version"),
-        max_concurrency: 0,
-        max_rpm: 0,
-        allowed_models: None,
-        handoff_after_compaction: handoff,
-        take_new_threads: take,
-        end_on_message_stop: false,
-        filter_count_tokens: false,
-        buffer_complete_response: false,
-        endless_mode: false,
-        upstream_retry_seconds: 5,
-        normal_retry_seconds: 3,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
-    }
-}
 
 #[cfg(test)]
 #[path = "websocket_owner_retry_tests.rs"]
@@ -173,24 +150,11 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
     let mut store = Store::default();
     store
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://fixture.example.invalid/v1".into(),
-                token: "fixture-token".into(),
-                name: Some("fixture".into()),
-            },
+            form(json!({
+                "name": "fixture",
+                "baseUrl": "https://fixture.example.invalid/v1",
+                "token": "fixture-token",
+            })),
             false,
         )
         .unwrap();
@@ -411,34 +375,6 @@ fn upstream_numeric_error_codes_are_retained_as_strings_and_local_codes_are_dist
     assert_eq!(local.local_code.as_deref(), Some("FIRST_BYTE_TIMEOUT"));
 }
 
-async fn server<F, Fut>(handler: F) -> u16
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handler = Arc::new(handler);
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        hyper_util::rt::TokioIo::new(stream),
-                        hyper::service::service_fn(move |request| {
-                            let handler = handler.clone();
-                            async move { Ok::<_, Infallible>(handler(request).await) }
-                        }),
-                    )
-                    .with_upgrades()
-                    .await;
-            });
-        }
-    });
-    port
-}
-
 fn json_response(status: u16, body: &str, retry_after: Option<&str>) -> Response<WireBody> {
     let mut response = Response::builder()
         .status(status)
@@ -447,63 +383,6 @@ fn json_response(status: u16, body: &str, retry_after: Option<&str>) -> Response
         response = response.header("retry-after", retry_after);
     }
     response.body(replay::full(body.to_owned())).unwrap()
-}
-
-async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
-    let dir = tempfile::tempdir().unwrap();
-    let first = urls
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "https://fixture.example.invalid/v1".into());
-    std::fs::write(
-        dir.path().join("config.toml"),
-        format!(
-            "model_provider='custom'\n[model_providers.custom]\nbase_url = {}\nexperimental_bearer_token = \"fixture-token\"\nwire_api='responses'\nsupports_websockets=false\n",
-            serde_json::to_string(&first).unwrap()
-        ),
-    )
-    .unwrap();
-    let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let mut settings = gateway.view().settings;
-    settings.port = port;
-    update(&gateway, &dir, Edit::Settings { settings });
-    for url in urls {
-        update(
-            &gateway,
-            &dir,
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: url,
-                token: "fixture-token".into(),
-                name: None,
-            },
-        );
-    }
-    gateway
-        .edit(
-            Edit::Mode {
-                mode: "auto".into(),
-            },
-            &gateway.view().revision,
-            dir.path(),
-        )
-        .unwrap();
-    (dir, gateway)
 }
 
 async fn request(gateway: &Gateway, session: &str, body: Vec<u8>) -> Response<Incoming> {

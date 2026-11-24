@@ -1,7 +1,8 @@
 use super::{
     takeover::{self, Pair},
-    ClientId, Edit, Gateway,
+    ClientId, Gateway,
 };
+use crate::gateway::test_support::form;
 use crate::storage;
 use serde_json::{json, Value};
 use std::{fs, path::Path};
@@ -148,24 +149,7 @@ fn save_local(gateway: &Gateway, token: &str) {
 fn provider(gateway: &Gateway, home: &Path) {
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: BASE.into(),
-                token: UPSTREAM.into(),
-                name: None,
-            },
+            form(json!({"baseUrl": BASE, "token": UPSTREAM})),
             &gateway.view().revision,
             home,
         )

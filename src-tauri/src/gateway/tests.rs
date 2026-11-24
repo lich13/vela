@@ -2,6 +2,7 @@
 #[path = "failover_diagnostics_tests.rs"]
 mod failover_diagnostics_tests;
 use super::*;
+use crate::gateway::test_support::form;
 fn capacity_message(status: hyper::StatusCode, body: &[u8]) -> bool {
     failure_policy::decision(
         Some(status.as_u16()),
@@ -34,24 +35,11 @@ fn provider_secrets_never_appear_in_view() {
     let temp = tempfile::tempdir().unwrap();
     let g = Gateway::new(temp.path().to_path_buf()).unwrap();
     let update = |edit| g.edit(edit, &g.view().revision, temp.path()).unwrap();
-    update(Edit::SaveProvider {
-        delegate: Default::default(),
-        end_on_message_stop: None,
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: None,
-        upstream_retry_seconds: None,
-        normal_retry_seconds: None,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
-        quota_access_token: Some("fixture-account-access-token".into()),
-        id: None,
-        base_url: "https://example.test/custom/v1".into(),
-        token: "private-fixture-token".into(),
-        name: None,
-    });
+    update(form(serde_json::json!({
+        "baseUrl": "https://example.test/custom/v1",
+        "token": "private-fixture-token",
+        "quotaAccessToken": "fixture-account-access-token",
+    })));
     let json = serde_json::to_string(&g.view()).unwrap();
     assert!(!json.contains("private-fixture"));
     assert!(!json.contains("fixture-account-access-token"));
@@ -80,6 +68,7 @@ fn url_suffix_and_hop_headers() {
 }
 
 use super::replay::{full, WireBody};
+pub(super) use crate::gateway::test_support::loopback::serve as server;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, StreamBody};
@@ -90,38 +79,10 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use std::{
-    convert::Infallible,
     future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
-pub(super) async fn server<F, Fut>(handler: F) -> u16
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handler = Arc::new(handler);
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        TokioIo::new(stream),
-                        hyper::service::service_fn(move |req| {
-                            let handler = handler.clone();
-                            async move { Ok::<_, Infallible>(handler(req).await) }
-                        }),
-                    )
-                    .with_upgrades()
-                    .await;
-            });
-        }
-    });
-    port
-}
 async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
     let t = tempfile::tempdir().unwrap();
     let first = urls
@@ -149,24 +110,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
         update(
             &g,
             &t,
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: url,
-                token: "upstream-fixture-token".into(),
-                name: None,
-            },
+            form(serde_json::json!({"baseUrl": url, "token": "upstream-fixture-token"})),
         );
     }
     std::fs::write(t.path().join("auth.json"), "unchanged-auth").unwrap();
@@ -559,24 +503,11 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: Some(first.clone()),
-            base_url: format!("http://127.0.0.1:{closed_port}/v1"),
-            token: String::new(),
-            name: None,
-        },
+        form(serde_json::json!({
+            "id": first,
+            "baseUrl": format!("http://127.0.0.1:{closed_port}/v1"),
+            "token": "",
+        })),
     );
     let response = request(&g, "/v1/responses", vec![], vec![]).await;
     assert_eq!(response.status(), 200);
@@ -602,24 +533,11 @@ async fn streaming_first_byte_timeout_no_retry_and_cancel_releases_activity() {
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: Some(first),
-            base_url: format!("http://127.0.0.1:{never}"),
-            token: String::new(),
-            name: None,
-        },
+        form(serde_json::json!({
+            "id": first,
+            "baseUrl": format!("http://127.0.0.1:{never}"),
+            "token": "",
+        })),
     );
     let (mut response, sender, task) =
         request_with_reset(&g, "/v1/responses", vec![], vec![]).await;
@@ -862,24 +780,10 @@ async fn real_codex_cli_with_isolated_home() {
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: None,
-            base_url: private["baseUrl"].as_str().unwrap().into(),
-            token: private["token"].as_str().unwrap().into(),
-            name: None,
-        },
+        form(serde_json::json!({
+            "baseUrl": private["baseUrl"].as_str().unwrap(),
+            "token": private["token"].as_str().unwrap(),
+        })),
     );
     // A valid disposable auth file proves the CLI used the managed provider, never the real account.
     let auth = b"{\"auth_mode\":\"apikey\",\"OPENAI_API_KEY\":\"fixture-only\"}";
@@ -1350,24 +1254,11 @@ async fn quota_late_response_is_discarded_after_provider_edit() {
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: Some(id),
-            base_url: format!("http://127.0.0.1:{port}"),
-            token: "changed-key".into(),
-            name: None,
-        },
+        form(serde_json::json!({
+            "id": id,
+            "baseUrl": format!("http://127.0.0.1:{port}"),
+            "token": "changed-key",
+        })),
     );
     gate.notify_one();
     assert_eq!(
