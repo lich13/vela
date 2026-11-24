@@ -3,24 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ClientId, GatewayState } from "./types";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  confirmAction: vi.fn(async () => true),
-}));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).unfrozenBridge);
 
-vi.mock("./bridge", () => ({
-  command: (name: string, args: unknown) =>
-    name === "get_gateway_freeze"
-      ? Promise.resolve({
-          clients: ["codex", "claude", "grok", "dsh"].map((clientId) => ({
-            clientId,
-            frozen: false,
-          })),
-        })
-      : mock.command(name, args),
-  subscribe: vi.fn(async () => () => {}),
-}));
-vi.mock("./confirmation", () => ({ confirmAction: mock.confirmAction }));
+vi.mock("./confirmation", () => ({ confirmAction: mock.confirm }));
 
 import Gateway from "./Gateway";
 import { gatewayDemo, grokGatewayDemo } from "./gateway-preview";
@@ -33,7 +19,7 @@ beforeEach(() => {
   codex = { ...structuredClone(gatewayDemo), providers: [] };
   grok = { ...structuredClone(grokGatewayDemo), providers: [] };
   mock.command.mockReset();
-  mock.confirmAction.mockReset().mockResolvedValue(true);
+  mock.confirm.mockReset().mockResolvedValue(true);
   mock.command.mockImplementation(
     async (name: string, args?: { clientId?: ClientId }) => {
       const state = args?.clientId === "grok" ? grok : codex;

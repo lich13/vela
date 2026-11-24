@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
-const command = vi.hoisted(() => vi.fn());
-vi.mock("./bridge", () => ({ command }));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
+const { command } = mock;
 import { saveGatewayEdit } from "./gateway-edit";
 import { gatewayDemo } from "./gateway-preview";
 

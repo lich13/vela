@@ -2,8 +2,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { DshFileView } from "./bridge-contracts";
-const mock = vi.hoisted(() => ({ command: vi.fn(), confirm: vi.fn() }));
-vi.mock("./bridge", () => ({ command: mock.command }));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 vi.mock("./confirmation", () => ({ confirmAction: mock.confirm }));
 vi.mock("@uiw/react-codemirror", () => ({
   default: ({

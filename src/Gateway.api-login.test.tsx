@@ -3,28 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GatewayState } from "./types";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (state: GatewayState) => void>(),
-}));
-
-vi.mock("./bridge", () => ({
-  command: (name: string, args: unknown) =>
-    name === "get_gateway_freeze"
-      ? Promise.resolve({
-          clients: ["codex", "claude", "grok", "dsh"].map((clientId) => ({
-            clientId,
-            frozen: false,
-          })),
-        })
-      : mock.command(name, args),
-  subscribe: vi.fn(
-    async (name: string, listener: (state: GatewayState) => void) => {
-      mock.listeners.set(name, listener);
-      return () => mock.listeners.delete(name);
-    },
-  ),
-}));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).unfrozenBridge);
 
 import Gateway from "./Gateway";
 import { claudeGatewayDemo, gatewayDemo } from "./gateway-preview";

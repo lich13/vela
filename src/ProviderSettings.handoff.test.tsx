@@ -3,8 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ModelCatalog } from "./types";
 
-const mock = vi.hoisted(() => ({ command: vi.fn() }));
-vi.mock("./bridge", () => ({ command: mock.command }));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import ProviderSettings from "./ProviderSettings";
 import { gatewayDemo } from "./gateway-preview";

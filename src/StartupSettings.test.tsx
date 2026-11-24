@@ -1,8 +1,9 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const command = vi.hoisted(() => vi.fn());
-vi.mock("./bridge", () => ({ command }));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
+const { command } = mock;
 import StartupSettings from "./StartupSettings";
 const initial = {
   launchOnBoot: false,

@@ -21,19 +21,8 @@ import type {
   UsageState,
 } from "./usage-types";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  confirm: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
-}));
-vi.mock("./bridge", () => ({
-  preview: false,
-  command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (value: unknown) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
-}));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 vi.mock("./confirmation", () => ({ confirmAction: mock.confirm }));
 
 import Usage from "./Usage";
@@ -289,27 +278,6 @@ async function renderUsage() {
     expect(screen.getByRole("button", { name: "刷新用量" })).toBeEnabled();
   });
   return view;
-}
-
-const rangeLabels: Record<string, string> = {
-  today: "今日",
-  "1": "最近 24 小时",
-  "7": "7 天",
-  "14": "14 天",
-  "30": "30 天",
-  all: "全部",
-  custom: "自定义",
-};
-
-async function chooseRange(value: string) {
-  await userEvent.click(screen.getByRole("button", { name: "用量时间范围" }));
-  const dialog = screen.getByRole("dialog", { name: "选择时间范围" });
-  await userEvent.click(
-    within(dialog).getByRole("button", { name: rangeLabels[value] ?? value }),
-  );
-  if (value === "custom") {
-    await userEvent.click(within(dialog).getByRole("button", { name: "确定" }));
-  }
 }
 
 async function openBilling() {

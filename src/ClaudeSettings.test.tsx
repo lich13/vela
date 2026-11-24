@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { expect, it, vi } from "vitest";
-vi.mock("./bridge", () => ({ command: vi.fn() }));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 import ClaudeSettings from "./ClaudeSettings";
 
 let draft = "";

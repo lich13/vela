@@ -10,17 +10,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { GatewayFreeze } from "./bridge-contracts";
 import { clients } from "./ClientSelection";
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (v: unknown) => void>(),
-}));
-vi.mock("./bridge", () => ({
-  command: mock.command,
-  subscribe: async (name: string, fn: (v: unknown) => void) => {
-    mock.listeners.set(name, fn);
-    return () => mock.listeners.delete(name);
-  },
-}));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 import FreezePanel from "./FreezePanel";
 const status = {
   frozen: false,

@@ -4,17 +4,8 @@ import { useState } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { gatewayDemo } from "./gateway-preview";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, () => void>(),
-}));
-vi.mock("./bridge", () => ({
-  command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: () => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
-}));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 import ProviderImports from "./ProviderImports";
 import type { PendingImport } from "./bridge-contracts";
 const queued = (p: typeof first): PendingImport => ({

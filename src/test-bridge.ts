@@ -1,9 +1,11 @@
 import { vi } from "vitest";
 
-/** What a test drives: the `command` stub and the listeners the page registered. */
+/** What a test drives: the stubs and the listeners the page registered. */
 export const mock = {
   command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
+  /** For `vi.mock("./confirmation", () => ({ confirmAction: mock.confirm }))`. */
+  confirm: vi.fn(),
+  listeners: new Map<string, (value?: unknown) => void>(),
 };
 
 /**
@@ -17,4 +19,18 @@ export const bridge = {
     mock.listeners.set(name, listener);
     return () => mock.listeners.delete(name);
   }),
+};
+
+/** `bridge` for pages that also read the freeze state: no client is frozen. */
+export const unfrozenBridge = {
+  ...bridge,
+  command: (name: string, args: unknown) =>
+    name === "get_gateway_freeze"
+      ? Promise.resolve({
+          clients: ["codex", "claude", "grok", "dsh"].map((clientId) => ({
+            clientId,
+            frozen: false,
+          })),
+        })
+      : mock.command(name, args),
 };

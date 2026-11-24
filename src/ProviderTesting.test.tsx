@@ -10,19 +10,8 @@ import type {
   ProviderTestModels,
   ProviderTestError,
 } from "./bridge-contracts";
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value?: unknown) => void>(),
-}));
-vi.mock("./bridge", () => ({
-  command: mock.command,
-  subscribe: vi.fn(
-    async (event: string, callback: (value?: unknown) => void) => {
-      mock.listeners.set(event, callback);
-      return () => mock.listeners.delete(event);
-    },
-  ),
-}));
+import { mock } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 import ProviderTesting from "./ProviderTesting";
 let gateway: typeof gatewayDemo;
 let states: Record<string, ProviderTestingState>;

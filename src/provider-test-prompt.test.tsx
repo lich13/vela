@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ command: vi.fn(), confirm: vi.fn() }));
-vi.mock("./bridge", () => ({ command: mocks.command }));
+import { mock as mocks } from "./test-bridge";
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 vi.mock("./confirmation", () => ({ confirmAction: mocks.confirm }));
 import { flushTestPrompt, useTestPrompt } from "./provider-test-prompt";
 afterEach(() => {

@@ -6,10 +6,7 @@ import { command } from "./bridge";
 import { claudeGatewayDemo } from "./gateway-preview";
 import type { Provider } from "./types";
 
-vi.mock("./bridge", () => ({
-  command: vi.fn(),
-  subscribe: vi.fn(async () => () => {}),
-}));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 describe("Claude provider message_stop setting", () => {
   it.each([undefined, false, true])(
