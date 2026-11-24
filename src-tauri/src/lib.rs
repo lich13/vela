@@ -22,6 +22,10 @@ mod exchange_template;
 #[cfg(test)]
 mod exchange_template_tests;
 mod gateway;
+// Unused until the instance commands are registered.
+#[cfg(feature = "desktop")]
+#[allow(dead_code)]
+mod instances;
 #[cfg(feature = "desktop")]
 mod links;
 mod login;

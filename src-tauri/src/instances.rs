@@ -1,0 +1,648 @@
+//! Which Vela the pages show and operate: this machine, or a server reached
+//! over SSH. Keeps the list of servers in `instances.json`, the channel to
+//! the selected one and what the windows are told about both.
+use crate::{
+    errors::code,
+    remote::{self, Channel, Dialer, Listener, Target},
+    storage::{self, AppError, Result},
+    wire::Capabilities,
+};
+use parking_lot::{Mutex, MutexGuard};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Weak},
+};
+
+/// The instance that is this machine; every other one is a machine id.
+pub(crate) const LOCAL: &str = "local";
+const FILE: &str = "instances.json";
+const NAME_LIMIT: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Machine {
+    pub id: String,
+    pub name: String,
+    pub ssh_host: String,
+    pub fallback_host: Option<String>,
+    pub use_sudo: bool,
+}
+
+impl Machine {
+    fn target(&self) -> Target {
+        Target {
+            host: self.ssh_host.clone(),
+            fallback: self.fallback_host.clone(),
+            sudo: self.use_sudo,
+        }
+    }
+}
+
+/// A machine as the manage dialog saves it; without an id it is a new one.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MachineInput {
+    pub id: Option<String>,
+    pub name: String,
+    pub ssh_host: String,
+    pub fallback_host: Option<String>,
+    pub use_sudo: bool,
+}
+
+/// The file. Without one there is only this machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Stored {
+    active: String,
+    machines: Vec<Machine>,
+}
+
+impl Stored {
+    fn machine(&self, id: &str) -> Option<&Machine> {
+        self.machines.iter().find(|machine| machine.id == id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Status {
+    Local,
+    Connecting,
+    Connected,
+    Offline,
+}
+
+/// The connection to the selected instance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct Connection {
+    pub status: Status,
+    /// The server's version, as last heard.
+    pub version: Option<String>,
+    pub error: Option<String>,
+    /// Shared commands of this app that the server does not answer.
+    pub unsupported: Vec<String>,
+}
+
+impl Connection {
+    fn new(status: Status) -> Self {
+        Self {
+            status,
+            version: None,
+            error: None,
+            unsupported: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct InstanceState {
+    pub revision: String,
+    pub active: String,
+    pub machines: Vec<Machine>,
+    pub connection: Connection,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct Tested {
+    pub version: String,
+}
+
+/// A shared event of a server, as the windows receive it.
+#[derive(Debug, Serialize)]
+pub(crate) struct RemoteEvent<'a> {
+    pub instance: &'a str,
+    pub event: &'a str,
+    pub payload: &'a Value,
+}
+
+/// Where the service tells the windows what changed. Called while the service
+/// holds its state, so it must not call back into it.
+pub(crate) trait Sink: Send + Sync + 'static {
+    /// Goes out as `instance-state`.
+    fn state(&self, state: &InstanceState);
+    /// Goes out as `remote-event`.
+    fn remote(&self, event: &RemoteEvent<'_>);
+}
+
+impl Sink for tauri::AppHandle {
+    fn state(&self, state: &InstanceState) {
+        let _ = tauri::Emitter::emit(self, "instance-state", state);
+    }
+    fn remote(&self, event: &RemoteEvent<'_>) {
+        let _ = tauri::Emitter::emit(self, "remote-event", event);
+    }
+}
+
+struct Inner {
+    /// Whether `stored` is what the file says. A file that cannot be read is
+    /// tried again by the next command.
+    read: bool,
+    stored: Stored,
+    revision: String,
+    connection: Connection,
+    /// The channel to the selected server and the number that tells it from
+    /// every earlier one. There is one exactly while a server is selected.
+    channel: Option<(u64, Arc<Channel>)>,
+    channels: u64,
+}
+
+impl Inner {
+    fn view(&self) -> InstanceState {
+        InstanceState {
+            revision: self.revision.clone(),
+            active: self.stored.active.clone(),
+            machines: self.stored.machines.clone(),
+            connection: self.connection.clone(),
+        }
+    }
+
+    fn check(&self, revision: &str) -> Result<()> {
+        if self.revision == revision {
+            Ok(())
+        } else {
+            Err(AppError::new(code::CONFLICT, "实例列表已更新，请重试"))
+        }
+    }
+}
+
+pub(crate) struct Service {
+    me: Weak<Service>,
+    data: PathBuf,
+    /// The shared commands of this app.
+    local: &'static [&'static str],
+    dialer: Dialer,
+    sink: Arc<dyn Sink>,
+    inner: Mutex<Inner>,
+    /// One change of the list or the selection at a time.
+    changing: tokio::sync::Mutex<()>,
+}
+
+/// What the selected server's channel reports. A channel that is no longer
+/// the selected one is not listened to.
+struct Watch {
+    service: Weak<Service>,
+    machine: String,
+    number: u64,
+}
+
+impl Listener for Watch {
+    fn event(&self, event: String, payload: Value) {
+        let Some(service) = self.service.upgrade() else {
+            return;
+        };
+        let inner = service.inner.lock();
+        if matches!(&inner.channel, Some((number, _)) if *number == self.number) {
+            service.sink.remote(&RemoteEvent {
+                instance: &self.machine,
+                event: &event,
+                payload: &payload,
+            });
+        }
+    }
+
+    fn connected(&self, capabilities: &Capabilities) {
+        let Some(service) = self.service.upgrade() else {
+            return;
+        };
+        let mut inner = service.inner.lock();
+        if matches!(&inner.channel, Some((number, _)) if *number == self.number) {
+            let connection = service.connected(capabilities);
+            service.show(&mut inner, connection);
+        }
+    }
+
+    fn offline(&self, error: &AppError) {
+        if let Some(service) = self.service.upgrade() {
+            service.lost(self.number, error);
+        }
+    }
+}
+
+impl Service {
+    /// Reads nothing and starts nothing until `start` or the first command.
+    pub(crate) fn new(
+        data: PathBuf,
+        local: &'static [&'static str],
+        dialer: Dialer,
+        sink: Arc<dyn Sink>,
+    ) -> Arc<Self> {
+        Arc::new_cyclic(|me| Self {
+            me: me.clone(),
+            data,
+            local,
+            dialer,
+            sink,
+            inner: Mutex::new(Inner {
+                read: false,
+                stored: Stored {
+                    active: LOCAL.into(),
+                    machines: Vec::new(),
+                },
+                revision: storage::revision(None),
+                connection: Connection::new(Status::Local),
+                channel: None,
+                channels: 0,
+            }),
+            changing: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    /// Reads the file and, when it selects a server, connects to it in the
+    /// background. Needs the tokio runtime. A file that cannot be read is
+    /// reported by the commands, which read it again.
+    pub(crate) fn start(&self) {
+        drop(self.loaded());
+    }
+
+    pub(crate) fn state(&self) -> Result<InstanceState> {
+        Ok(self.loaded()?.view())
+    }
+
+    /// Adds a machine or changes one. A new address for the selected server
+    /// ends its connection; the next call or a retry connects again.
+    pub(crate) async fn save(&self, expected: &str, input: MachineInput) -> Result<InstanceState> {
+        let _changing = self.changing.lock().await;
+        let mut inner = self.loaded()?;
+        inner.check(expected)?;
+        let name = input.name.trim();
+        if name.is_empty() || name.chars().count() > NAME_LIMIT {
+            return Err(AppError::new(code::NAME, "名称需为 1–64 个字符"));
+        }
+        remote::check_alias(&input.ssh_host)?;
+        if let Some(fallback) = &input.fallback_host {
+            remote::check_alias(fallback)?;
+        }
+        let machine = Machine {
+            id: input
+                .id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            name: name.to_string(),
+            ssh_host: input.ssh_host,
+            fallback_host: input.fallback_host,
+            use_sudo: input.use_sudo,
+        };
+        let mut stored = inner.stored.clone();
+        let moved = match &input.id {
+            None => {
+                stored.machines.push(machine.clone());
+                false
+            }
+            Some(id) => {
+                let known = stored
+                    .machines
+                    .iter_mut()
+                    .find(|known| known.id == *id)
+                    .ok_or_else(missing)?;
+                let moved = known.target() != machine.target();
+                *known = machine.clone();
+                moved && stored.active == *id
+            }
+        };
+        self.write(&mut inner, stored)?;
+        if moved {
+            self.open(&mut inner, &machine);
+            inner.connection = Connection {
+                error: Some("连接设置已修改，请重新连接".into()),
+                ..Connection::new(Status::Offline)
+            };
+        }
+        self.sink.state(&inner.view());
+        Ok(inner.view())
+    }
+
+    /// Removes a machine. Without the selected one, this machine is selected.
+    pub(crate) async fn delete(&self, expected: &str, id: &str) -> Result<InstanceState> {
+        let _changing = self.changing.lock().await;
+        let mut inner = self.loaded()?;
+        inner.check(expected)?;
+        let mut stored = inner.stored.clone();
+        if stored.machine(id).is_none() {
+            return Err(missing());
+        }
+        stored.machines.retain(|machine| machine.id != id);
+        let selected = stored.active == id;
+        if selected {
+            stored.active = LOCAL.into();
+        }
+        self.write(&mut inner, stored)?;
+        if selected {
+            self.leave(&mut inner);
+        }
+        self.sink.state(&inner.view());
+        Ok(inner.view())
+    }
+
+    /// Selects this machine at once and a server only after it answered the
+    /// handshake; until then, and when it does not, the selection stays what
+    /// it was. Selecting the selected server again connects to it again.
+    pub(crate) async fn select(&self, expected: &str, id: &str) -> Result<InstanceState> {
+        let _changing = self.changing.lock().await;
+        let (number, channel, selected) = {
+            let mut inner = self.loaded()?;
+            inner.check(expected)?;
+            if id == LOCAL {
+                if inner.stored.active != LOCAL {
+                    let stored = Stored {
+                        active: LOCAL.into(),
+                        machines: inner.stored.machines.clone(),
+                    };
+                    self.write(&mut inner, stored)?;
+                    self.leave(&mut inner);
+                    self.sink.state(&inner.view());
+                }
+                return Ok(inner.view());
+            }
+            let machine = inner.stored.machine(id).cloned().ok_or_else(missing)?;
+            if inner.stored.active != id {
+                // Not the selected channel yet: the one in use stays in use.
+                let (number, channel) = self.channel(&mut inner, &machine);
+                (number, channel, false)
+            } else {
+                let (number, channel) = match inner.channel.clone() {
+                    Some(current) => current,
+                    None => self.open(&mut inner, &machine),
+                };
+                if channel.is_open() {
+                    return Ok(inner.view());
+                }
+                let connection = Connection {
+                    status: Status::Connecting,
+                    error: None,
+                    ..inner.connection.clone()
+                };
+                self.show(&mut inner, connection);
+                (number, channel, true)
+            }
+        };
+        let capabilities = match channel.connect().await {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                if selected {
+                    self.lost(number, &error);
+                }
+                return Err(error);
+            }
+        };
+        let mut inner = self.inner.lock();
+        if !selected {
+            let stored = Stored {
+                active: id.into(),
+                machines: inner.stored.machines.clone(),
+            };
+            if let Err(error) = self.write(&mut inner, stored) {
+                channel.close();
+                return Err(error);
+            }
+            if let Some((_, former)) = inner.channel.replace((number, channel.clone())) {
+                former.close();
+            }
+            inner.connection = if channel.is_open() {
+                self.connected(&capabilities)
+            } else {
+                // It ended before anyone listened to it.
+                Connection {
+                    error: Some("连接已断开，请重试".into()),
+                    ..Connection::new(Status::Offline)
+                }
+            };
+            self.sink.state(&inner.view());
+        }
+        Ok(inner.view())
+    }
+
+    /// Whether a server answers at an address, on a channel of its own.
+    pub(crate) async fn test(&self, target: Target) -> Result<Tested> {
+        let channel = Channel::new(target, self.dialer.clone(), Arc::new(remote::Silent));
+        let capabilities = channel.connect().await;
+        channel.close();
+        Ok(Tested {
+            version: capabilities?.version,
+        })
+    }
+
+    /// Runs a shared command on the selected server and answers what the
+    /// server answered, its errors included. `instance` is the one the caller
+    /// believes is selected.
+    pub(crate) async fn call(&self, instance: &str, name: &str, args: Value) -> Result<Value> {
+        let unsupported = || {
+            AppError::new(
+                code::UNSUPPORTED,
+                "服务器版本不支持此操作，请升级服务器上的 Vela",
+            )
+        };
+        let (number, channel) = {
+            let inner = self.loaded()?;
+            let switched = || AppError::new(code::STALE, "实例已切换，请重试");
+            if instance == LOCAL || inner.stored.active != instance {
+                return Err(switched());
+            }
+            if inner
+                .connection
+                .unsupported
+                .iter()
+                .any(|known| known == name)
+            {
+                return Err(unsupported());
+            }
+            inner.channel.clone().ok_or_else(switched)?
+        };
+        // An offline channel connects here, once, before anything is sent.
+        let capabilities = match channel.connect().await {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                self.lost(number, &error);
+                return Err(error);
+            }
+        };
+        if self.local.contains(&name) && !capabilities.commands.iter().any(|known| known == name) {
+            return Err(unsupported());
+        }
+        channel.call(name, args).await
+    }
+
+    /// The state, read from the file the first time. A file that selects a
+    /// server starts the connection to it.
+    fn loaded(&self) -> Result<MutexGuard<'_, Inner>> {
+        let mut inner = self.inner.lock();
+        if !inner.read {
+            let bytes = storage::read_optional(&self.data.join(FILE))?;
+            if let Some(bytes) = &bytes {
+                let damaged = || {
+                    AppError::new(
+                        code::SETTINGS,
+                        "实例配置 instances.json 已损坏，请修复或删除该文件后重试",
+                    )
+                };
+                let stored: Stored = serde_json::from_slice(bytes).map_err(|_| damaged())?;
+                if stored.active != LOCAL && stored.machine(&stored.active).is_none() {
+                    return Err(damaged());
+                }
+                inner.stored = stored;
+            }
+            inner.revision = storage::revision(bytes.as_deref());
+            inner.read = true;
+            let active = inner.stored.active.clone();
+            if let Some(machine) = inner.stored.machine(&active).cloned() {
+                let (number, channel) = self.open(&mut inner, &machine);
+                inner.connection = Connection::new(Status::Connecting);
+                let service = self.me.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = channel.connect().await {
+                        if let Some(service) = service.upgrade() {
+                            service.lost(number, &error);
+                        }
+                    }
+                });
+            }
+            self.sink.state(&inner.view());
+        }
+        Ok(inner)
+    }
+
+    /// Writes the list and only then takes it for the current one.
+    fn write(&self, inner: &mut Inner, stored: Stored) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(&stored)
+            .map_err(|_| AppError::new(code::JSON, "实例配置无法保存"))?;
+        storage::atomic_write(&self.data.join(FILE), &bytes, None)?;
+        inner.revision = storage::digest(&bytes);
+        inner.stored = stored;
+        Ok(())
+    }
+
+    /// A channel to `machine` that nothing listens to until it is selected.
+    fn channel(&self, inner: &mut Inner, machine: &Machine) -> (u64, Arc<Channel>) {
+        inner.channels += 1;
+        let watch = Watch {
+            service: self.me.clone(),
+            machine: machine.id.clone(),
+            number: inner.channels,
+        };
+        let channel = Channel::new(machine.target(), self.dialer.clone(), Arc::new(watch));
+        (inner.channels, Arc::new(channel))
+    }
+
+    /// Replaces the selected channel with a new one to `machine`, not yet
+    /// connected.
+    fn open(&self, inner: &mut Inner, machine: &Machine) -> (u64, Arc<Channel>) {
+        let opened = self.channel(inner, machine);
+        if let Some((_, former)) = inner.channel.replace(opened.clone()) {
+            former.close();
+        }
+        opened
+    }
+
+    /// Back to this machine.
+    fn leave(&self, inner: &mut Inner) {
+        if let Some((_, former)) = inner.channel.take() {
+            former.close();
+        }
+        inner.connection = Connection::new(Status::Local);
+    }
+
+    fn connected(&self, capabilities: &Capabilities) -> Connection {
+        Connection {
+            status: Status::Connected,
+            version: Some(capabilities.version.clone()),
+            error: None,
+            unsupported: self
+                .local
+                .iter()
+                .filter(|name| !capabilities.commands.iter().any(|known| known == *name))
+                .map(|name| name.to_string())
+                .collect(),
+        }
+    }
+
+    /// The selected channel `number` has no connection, because of `error`.
+    fn lost(&self, number: u64, error: &AppError) {
+        let mut inner = self.inner.lock();
+        // A later connection of the same channel may already be up.
+        if !matches!(&inner.channel, Some((current, channel)) if *current == number && !channel.is_open())
+        {
+            return;
+        }
+        let connection = Connection {
+            status: Status::Offline,
+            error: Some(error.message.clone()),
+            ..inner.connection.clone()
+        };
+        self.show(&mut inner, connection);
+    }
+
+    /// Takes a connection state and tells the windows when it is a new one.
+    fn show(&self, inner: &mut Inner, connection: Connection) {
+        if inner.connection != connection {
+            inner.connection = connection;
+            self.sink.state(&inner.view());
+        }
+    }
+}
+
+fn missing() -> AppError {
+    AppError::new(code::MISSING, "实例不存在，请刷新后重试")
+}
+
+#[tauri::command]
+pub(crate) async fn get_instances(
+    service: tauri::State<'_, Arc<Service>>,
+) -> Result<InstanceState> {
+    service.state()
+}
+
+#[tauri::command]
+pub(crate) async fn save_instance(
+    service: tauri::State<'_, Arc<Service>>,
+    expected_revision: String,
+    machine: MachineInput,
+) -> Result<InstanceState> {
+    service.save(&expected_revision, machine).await
+}
+
+#[tauri::command]
+pub(crate) async fn delete_instance(
+    service: tauri::State<'_, Arc<Service>>,
+    expected_revision: String,
+    id: String,
+) -> Result<InstanceState> {
+    service.delete(&expected_revision, &id).await
+}
+
+#[tauri::command]
+pub(crate) async fn select_instance(
+    service: tauri::State<'_, Arc<Service>>,
+    expected_revision: String,
+    id: String,
+) -> Result<InstanceState> {
+    service.select(&expected_revision, &id).await
+}
+
+#[tauri::command]
+pub(crate) async fn test_instance(
+    service: tauri::State<'_, Arc<Service>>,
+    ssh_host: String,
+    fallback_host: Option<String>,
+    use_sudo: bool,
+) -> Result<Tested> {
+    let target = Target {
+        host: ssh_host,
+        fallback: fallback_host,
+        sudo: use_sudo,
+    };
+    service.test(target).await
+}
+
+#[tauri::command]
+pub(crate) async fn remote_call(
+    service: tauri::State<'_, Arc<Service>>,
+    instance: String,
+    name: String,
+    args: Value,
+) -> Result<Value> {
+    service.call(&instance, &name, args).await
+}
+
+#[cfg(test)]
+#[path = "instances_tests.rs"]
+mod tests;
