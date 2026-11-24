@@ -8,6 +8,7 @@ import {
   quotaBasisLabel,
   type QuotaCheck,
 } from "./limit-labels";
+import { date } from "./usage-format";
 import type { RoutingDetails } from "./usage-types";
 import {
   routingReason,
@@ -178,15 +179,7 @@ const client = (id: ClientId | ExternalClient | null) =>
               ? "Grok Build"
               : "应用";
 
-const time = (seconds: number) =>
-  new Date(seconds * 1000).toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
+const time = (seconds: number) => date(seconds * 1000);
 
 function displayName(name: string, id: string) {
   return name.length <= 120 &&

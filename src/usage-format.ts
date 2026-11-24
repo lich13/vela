@@ -19,6 +19,8 @@ export const preciseDate = (n: number) =>
     fractionalSecondDigits: 3,
     hour12: false,
   });
+export const seconds = (ms: number, digits: 2 | 3) =>
+  `${(ms / 1000).toFixed(digits)}s`;
 // 1024 to a step, one decimal from KB up: 718.6 KB.
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
