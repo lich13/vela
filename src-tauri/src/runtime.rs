@@ -669,20 +669,38 @@ impl Runtime {
             }
         });
         let runtime = Arc::downgrade(self);
+        let mut announced = self.usage.subscribe();
         tokio::spawn(async move {
+            let mut maintained: Option<tokio::time::Instant> = None;
             loop {
                 let Some(runtime) = runtime.upgrade() else {
                     break;
                 };
-                if runtime.usage.settings().auto_sync {
+                // What a gateway recorded since the last round, or the user
+                // had done. A failed tidying is announced too, and so tried
+                // again.
+                let mut written = take_announced(&mut announced);
+                let reading = runtime.usage.settings().auto_sync;
+                if reading {
                     let roots = runtime.usage_roots();
                     let usage = runtime.usage.clone();
                     let _ =
                         tokio::task::spawn_blocking(move || usage.sync_roots(roots, None)).await;
+                    // A reading announces itself whether or not it found
+                    // anything, so its reports are asked instead.
+                    take_announced(&mut announced);
                 }
-                let maintenance = runtime.usage.clone();
-                let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
+                let usage = runtime.usage.state();
+                written |= reading && usage.reports.values().any(|report| report.imported > 0);
                 let attentive = runtime.sink.attentive();
+                if maintenance_due(
+                    attentive || written || usage.maintenance.is_some(),
+                    maintained.map(|at| at.elapsed()),
+                ) {
+                    maintained = Some(tokio::time::Instant::now());
+                    let maintenance = runtime.usage.clone();
+                    let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
+                }
                 drop(runtime);
                 wait_next_usage_scan(attentive, UNWATCHED_USAGE_SCAN_INTERVAL, &watched).await;
             }
@@ -894,6 +912,27 @@ pub(crate) async fn wait_next_usage_scan(
     tokio::time::sleep_until(watched_next).await;
 }
 
+/// How long the usage store goes untidied while nothing calls for it. Records
+/// grow old with nothing written: after a week their details are put away,
+/// and after a month they join the totals of their day.
+pub(crate) const UNCALLED_MAINTENANCE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(3600);
+
+/// Whether the usage store is tidied this round. Something calls for it when
+/// someone is watching, when records were written, or when the last tidying
+/// left work it could not finish; `since_last` is how long ago that was.
+pub(crate) fn maintenance_due(called_for: bool, since_last: Option<std::time::Duration>) -> bool {
+    called_for || since_last.is_none_or(|rested| rested >= UNCALLED_MAINTENANCE_INTERVAL)
+}
+
+/// Forgets what `events` announced so far and tells whether there was any of
+/// it.
+pub(crate) fn take_announced(events: &mut tokio::sync::broadcast::Receiver<()>) -> bool {
+    let any = !events.is_empty();
+    coalesce_gateway_events(events);
+    any
+}
+
 pub(crate) const fn should_poll_editor_configs(
     has_visible_windows: bool,
     background_active: bool,
@@ -1006,7 +1045,7 @@ mod gateway_broadcast_tests {
 }
 
 #[cfg(test)]
-mod unwatched_tests {
+mod idle_tests {
     use super::*;
     use std::time::Duration;
 
@@ -1075,6 +1114,36 @@ mod unwatched_tests {
         tokio::time::advance(REST - MOMENT).await;
         assert!(!ended(&wait).await);
         wait.abort();
+    }
+
+    #[test]
+    fn the_usage_store_is_tidied_when_called_for_and_otherwise_once_an_hour() {
+        let hour = UNCALLED_MAINTENANCE_INTERVAL;
+        // A run begins with it.
+        assert!(maintenance_due(false, None));
+        assert!(!maintenance_due(false, Some(Duration::ZERO)));
+        assert!(!maintenance_due(false, Some(hour - MOMENT)));
+        assert!(maintenance_due(false, Some(hour)));
+        assert!(maintenance_due(true, Some(Duration::ZERO)));
+    }
+
+    #[test]
+    fn what_was_announced_is_taken_once() {
+        let (announce, mut announced) = tokio::sync::broadcast::channel(4);
+        assert!(!take_announced(&mut announced));
+        announce.send(()).unwrap();
+        announce.send(()).unwrap();
+        assert!(take_announced(&mut announced));
+        assert!(!take_announced(&mut announced));
+
+        // More than the channel holds is still something, and is all taken.
+        for _ in 0..16 {
+            announce.send(()).unwrap();
+        }
+        assert!(take_announced(&mut announced));
+        assert!(!take_announced(&mut announced));
+        announce.send(()).unwrap();
+        assert!(take_announced(&mut announced));
     }
 }
 
