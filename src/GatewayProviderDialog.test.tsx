@@ -359,9 +359,15 @@ describe("request takeover", () => {
 
   it("loads a saved takeover, suggests the provider's models and clears a model with an empty value", async () => {
     const user = userEvent.setup();
-    vi.mocked(command).mockResolvedValue({
-      models: ["fixture-large", "fixture-small"],
-    } as never);
+    // The saved list is shown first and replaced by the provider's current one.
+    vi.mocked(command).mockImplementation((async (
+      _name: string,
+      args?: { force?: boolean },
+    ) => ({
+      models: args?.force
+        ? ["fixture-large", "fixture-small"]
+        : ["fixture-retired"],
+    })) as never);
     const save = open("codex", {
       takeCompaction: true,
       compactionModel: "fixture-compact",
@@ -390,10 +396,20 @@ describe("request takeover", () => {
       providerId: claudeGatewayDemo.providers[0].id,
       force: false,
     });
-    const suggestions = document.getElementById(model.getAttribute("list")!)!;
-    expect(
-      [...suggestions.querySelectorAll("option")].map((option) => option.value),
-    ).toEqual(["fixture-large", "fixture-small"]);
+    expect(command).toHaveBeenCalledWith("list_provider_models", {
+      clientId: "codex",
+      providerId: claudeGatewayDemo.providers[0].id,
+      force: true,
+    });
+    await waitFor(() =>
+      expect(
+        [
+          ...document
+            .getElementById(model.getAttribute("list")!)!
+            .querySelectorAll("option"),
+        ].map((option) => option.value),
+      ).toEqual(["fixture-large", "fixture-small"]),
+    );
 
     await user.clear(model);
     await user.selectOptions(effort, "");

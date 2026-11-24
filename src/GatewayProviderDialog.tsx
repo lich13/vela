@@ -255,15 +255,19 @@ function ProviderApiForm({
     if (!providerId || !suggesting) return;
     let gone = false;
     void (async () => {
-      try {
-        const catalog = await command("list_provider_models", {
-          clientId,
-          providerId,
-          force: false,
-        });
-        if (!gone) setModels(catalog.models);
-      } catch {
-        // Suggestions only: the model stays typeable without them.
+      // The saved list shows at once; the provider's current one replaces it.
+      for (const force of [false, true]) {
+        try {
+          const catalog = await command("list_provider_models", {
+            clientId,
+            providerId,
+            force,
+          });
+          if (gone) return;
+          setModels(catalog.models);
+        } catch {
+          // Suggestions only: the model stays typeable without them.
+        }
       }
     })();
     return () => {
