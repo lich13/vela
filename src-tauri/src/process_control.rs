@@ -70,8 +70,10 @@ fn is_zero(value: &usize) -> bool {
 pub enum Target {
     Codex,
     Claude,
-    /// Antigravity's terminal client. The interface never names it.
+    /// Antigravity's terminal client. The interface never names it, and only
+    /// the macOS account switch asks for it.
     #[serde(skip)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Agy,
 }
 fn root(entry: &Entry, target: Target) -> bool {
