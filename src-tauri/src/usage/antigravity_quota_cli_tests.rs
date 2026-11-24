@@ -188,8 +188,8 @@ async fn an_answer_is_reused_for_a_minute_by_the_same_account() {
     assert_eq!(agy.usage_runs(), 3);
 }
 
-#[tokio::test]
-async fn a_timeout_is_reported_and_asked_again_next_time() {
+#[tokio::test(start_paused = true)]
+async fn a_timeout_is_reported_for_a_minute_and_then_asked_again() {
     let silent = Output {
         code: None,
         stdout: String::new(),
@@ -200,6 +200,11 @@ async fn a_timeout_is_reported_and_asked_again_next_time() {
     let session = session();
     let error = agy.quota(&session, "account-a").await.unwrap_err();
     assert!(error.message.contains("超时"), "{}", error.message);
+    tokio::time::advance(Duration::from_secs(59)).await;
+    let kept = agy.quota(&session, "account-a").await.unwrap_err();
+    assert_eq!(kept.message, error.message);
+    assert_eq!(agy.usage_runs(), 1, "a hung agy is not waited for again");
+    tokio::time::advance(Duration::from_secs(1)).await;
     assert_eq!(agy.quota(&session, "account-a").await.unwrap().len(), 4);
 }
 
@@ -223,10 +228,14 @@ async fn failures_are_named_without_addresses_or_tokens() {
             printed("not json\n"),
         ],
     );
-    let session = session();
     let mut messages = Vec::new();
     for _ in 0..4 {
-        messages.push(agy.quota(&session, "account-a").await.unwrap_err().message);
+        messages.push(
+            agy.quota(&session(), "account-a")
+                .await
+                .unwrap_err()
+                .message,
+        );
     }
     assert!(messages[0].contains("限流"), "{}", messages[0]);
     assert!(messages[1].contains("限流"), "{}", messages[1]);

@@ -25,7 +25,8 @@ const USAGE: &[&str] = &[
 ];
 const VERSION_LIMIT: Duration = Duration::from_secs(5);
 const USAGE_LIMIT: Duration = Duration::from_secs(30);
-/// Every usage statistics query asks for the quota.
+/// Every usage statistics query asks for the quota. A failure is kept as long
+/// as an answer, so a hung `agy` is not waited for by each of them.
 const FRESH: Duration = Duration::from_secs(60);
 const OUTPUT_LIMIT: u64 = 512 * 1024;
 const LOGIN_PROMPT: &str = "Authentication required. Please visit the URL";
@@ -60,7 +61,7 @@ impl Refusal {
 /// Kept for as long as Vela runs; nothing of it is written to disk.
 pub(super) struct Session {
     refused: Option<(String, Refusal)>,
-    fresh: Option<(String, Instant, Periods)>,
+    fresh: Option<(String, Instant, Result<Periods>)>,
 }
 impl Session {
     const fn new() -> Self {
@@ -100,33 +101,33 @@ where
     if let Some((_, refusal)) = &session.refused {
         return Err(refusal.error());
     }
-    if let Some((id, at, periods)) = &session.fresh {
+    if let Some((id, at, answer)) = &session.fresh {
         if id == account && at.elapsed() < FRESH {
-            return Ok(periods.clone());
+            return answer.clone();
         }
     }
-    let version = run(VERSION, VERSION_LIMIT).await?;
-    if version.timed_out {
-        return Err(timed_out());
-    }
-    if !supported(&version.stdout) && !supported(&version.stderr) {
-        return Err(failure(
-            "agy 版本过旧，升级到 1.1.11 或更高版本后才能读取额度",
-        ));
-    }
-    let output = run(USAGE, USAGE_LIMIT).await?;
-    match read(&output) {
-        Ok(periods) => {
-            session.fresh = Some((account.to_owned(), Instant::now(), periods.clone()));
-            Ok(periods)
+    let asked = async {
+        let version = run(VERSION, VERSION_LIMIT).await.map_err(|e| (None, e))?;
+        if version.timed_out {
+            return Err((None, timed_out()));
         }
-        Err((refusal, error)) => {
-            if let Some(refusal) = refusal {
-                session.refused = Some((account.to_owned(), refusal));
-            }
-            Err(error)
+        if !supported(&version.stdout) && !supported(&version.stderr) {
+            return Err((
+                None,
+                failure("agy 版本过旧，升级到 1.1.11 或更高版本后才能读取额度"),
+            ));
         }
+        read(&run(USAGE, USAGE_LIMIT).await.map_err(|e| (None, e))?)
     }
+    .await;
+    let answer = asked.map_err(|(refusal, error)| {
+        if let Some(refusal) = refusal {
+            session.refused = Some((account.to_owned(), refusal));
+        }
+        error
+    });
+    session.fresh = Some((account.to_owned(), Instant::now(), answer.clone()));
+    answer
 }
 
 fn timed_out() -> AppError {
