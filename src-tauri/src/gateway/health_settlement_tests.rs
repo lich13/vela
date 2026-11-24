@@ -65,7 +65,7 @@ fn default_settings_match_current_serialization() {
             "firstByteSeconds": 300,
             "compactionSeconds": 400,
             "idleSeconds": 300,
-            "stallSeconds": 120,
+            "stallSeconds": 300,
             "holdIdleSeconds": 60,
             "retryBudgetSeconds": 300,
             "connectSeconds": 300,
