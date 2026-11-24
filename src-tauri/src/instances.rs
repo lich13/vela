@@ -127,9 +127,13 @@ pub(crate) trait Sink: Send + Sync + 'static {
 
 impl Sink for tauri::AppHandle {
     fn state(&self, state: &InstanceState) {
+        #[cfg(target_os = "macos")]
+        crate::quick_macos::instances_changed(state);
         let _ = tauri::Emitter::emit(self, "instance-state", state);
     }
     fn remote(&self, event: &RemoteEvent<'_>) {
+        #[cfg(target_os = "macos")]
+        crate::quick_macos::server_event(event.instance, event.event, event.payload);
         let _ = tauri::Emitter::emit(self, "remote-event", event);
     }
 }

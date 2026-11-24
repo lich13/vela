@@ -5,12 +5,15 @@
 use crate::{
     core::ViewState,
     gateway::{self, quota::QuotaView, ClientId, ProviderView},
+    instances::{self, InstanceState},
     power, process_control, quick,
     quick_model::*,
     Runtime,
 };
+use chrono::{Local, TimeZone};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     ffi::{c_char, c_void, CStr, CString},
@@ -64,6 +67,22 @@ pub struct ClientTabModel {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct InstanceTabModel {
+    pub id: String,
+    pub label: String,
+    pub selected: bool,
+}
+
+/// A card worked out here, or the one a server answered with.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum Shown<T> {
+    Here(T),
+    There(Value),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ControlsCardModel {
     pub power_error: Option<String>,
     pub show_clamshell: bool,
@@ -79,17 +98,23 @@ pub struct QuickPanelViewModel {
     pub appearance_mode: String,
     pub pinned: bool,
     pub busy: bool,
-    pub freeze: FreezeCardModel,
+    pub freeze: Shown<FreezeCardModel>,
     pub clients: Vec<ClientTabModel>,
     pub selected_client: Option<ClientId>,
     pub client_visible: bool,
     pub error_banner: Option<String>,
     pub notice_banner: Option<String>,
-    pub gateway: Option<GatewayCardModel>,
+    pub gateway: Option<Shown<GatewayCardModel>>,
     pub controls: ControlsCardModel,
     pub limit_error: Option<String>,
     pub limit_close_seq: u64,
     pub rename_close_seq: u64,
+    /// This machine and the servers, once there is a server to switch to.
+    pub instances: Vec<InstanceTabModel>,
+    pub instance_status: Option<String>,
+    pub instance_retry: bool,
+    /// A server is shown: what belongs to this machine alone is left out.
+    pub remote: bool,
 }
 
 // MARK: - Pure Derivation & Validation Logic
@@ -258,6 +283,74 @@ pub fn next_quota_schedule_step(
     (due, next_at)
 }
 
+/// The row that switches instances: empty until there is a server, then this
+/// machine first. The status is only said while it is not simply connected.
+pub fn instance_row(
+    state: Option<&InstanceState>,
+) -> (Vec<InstanceTabModel>, Option<String>, bool) {
+    let Some(state) = state.filter(|state| !state.machines.is_empty()) else {
+        return (Vec::new(), None, false);
+    };
+    let tab = |id: &str, label: &str| InstanceTabModel {
+        id: id.into(),
+        label: label.into(),
+        selected: state.active == id,
+    };
+    let tabs = std::iter::once(tab(instances::LOCAL, "本机"))
+        .chain(state.machines.iter().map(|m| tab(&m.id, &m.name)))
+        .collect();
+    let offline = state.connection.status == instances::Status::Offline;
+    let status = match (state.connection.status, &state.connection.error) {
+        (instances::Status::Connecting, _) => Some("连接中…".into()),
+        (instances::Status::Offline, Some(error)) => Some(format!("离线：{error}")),
+        (instances::Status::Offline, None) => Some("离线".into()),
+        _ => None,
+    };
+    (tabs, status, offline)
+}
+
+/// The cards of a server's answer with what only this panel knows laid over
+/// them: the start of each wait in this machine's time, the waits being
+/// interrupted, and a freeze switch that is in use.
+pub fn server_cards(
+    snapshot: &Value,
+    cancelling: &HashSet<String>,
+    freeze_busy: bool,
+) -> (Value, Option<Value>) {
+    let mut freeze = snapshot["freeze"].clone();
+    if freeze_busy {
+        freeze["disabled"] = Value::Bool(true);
+    }
+    let mut gateway = snapshot.get("gateway").filter(|g| !g.is_null()).cloned();
+    let waits = gateway
+        .as_mut()
+        .and_then(|gateway| gateway["longWaits"].as_array_mut());
+    for wait in waits.into_iter().flatten() {
+        let started = wait["startedAt"]
+            .as_i64()
+            .and_then(|at| Local.timestamp_opt(at, 0).single());
+        if let Some(started) = started {
+            wait["startedAtText"] = started.format("%H:%M:%S").to_string().into();
+        }
+        if wait["requestId"]
+            .as_str()
+            .is_some_and(|id| cancelling.contains(id))
+        {
+            wait["cancelling"] = Value::Bool(true);
+        }
+    }
+    (freeze, gateway)
+}
+
+/// What the panel says once a wait was interrupted.
+pub fn interrupted_notice(outcome: &str) -> &'static str {
+    match outcome {
+        "resent" => "已打断并重发",
+        "ended" => "回应已开始交付，已中止，需由客户端重试",
+        _ => "等待已结束",
+    }
+}
+
 // MARK: - Host State, Action Dispatcher & Schedulers
 
 #[derive(Deserialize)]
@@ -330,6 +423,39 @@ enum QuickAction {
     ForceQuit {
         target: process_control::Target,
     },
+    SelectInstance {
+        id: String,
+    },
+}
+
+/// What a server last answered about one of its clients.
+struct Answer {
+    instance: String,
+    client: ClientId,
+    snapshot: Value,
+}
+
+/// The little of a gateway the actions decide by, from this machine's gateway
+/// or from a server's answer.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Lens {
+    revision: String,
+    running: bool,
+    mode: String,
+    providers: Vec<LensProvider>,
+    #[serde(skip)]
+    config_revision: Option<String>,
+    #[serde(skip)]
+    recovery_pending: bool,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LensProvider {
+    id: String,
+    queued: bool,
+    handoff_after_compaction: bool,
+    take_new_threads: bool,
 }
 
 type PendingSnapshotKey = (ClientId, Vec<(String, u64, String)>);
@@ -359,6 +485,15 @@ struct EphemeralState {
     power_read_error: Option<String>,
     power_error: Option<String>,
     quit_busy: Option<String>,
+    /// The instances as last told. With a server selected the cards come from
+    /// `server` and the actions go to it.
+    instances: Option<InstanceState>,
+    instance_busy: bool,
+    server: Option<Answer>,
+    server_error: Option<String>,
+    /// An answer is on its way, and another is wanted after it.
+    server_reading: bool,
+    server_stale: bool,
 }
 
 struct Host {
@@ -418,6 +553,170 @@ impl Host {
                 r.gateway(cid).observe_home(&home);
             }
         }
+        if self.state.lock().instances.is_none() {
+            let told = self
+                .app
+                .try_state::<Arc<instances::Service>>()
+                .and_then(|service| service.state().ok());
+            if let Some(state) = told {
+                self.state.lock().instances.get_or_insert(state);
+            }
+        }
+        self.read_server();
+    }
+
+    /// Whether the selected server can be asked without dialling it again:
+    /// an offline one is left to the next action or to the retry button.
+    fn server_reachable(&self) -> bool {
+        let st = self.state.lock();
+        st.instances.as_ref().is_some_and(|state| {
+            state.active != instances::LOCAL
+                && state.connection.status != instances::Status::Offline
+        })
+    }
+
+    /// The server the panel shows, if it is not this machine.
+    fn server(&self) -> Option<String> {
+        let st = self.state.lock();
+        let state = st.instances.as_ref()?;
+        (state.active != instances::LOCAL).then(|| state.active.clone())
+    }
+
+    /// Runs a shared command on `instance`.
+    async fn ask(&self, instance: &str, name: &str, args: Value) -> crate::storage::Result<Value> {
+        let Some(service) = self
+            .app
+            .try_state::<Arc<instances::Service>>()
+            .map(|service| service.inner().clone())
+        else {
+            return Err(crate::storage::AppError::new(
+                crate::errors::code::STATE,
+                "实例尚未就绪",
+            ));
+        };
+        service.call(instance, name, args).await
+    }
+
+    /// Asks the selected server for the selected client again. Calls that
+    /// arrive while one is under way are answered by one more after it.
+    fn read_server(&self) {
+        let Some(host) = PANEL_HOST.get().cloned() else {
+            return;
+        };
+        if !host.server_reachable() {
+            return;
+        }
+        {
+            let mut st = host.state.lock();
+            if st.server_reading {
+                st.server_stale = true;
+                return;
+            }
+            st.server_reading = true;
+        }
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let asked = host.server().zip(host.current_selected_client());
+                let answer = match &asked {
+                    Some((instance, client)) => {
+                        let cancelling: Vec<String> =
+                            host.state.lock().cancelling_waits.iter().cloned().collect();
+                        let args = json!({ "clientId": client, "cancelling": cancelling });
+                        Some(host.ask(instance, "quick_snapshot", args).await)
+                    }
+                    None => None,
+                };
+                let again = {
+                    let mut st = host.state.lock();
+                    match (asked, answer) {
+                        (Some((instance, client)), Some(Ok(snapshot))) => {
+                            st.server_error = None;
+                            st.server = Some(Answer {
+                                instance,
+                                client,
+                                snapshot,
+                            });
+                        }
+                        (_, Some(Err(error))) => st.server_error = Some(error.message),
+                        _ => {}
+                    }
+                    let again = std::mem::take(&mut st.server_stale);
+                    st.server_reading = again;
+                    again
+                };
+                host.render_if_visible();
+                if !again {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// The server's answer about `client`, if it is the selected server's.
+    fn answer<T>(&self, client: ClientId, read: impl FnOnce(&Value) -> T) -> Option<T> {
+        let st = self.state.lock();
+        let active = st.instances.as_ref().map(|state| state.active.as_str());
+        st.server
+            .as_ref()
+            .filter(|answer| Some(answer.instance.as_str()) == active && answer.client == client)
+            .map(|answer| read(&answer.snapshot))
+    }
+
+    fn lens(&self, client: ClientId) -> Option<Lens> {
+        if self.server().is_none() {
+            let r = self.app.try_state::<Arc<Runtime>>()?;
+            let view = r.gateway(client).try_view().ok()?;
+            return Some(Lens {
+                revision: view.revision,
+                running: view.running,
+                mode: view.mode,
+                providers: view
+                    .providers
+                    .into_iter()
+                    .map(|p| LensProvider {
+                        id: p.id,
+                        queued: p.queued,
+                        handoff_after_compaction: p.handoff_after_compaction,
+                        take_new_threads: p.take_new_threads,
+                    })
+                    .collect(),
+                config_revision: view.config_revision,
+                recovery_pending: view.recovery_pending,
+            });
+        }
+        self.answer(client, |snapshot| {
+            let mut lens: Lens = serde_json::from_value(snapshot["gateway"].clone()).ok()?;
+            lens.config_revision = snapshot["configRevision"].as_str().map(str::to_owned);
+            lens.recovery_pending = snapshot["recoveryPending"] == true;
+            Some(lens)
+        })
+        .flatten()
+    }
+
+    /// Keeps what the instances service told. Touches nothing but the panel's
+    /// own state, so the service may call it while it holds its own.
+    fn keep_instances(&self, state: &InstanceState) {
+        let mut st = self.state.lock();
+        let before = st.instances.as_ref().map(|state| state.active.as_str());
+        if before != Some(state.active.as_str()) {
+            st.server = None;
+            st.server_error = None;
+            st.cancelling_waits.clear();
+            st.limit_error = None;
+        }
+        st.instances = Some(state.clone());
+    }
+
+    /// Shows the instances as they are now.
+    fn show_instances(&self) {
+        self.read_server();
+        self.bump_wake();
+        self.render_if_visible();
+    }
+
+    fn wait_interrupted(&self, request_id: &str, outcome: &str) {
+        self.state.lock().cancelling_waits.remove(request_id);
+        self.set_notice(interrupted_notice(outcome).into());
     }
 
     fn set_notice(&self, text: String) {
@@ -482,8 +781,11 @@ impl Host {
             _ => "system".to_owned(),
         };
 
+        let server = self.server();
         let freeze_view = r.gateway.freeze_gate().view();
-        let gateway_result = selected_client.map(|cid| r.gateway(cid).try_view());
+        let gateway_result = selected_client
+            .filter(|_| server.is_none())
+            .map(|cid| r.gateway(cid).try_view());
 
         let now_inst = Instant::now();
         let now_secs = gateway::quota::now();
@@ -546,16 +848,42 @@ impl Host {
             _ => None,
         };
 
+        let (freeze_card, gateway_card) = match &server {
+            None => (
+                Shown::Here(derive_freeze_card(
+                    Some(&freeze_view),
+                    st.freeze_error.as_deref(),
+                    st.freeze_busy,
+                )),
+                gateway_card.map(Shown::Here),
+            ),
+            Some(instance) => {
+                let answer = st.server.as_ref().filter(|a| &a.instance == instance);
+                gateway_err = st.server_error.clone().or_else(|| {
+                    answer.and_then(|a| a.snapshot["error"].as_str().map(str::to_owned))
+                });
+                match answer {
+                    Some(answer) => {
+                        let (freeze, gateway) =
+                            server_cards(&answer.snapshot, &st.cancelling_waits, st.freeze_busy);
+                        (
+                            Shown::There(freeze),
+                            gateway
+                                .filter(|_| Some(answer.client) == selected_client)
+                                .map(Shown::There),
+                        )
+                    }
+                    None => (Shown::Here(derive_freeze_card(None, None, false)), None),
+                }
+            }
+        };
+        // What is wrong with this machine's accounts says nothing of a server's.
         let error_banner = st
             .local_error
             .clone()
             .or(gateway_err)
-            .or_else(|| accounts.and_then(|a| a.error));
-        let freeze_card = derive_freeze_card(
-            Some(&freeze_view),
-            st.freeze_error.as_deref(),
-            st.freeze_busy,
-        );
+            .or_else(|| accounts.filter(|_| server.is_none()).and_then(|a| a.error));
+        let (instances, instance_status, instance_retry) = instance_row(st.instances.as_ref());
         let clients = visible_clients
             .iter()
             .map(|&cid| ClientTabModel {
@@ -578,7 +906,7 @@ impl Host {
         let vm = QuickPanelViewModel {
             appearance_mode,
             pinned: prefs.pinned,
-            busy: st.busy,
+            busy: st.busy || st.instance_busy,
             freeze: freeze_card,
             clients,
             selected_client,
@@ -590,6 +918,10 @@ impl Host {
             limit_error: st.limit_error.clone(),
             limit_close_seq: st.limit_close_seq,
             rename_close_seq: st.rename_close_seq,
+            instances,
+            instance_status,
+            instance_retry,
+            remote: server.is_some(),
         };
         drop(st);
         let json = serde_json::to_string(&vm).ok()?;
@@ -698,12 +1030,27 @@ impl Host {
                 });
             }
             QuickAction::ToggleFreeze => {
-                let Some(r) = self.app.try_state::<Arc<Runtime>>() else {
-                    return;
+                let server = self.server();
+                // Whether it is frozen, and whether the switch is locked.
+                let (frozen, locked) = match &server {
+                    None => {
+                        let Some(r) = self.app.try_state::<Arc<Runtime>>() else {
+                            return;
+                        };
+                        let view = r.gateway.freeze_gate().view();
+                        (view.frozen, view.frozen && view.draining > 0)
+                    }
+                    Some(instance) => {
+                        let st = self.state.lock();
+                        let Some(answer) = st.server.as_ref().filter(|a| &a.instance == instance)
+                        else {
+                            return;
+                        };
+                        let card = &answer.snapshot["freeze"];
+                        (card["frozen"] == true, card["disabled"] == true)
+                    }
                 };
-                let gate = r.gateway.freeze_gate();
-                let view = gate.view();
-                if view.frozen && view.draining > 0 {
+                if locked {
                     return;
                 }
                 {
@@ -720,14 +1067,34 @@ impl Host {
                     st.freeze_busy = true;
                 }
                 self.render_if_visible();
-                let res = gate.set(!view.frozen);
-                {
-                    let mut st = self.state.lock();
-                    st.freeze_busy = false;
-                    st.freeze_error = res.err().map(|e| e.message);
+                match server {
+                    None => {
+                        let res = self
+                            .app
+                            .try_state::<Arc<Runtime>>()
+                            .map(|r| r.gateway.freeze_gate().set(!frozen));
+                        let mut st = self.state.lock();
+                        st.freeze_busy = false;
+                        st.freeze_error = res.and_then(|res| res.err()).map(|e| e.message);
+                        drop(st);
+                        self.bump_wake();
+                        self.render_if_visible();
+                    }
+                    Some(instance) => {
+                        let host = self.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let args = json!({ "frozen": !frozen });
+                            let res = host.ask(&instance, "set_gateway_frozen", args).await;
+                            host.state.lock().freeze_busy = false;
+                            // The card is the server's; its failure is told above it.
+                            if let Err(e) = res {
+                                host.set_error(e.message);
+                            }
+                            host.read_server();
+                            host.render_if_visible();
+                        });
+                    }
                 }
-                self.bump_wake();
-                self.render_if_visible();
             }
             QuickAction::ToggleGatewayMode => {
                 let Some(cid) = self.current_selected_client() else {
@@ -735,10 +1102,7 @@ impl Host {
                 };
                 let host = self.clone();
                 tauri::async_runtime::spawn(async move {
-                    let Some(r) = host.app.try_state::<Arc<Runtime>>() else {
-                        return;
-                    };
-                    let Ok(view) = r.gateway(cid).try_view() else {
+                    let Some(view) = host.lens(cid) else {
                         return;
                     };
                     let next_mode = if view.mode == "auto" {
@@ -763,12 +1127,14 @@ impl Host {
                 };
                 let host = self.clone();
                 tauri::async_runtime::spawn(async move {
-                    let Some(r) = host.app.try_state::<Arc<Runtime>>() else {
+                    let Some(view) = host.lens(cid) else {
                         return;
                     };
-                    let Ok(view) = r.gateway(cid).try_view() else {
-                        return;
-                    };
+                    let server = host.server();
+                    let r = host
+                        .app
+                        .try_state::<Arc<Runtime>>()
+                        .map(|r| r.inner().clone());
                     {
                         let mut st = host.state.lock();
                         if st.busy {
@@ -780,15 +1146,34 @@ impl Host {
                     }
                     host.render_if_visible();
                     let config = view.config_revision.as_deref();
-                    let outcome = if view.running || view.recovery_pending {
-                        crate::rpc::handlers::stop_gateway_for(&r, cid, config).await
-                    } else {
-                        crate::rpc::handlers::start_gateway_for(&r, cid, &view.revision, config)
-                            .await
+                    let stop = view.running || view.recovery_pending;
+                    let outcome = match (&server, &r) {
+                        (Some(instance), _) => if stop {
+                            let args = json!({ "clientId": cid, "expectedConfigRevision": config });
+                            host.ask(instance, "stop_gateway", args).await
+                        } else {
+                            let args = json!({
+                                "clientId": cid,
+                                "expectedRevision": view.revision,
+                                "expectedConfigRevision": config,
+                            });
+                            host.ask(instance, "start_gateway", args).await
+                        }
+                        .map(|_| ()),
+                        (None, Some(r)) => if stop {
+                            crate::rpc::handlers::stop_gateway_for(r, cid, config).await
+                        } else {
+                            crate::rpc::handlers::start_gateway_for(r, cid, &view.revision, config)
+                                .await
+                        }
+                        .map(|_| ()),
+                        (None, None) => Ok(()),
                     };
                     host.state.lock().busy = false;
                     match outcome {
-                        Ok(_) => {
+                        // A server says so itself, as it does to every window.
+                        Ok(()) if server.is_some() => host.read_server(),
+                        Ok(()) => {
                             host.set_notice(format!("配置已切换，请重新打开 {}", cid.name()));
                         }
                         Err(e) => host.set_error(e.message),
@@ -801,24 +1186,32 @@ impl Host {
                 let Some(cid) = self.current_selected_client() else {
                     return;
                 };
-                let Some(r) = self.app.try_state::<Arc<Runtime>>() else {
-                    return;
-                };
                 self.state
                     .lock()
                     .cancelling_waits
                     .insert(request_id.clone());
                 self.render_if_visible();
-                let outcome = r.gateway(cid).interrupt_wait(&request_id);
-                self.state.lock().cancelling_waits.remove(&request_id);
-                self.set_notice(
-                    match outcome {
-                        "resent" => "已打断并重发",
-                        "ended" => "回应已开始交付，已中止，需由客户端重试",
-                        _ => "等待已结束",
+                let Some(instance) = self.server() else {
+                    if let Some(r) = self.app.try_state::<Arc<Runtime>>() {
+                        let outcome = r.gateway(cid).interrupt_wait(&request_id);
+                        self.wait_interrupted(&request_id, outcome);
                     }
-                    .into(),
-                );
+                    return;
+                };
+                let host = self.clone();
+                tauri::async_runtime::spawn(async move {
+                    let args = json!({ "clientId": cid, "requestId": request_id });
+                    match host.ask(&instance, "cancel_gateway_wait", args).await {
+                        Ok(outcome) => {
+                            host.wait_interrupted(&request_id, outcome.as_str().unwrap_or(""));
+                        }
+                        Err(e) => {
+                            host.state.lock().cancelling_waits.remove(&request_id);
+                            host.set_error(e.message);
+                        }
+                    }
+                    host.read_server();
+                });
             }
             QuickAction::ReorderProviders {
                 ids,
@@ -873,7 +1266,18 @@ impl Host {
                 let Some(cid) = self.current_selected_client() else {
                     return;
                 };
-                self.spawn_quota_query(cid, id, None, true);
+                let Some(instance) = self.server() else {
+                    self.spawn_quota_query(cid, id, None, true);
+                    return;
+                };
+                let host = self.clone();
+                tauri::async_runtime::spawn(async move {
+                    let args = json!({ "clientId": cid, "providerId": id, "force": true });
+                    if let Err(e) = host.ask(&instance, "query_provider_quota", args).await {
+                        host.set_error(e.message);
+                    }
+                    host.read_server();
+                });
             }
             QuickAction::SelectProvider { id } => {
                 let Some(cid) = self.current_selected_client() else {
@@ -881,17 +1285,12 @@ impl Host {
                 };
                 let host = self.clone();
                 tauri::async_runtime::spawn(async move {
-                    let Some(r) = host.app.try_state::<Arc<Runtime>>() else {
-                        return;
-                    };
-                    let running_before = r
-                        .gateway(cid)
-                        .try_view()
-                        .map(|v| v.running)
-                        .unwrap_or(false);
+                    let running_before = host.lens(cid).is_some_and(|view| view.running);
+                    // A server says what the choice did itself, as it does to every window.
                     if host
                         .commit_gateway_edit(cid, gateway::Edit::Select { id }, None, true)
                         .await
+                        && host.server().is_none()
                     {
                         host.set_notice(if running_before {
                             "供应商已切换，新请求已生效".into()
@@ -921,10 +1320,7 @@ impl Host {
                 };
                 let host = self.clone();
                 tauri::async_runtime::spawn(async move {
-                    let Some(r) = host.app.try_state::<Arc<Runtime>>() else {
-                        return;
-                    };
-                    let Ok(view) = r.gateway(cid).try_view() else {
+                    let Some(view) = host.lens(cid) else {
                         return;
                     };
                     let Some(p) = view.providers.iter().find(|p| p.id == id) else {
@@ -1000,10 +1396,7 @@ impl Host {
                 };
                 let host = self.clone();
                 tauri::async_runtime::spawn(async move {
-                    let Some(r) = host.app.try_state::<Arc<Runtime>>() else {
-                        return;
-                    };
-                    let Ok(view) = r.gateway(cid).try_view() else {
+                    let Some(view) = host.lens(cid) else {
                         return;
                     };
                     let Some(p) = view.providers.iter().find(|p| p.id == id) else {
@@ -1062,6 +1455,43 @@ impl Host {
                         Err(_) => host.render_if_visible(),
                     }
                     host.bump_power_wake();
+                });
+            }
+            QuickAction::SelectInstance { id } => {
+                let Some(service) = self
+                    .app
+                    .try_state::<Arc<instances::Service>>()
+                    .map(|service| service.inner().clone())
+                else {
+                    return;
+                };
+                let revision = {
+                    let mut st = self.state.lock();
+                    let Some(revision) = st.instances.as_ref().map(|s| s.revision.clone()) else {
+                        return;
+                    };
+                    if st.instance_busy {
+                        return;
+                    }
+                    st.instance_busy = true;
+                    st.local_error = None;
+                    st.local_error_from_startup = false;
+                    revision
+                };
+                self.render_if_visible();
+                let host = self.clone();
+                tauri::async_runtime::spawn(async move {
+                    // The same instance again is how an offline one is retried.
+                    let selected = service.select(&revision, &id).await;
+                    host.state.lock().instance_busy = false;
+                    // On a failure too: the list may be what was stale.
+                    if let Ok(state) = service.state() {
+                        host.keep_instances(&state);
+                    }
+                    if let Err(e) = selected {
+                        host.set_error(e.message);
+                    }
+                    host.show_instances();
                 });
             }
             QuickAction::ForceQuit { target } => {
@@ -1132,6 +1562,12 @@ impl Host {
         else {
             return false;
         };
+        let server = self.server();
+        // What the server last answered is what the edit is checked against.
+        let seen = server.as_ref().map(|_| self.lens(client_id));
+        if matches!(seen, Some(None)) {
+            return false;
+        }
         {
             let mut st = self.state.lock();
             if st.busy {
@@ -1145,7 +1581,18 @@ impl Host {
         }
         self.render_if_visible();
 
-        let outcome = {
+        let outcome = if let (Some(instance), Some(Some(current))) = (&server, seen) {
+            let config = (matches!(&edit, gateway::Edit::Select { .. }) && !current.running)
+                .then_some(current.config_revision)
+                .flatten();
+            let args = json!({
+                "clientId": client_id,
+                "edit": edit,
+                "expectedRevision": expected_revision.unwrap_or(current.revision),
+                "expectedConfigRevision": config,
+            });
+            self.ask(instance, "update_gateway", args).await.map(|_| ())
+        } else {
             let _guard = r.official_tx.lock().await;
             match (r.home(client_id), r.gateway(client_id).try_view()) {
                 (Ok(home), Ok(current)) => {
@@ -1158,6 +1605,7 @@ impl Host {
                         };
                     r.gateway(client_id)
                         .edit_checked(edit, &rev, &home, cfg_rev)
+                        .map(|_| ())
                         .map_err(|e| r.config_failure(client_id, e))
                 }
                 (Err(e), _) | (_, Err(e)) => Err(e),
@@ -1166,7 +1614,12 @@ impl Host {
 
         self.state.lock().busy = false;
         match outcome {
-            Ok(_) => {
+            Ok(()) if server.is_some() => {
+                self.read_server();
+                self.render_if_visible();
+                true
+            }
+            Ok(()) => {
                 let _ = r.refresh();
                 self.bump_wake();
                 self.render_if_visible();
@@ -1195,6 +1648,9 @@ impl Host {
         expected_version: Option<String>,
         force: bool,
     ) {
+        if self.server().is_some() {
+            return;
+        }
         let resolved_version = expected_version.unwrap_or_else(|| {
             self.app
                 .try_state::<Arc<Runtime>>()
@@ -1320,6 +1776,9 @@ impl Host {
                     continue;
                 }
                 let plan = (|| -> Option<QuotaSchedulePlan> {
+                    if host.server().is_some() {
+                        return None;
+                    }
                     let r = host.app.try_state::<Arc<Runtime>>()?;
                     if r.quitting.load(Ordering::Relaxed) {
                         return None;
@@ -1452,6 +1911,13 @@ impl Host {
         let mut wake_rx = self.wake_tx.subscribe();
         tauri::async_runtime::spawn(async move {
             loop {
+                if is_visible() && host.server().is_some() {
+                    tokio::select! {
+                        res = wake_rx.changed() => if res.is_err() { break; },
+                        _ = tokio::time::sleep(Duration::from_secs(3)) => host.read_server(),
+                    }
+                    continue;
+                }
                 let has_active_wait = is_visible()
                     && host
                         .current_selected_client()
@@ -1584,6 +2050,34 @@ pub fn notify_state_changed(_app: &tauri::AppHandle) {
         }
         host.bump_wake();
         host.render_if_visible();
+    }
+}
+
+/// The instances service says what it shows now. It still holds its state, so
+/// only what the panel keeps is touched here.
+pub fn instances_changed(state: &InstanceState) {
+    let Some(host) = PANEL_HOST.get().cloned() else {
+        return;
+    };
+    host.keep_instances(state);
+    tauri::async_runtime::spawn(async move { host.show_instances() });
+}
+
+/// A server told of a change. What the panel shows of it is read again; what
+/// it says to every window is said here too.
+pub fn server_event(instance: &str, event: &str, payload: &Value) {
+    let Some(host) = PANEL_HOST.get().cloned() else {
+        return;
+    };
+    if !is_visible() || host.server().as_deref() != Some(instance) {
+        return;
+    }
+    match (event, payload.as_str()) {
+        ("switch-notice", Some(message)) => host.set_notice(message.into()),
+        ("gateway-state" | "gateway-freeze" | "switch-state" | "provider-quota", _) => {
+            host.read_server();
+        }
+        _ => {}
     }
 }
 
@@ -2116,12 +2610,17 @@ mod tests {
             }
             out
         };
-        let rust = include_str!("quick_macos.rs");
+        // The cards are in the model, what the panel adds around them is here.
+        let rust = concat!(
+            include_str!("quick_model.rs"),
+            include_str!("quick_macos.rs")
+        );
         let swift = include_str!("../native/quick_panel.swift");
         let names = [
             "FreezeStageModel",
             "FreezeCardModel",
             "ClientTabModel",
+            "InstanceTabModel",
             "LongWaitModel",
             "QuotaPlanRowModel",
             "QuotaSubscriptionDetailModel",
@@ -2150,6 +2649,91 @@ mod tests {
             .filter(|l| l.starts_with("struct ") && l.contains("Codable"))
             .count();
         assert_eq!(declared, names.len());
+    }
+
+    #[test]
+    fn the_instance_row_appears_with_a_server_and_says_when_it_is_not_connected() {
+        let state = |active: &str, status, error: Option<&str>| InstanceState {
+            revision: "r".into(),
+            active: active.into(),
+            machines: vec![instances::Machine {
+                id: "m1".into(),
+                name: "fixture".into(),
+                ssh_host: "example.invalid".into(),
+                fallback_host: None,
+                use_sudo: true,
+            }],
+            connection: instances::Connection {
+                status,
+                version: None,
+                error: error.map(str::to_owned),
+                unsupported: Vec::new(),
+            },
+        };
+        assert_eq!(instance_row(None), (Vec::new(), None, false));
+        let alone = InstanceState {
+            machines: Vec::new(),
+            ..state(instances::LOCAL, instances::Status::Local, None)
+        };
+        assert_eq!(instance_row(Some(&alone)), (Vec::new(), None, false));
+
+        let (tabs, status, retry) = instance_row(Some(&state(
+            "m1",
+            instances::Status::Offline,
+            Some("fixture failure"),
+        )));
+        let shown: Vec<_> = tabs
+            .iter()
+            .map(|tab| (tab.id.as_str(), tab.label.as_str(), tab.selected))
+            .collect();
+        assert_eq!(
+            shown,
+            [(instances::LOCAL, "本机", false), ("m1", "fixture", true)]
+        );
+        assert_eq!(status.as_deref(), Some("离线：fixture failure"));
+        assert!(retry);
+
+        let connecting = state("m1", instances::Status::Connecting, None);
+        assert_eq!(
+            instance_row(Some(&connecting)).1.as_deref(),
+            Some("连接中…")
+        );
+        let connected = state("m1", instances::Status::Connected, None);
+        assert_eq!(instance_row(Some(&connected)).1, None);
+    }
+
+    #[test]
+    fn a_servers_cards_are_shown_with_what_only_this_panel_knows() {
+        let snapshot = json!({
+            "freeze": { "frozen": false, "disabled": false },
+            "gateway": {
+                "revision": "r1",
+                "longWaits": [
+                    { "requestId": "a", "startedAt": 0, "startedAtText": "server", "cancelling": false },
+                    { "requestId": "b", "startedAt": 0, "startedAtText": "server", "cancelling": false },
+                ],
+            },
+        });
+        let cancelling = HashSet::from(["b".to_owned()]);
+        let (freeze, gateway) = server_cards(&snapshot, &cancelling, true);
+        assert_eq!(freeze["disabled"], true);
+        let waits = &gateway.expect("gateway")["longWaits"];
+        // The start is told in this machine's time, not the server's.
+        let here = Local.timestamp_opt(0, 0).single().expect("epoch");
+        assert_eq!(
+            waits[0]["startedAtText"],
+            here.format("%H:%M:%S").to_string()
+        );
+        assert_eq!(waits[0]["cancelling"], false);
+        assert_eq!(waits[1]["cancelling"], true);
+
+        let (freeze, gateway) = server_cards(
+            &json!({ "freeze": {}, "gateway": null }),
+            &cancelling,
+            false,
+        );
+        assert!(freeze.get("disabled").is_none());
+        assert!(gateway.is_none());
     }
 
     #[test]

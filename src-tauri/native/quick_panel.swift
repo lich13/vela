@@ -25,9 +25,16 @@ struct ClientTabModel: Codable, Equatable, Identifiable {
     let selected: Bool
 }
 
+struct InstanceTabModel: Codable, Equatable, Identifiable {
+    let id: String
+    let label: String
+    let selected: Bool
+}
+
 struct LongWaitModel: Codable, Equatable, Identifiable {
     var id: String { requestId }
     let requestId: String
+    let startedAt: UInt64
     let providerName: String
     let model: String
     let startedAtText: String
@@ -153,6 +160,10 @@ struct QuickPanelViewModel: Codable, Equatable {
     let limitError: String?
     let limitCloseSeq: UInt64
     let renameCloseSeq: UInt64
+    let instances: [InstanceTabModel]
+    let instanceStatus: String?
+    let instanceRetry: Bool
+    let remote: Bool
 
     static let placeholder = QuickPanelViewModel(
         appearanceMode: "system",
@@ -183,7 +194,11 @@ struct QuickPanelViewModel: Codable, Equatable {
         ),
         limitError: nil,
         limitCloseSeq: 0,
-        renameCloseSeq: 0
+        renameCloseSeq: 0,
+        instances: [],
+        instanceStatus: nil,
+        instanceRetry: false,
+        remote: false
     )
 }
 
@@ -559,6 +574,66 @@ struct QuickFreezeCardView: View {
             rows.append(current)
         }
         return rows
+    }
+}
+
+/// This machine and the servers: which one the panel shows and acts on.
+struct QuickInstanceRowView: View {
+    let instances: [InstanceTabModel]
+    let status: String?
+    let retry: Bool
+    let busy: Bool
+    let palette: QuickPalette
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 2) {
+                ForEach(instances) { tab in
+                    Button(action: { onSelect(tab.id) }) {
+                        Text(tab.label)
+                            .font(.system(size: 12, weight: tab.selected ? .semibold : .medium))
+                            .foregroundColor(tab.selected ? palette.ink : palette.muted)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 6)
+                            .background(Capsule().fill(tab.selected ? palette.surface : Color.clear))
+                            .overlay(Capsule().strokeBorder(tab.selected ? palette.line : Color.clear, lineWidth: 1))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(busy || tab.selected)
+                }
+            }
+            .padding(2)
+            .background(Capsule().fill(palette.surfaceSubtle))
+
+            if let status = status, !status.isEmpty {
+                HStack(spacing: 6) {
+                    Text(status)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(retry ? palette.error : palette.muted)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    if retry, let active = instances.first(where: { $0.selected }) {
+                        Button(action: { onSelect(active.id) }) {
+                            Text("重试")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundColor(palette.accent)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(busy)
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+        }
     }
 }
 
@@ -1972,6 +2047,17 @@ struct QuickPanelRootView: View {
                     onToggle: { store.dispatch(["op": "toggleFreeze"]) }
                 )
 
+                if !store.model.instances.isEmpty {
+                    QuickInstanceRowView(
+                        instances: store.model.instances,
+                        status: store.model.instanceStatus,
+                        retry: store.model.instanceRetry,
+                        busy: store.model.busy,
+                        palette: palette,
+                        onSelect: { id in store.dispatch(["op": "selectInstance", "id": id]) }
+                    )
+                }
+
                 QuickToolbarView(
                     clients: store.model.clients,
                     pinned: store.model.pinned,
@@ -2071,11 +2157,14 @@ struct QuickPanelRootView: View {
                     .padding(.horizontal, 1)
                 }
 
-                QuickControlsDockView(
-                    controls: store.model.controls,
-                    palette: palette,
-                    dispatch: { store.dispatch($0) }
-                )
+                // Sleep and the client apps are this machine's, not a server's.
+                if !store.model.remote {
+                    QuickControlsDockView(
+                        controls: store.model.controls,
+                        palette: palette,
+                        dispatch: { store.dispatch($0) }
+                    )
+                }
 
                 HStack {
                     Button(action: { store.dispatch(["op": "openMain"]) }) {

@@ -208,7 +208,7 @@ impl Delegate {
 }
 /// The delegation fields of a provider form. An absent field stays as it is;
 /// an empty model or effort clears the one that was set.
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DelegateEdit {
     pub take_compaction: Option<bool>,
@@ -644,7 +644,7 @@ impl Default for Store {
         }
     }
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Edit {
     /// Made from a link opened on the desktop, never from a request.
