@@ -5,10 +5,12 @@
 //! upstreams bind only to loopback.
 use super::{
     model::Edit,
-    replay::{self, RequestHints, TurnEvidence, WireBody},
+    replay::{self, RequestHints, TurnEvidence},
 };
+use crate::gateway::test_support::encoded;
 use crate::gateway::test_support::loopback::{
-    probing_fixture, provider_ids, response_value, serve, start, thread_request, update,
+    json_response, probing_fixture, provider_ids, response_value, serve, start, thread_request,
+    update,
 };
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -16,17 +18,9 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Response, StatusCode};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{io::Write, path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use crate::usage::model::RoutingInput;
-
-fn v0233_json_response(body: impl Into<Bytes>) -> Response<WireBody> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/json")
-        .body(replay::full(body))
-        .unwrap()
-}
 
 async fn v0233_inspect_bytes(bytes: Vec<u8>, encoding: &str, dir: &Path) -> RequestHints {
     let captured = replay::Replay::capture_progress(Full::new(Bytes::from(bytes)), dir, None)
@@ -62,12 +56,6 @@ fn v0233_split_tool_declaration_body() -> Vec<u8> {
         br#"","role":"developer","id":"synthetic","tools":[]},{"type":"message","role":"developer","content":"fixture init"},{"type":"message","role":"user","content":"fixture user"}]}"#,
     );
     body
-}
-
-fn v0233_gzip(bytes: &[u8]) -> Vec<u8> {
-    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(bytes).unwrap();
-    encoder.finish().unwrap()
 }
 
 fn v0233_sse_bytes(provider: &str) -> Bytes {
@@ -181,9 +169,11 @@ async fn v0233_ws_turn(peer: &mut yawc::TcpWebSocket, body: &str) -> Vec<u8> {
 #[tokio::test]
 async fn v0233_http_additional_tools_and_initial_messages_route_to_new_thread_provider() {
     let ordinary_port =
-        serve(|_| async { v0233_json_response(r#"{"provider":"ordinary"}"#) }).await;
+        serve(|_| async { json_response(StatusCode::OK, r#"{"provider":"ordinary"}"#, None) })
+            .await;
     let new_thread_port =
-        serve(|_| async { v0233_json_response(r#"{"provider":"new-thread"}"#) }).await;
+        serve(|_| async { json_response(StatusCode::OK, r#"{"provider":"new-thread"}"#, None) })
+            .await;
     let (dir, gateway) = probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{new_thread_port}/v1"),
@@ -240,7 +230,7 @@ async fn v0233_replay_projection_recognizes_tool_declaration_across_chunks_and_g
     assert!(marker_start < 64 * 1024);
     assert!(marker_start + b"additional_tools".len() > 64 * 1024);
 
-    for (encoding, encoded) in [("", body.clone()), ("gzip", v0233_gzip(&body))] {
+    for (encoding, encoded) in [("", body.clone()), ("gzip", encoded("gzip", &body))] {
         let hints = v0233_inspect_bytes(encoded, encoding, dir.path()).await;
         assert!(hints.first_turn, "encoding={encoding}");
         assert_eq!(hints.turn, TurnEvidence::First, "encoding={encoding}");

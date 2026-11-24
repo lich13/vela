@@ -68,8 +68,8 @@ jobs:
         with:
           workspaces: src-tauri
           cache-on-failure: true
-      # Logic tests run on macOS only. Windows keeps the platform modules, so a
-      # wall-clock flake in shared logic cannot block a release.
+      # Frontend tests and the format check run on macOS only; the Rust tests
+      # run on both.
       - name: Frontend tests
         if: runner.os == 'macOS'
         run: pnpm test
@@ -81,12 +81,10 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-      - name: Rust tests (platform modules)
+      - name: Rust tests (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: >-
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --
-          storage:: links:: startup:: cleanup_spool:: process_control:: notifications:: power:: quick::
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Installed Windows launch check

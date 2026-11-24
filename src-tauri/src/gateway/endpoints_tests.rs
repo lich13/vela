@@ -4,12 +4,12 @@ use super::super::{
 };
 use super::{Batch, Measurement, Service};
 use crate::gateway::test_support::form;
+use crate::gateway::test_support::loopback::serve;
 use crate::gateway::test_support::provider_at;
 use http_body_util::BodyExt;
-use hyper::{body::Incoming, header, Request, Response};
-use hyper_util::rt::TokioIo;
+use hyper::{header, Response};
 use parking_lot::Mutex;
-use std::{convert::Infallible, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 #[test]
 fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_provider_identity() {
@@ -245,36 +245,22 @@ fn v0212_service_prefers_fastest_endpoint_and_keeps_thread_and_response_pins_aft
 }
 
 async fn v0212_loopback_server(seen: Arc<Mutex<Vec<(String, bool)>>>) -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let seen = seen.clone();
-            tokio::spawn(async move {
-                let service = hyper::service::service_fn(move |request: Request<Incoming>| {
-                    let seen = seen.clone();
-                    async move {
-                        let (parts, body) = request.into_parts();
-                        let _ = body.collect().await;
-                        seen.lock().push((
-                            parts.uri.path().to_owned(),
-                            parts.headers.contains_key(header::AUTHORIZATION),
-                        ));
-                        Ok::<_, Infallible>(
-                            Response::builder()
-                                .status(204)
-                                .body(replay::empty())
-                                .unwrap(),
-                        )
-                    }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await;
-            });
+    serve(move |request| {
+        let seen = seen.clone();
+        async move {
+            let (parts, body) = request.into_parts();
+            let _ = body.collect().await;
+            seen.lock().push((
+                parts.uri.path().to_owned(),
+                parts.headers.contains_key(header::AUTHORIZATION),
+            ));
+            Response::builder()
+                .status(204)
+                .body(replay::empty())
+                .unwrap()
         }
-    });
-    port
+    })
+    .await
 }
 
 #[tokio::test]

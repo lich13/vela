@@ -59,11 +59,11 @@ fn registered() -> Result<bool> {
                 .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run")
                 .and_then(|key| key.get_value("Vela"))
                 .map_err(storage::io_error)?;
-            if actual != format!("{} {LOGIN_ARG}", launch.get_app_path()) {
-                return Err(AppError::new(
-                    code::STARTUP,
-                    "启动路径已变化，请重新启用开机启动",
-                ));
+            // A value another install path left is not this app's login
+            // item; enabling it again writes the current path.
+            let expected = format!("{} {LOGIN_ARG}", launch.get_app_path());
+            if actual.to_lowercase() != expected.to_lowercase() {
+                return Ok(false);
             }
         }
         Ok(enabled)

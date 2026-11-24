@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
 
+#[path = "antigravity_quota_cli.rs"]
+mod cli;
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Period {
@@ -51,9 +54,13 @@ fn parse_remaining_percent(bucket: &Value) -> Option<f64> {
         .map(|pct| (pct.clamp(0.0, 100.0) * 10.0).round() / 10.0)
 }
 pub fn parse(value: &Value) -> Periods {
-    let response = &value["response"];
+    periods(&value["response"]["groups"])
+}
+/// The periods of the quota groups, as the app's local service and
+/// `agy /usage` both report them.
+fn periods(groups: &Value) -> Periods {
     let mut periods = Periods::new();
-    for b in response["groups"]
+    for b in groups
         .as_array()
         .into_iter()
         .flatten()
@@ -62,7 +69,7 @@ pub fn parse(value: &Value) -> Periods {
         if b["disabled"] == true {
             continue;
         }
-        let Some(id) = b["bucketId"].as_str() else {
+        let Some(id) = b["bucketId"].as_str().or_else(|| b["id"].as_str()) else {
             continue;
         };
         let duration = match id {
@@ -70,7 +77,7 @@ pub fn parse(value: &Value) -> Periods {
             "gemini-weekly" | "3p-weekly" => 7 * 86_400_000,
             _ => continue,
         };
-        let Some(end) = time(&b["resetTime"]) else {
+        let Some(end) = time(&b["resetTime"]).or_else(|| time(&b["reset_time"])) else {
             continue;
         };
         let remaining_percent = parse_remaining_percent(b);
@@ -136,20 +143,31 @@ impl Api {
         last_error.map_or(Ok(None), Err)
     }
 }
+/// The quota of the signed-in account: from the running app, or from the
+/// `agy` CLI when the app has no answer.
 pub async fn observe(data: &Path) -> Result<Option<(String, Periods)>> {
     let home = crate::antigravity::home()?;
+    // A signed-out `agy` opens the browser by itself, so nothing is asked
+    // without a login.
     let Some((id, email)) = auth::current_oauth_identity(data, &home)? else {
         return Ok(None);
     };
-    match Api::connect(&home).await? {
-        Some(api) => Ok(api.quota_for(&email).await?.map(|periods| (id, periods))),
-        None => Ok(None),
+    let from_app = match Api::connect(&home).await {
+        Ok(Some(api)) => api.quota_for(&email).await,
+        Ok(None) => Ok(None),
+        Err(error) => Err(error),
+    };
+    if let Ok(Some(periods)) = from_app {
+        return Ok(Some((id, periods)));
     }
+    let periods = cli::quota(&id).await?;
+    Ok(Some((id, periods)))
 }
 pub(in crate::usage) struct AccountAccumulator {
     account: Account,
     periods: Periods,
     windows: BTreeMap<&'static str, WindowAcc>,
+    now: i64,
 }
 impl AccountAccumulator {
     pub(in crate::usage) fn new(account: Account, mut periods: Periods, now: i64) -> Self {
@@ -158,6 +176,7 @@ impl AccountAccumulator {
             account,
             periods,
             windows: BTreeMap::new(),
+            now,
         }
     }
     pub(in crate::usage) fn earliest(&self) -> Option<i64> {
@@ -191,13 +210,12 @@ impl AccountAccumulator {
             ("gemini", "Gemini", "gemini-5h", "gemini-weekly"),
             ("claude_gpt", "Claude / GPT", "3p-5h", "3p-weekly"),
         ] {
-            let mut window = |key: &str, hours: f64| {
-                let mut w = self
-                    .windows
-                    .remove(key)
-                    .unwrap_or_default()
-                    .into_view(hours);
+            let mut window = |key: &str| {
+                let spent = self.windows.remove(key).unwrap_or_default();
                 let period = self.periods.remove(key);
+                let hourly = cost_per_hour(spent.cost, period.as_ref(), self.now);
+                let mut w = spent.into_view();
+                w.cost_per_hour = hourly;
                 w.remaining_percent = period.as_ref().and_then(|p| p.remaining_percent);
                 w.period = period;
                 w
@@ -205,17 +223,32 @@ impl AccountAccumulator {
             tracks.push(AntigravityQuotaTrack {
                 id: id.into(),
                 label: label.into(),
-                burst_5h: window(burst, 5.0),
-                weekly_7d: window(weekly, 168.0),
+                burst_5h: window(burst),
+                weekly_7d: window(weekly),
             });
         }
         AccountUsage {
             id: self.account.id,
             name: self.account.name,
             tracks,
-            total: WindowAcc::default().into_view(0.0),
+            total: WindowAcc::default().into_view(),
         }
     }
+}
+/// Spend of the period so far for each hour since it began. The first minute
+/// counts as a whole one, so a period that has just begun shows no runaway
+/// rate.
+fn cost_per_hour(cost: rust_decimal::Decimal, period: Option<&Period>, now: i64) -> String {
+    use rust_decimal::{Decimal, RoundingStrategy};
+    let Some(period) = period else {
+        return "0".into();
+    };
+    let elapsed = now
+        .saturating_sub(period.start)
+        .min(period.end.saturating_sub(period.start))
+        .max(60_000);
+    let hours = Decimal::from(elapsed) / Decimal::from(3_600_000);
+    super::fmt_usd((cost / hours).round_dp_with_strategy(4, RoundingStrategy::MidpointAwayFromZero))
 }
 
 #[cfg(test)]

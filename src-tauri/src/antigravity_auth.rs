@@ -1435,12 +1435,24 @@ pub struct AntigravityImport {
     /// Accounts the file holds that were already saved.
     pub skipped: usize,
 }
-pub fn export_accounts_at(paths: &Paths, rev: &str, target: &Path) -> Result<usize> {
+/// Writes the chosen accounts, in the order they are saved.
+pub fn export_accounts_at(
+    paths: &Paths,
+    rev: &str,
+    ids: &[String],
+    target: &Path,
+) -> Result<usize> {
     with_lock(|| {
         verify_revision(paths, rev)?;
         let (vault, _) = load_vault(paths)?;
-        if vault.entries.is_empty() {
-            return Err(err(code::ACCOUNT, "没有可导出的 Antigravity 账号"));
+        if ids.is_empty() {
+            return Err(err(code::ACCOUNT, "请选择要导出的 Antigravity 账号"));
+        }
+        if ids
+            .iter()
+            .any(|id| !vault.entries.iter().any(|e| &e.id == id))
+        {
+            return Err(err(code::ACCOUNT, "所选 Antigravity 账号已不存在"));
         }
         let file = ExchangeFile {
             schema: EXCHANGE_SCHEMA.to_owned(),
@@ -1448,6 +1460,7 @@ pub fn export_accounts_at(paths: &Paths, rev: &str, target: &Path) -> Result<usi
             accounts: vault
                 .entries
                 .iter()
+                .filter(|e| ids.contains(&e.id))
                 .map(|e| ExchangedAccount {
                     name: e.name.clone(),
                     payload: e.payload.clone(),
@@ -1587,6 +1600,7 @@ pub fn delete_antigravity_account(
 pub async fn export_antigravity_accounts(
     app: tauri::AppHandle,
     r: R<'_>,
+    ids: Vec<String>,
     expected_revision: String,
 ) -> Result<Option<usize>> {
     use tauri_plugin_dialog::DialogExt;
@@ -1604,7 +1618,7 @@ pub async fn export_antigravity_accounts(
         let path = file
             .into_path()
             .map_err(|_| err(code::PATH, "请选择本地路径"))?;
-        export_accounts_at(&Paths::resolve(&data)?, &expected_revision, &path).map(Some)
+        export_accounts_at(&Paths::resolve(&data)?, &expected_revision, &ids, &path).map(Some)
     })
     .await
     .map_err(|_| err(code::EXPORT, "账号导出失败"))?

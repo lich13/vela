@@ -44,6 +44,8 @@ pub struct PendingRequest {
     pub model: Option<String>,
     pub started_at: u64,
     pub elapsed_seconds: u64,
+    /// Live wait time since the provider, model or phase was last set.
+    pub attempt_seconds: u64,
     pub remaining_seconds: Option<u64>,
     pub phase: String,
     /// Upstream bytes of the attempt in progress; absent while nothing is
@@ -117,6 +119,9 @@ struct Pending {
     execution_elapsed: Duration,
     traffic: Option<super::freeze::Ticket>,
     paused_before: Duration,
+    /// When the attempt or wait being shown began, and `paused_for` then.
+    attempt_since: Instant,
+    attempt_paused: Duration,
 }
 impl Pending {
     fn paused_for(&self) -> Duration {
@@ -182,6 +187,11 @@ impl Registry {
                     .started
                     .elapsed()
                     .saturating_sub(active.paused_for())
+                    .as_secs();
+                view.attempt_seconds = active
+                    .attempt_since
+                    .elapsed()
+                    .saturating_sub(active.paused_for().saturating_sub(active.attempt_paused))
                     .as_secs();
                 if let Some(transfer) = &active.transfer {
                     let now = Instant::now();
@@ -325,6 +335,7 @@ impl WaitBudget {
                     .as_secs()
                     .saturating_sub(started.elapsed().as_secs()),
                 elapsed_seconds: 0,
+                attempt_seconds: 0,
                 remaining_seconds: Some(self.seconds),
                 phase: "admission".into(),
                 received_bytes: None,
@@ -341,6 +352,8 @@ impl WaitBudget {
             execution_elapsed: Duration::ZERO,
             traffic: None,
             paused_before: Duration::ZERO,
+            attempt_since: started,
+            attempt_paused: Duration::ZERO,
         });
         if let Some(registry) = &self.shared.registry {
             registry
@@ -362,6 +375,8 @@ impl WaitBudget {
     pub fn attach_traffic(&self, traffic: &super::freeze::Ticket) {
         if let Some(active) = &mut self.shared.state.lock().active {
             active.paused_before = traffic.paused_for();
+            // `paused_for` counts from here on.
+            active.attempt_paused = Duration::ZERO;
             active.traffic = Some(traffic.clone());
         }
         self.shared.changes.send_replace(());
@@ -392,6 +407,8 @@ impl WaitBudget {
                 active.view.model = crate::events::safe_message(model);
             }
             active.view.phase = phase.into();
+            active.attempt_since = Instant::now();
+            active.attempt_paused = active.paused_for();
             active.compaction_execution = false;
             // Each attempt and each wait counts its own transfer.
             active.transfer = None;
@@ -728,6 +745,54 @@ mod tests {
         assert!(registry.cancel(&registry.view()[0].request_id));
         budget.cancelled().await;
         assert!(registry.view().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attempt_time_restarts_with_each_description_and_skips_frozen_time() {
+        let registry = Registry::new(broadcast::channel(16).0);
+        let budget = WaitBudget::tracked(600, &registry);
+        let gate = crate::gateway::freeze::Gate::default();
+        let traffic = gate.request(crate::gateway::freeze::Scope::Client(
+            crate::gateway::ClientId::Codex,
+        ));
+        traffic.waiting();
+        budget.begin();
+        budget.attach_traffic(&traffic);
+        let identity = budget.deadline();
+        let times = || {
+            let row = registry.view().pop().unwrap();
+            (row.elapsed_seconds, row.attempt_seconds)
+        };
+        tokio::time::advance(Duration::from_secs(40)).await;
+        assert_eq!(times(), (40, 40));
+
+        budget.describe(Some("p1"), None, "headers");
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(times(), (45, 5));
+        // Buffering and a compaction belong to the attempt they follow.
+        budget.buffering();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        budget.compaction_execution(identity, true);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(times(), (55, 15));
+
+        // Frozen time counts for neither, including what was frozen before
+        // the attempt began.
+        gate.set(true).unwrap();
+        tokio::time::advance(Duration::from_secs(100)).await;
+        gate.set(false).unwrap();
+        budget.describe(None, None, "retry");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        gate.set(true).unwrap();
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert_eq!(times(), (57, 2));
+        gate.set(false).unwrap();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(times(), (58, 3));
+        assert_eq!(
+            serde_json::to_value(registry.view().pop().unwrap()).unwrap()["attemptSeconds"],
+            3
+        );
     }
 
     #[tokio::test(start_paused = true)]
