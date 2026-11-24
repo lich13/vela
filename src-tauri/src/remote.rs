@@ -1,6 +1,7 @@
-//! One SSH channel to a Vela server. The system `ssh` runs
-//! `vela-server rpc-stdio` on the other machine, which joins its input and
-//! output to the server's socket, and the messages of `wire.rs` cross it.
+//! One SSH channel to another machine's Vela. The system `ssh` runs
+//! `rpc-stdio` there, of the Linux server or of the Mac app, which joins its
+//! input and output to that Vela's socket, and the messages of `wire.rs`
+//! cross it.
 use crate::{
     errors::code,
     storage::{AppError, Result},
@@ -28,6 +29,8 @@ use tokio::{
 /// the server answered.
 pub(crate) const SSH: &str = "SSH";
 const SERVER: &str = "/usr/local/bin/vela-server rpc-stdio";
+/// The app where the macOS installer puts it.
+const MAC_APP: &str = "/Applications/Vela.app/Contents/MacOS/vela rpc-stdio";
 #[cfg(windows)]
 const PROGRAM: &str = "ssh.exe";
 #[cfg(not(windows))]
@@ -52,7 +55,18 @@ pub(crate) struct Target {
     pub host: String,
     /// Tried once whenever `host` cannot be reached.
     pub fallback: Option<String>,
-    pub sudo: bool,
+    pub runs: Program,
+}
+
+/// What an alias is asked to run. Each is a fixed command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Program {
+    /// The Linux server's bridge, by a user who may open its socket.
+    Server,
+    /// The same through `sudo -n`.
+    ServerWithSudo,
+    /// The bridge of the Vela app of the user who logs in to a Mac.
+    MacApp,
 }
 
 /// An alias goes to `ssh` as an argument, so it is held to what a `Host` name
@@ -70,7 +84,7 @@ pub(crate) fn check_alias(alias: &str) -> Result<()> {
 }
 
 /// Everything after the program name.
-pub(crate) fn arguments(alias: &str, sudo: bool) -> Result<Vec<String>> {
+pub(crate) fn arguments(alias: &str, runs: Program) -> Result<Vec<String>> {
     check_alias(alias)?;
     let mut arguments = vec!["-T".to_string()];
     for option in [
@@ -90,10 +104,10 @@ pub(crate) fn arguments(alias: &str, sudo: bool) -> Result<Vec<String>> {
     arguments.extend([
         "--".to_string(),
         alias.to_string(),
-        if sudo {
-            format!("sudo -n {SERVER}")
-        } else {
-            SERVER.to_string()
+        match runs {
+            Program::Server => SERVER.to_string(),
+            Program::ServerWithSudo => format!("sudo -n {SERVER}"),
+            Program::MacApp => MAC_APP.to_string(),
         },
     ]);
     Ok(arguments)
@@ -107,18 +121,18 @@ pub(crate) struct Transport {
     pub ended: Pin<Box<dyn Future<Output = String> + Send>>,
 }
 
-/// Starts a transport to an alias, with or without `sudo`.
-pub(crate) type Dialer = Arc<dyn Fn(&str, bool) -> Result<Transport> + Send + Sync>;
+/// Starts a transport to an alias that runs a program there.
+pub(crate) type Dialer = Arc<dyn Fn(&str, Program) -> Result<Transport> + Send + Sync>;
 
 /// The dialer of the app: the system's own `ssh`.
 pub(crate) fn system() -> Dialer {
     Arc::new(ssh)
 }
 
-fn ssh(alias: &str, sudo: bool) -> Result<Transport> {
+fn ssh(alias: &str, runs: Program) -> Result<Transport> {
     let mut command = tokio::process::Command::new(PROGRAM);
     command
-        .args(arguments(alias, sudo)?)
+        .args(arguments(alias, runs)?)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -534,7 +548,7 @@ impl Channel {
     }
 
     async fn handshake(&self, alias: &str) -> Result<(Arc<Link>, Capabilities)> {
-        let transport = (self.dialer)(alias, self.target.sudo)?;
+        let transport = (self.dialer)(alias, self.target.runs)?;
         let link = Link::start(alias, transport, self.listener.clone());
         let answer = link
             .request(

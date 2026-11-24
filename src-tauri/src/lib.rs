@@ -354,11 +354,16 @@ struct Host {
     power_attempted: Mutex<bool>,
     #[cfg(windows)]
     tray_dark: Mutex<Option<bool>>,
+    /// The machines this app lets control it are told every event too.
+    #[cfg(target_os = "macos")]
+    control: Arc<server::Control>,
 }
 #[cfg(feature = "desktop")]
 impl runtime::Sink for Host {
     fn emit(&self, event: runtime::Event<'_>) {
         use runtime::Event;
+        #[cfg(target_os = "macos")]
+        self.control.tell(&event);
         let app = &self.app;
         let name = event.name();
         match &event {
@@ -452,6 +457,10 @@ impl runtime::Sink for Host {
         }
     }
     fn attentive(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.control.listened_to() {
+            return true;
+        }
         has_visible_ui(&self.app)
     }
     fn sign_ins(&self) -> runtime::SignIns {
@@ -1135,6 +1144,9 @@ async fn call(
                 let _ = w.set_background_color(Some(bg));
             }
         }
+        #[cfg(target_os = "macos")]
+        app.state::<Arc<server::Control>>()
+            .set(r.inner(), preferences.remote_control)?;
     }
     Ok(result)
 }
@@ -1433,11 +1445,15 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(move |app| {
             let start_silently = startup::login_source(&args);
+            #[cfg(target_os = "macos")]
+            let control = Arc::new(server::Control::default());
             let runtime = Runtime::new(Arc::new(Host {
                 app: app.handle().clone(),
                 power_attempted: Mutex::new(false),
                 #[cfg(windows)]
                 tray_dark: Mutex::new(None),
+                #[cfg(target_os = "macos")]
+                control: control.clone(),
             }))?;
             app.manage(quick::Panel::new(&runtime.data)?);
             app.manage(runtime.clone());
@@ -1453,6 +1469,15 @@ pub fn run() {
             quick_macos::connect(app.handle());
             notifications::connect(app.handle(), &runtime.diagnostics);
             runtime.start()?;
+            #[cfg(target_os = "macos")]
+            {
+                if runtime.core.lock().preferences().remote_control {
+                    if let Err(error) = control.set(&runtime, true) {
+                        runtime.record_startup_error(error, false);
+                    }
+                }
+                app.manage(control);
+            }
             {
                 let handle = app.handle().clone();
                 let r = runtime.clone();
@@ -1748,6 +1773,8 @@ pub fn run() {
                 // macOS Dock/system termination can bypass ExitRequested.
                 // Serialize restoration with any in-flight takeover before returning to the OS.
                 let _ = tauri::async_runtime::block_on(r.stop_gateways());
+                #[cfg(target_os = "macos")]
+                let _ = app.state::<Arc<server::Control>>().set(r.inner(), false);
             }
         });
 }

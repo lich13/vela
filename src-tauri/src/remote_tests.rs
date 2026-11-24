@@ -8,7 +8,7 @@ const SPARE: &str = "spare.example.invalid";
 /// The server's end of one dialed transport.
 struct Far {
     alias: String,
-    sudo: bool,
+    runs: Program,
     stream: DuplexStream,
 }
 
@@ -52,13 +52,13 @@ struct Plan {
 
 fn pipes(plan: Plan) -> (Dialer, mpsc::UnboundedReceiver<Far>) {
     let (dialed, far) = mpsc::unbounded_channel();
-    let dialer: Dialer = Arc::new(move |alias: &str, sudo: bool| {
+    let dialer: Dialer = Arc::new(move |alias: &str, runs: Program| {
         let (near, stream) = tokio::io::duplex(64 * 1024);
         // A refused alias is still seen by the test, with an end nobody holds.
         let refused = plan.refused.contains(&alias);
         let _ = dialed.send(Far {
             alias: alias.to_string(),
-            sudo,
+            runs,
             stream,
         });
         if refused {
@@ -102,7 +102,7 @@ fn target(fallback: Option<&str>) -> Target {
     Target {
         host: HOST.into(),
         fallback: fallback.map(Into::into),
-        sudo: false,
+        runs: Program::Server,
     }
 }
 
@@ -154,7 +154,7 @@ fn an_alias_is_a_plain_host_name_and_nothing_else() {
     ] {
         let error = check_alias(alias).unwrap_err();
         assert_eq!(error.code, SSH, "{alias:?}");
-        assert!(arguments(alias, false).is_err(), "{alias:?}");
+        assert!(arguments(alias, Program::Server).is_err(), "{alias:?}");
     }
 }
 
@@ -169,7 +169,7 @@ async fn a_bad_alias_starts_nothing() {
             Target {
                 host: host.into(),
                 fallback: fallback.map(Into::into),
-                sudo: false,
+                runs: Program::Server,
             },
             dialer,
             Arc::new(Silent),
@@ -211,15 +211,24 @@ fn ssh_gets_fixed_options_then_the_alias_and_one_remote_command() {
         HOST,
         "/usr/local/bin/vela-server rpc-stdio",
     ];
-    assert_eq!(arguments(HOST, false).unwrap(), expected);
+    assert_eq!(arguments(HOST, Program::Server).unwrap(), expected);
 
-    let sudo = arguments(HOST, true).unwrap();
-    let end = sudo.len() - 3;
-    assert_eq!(sudo[..end], expected[..end]);
-    assert_eq!(
-        sudo[end..],
-        ["--", HOST, "sudo -n /usr/local/bin/vela-server rpc-stdio"]
-    );
+    // Only the command differs, and each is a fixed one.
+    for (runs, command) in [
+        (
+            Program::ServerWithSudo,
+            "sudo -n /usr/local/bin/vela-server rpc-stdio",
+        ),
+        (
+            Program::MacApp,
+            "/Applications/Vela.app/Contents/MacOS/vela rpc-stdio",
+        ),
+    ] {
+        let other = arguments(HOST, runs).unwrap();
+        let end = other.len() - 3;
+        assert_eq!(other[..end], expected[..end]);
+        assert_eq!(other[end..], ["--", HOST, command]);
+    }
 }
 
 #[test]
@@ -240,7 +249,7 @@ async fn the_handshake_asks_for_capabilities_and_reports_the_connection() {
     let heard = Arc::new(Heard::default());
     let channel = Channel::new(
         Target {
-            sudo: true,
+            runs: Program::ServerWithSudo,
             ..target(None)
         },
         dialer,
@@ -255,7 +264,10 @@ async fn the_handshake_asks_for_capabilities_and_reports_the_connection() {
     let capabilities = capabilities.unwrap();
     assert_eq!(capabilities.version, "0.41.0");
     assert_eq!(capabilities.commands, ["get_state"]);
-    assert_eq!((far.alias.as_str(), far.sudo), (HOST, true));
+    assert_eq!(
+        (far.alias.as_str(), far.runs),
+        (HOST, Program::ServerWithSudo)
+    );
     assert!(channel.is_open());
     assert_eq!(heard.all(), ["connected 0.41.0"]);
 

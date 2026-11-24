@@ -34,6 +34,9 @@ pub struct Preferences {
     pub quota_refresh_seconds: u64,
     #[serde(default = "default_notifications")]
     pub system_notifications: bool,
+    /// Whether the app on a Mac lets another machine control it over SSH.
+    #[serde(default)]
+    pub remote_control: bool,
 }
 pub fn default_quota_refresh() -> u64 {
     60
@@ -521,6 +524,7 @@ impl Core {
                     theme: "system".into(),
                     quota_refresh_seconds: default_quota_refresh(),
                     system_notifications: true,
+                    remote_control: false,
                 },
                 observed_auth_revisions: BTreeMap::new(),
                 extensions: BTreeMap::new(),

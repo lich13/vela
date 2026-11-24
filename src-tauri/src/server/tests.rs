@@ -8,9 +8,8 @@ struct Fixture {
     _home: tempfile::TempDir,
 }
 
-/// Every directory the services look into is under the temporary home, and
-/// nothing runs in the background: `start` is never called.
-async fn fixture() -> Fixture {
+/// A home directory whose clients are all under it.
+fn home() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let root = home.path();
     let client = |name: &str| root.join(name).to_string_lossy().into_owned();
@@ -32,6 +31,14 @@ async fn fixture() -> Fixture {
         .to_string(),
     )
     .unwrap();
+    home
+}
+
+/// Every directory the services look into is under the temporary home, and
+/// nothing runs in the background: `start` is never called.
+async fn fixture() -> Fixture {
+    let home = home();
+    let root = home.path();
     let hub = Arc::new(Hub::default());
     let runtime = Runtime::at(hub.clone(), root.to_path_buf(), root.join(".codex")).unwrap();
     let server = Arc::new(Server { runtime, hub });
@@ -53,7 +60,10 @@ async fn fixture() -> Fixture {
 struct Client(UnixStream);
 impl Client {
     async fn connect(fixture: &Fixture) -> Self {
-        Self(UnixStream::connect(&fixture.socket).await.unwrap())
+        Self::at(&fixture.socket).await
+    }
+    async fn at(socket: &Path) -> Self {
+        Self(UnixStream::connect(socket).await.unwrap())
     }
     async fn ask(&mut self, id: u64, command: &str, args: Value) {
         let request = Request {
@@ -270,6 +280,80 @@ async fn the_socket_is_private_and_only_a_dead_one_is_replaced() {
     std::fs::write(&file, "kept").unwrap();
     assert!(bind(&file).is_err());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "kept");
+}
+
+/// The app's sink, as far as the machines that control it go.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+struct App(Arc<Control>);
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+impl Sink for App {
+    fn emit(&self, event: Event<'_>) {
+        self.0.tell(&event);
+    }
+    fn attentive(&self) -> bool {
+        self.0.listened_to()
+    }
+}
+
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+#[tokio::test]
+async fn an_app_is_controlled_through_its_own_socket_only_while_it_is_set_to() {
+    let home = home();
+    let root = home.path();
+    let control = Arc::new(Control::default());
+    let runtime = Runtime::at(
+        Arc::new(App(control.clone())),
+        root.to_path_buf(),
+        root.join(".codex"),
+    )
+    .unwrap();
+    let socket = root.join(".vela/rpc.sock");
+    assert!(!socket.exists());
+    // Stopping what never listened is nothing.
+    control.set(&runtime, false).unwrap();
+
+    control.set(&runtime, true).unwrap();
+    control.set(&runtime, true).unwrap();
+    let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    let mut client = Client::at(&socket).await;
+    assert_eq!(client.shake_hands().await.commands, rpc::names());
+    assert!(control.listened_to());
+    client
+        .ask(
+            2,
+            "set_quota_refresh",
+            json!({"seconds": 120, "expectedSeconds": 60}),
+        )
+        .await;
+    let (mut answered, mut told) = (false, false);
+    while !(answered && told) {
+        match client.next().await.unwrap() {
+            Reply::Answer { id, error, .. } => {
+                assert!(error.is_none(), "{error:?}");
+                assert_eq!(id, 2);
+                answered = true;
+            }
+            Reply::Event { event, payload } => {
+                assert_eq!(event, "switch-state");
+                assert_eq!(payload["preferences"]["quotaRefreshSeconds"], 120);
+                told = true;
+            }
+        }
+    }
+    let agy = client
+        .call("start_gateway", json!({"clientId": "agy"}))
+        .await;
+    assert_eq!(agy.unwrap_err().code, code::UNSUPPORTED);
+
+    control.set(&runtime, false).unwrap();
+    assert!(!socket.exists());
+    assert!(client.next().await.is_none(), "the connection ends too");
+    assert!(!control.listened_to());
+
+    control.set(&runtime, true).unwrap();
+    Client::at(&socket).await.shake_hands().await;
+    control.set(&runtime, false).unwrap();
 }
 
 #[tokio::test]

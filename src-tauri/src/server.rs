@@ -1,6 +1,8 @@
 //! Vela with no window: this machine's services behind a Unix socket, in the
 //! frames of `wire`. `serve` is the server; `rpc-stdio` and `health` are brief
 //! clients of it, the first being what an SSH session runs to reach the socket.
+//! A Mac's app serves the same connections on a socket of its own while it is
+//! set to (`Control`), and its binary is the bridge to that one.
 use crate::{
     errors::code,
     rpc,
@@ -26,6 +28,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
     signal::unix::{signal, SignalKind},
     sync::{mpsc, Notify, Semaphore},
+    task::JoinSet,
 };
 
 const DEFAULT_SOCKET: &str = "/run/vela/rpc.sock";
@@ -116,7 +119,9 @@ async fn serve(path: PathBuf) -> Outcome {
                 _ = interrupt.recv() => {}
             }
         };
-        server.accept(listener, asked_to_stop).await;
+        // Held to the end: what is asked while the gateways stop is still
+        // answered.
+        let _connections = server.accept(listener, asked_to_stop).await;
         let runtime = &server.runtime;
         runtime.quit_pending.store(true, Ordering::Relaxed);
         let stopped = runtime.stop_gateways().await;
@@ -240,16 +245,13 @@ struct Listener {
 struct Hub {
     listeners: Mutex<Vec<Listener>>,
 }
-impl Sink for Hub {
-    fn emit(&self, event: Event<'_>) {
-        if let Event::StartupError(error) = &event {
-            eprintln!("{}", described((*error).clone()));
-        }
+impl Hub {
+    fn tell(&self, event: &Event<'_>) {
         let mut listeners = self.listeners.lock();
         if listeners.is_empty() {
             return;
         }
-        let Ok(payload) = serde_json::to_value(&event) else {
+        let Ok(payload) = serde_json::to_value(event) else {
             return;
         };
         let message = Arc::new(Reply::Event {
@@ -267,10 +269,96 @@ impl Sink for Hub {
             kept
         });
     }
-    fn attentive(&self) -> bool {
+
+    fn listened_to(&self) -> bool {
         let mut listeners = self.listeners.lock();
         listeners.retain(|listener| !listener.events.is_closed());
         !listeners.is_empty()
+    }
+}
+impl Sink for Hub {
+    fn emit(&self, event: Event<'_>) {
+        if let Event::StartupError(error) = &event {
+            eprintln!("{}", described((*error).clone()));
+        }
+        self.tell(&event);
+    }
+    fn attentive(&self) -> bool {
+        self.listened_to()
+    }
+}
+
+/// The socket of the app of the user whose data is in `data`.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn app_socket(data: &Path) -> PathBuf {
+    data.join("rpc.sock")
+}
+
+/// What `ssh` runs on a Mac: joins its input and output to the socket of the
+/// open app and answers the exit status. Opens no app.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+pub fn app_rpc_stdio() -> i32 {
+    let socket = dirs::home_dir()
+        .map(|home| app_socket(&home.join(".vela")))
+        .and_then(|path| BlockingStream::connect(path).ok());
+    let Some(socket) = socket else {
+        eprintln!("这台 Mac 上的 Vela 没有运行，或没有开启“允许其他设备经 SSH 控制这台 Mac”");
+        return 1;
+    };
+    relay(socket, std::io::stdin(), std::io::stdout())
+        .is_err()
+        .into()
+}
+
+/// The open app as the far end of another machine's channel: the server's
+/// connections over the app's own runtime, while the user lets it.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+#[derive(Default)]
+pub(crate) struct Control {
+    hub: Arc<Hub>,
+    /// Dropped to stop listening and to end the connections.
+    listening: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+impl Control {
+    /// Hands an event of the app's runtime to the connections that listen.
+    pub(crate) fn tell(&self, event: &Event<'_>) {
+        self.hub.tell(event);
+    }
+
+    /// Whether another machine is showing this one.
+    pub(crate) fn listened_to(&self) -> bool {
+        self.hub.listened_to()
+    }
+
+    /// Listens at the app's socket, or stops, which ends every connection and
+    /// removes the socket. Listening needs the tokio runtime.
+    pub(crate) fn set(&self, runtime: &Arc<Runtime>, on: bool) -> Result<()> {
+        let path = app_socket(&runtime.data);
+        let mut listening = self.listening.lock();
+        if !on {
+            if listening.take().is_some() {
+                let _ = std::fs::remove_file(&path);
+            }
+            return Ok(());
+        }
+        if listening.is_some() {
+            return Ok(());
+        }
+        let listener = bind(&path).map_err(|reason| AppError::new(code::IO, &reason))?;
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = Arc::new(Server {
+            runtime: runtime.clone(),
+            hub: self.hub.clone(),
+        });
+        tokio::spawn(async move {
+            let asked_to_stop = async {
+                let _ = stopped.await;
+            };
+            drop(server.accept(listener, asked_to_stop).await);
+        });
+        *listening = Some(stop);
+        Ok(())
     }
 }
 
@@ -280,22 +368,29 @@ struct Server {
 }
 impl Server {
     /// Takes connections until `stop` completes, then closes the socket to
-    /// new ones.
-    async fn accept(self: &Arc<Self>, listener: UnixListener, stop: impl Future<Output = ()>) {
+    /// new ones and answers those still open, which end when dropped.
+    async fn accept(
+        self: &Arc<Self>,
+        listener: UnixListener,
+        stop: impl Future<Output = ()>,
+    ) -> JoinSet<()> {
+        let mut connections = JoinSet::new();
         tokio::pin!(stop);
         loop {
             tokio::select! {
                 _ = &mut stop => break,
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _)) => {
-                        tokio::spawn(self.clone().connection(stream));
+                        connections.spawn(self.clone().connection(stream));
                     }
                     // Most likely out of descriptors, which the open
                     // connections give back as they end.
                     Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
                 },
+                Some(_) = connections.join_next() => {}
             }
         }
+        connections
     }
 
     /// Answers one connection's requests, each on its own task so that none

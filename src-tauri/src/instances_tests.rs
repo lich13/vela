@@ -28,7 +28,7 @@ struct Fleet {
     protocol: Mutex<u32>,
     /// What the servers say they answer.
     commands: Mutex<Vec<&'static str>>,
-    dialed: Mutex<Vec<(String, bool)>>,
+    dialed: Mutex<Vec<(String, Program)>>,
     /// Every request after the handshake, as `alias command`.
     asked: Mutex<Vec<String>>,
     lines: Mutex<Vec<Line>>,
@@ -48,8 +48,8 @@ impl Fleet {
 
     fn dialer(self: &Arc<Self>) -> Dialer {
         let fleet = self.clone();
-        Arc::new(move |alias: &str, sudo: bool| {
-            fleet.dialed.lock().push((alias.to_string(), sudo));
+        Arc::new(move |alias: &str, runs: Program| {
+            fleet.dialed.lock().push((alias.to_string(), runs));
             if fleet.down.lock().contains(&alias) {
                 return Err(AppError::new(
                     remote::SSH,
@@ -260,6 +260,7 @@ fn input(id: Option<&str>, name: &str, host: &str) -> MachineInput {
     MachineInput {
         id: id.map(Into::into),
         name: name.into(),
+        kind: Kind::Linux,
         ssh_host: host.into(),
         fallback_host: None,
         use_sudo: false,
@@ -309,7 +310,8 @@ async fn a_machine_is_added_changed_and_removed_in_the_file() {
     let id = added.machines[0].id.clone();
     assert!(uuid::Uuid::parse_str(&id).is_ok());
     let saved = json!({
-        "id": id, "name": "Tokyo", "sshHost": HOST, "fallbackHost": SPARE, "useSudo": true,
+        "id": id, "name": "Tokyo", "kind": "linux", "sshHost": HOST,
+        "fallbackHost": SPARE, "useSudo": true,
     });
     assert_eq!(
         bench.on_disk(),
@@ -341,8 +343,8 @@ async fn a_machine_is_added_changed_and_removed_in_the_file() {
     assert_eq!(
         bench.on_disk()["machines"],
         json!([
-            {"id": id, "name": "Tokyo 2", "sshHost": "new.example.invalid", "fallbackHost": null, "useSudo": false},
-            {"id": second, "name": "Osaka", "sshHost": OTHER, "fallbackHost": null, "useSudo": false},
+            {"id": id, "name": "Tokyo 2", "kind": "linux", "sshHost": "new.example.invalid", "fallbackHost": null, "useSudo": false},
+            {"id": second, "name": "Osaka", "kind": "linux", "sshHost": OTHER, "fallbackHost": null, "useSudo": false},
         ])
     );
 
@@ -428,6 +430,49 @@ async fn a_stale_revision_an_unknown_id_or_a_bad_field_changes_nothing() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_mac_is_asked_for_its_app_and_never_for_sudo() {
+    let bench = Bench::new();
+    let state = bench
+        .service
+        .save(
+            "missing",
+            MachineInput {
+                kind: Kind::Mac,
+                use_sudo: true,
+                ..input(None, "Studio", HOST)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(bench.on_disk()["machines"][0]["kind"], "mac");
+    assert_eq!(bench.on_disk()["machines"][0]["useSudo"], false);
+    let id = state.machines[0].id.clone();
+    bench.service.select(&state.revision, &id).await.unwrap();
+    assert_eq!(
+        *bench.fleet.dialed.lock(),
+        [(HOST.to_string(), Program::MacApp)]
+    );
+
+    // A list written before there were Macs is of Linux servers.
+    let folder = tempdir().unwrap();
+    stored(
+        folder.path(),
+        &json!({
+            "active": LOCAL,
+            "machines": [{
+                "id": "m1",
+                "name": "Tokyo",
+                "sshHost": HOST,
+                "fallbackHost": null,
+                "useSudo": true,
+            }],
+        }),
+    );
+    let older = Bench::over(folder);
+    assert_eq!(older.state().machines[0].kind, Kind::Linux);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_server_is_selected_once_it_answered_the_handshake() {
     let bench = Bench::new();
     let state = bench
@@ -457,7 +502,10 @@ async fn a_server_is_selected_once_it_answered_the_handshake() {
         })
     );
     assert_eq!(bench.on_disk()["active"], json!(id));
-    assert_eq!(*bench.fleet.dialed.lock(), [(HOST.to_string(), true)]);
+    assert_eq!(
+        *bench.fleet.dialed.lock(),
+        [(HOST.to_string(), Program::ServerWithSudo)]
+    );
     assert_eq!(bench.seen.take(), [format!("{id} connected")]);
     assert_eq!(bench.state(), selected);
 
@@ -806,14 +854,17 @@ async fn testing_an_address_leaves_the_selection_alone() {
     let target = |host: &str, fallback: Option<&str>| Target {
         host: host.into(),
         fallback: fallback.map(Into::into),
-        sudo: true,
+        runs: Program::ServerWithSudo,
     };
     let tested = bench.service.test(target(OTHER, None)).await.unwrap();
     assert_eq!(
         serde_json::to_value(&tested).unwrap(),
         json!({"version": "0.41.0"})
     );
-    assert_eq!(bench.fleet.dialed.lock()[1], (OTHER.to_string(), true));
+    assert_eq!(
+        bench.fleet.dialed.lock()[1],
+        (OTHER.to_string(), Program::ServerWithSudo)
+    );
     // Only the selected server's connection is left.
     assert_eq!(bench.fleet.connected().await, [HOST]);
 
@@ -897,7 +948,7 @@ async fn a_silent_server_at_start_is_offline_after_the_handshake_wait() {
         COMMANDS,
         {
             let held = held.clone();
-            Arc::new(move |_: &str, _: bool| {
+            Arc::new(move |_: &str, _: Program| {
                 let (near, far) = tokio::io::duplex(1024);
                 held.lock().push(far);
                 let (reader, writer) = tokio::io::split(near);

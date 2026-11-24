@@ -2659,6 +2659,7 @@ mod tests {
             machines: vec![instances::Machine {
                 id: "m1".into(),
                 name: "fixture".into(),
+                kind: Default::default(),
                 ssh_host: "example.invalid".into(),
                 fallback_host: None,
                 use_sudo: true,

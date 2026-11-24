@@ -1,9 +1,10 @@
-//! Which Vela the pages show and operate: this machine, or a server reached
-//! over SSH. Keeps the list of servers in `instances.json`, the channel to
-//! the selected one and what the windows are told about both.
+//! Which Vela the pages show and operate: this machine, or another reached
+//! over SSH, a Linux server or a Mac with the app open. Keeps the list of
+//! them in `instances.json`, the channel to the selected one and what the
+//! windows are told about both.
 use crate::{
     errors::code,
-    remote::{self, Channel, Dialer, Listener, Target},
+    remote::{self, Channel, Dialer, Listener, Program, Target},
     storage::{self, AppError, Result},
     wire::Capabilities,
 };
@@ -20,11 +21,37 @@ pub(crate) const LOCAL: &str = "local";
 const FILE: &str = "instances.json";
 const NAME_LIMIT: usize = 64;
 
+/// What runs Vela on a machine. A file from before there were Macs lists
+/// Linux servers only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Kind {
+    /// The `vela-server` service.
+    #[default]
+    Linux,
+    /// The Vela app, open and set to let itself be controlled.
+    Mac,
+}
+
+impl Kind {
+    /// The app belongs to the user who logs in, so a Mac is never asked for
+    /// `sudo`.
+    fn runs(self, sudo: bool) -> Program {
+        match (self, sudo) {
+            (Self::Mac, _) => Program::MacApp,
+            (Self::Linux, true) => Program::ServerWithSudo,
+            (Self::Linux, false) => Program::Server,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Machine {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub kind: Kind,
     pub ssh_host: String,
     pub fallback_host: Option<String>,
     pub use_sudo: bool,
@@ -35,7 +62,7 @@ impl Machine {
         Target {
             host: self.ssh_host.clone(),
             fallback: self.fallback_host.clone(),
-            sudo: self.use_sudo,
+            runs: self.kind.runs(self.use_sudo),
         }
     }
 }
@@ -46,6 +73,8 @@ impl Machine {
 pub(crate) struct MachineInput {
     pub id: Option<String>,
     pub name: String,
+    #[serde(default)]
+    pub kind: Kind,
     pub ssh_host: String,
     pub fallback_host: Option<String>,
     pub use_sudo: bool,
@@ -283,9 +312,10 @@ impl Service {
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             name: name.to_string(),
+            kind: input.kind,
             ssh_host: input.ssh_host,
             fallback_host: input.fallback_host,
-            use_sudo: input.use_sudo,
+            use_sudo: input.use_sudo && input.kind == Kind::Linux,
         };
         let mut stored = inner.stored.clone();
         let moved = match &input.id {
@@ -625,6 +655,7 @@ pub(crate) async fn select_instance(
 #[tauri::command]
 pub(crate) async fn test_instance(
     service: tauri::State<'_, Arc<Service>>,
+    kind: Option<Kind>,
     ssh_host: String,
     fallback_host: Option<String>,
     use_sudo: bool,
@@ -632,7 +663,7 @@ pub(crate) async fn test_instance(
     let target = Target {
         host: ssh_host,
         fallback: fallback_host,
-        sudo: use_sudo,
+        runs: kind.unwrap_or_default().runs(use_sudo),
     };
     service.test(target).await
 }
