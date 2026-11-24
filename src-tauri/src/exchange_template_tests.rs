@@ -50,7 +50,7 @@ fn masked(mut document: Value, index: usize) -> Value {
 }
 
 #[test]
-fn v023_template_masks_exactly_three_fields_and_preserves_complete_envelopes() {
+fn template_masks_exactly_three_fields_and_preserves_complete_envelopes() {
     for wrapped in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("saved.json");
@@ -82,7 +82,7 @@ fn v023_template_masks_exactly_three_fields_and_preserves_complete_envelopes() {
 }
 
 #[test]
-fn v023_template_requires_explicit_matching_prototype_and_consumes_selection() {
+fn template_requires_explicit_matching_prototype_and_consumes_selection() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("saved.json");
     let service = Service::default();
@@ -125,7 +125,7 @@ fn v023_template_requires_explicit_matching_prototype_and_consumes_selection() {
 }
 
 #[test]
-fn v023_template_cancel_and_replacement_preserve_last_saved_document() {
+fn template_cancel_and_replacement_preserve_last_saved_document() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("saved.json");
     let service = Service::default();
@@ -174,7 +174,7 @@ fn v023_template_cancel_and_replacement_preserve_last_saved_document() {
 }
 
 #[test]
-fn v023_template_legacy_and_wrong_kind_require_reselection_without_overwrite() {
+fn template_legacy_and_wrong_kind_require_reselection_without_overwrite() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("saved.json");
     let legacy = br#"{"version":1,"platform":"openai","concurrency":4,"extra":{"keep":true}}"#;
@@ -200,7 +200,7 @@ fn v023_template_legacy_and_wrong_kind_require_reselection_without_overwrite() {
 }
 
 #[test]
-fn v023_template_oauth_keeps_behavior_but_drops_prototype_identity_and_cache() {
+fn template_oauth_keeps_behavior_but_drops_prototype_identity_and_cache() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("saved.json");
     let document = envelope(vec![json!({
@@ -237,7 +237,7 @@ fn v023_template_oauth_keeps_behavior_but_drops_prototype_identity_and_cache() {
 }
 
 #[test]
-fn v023_template_preserves_unknown_large_integer_and_decimal_exactly() {
+fn template_preserves_unknown_large_integer_and_decimal_exactly() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("template.json");
     let mut document = envelope(vec![api("Fixture", "openai")]);

@@ -1470,7 +1470,7 @@ async fn file_imported_planner_step_is_deduplicated_when_later_covered_by_rpc_sy
 }
 
 #[test]
-fn v02614_migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_match_batch() {
+fn migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_match_batch() {
     for native in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path()).unwrap();

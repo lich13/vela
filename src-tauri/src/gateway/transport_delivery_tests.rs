@@ -8,7 +8,7 @@ use super::{
     replay::{full, WireBody},
     Edit, Gateway, Settings,
 };
-use crate::gateway::test_support::form;
+use crate::gateway::test_support::{form, NotifyOnDrop};
 use crate::gateway::test_support::{
     scoped::{server, server_in_scope, LoopbackServer},
     UsageFixture as Fixture,
@@ -445,16 +445,8 @@ async fn http_write_half_close_still_delivers_the_complete_response() {
     assert_success(&rows[0], HTTP_RESPONSE.len());
 }
 
-struct Dropped(Arc<Notify>);
-
-impl Drop for Dropped {
-    fn drop(&mut self) {
-        self.0.notify_one();
-    }
-}
-
 fn open_stream(prefix: &'static [u8], release: Arc<Notify>, cancelled: Arc<Notify>) -> WireBody {
-    let guard = Dropped(cancelled);
+    let guard = NotifyOnDrop(cancelled);
     let chunks = async_stream::try_stream! {
         let _guard = guard;
         yield Frame::data(Bytes::from_static(prefix));

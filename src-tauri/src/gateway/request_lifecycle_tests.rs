@@ -5,6 +5,7 @@
 //! same lifecycle decisions used by HTTP and websocket forwarding without
 //! opening a real listener.  All IDs and request data are synthetic fixtures.
 use super::protocol::Protocol;
+use crate::gateway::test_support::NotifyOnDrop;
 use crate::usage::{
     model::{EndCause, Filter, RoutingDecision},
     Service,
@@ -28,14 +29,6 @@ const COMPLETED: &[u8] =
     br#"data: {"type":"response.completed","response":{"id":"fixture-completed","status":"completed"}}
 
 "#;
-
-struct CancelGuard(Arc<Notify>);
-
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        self.0.notify_one();
-    }
-}
 
 fn wait_for_record(service: &Service) -> crate::usage::model::Record {
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -278,7 +271,7 @@ async fn http_client_disconnect_preserves_forwarded_bytes_without_usage_tail() {
         let generated = generated_copy.clone();
         let release = release_copy.clone();
         async move {
-            let guard = CancelGuard(cancelled);
+            let guard = NotifyOnDrop(cancelled);
             let chunks = async_stream::try_stream! {
                 let _guard = guard;
                 yield Frame::data(completed);

@@ -27,35 +27,35 @@ use std::{
 #[path = "model_detour_http_tests.rs"]
 mod model_detour_http_tests;
 
-const V022_WINDOW: &str = "fixture-v022-window";
-const V022_CAPACITY: &[u8] = b"data: {\"type\":\"error\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Selected model is at capacity\"}}\n\n";
-const V022_TEMPORARY_429: &[u8] =
+const WINDOW: &str = "fixture-v022-window";
+const CAPACITY: &[u8] = b"data: {\"type\":\"error\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Selected model is at capacity\"}}\n\n";
+const TEMPORARY_429: &[u8] =
     br#"{"error":{"code":"rate_limit_exceeded","message":"selected model is at capacity"}}"#;
-const V022_BALANCE_429: &[u8] =
+const BALANCE_429: &[u8] =
     br#"{"error":{"code":"INSUFFICIENT_BALANCE","message":"fixture balance exhausted"}}"#;
-const V022_USAGE_LIMIT_429: &[u8] =
+const USAGE_LIMIT_429: &[u8] =
     br#"{"error":{"code":"USAGE_LIMIT_EXCEEDED","message":"fixture usage limit"}}"#;
 
-fn v022_sse_response(body: impl Into<Bytes>) -> Response<WireBody> {
+fn sse_response(body: impl Into<Bytes>) -> Response<WireBody> {
     Response::builder()
         .header("content-type", "text/event-stream")
         .body(replay::full(body))
         .unwrap()
 }
 
-fn v022_compacted_body() -> Vec<u8> {
+fn compacted_body() -> Vec<u8> {
     serde_json::to_vec(&json!({
         "model": "fixture-model",
         "stream": true,
         "input": [
-            {"type": "compaction", "encrypted_content": V022_WINDOW},
+            {"type": "compaction", "encrypted_content": WINDOW},
             {"role": "user", "content": "fixture-after-compaction"}
         ]
     }))
     .unwrap()
 }
 
-fn v022_initial_body() -> Vec<u8> {
+fn initial_body() -> Vec<u8> {
     serde_json::to_vec(&json!({
         "model": "fixture-model",
         "input": [{"role": "user", "content": "fixture-initial"}]
@@ -63,22 +63,22 @@ fn v022_initial_body() -> Vec<u8> {
     .unwrap()
 }
 
-fn v022_seed_response() -> String {
+fn seed_response() -> String {
     json!({
         "id": "fixture-v022-seed",
         "object": "response",
         "status": "completed",
         "model": "fixture-model",
-        "output": [{"type": "compaction", "encrypted_content": V022_WINDOW}]
+        "output": [{"type": "compaction", "encrypted_content": WINDOW}]
     })
     .to_string()
 }
 
 #[tokio::test]
-async fn v022_capacity_before_first_output_returns_to_compaction_owner() {
+async fn capacity_before_first_output_returns_to_compaction_owner() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let owner_count = owner_hits.clone();
-    let owner_body = v022_seed_response();
+    let owner_body = seed_response();
     let owner_response_body = owner_body.clone();
     let owner_port = serve(move |_| {
         let owner_body = owner_response_body.clone();
@@ -90,7 +90,7 @@ async fn v022_capacity_before_first_output_returns_to_compaction_owner() {
     let receiver_count = receiver_hits.clone();
     let receiver_port = serve(move |_| {
         receiver_count.fetch_add(1, Ordering::SeqCst);
-        async { json_response(StatusCode::TOO_MANY_REQUESTS, V022_CAPACITY, None) }
+        async { json_response(StatusCode::TOO_MANY_REQUESTS, CAPACITY, None) }
     })
     .await;
 
@@ -112,7 +112,7 @@ async fn v022_capacity_before_first_output_returns_to_compaction_owner() {
     start(&gateway, &dir).await;
 
     let session = "fixture-v022-capacity-owner";
-    let seed = thread_request(&gateway, "/v1/responses", session, v022_initial_body()).await;
+    let seed = thread_request(&gateway, "/v1/responses", session, initial_body()).await;
     assert_eq!(seed.status(), StatusCode::OK);
     let seed_bytes = response_bytes(seed).await;
     assert_eq!(seed_bytes, owner_body.as_bytes());
@@ -124,7 +124,7 @@ async fn v022_capacity_before_first_output_returns_to_compaction_owner() {
             ids: vec![ids[1].clone(), ids[0].clone()],
         },
     );
-    let response = thread_request(&gateway, "/v1/responses", session, v022_compacted_body()).await;
+    let response = thread_request(&gateway, "/v1/responses", session, compacted_body()).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response_bytes(response).await, owner_body.as_bytes());
     assert_eq!(receiver_hits.load(Ordering::SeqCst), 1);
@@ -133,10 +133,10 @@ async fn v022_capacity_before_first_output_returns_to_compaction_owner() {
 }
 
 #[tokio::test]
-async fn v022_compaction_output_closes_the_single_retakeover_opportunity() {
+async fn compaction_output_closes_the_single_retakeover_opportunity() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let owner_count = owner_hits.clone();
-    let owner_body = v022_seed_response();
+    let owner_body = seed_response();
     let owner_response_body = owner_body.clone();
     let owner_port = serve(move |_| {
         let owner_body = owner_response_body.clone();
@@ -149,7 +149,7 @@ async fn v022_compaction_output_closes_the_single_retakeover_opportunity() {
     let receiver_port = serve(move |_| {
         receiver_count.fetch_add(1, Ordering::SeqCst);
         async {
-            v022_sse_response(Bytes::from_static(
+            sse_response(Bytes::from_static(
                 b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-v022-created\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
             ))
         }
@@ -172,7 +172,7 @@ async fn v022_compaction_output_closes_the_single_retakeover_opportunity() {
     );
     start(&gateway, &dir).await;
     let session = "fixture-v022-output-started";
-    let seed = thread_request(&gateway, "/v1/responses", session, v022_initial_body()).await;
+    let seed = thread_request(&gateway, "/v1/responses", session, initial_body()).await;
     assert_eq!(seed.status(), StatusCode::OK);
     let _ = response_bytes(seed).await;
     update(
@@ -182,7 +182,7 @@ async fn v022_compaction_output_closes_the_single_retakeover_opportunity() {
             ids: vec![ids[1].clone(), ids[0].clone()],
         },
     );
-    let response = thread_request(&gateway, "/v1/responses", session, v022_compacted_body()).await;
+    let response = thread_request(&gateway, "/v1/responses", session, compacted_body()).await;
     assert_eq!(response.status(), StatusCode::OK);
     let expected = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-v022-created\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
     assert_eq!(response_bytes(response).await, expected.as_slice());
@@ -192,7 +192,7 @@ async fn v022_compaction_output_closes_the_single_retakeover_opportunity() {
 }
 
 #[tokio::test]
-async fn v022_model_capacity_isolated_so_same_provider_accepts_astra() {
+async fn model_capacity_isolated_so_same_provider_accepts_astra() {
     let luna_hits = Arc::new(AtomicUsize::new(0));
     let astra_hits = Arc::new(AtomicUsize::new(0));
     let luna_first = Arc::new(tokio::sync::Notify::new());
@@ -213,7 +213,7 @@ async fn v022_model_capacity_isolated_so_same_provider_accepts_astra() {
                     first_signal.notify_waiters();
                 }
                 if attempt <= 2 {
-                    return json_response(StatusCode::TOO_MANY_REQUESTS, V022_CAPACITY, None);
+                    return json_response(StatusCode::TOO_MANY_REQUESTS, CAPACITY, None);
                 }
             } else if model == "fixture-astra" {
                 astra_count.fetch_add(1, Ordering::SeqCst);
@@ -269,7 +269,7 @@ async fn v022_model_capacity_isolated_so_same_provider_accepts_astra() {
 }
 
 #[test]
-fn v022_permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary() {
+fn permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary() {
     let chinese_balance = serde_json::to_vec(&json!({
         "error": {"message": "\u{4f59}\u{989d}\u{8017}\u{5c3d}"}
     }))
@@ -308,9 +308,9 @@ fn v022_permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary
         );
     }
 
-    let temporary = super::failure_policy::test_support::details_http(V022_TEMPORARY_429);
+    let temporary = super::failure_policy::test_support::details_http(TEMPORARY_429);
     assert!(!super::failure_policy::test_support::permanent_rejection(
-        V022_TEMPORARY_429
+        TEMPORARY_429
     ));
     assert_eq!(temporary.health_scope, None);
     assert_eq!(
@@ -320,12 +320,12 @@ fn v022_permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary
 }
 
 #[tokio::test]
-async fn v022_usage_limit_429_fails_over_to_p2_without_capacity_wait() {
+async fn usage_limit_429_fails_over_to_p2_without_capacity_wait() {
     let p1_hits = Arc::new(AtomicUsize::new(0));
     let p1_count = p1_hits.clone();
     let p1_port = serve(move |_| {
         p1_count.fetch_add(1, Ordering::SeqCst);
-        async { json_response(StatusCode::TOO_MANY_REQUESTS, V022_USAGE_LIMIT_429, None) }
+        async { json_response(StatusCode::TOO_MANY_REQUESTS, USAGE_LIMIT_429, None) }
     })
     .await;
     let p2_hits = Arc::new(AtomicUsize::new(0));
@@ -384,12 +384,12 @@ async fn v022_usage_limit_429_fails_over_to_p2_without_capacity_wait() {
 }
 
 #[tokio::test]
-async fn v022_insufficient_balance_429_with_one_provider_returns_original_body_without_waiting() {
+async fn insufficient_balance_429_with_one_provider_returns_original_body_without_waiting() {
     let p1_hits = Arc::new(AtomicUsize::new(0));
     let p1_count = p1_hits.clone();
     let p1_port = serve(move |_| {
         p1_count.fetch_add(1, Ordering::SeqCst);
-        async { json_response(StatusCode::TOO_MANY_REQUESTS, V022_BALANCE_429, None) }
+        async { json_response(StatusCode::TOO_MANY_REQUESTS, BALANCE_429, None) }
     })
     .await;
     let (dir, gateway) = probing_fixture(vec![format!("http://127.0.0.1:{p1_port}/v1")]).await;
@@ -419,21 +419,21 @@ async fn v022_insufficient_balance_429_with_one_provider_returns_original_body_w
         }
     };
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(response_bytes(response).await, V022_BALANCE_429);
+    assert_eq!(response_bytes(response).await, BALANCE_429);
     assert_eq!(p1_hits.load(Ordering::SeqCst), 1);
     gateway.stop().await.unwrap();
 }
 
 #[tokio::test]
-async fn v022_temporary_capacity_then_hard_429_does_not_revive_denied_provider() {
+async fn temporary_capacity_then_hard_429_does_not_revive_denied_provider() {
     let hits = Arc::new(AtomicUsize::new(0));
     let count = hits.clone();
     let port = serve(move |_| {
         let attempt = count.fetch_add(1, Ordering::SeqCst) + 1;
         async move {
             match attempt {
-                1 => json_response(StatusCode::TOO_MANY_REQUESTS, V022_TEMPORARY_429, None),
-                2 => json_response(StatusCode::TOO_MANY_REQUESTS, V022_BALANCE_429, None),
+                1 => json_response(StatusCode::TOO_MANY_REQUESTS, TEMPORARY_429, None),
+                2 => json_response(StatusCode::TOO_MANY_REQUESTS, BALANCE_429, None),
                 _ => json_response(
                     StatusCode::OK,
                     br#"{"provider":"fixture-revived"}"#.as_slice(),
@@ -464,13 +464,13 @@ async fn v022_temporary_capacity_then_hard_429_does_not_revive_denied_provider()
     .await
     .expect("mixed capacity and hard rejection did not settle");
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(response_bytes(response).await, V022_BALANCE_429);
+    assert_eq!(response_bytes(response).await, BALANCE_429);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     gateway.stop().await.unwrap();
 }
 
 #[tokio::test]
-async fn v022_first_turn_history_and_empty_warmup_do_not_misclassify_new_threads() {
+async fn first_turn_history_and_empty_warmup_do_not_misclassify_new_threads() {
     let ordinary_hits = Arc::new(AtomicUsize::new(0));
     let new_hits = Arc::new(AtomicUsize::new(0));
     let ordinary_count = ordinary_hits.clone();
@@ -556,7 +556,7 @@ async fn v022_first_turn_history_and_empty_warmup_do_not_misclassify_new_threads
 }
 
 #[test]
-fn v022_turn_evidence_keeps_first_history_and_auxiliary_distinct() {
+fn turn_evidence_keeps_first_history_and_auxiliary_distinct() {
     let first = RequestHints::from_value(
         json!({
             "model":"fixture-model",
@@ -601,7 +601,7 @@ fn v022_turn_evidence_keeps_first_history_and_auxiliary_distinct() {
 }
 
 #[tokio::test]
-async fn v022_model_server_errors_are_isolated_and_other_models_remain_admitted() {
+async fn model_server_errors_are_isolated_and_other_models_remain_admitted() {
     let port = serve(|request| async move {
         let body = request.into_body().collect().await.unwrap().to_bytes();
         let value: Value = serde_json::from_slice(&body).unwrap();
@@ -670,7 +670,7 @@ async fn v022_model_server_errors_are_isolated_and_other_models_remain_admitted(
 }
 
 #[tokio::test]
-async fn v022_invalid_api_key_marks_provider_scope() {
+async fn invalid_api_key_marks_provider_scope() {
     let port = serve(|_| async {
         json_response(
             StatusCode::UNAUTHORIZED,
@@ -703,10 +703,10 @@ async fn v022_invalid_api_key_marks_provider_scope() {
 }
 
 #[tokio::test]
-async fn v022_metadata_parse_failure_keeps_existing_owner_pinned() {
+async fn metadata_parse_failure_keeps_existing_owner_pinned() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let owner_count = owner_hits.clone();
-    let owner_body = v022_seed_response();
+    let owner_body = seed_response();
     let owner_response_body = owner_body.clone();
     let owner_port = serve(move |_| {
         let owner_body = owner_response_body.clone();
@@ -735,7 +735,7 @@ async fn v022_metadata_parse_failure_keeps_existing_owner_pinned() {
     start(&gateway, &dir).await;
     let ids = provider_ids(&gateway);
     let session = "fixture-v022-malformed-owner";
-    let seed = thread_request(&gateway, "/v1/responses", session, v022_initial_body()).await;
+    let seed = thread_request(&gateway, "/v1/responses", session, initial_body()).await;
     assert_eq!(seed.status(), StatusCode::OK);
     assert_eq!(response_bytes(seed).await, owner_body.as_bytes());
     update(

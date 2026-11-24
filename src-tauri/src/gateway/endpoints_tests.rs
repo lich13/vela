@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use std::{sync::Arc, time::Instant};
 
 #[test]
-fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_provider_identity() {
+fn store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_provider_identity() {
     let mut store = Store::default();
     let primary_raw = "HTTPS://PRIMARY.example.invalid:443/v1/";
     store
@@ -112,7 +112,7 @@ fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_pr
 }
 
 #[test]
-fn v0212_gateway_rejects_stale_edit_revision_and_persists_endpoints_across_restart() {
+fn gateway_rejects_stale_edit_revision_and_persists_endpoints_across_restart() {
     let dir = tempfile::tempdir().unwrap();
     let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
     gateway
@@ -170,7 +170,7 @@ fn v0212_gateway_rejects_stale_edit_revision_and_persists_endpoints_across_resta
 }
 
 #[test]
-fn v0212_service_prefers_fastest_endpoint_and_keeps_thread_and_response_pins_after_swap() {
+fn service_prefers_fastest_endpoint_and_keeps_thread_and_response_pins_after_swap() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path().join("endpoint-owners.json"));
     let primary_raw = "HTTPS://PRIMARY.example.invalid:443/v1/";
@@ -244,7 +244,7 @@ fn v0212_service_prefers_fastest_endpoint_and_keeps_thread_and_response_pins_aft
     );
 }
 
-async fn v0212_loopback_server(seen: Arc<Mutex<Vec<(String, bool)>>>) -> u16 {
+async fn loopback_server(seen: Arc<Mutex<Vec<(String, bool)>>>) -> u16 {
     serve(move |request| {
         let seen = seen.clone();
         async move {
@@ -264,9 +264,9 @@ async fn v0212_loopback_server(seen: Arc<Mutex<Vec<(String, bool)>>>) -> u16 {
 }
 
 #[tokio::test]
-async fn v0212_loopback_probe_sends_no_authorization_or_business_rpm_and_keeps_edit_revision() {
+async fn loopback_probe_sends_no_authorization_or_business_rpm_and_keeps_edit_revision() {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let upstream_port = v0212_loopback_server(seen.clone()).await;
+    let upstream_port = loopback_server(seen.clone()).await;
     let dir = tempfile::tempdir().unwrap();
     let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
     gateway

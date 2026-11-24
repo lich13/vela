@@ -94,7 +94,7 @@ async fn gateway_fixture() -> Fixture {
 }
 
 #[tokio::test]
-async fn v020_core_gateway_state_and_restart_do_not_import_temporary_api_key() {
+async fn core_gateway_state_and_restart_do_not_import_temporary_api_key() {
     let fixture = gateway_fixture().await;
     let mut core = Core::new(fixture.data.clone(), fixture.home.clone()).unwrap();
 
@@ -130,7 +130,7 @@ async fn v020_core_gateway_state_and_restart_do_not_import_temporary_api_key() {
 }
 
 #[tokio::test]
-async fn v020_core_gateway_transaction_rejects_switch_and_import_file_without_changing_bytes() {
+async fn core_gateway_transaction_rejects_switch_and_import_file_without_changing_bytes() {
     let fixture = gateway_fixture().await;
     let mut core = Core::new(fixture.data.clone(), fixture.home.clone()).unwrap();
     let account = core
@@ -183,7 +183,7 @@ async fn v020_core_gateway_transaction_rejects_switch_and_import_file_without_ch
 }
 
 #[tokio::test]
-async fn v020_core_official_chatgpt_login_saves_new_account_without_overwriting_gateway_auth() {
+async fn core_official_chatgpt_login_saves_new_account_without_overwriting_gateway_auth() {
     let fixture = gateway_fixture().await;
     let mut core = Core::new(fixture.data.clone(), fixture.home.clone()).unwrap();
     let before_auth = fs::read(fixture.home.join("auth.json")).unwrap();

@@ -313,8 +313,7 @@ async fn catalog_is_cached_singleflight_bounded_and_has_no_business_side_effects
 }
 
 #[tokio::test]
-async fn v02514_new_provider_discovers_once_failed_refresh_keeps_old_and_deleted_result_is_discarded(
-) {
+async fn new_provider_discovers_once_failed_refresh_keeps_old_and_deleted_result_is_discarded() {
     let hits = Arc::new(AtomicUsize::new(0));
     let count = hits.clone();
     let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));

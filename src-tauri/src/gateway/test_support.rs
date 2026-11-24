@@ -92,6 +92,15 @@ pub(crate) fn ids(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).into()).collect()
 }
 
+/// Tells a test that the value holding it was released.
+pub(crate) struct NotifyOnDrop(pub std::sync::Arc<tokio::sync::Notify>);
+
+impl Drop for NotifyOnDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
 /// Polls until the condition holds and panics after three seconds.
 pub(crate) async fn until(f: impl Fn() -> bool) {
     tokio::time::timeout(Duration::from_secs(3), async {

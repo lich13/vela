@@ -126,7 +126,7 @@ fn codex_identity_is_atomic_success_only_private_and_bound_to_home() {
 }
 
 #[test]
-fn v02523_business_user_agent_is_platform_scoped_success_only_and_survives_reload() {
+fn business_user_agent_is_platform_scoped_success_only_and_survives_reload() {
     let dir = tempfile::tempdir().unwrap();
     for client in [
         ClientId::Codex,

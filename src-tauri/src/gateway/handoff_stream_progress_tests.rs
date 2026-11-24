@@ -56,7 +56,7 @@ fn compaction_payload(items: usize, encrypted: &str) -> Vec<u8> {
 }
 
 #[test]
-fn v0212_compaction_after_large_inputs_is_recognized_at_all_boundaries() {
+fn compaction_after_large_inputs_is_recognized_at_all_boundaries() {
     let encrypted = "fixture-window-after-large-input";
     let expected = crate::storage::digest(encrypted.as_bytes());
     for items in [0, 63, 64, 82, 299] {
@@ -73,7 +73,7 @@ fn v0212_compaction_after_large_inputs_is_recognized_at_all_boundaries() {
 }
 
 #[test]
-fn v0212_assistant_and_tool_after_the_first_64_items_never_prove_a_new_thread() {
+fn assistant_and_tool_after_the_first_64_items_never_prove_a_new_thread() {
     for role in ["assistant", "tool"] {
         let mut input = Vec::with_capacity(65);
         for _ in 0..64 {
@@ -108,7 +108,7 @@ fn escaped_json_string(value: &str) -> String {
 }
 
 #[test]
-fn v0212_large_and_escaped_encrypted_content_have_the_same_decoded_digest() {
+fn large_and_escaped_encrypted_content_have_the_same_decoded_digest() {
     let plain = format!("{}\\\"\\\n\\t é 😀", "fixture-large-window-".repeat(140));
     assert!(plain.len() > 2048);
     let plain_raw = serde_json::to_vec(&json!({
@@ -167,7 +167,7 @@ fn seed_boundary(
 }
 
 #[test]
-fn v0212_failed_same_boundary_handoff_does_not_let_the_original_provider_consume_it() {
+fn failed_same_boundary_handoff_does_not_let_the_original_provider_consume_it() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let old = policy_provider("fixture-old", true, false);
@@ -209,7 +209,7 @@ fn v0212_failed_same_boundary_handoff_does_not_let_the_original_provider_consume
 }
 
 #[test]
-fn v0259_successful_handoff_continuation_reports_consumed_window_without_rerouting() {
+fn successful_handoff_continuation_reports_consumed_window_without_rerouting() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let old = policy_provider("fixture-old", true, false);
@@ -244,7 +244,7 @@ fn v0259_successful_handoff_continuation_reports_consumed_window_without_rerouti
 }
 
 #[test]
-fn v0212_cursor_pinning_and_no_receiver_are_distinct_third_thread_decisions() {
+fn cursor_pinning_and_no_receiver_are_distinct_third_thread_decisions() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let owner = policy_provider("fixture-owner", false, false);
@@ -317,7 +317,7 @@ fn v0212_cursor_pinning_and_no_receiver_are_distinct_third_thread_decisions() {
 }
 
 #[test]
-fn v0212_in_flight_and_missing_compaction_windows_are_not_mismatches() {
+fn in_flight_and_missing_compaction_windows_are_not_mismatches() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let owner = policy_provider("fixture-owner", true, false);
@@ -479,7 +479,7 @@ fn enable_receiver_before_owner(
 }
 
 #[tokio::test]
-async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
+async fn full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
     let (_dir, gateway, routes, providers) = configure_capacity_fixture(vec![
         "https://fixture-old.example.invalid/v1".into(),
         "https://fixture-new.example.invalid/v1".into(),
@@ -593,7 +593,7 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
 }
 
 #[tokio::test]
-async fn v0212_delayed_tail_and_slow_fragmented_sse_preserve_exact_bytes() {
+async fn delayed_tail_and_slow_fragmented_sse_preserve_exact_bytes() {
     let frames: Vec<&'static [u8]> = vec![
         b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-v0212\"}}\n\n",
         b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n",
@@ -635,7 +635,7 @@ async fn v0212_delayed_tail_and_slow_fragmented_sse_preserve_exact_bytes() {
 }
 
 #[tokio::test]
-async fn v0212_http_completed_event_keeps_slot_until_delayed_tail_is_forwarded() {
+async fn http_completed_event_keeps_slot_until_delayed_tail_is_forwarded() {
     let completed = Bytes::from_static(
         b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-v0212-http-tail\",\"status\":\"completed\"}}\n\n",
     );
@@ -742,7 +742,7 @@ async fn v0212_http_completed_event_keeps_slot_until_delayed_tail_is_forwarded()
 }
 
 #[tokio::test]
-async fn v0212_terminal_sse_forwards_a_large_delayed_tail_byte_for_byte() {
+async fn terminal_sse_forwards_a_large_delayed_tail_byte_for_byte() {
     let mut frames = vec![
         Bytes::from_static(
             b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-v0212-tail\"}}\n\n",
@@ -798,7 +798,7 @@ async fn v0212_terminal_sse_forwards_a_large_delayed_tail_byte_for_byte() {
 }
 
 #[tokio::test]
-async fn v0212_first_event_fragments_use_idle_deadline_after_first_byte() {
+async fn first_event_fragments_use_idle_deadline_after_first_byte() {
     let event = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-v0212-slow-first\"}}\n\n";
     let split = vec![
         Bytes::copy_from_slice(&event[..12]),
@@ -853,7 +853,7 @@ async fn v0212_first_event_fragments_use_idle_deadline_after_first_byte() {
 }
 
 #[tokio::test]
-async fn v0212_model_error_tail_uses_rolling_idle_deadline() {
+async fn model_error_tail_uses_rolling_idle_deadline() {
     let frames = vec![
         Bytes::from_static(
             b"data: {\"type\":\"response.failed\",\"error\":{\"code\":\"model_not_found\",\"message\":\"fixture\"}}\n\n",
@@ -910,7 +910,7 @@ async fn v0212_model_error_tail_uses_rolling_idle_deadline() {
 }
 
 #[tokio::test]
-async fn v0212_wire_progress_ignores_control_frames_and_records_split_data_frames() {
+async fn wire_progress_ignores_control_frames_and_records_split_data_frames() {
     let activity = Arc::new(wire_progress::Activity::default());
     activity.websocket();
     let (mut sender, receiver) = tokio::io::duplex(128);
@@ -934,7 +934,7 @@ async fn v0212_wire_progress_ignores_control_frames_and_records_split_data_frame
 }
 
 #[tokio::test]
-async fn v0212_socket_write_progress_extends_the_idle_deadline_until_the_tail_finishes() {
+async fn socket_write_progress_extends_the_idle_deadline_until_the_tail_finishes() {
     let activity = Arc::new(wire_progress::Activity::default());
     let writer = wire_progress::Tracked::new(tokio::io::sink(), activity.clone());
     let result = wire_progress::writing(
@@ -955,7 +955,7 @@ async fn v0212_socket_write_progress_extends_the_idle_deadline_until_the_tail_fi
 }
 
 #[tokio::test]
-async fn v0212_ws_reconnect_allows_slow_handshake_before_first_event_deadline() {
+async fn ws_reconnect_allows_slow_handshake_before_first_event_deadline() {
     let created = r#"{"type":"response.created","response":{"id":"fixture-v0212-ws"}}"#;
     let completed = r#"{"type":"response.completed","response":{"id":"fixture-v0212-ws","status":"completed"}}"#;
     let handshakes = Arc::new(AtomicUsize::new(0));

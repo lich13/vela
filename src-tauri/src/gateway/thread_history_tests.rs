@@ -121,7 +121,7 @@ fn promote_last(gateway: &Gateway, dir: &tempfile::TempDir) {
 }
 
 #[test]
-fn v0211_session_identity_prefers_thread_alias_and_ignores_cache_affinity() {
+fn session_identity_prefers_thread_alias_and_ignores_cache_affinity() {
     let mut headers = new_headers("thread-a");
     headers.insert("session_id", HeaderValue::from_static("legacy-a"));
     assert_eq!(header_session(&headers), digest("thread-a"));
@@ -143,7 +143,7 @@ fn v0211_session_identity_prefers_thread_alias_and_ignores_cache_affinity() {
 }
 
 #[test]
-fn v0211_invalid_or_conflicting_thread_aliases_fail_closed() {
+fn invalid_or_conflicting_thread_aliases_fail_closed() {
     let mut conflicting = HeaderMap::new();
     conflicting.insert("thread-id", HeaderValue::from_static("thread-a"));
     conflicting.insert("thread_id", HeaderValue::from_static("thread-b"));
@@ -177,7 +177,7 @@ fn v0211_invalid_or_conflicting_thread_aliases_fail_closed() {
 }
 
 #[test]
-fn v0211_same_cache_affinity_with_different_threads_isolated_in_registry() {
+fn same_cache_affinity_with_different_threads_isolated_in_registry() {
     let first = new_headers("thread-a");
     let second = new_headers("thread-b");
     let first_session = header_session(&first);
@@ -205,7 +205,7 @@ fn v0211_same_cache_affinity_with_different_threads_isolated_in_registry() {
 }
 
 #[test]
-fn v0211_multiple_initial_messages_prove_first_turn_but_auxiliary_does_not() {
+fn multiple_initial_messages_prove_first_turn_but_auxiliary_does_not() {
     let first = hints(json!({
         "input":[
             {"role":"system","content":"fixture policy"},
@@ -235,7 +235,7 @@ fn v0211_multiple_initial_messages_prove_first_turn_but_auxiliary_does_not() {
 }
 
 #[test]
-fn v0211_unadmitted_history_cannot_be_upgraded_to_new_thread() {
+fn unadmitted_history_cannot_be_upgraded_to_new_thread() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let session = digest("fixture-history-before-admission");
@@ -317,7 +317,7 @@ fn v0211_unadmitted_history_cannot_be_upgraded_to_new_thread() {
 }
 
 #[test]
-fn v0211_unadmitted_first_turn_cannot_keep_new_thread_intake_for_history() {
+fn unadmitted_first_turn_cannot_keep_new_thread_intake_for_history() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let session = digest("fixture-unadmitted-first-turn");
@@ -365,7 +365,7 @@ fn v0211_unadmitted_first_turn_cannot_keep_new_thread_intake_for_history() {
 }
 
 #[test]
-fn v0211_old_cursor_cannot_authorize_compaction_handoff() {
+fn old_cursor_cannot_authorize_compaction_handoff() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let session = digest("fixture-cursor-thread");
@@ -396,7 +396,7 @@ fn v0211_old_cursor_cannot_authorize_compaction_handoff() {
 }
 
 #[test]
-fn v0211_parallel_compaction_boundary_claims_once() {
+fn parallel_compaction_boundary_claims_once() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
     let session = digest("fixture-parallel-thread");
@@ -439,7 +439,7 @@ fn v0211_parallel_compaction_boundary_claims_once() {
 }
 
 #[test]
-fn v0211_restart_restores_owner_and_compaction_boundary_from_thread_identity() {
+fn restart_restores_owner_and_compaction_boundary_from_thread_identity() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("owners.json");
     let session = header_session(&new_headers("fixture-restart-thread"));
@@ -478,7 +478,7 @@ fn v0211_restart_restores_owner_and_compaction_boundary_from_thread_identity() {
 }
 
 #[tokio::test]
-async fn v0211_http_generate_false_warmup_preserves_new_thread_eligibility() {
+async fn http_generate_false_warmup_preserves_new_thread_eligibility() {
     let first =
         server(|_| async { Response::new(replay::full(r#"{"provider":"ordinary"}"#)) }).await;
     let second =
@@ -583,7 +583,7 @@ async fn compaction_endpoint(name: &'static str) -> (u16, Arc<Mutex<Vec<Vec<u8>>
 }
 
 #[tokio::test]
-async fn v0211_http_window_handoff_uses_new_thread_header_and_preserves_bytes() {
+async fn http_window_handoff_uses_new_thread_header_and_preserves_bytes() {
     let (old_port, old_seen) = compaction_endpoint("old").await;
     let (new_port, new_seen) = compaction_endpoint("new").await;
     let (dir, gateway) = fixture(vec![
@@ -688,7 +688,7 @@ async fn ws_turn(peer: &mut yawc::TcpWebSocket, body: String) -> Value {
 }
 
 #[tokio::test]
-async fn v0211_native_ws_reuses_thread_identity_across_turns_and_hands_off_once() {
+async fn native_ws_reuses_thread_identity_across_turns_and_hands_off_once() {
     let (old_port, old_seen) = native_endpoint("old").await;
     let (new_port, new_seen) = native_endpoint("new").await;
     let (dir, gateway) = fixture(vec![
