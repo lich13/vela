@@ -434,7 +434,7 @@ async fn http_sse_bare_error_then_matching_completion_preserves_wire_bytes() {
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let (mut sender, task) = connection(&fixture).await;
     let response = request(&mut sender, &fixture, "fixture-http-terminal").await;
     assert_eq!(body_bytes(response).await.as_ref(), payload.as_slice());
@@ -469,7 +469,7 @@ async fn http_client_close_after_pending_error_stops_upstream_without_success() 
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let (mut sender, task) = connection(&fixture).await;
     let mut body = request(&mut sender, &fixture, "fixture-pending-error-close")
         .await
@@ -510,36 +510,6 @@ const WS_ERROR_1: &str = r#"{"type":"error","response_id":"fixture-ws-terminal-1
 const WS_COMPLETED_1: &str = r#"{"type":"response.completed","response":{"id":"fixture-ws-terminal-1","model":"fixture-model","status":"completed","usage":{"input_tokens":7,"output_tokens":2}}}"#;
 const WS_CREATED_2: &str = r#"{"type":"response.created","response":{"id":"fixture-ws-terminal-2","model":"fixture-model"}}"#;
 const WS_COMPLETED_2: &str = r#"{"type":"response.completed","response":{"id":"fixture-ws-terminal-2","model":"fixture-model","status":"completed","usage":{"input_tokens":8,"output_tokens":3}}}"#;
-
-async fn websocket_server<F, Fut>(handler: F) -> Server
-where
-    F: Fn(Request<Incoming>, Tasks) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let tasks = Tasks::default();
-    let accepted = tasks.clone();
-    let handler = std::sync::Arc::new(handler);
-    tasks.spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            let connection_tasks = accepted.clone();
-            accepted.spawn(async move {
-                let service = hyper::service::service_fn(move |request| {
-                    let handler = handler.clone();
-                    let tasks = connection_tasks.clone();
-                    async move { Ok::<_, std::convert::Infallible>(handler(request, tasks).await) }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service)
-                    .with_upgrades()
-                    .await;
-            });
-        }
-    });
-    Server { port, tasks }
-}
 
 async fn websocket_client(fixture: &Fixture) -> yawc::TcpWebSocket {
     tokio::time::timeout(
@@ -607,7 +577,7 @@ async fn native_websocket_bare_error_then_matching_completion_settles_once_and_r
     let handshake_count = handshakes.clone();
     let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<Vec<u8>>::new()));
     let observed = seen.clone();
-    let upstream = websocket_server(move |mut request, tasks| {
+    let upstream = server_in_scope(move |mut request, tasks| {
         let handshake_count = handshake_count.clone();
         let observed = observed.clone();
         async move {
@@ -657,7 +627,7 @@ async fn native_websocket_bare_error_then_matching_completion_settles_once_and_r
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let mut client = websocket_client(&fixture).await;
 
     let first_create =

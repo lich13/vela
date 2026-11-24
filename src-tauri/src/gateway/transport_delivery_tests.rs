@@ -9,6 +9,10 @@ use super::{
     Edit, Gateway, Settings,
 };
 use crate::gateway::test_support::form;
+use crate::gateway::test_support::{
+    scoped::{server, server_in_scope, LoopbackServer},
+    UsageFixture as Fixture,
+};
 use crate::usage::{
     model::{EndCause, Filter, Record},
     Service,
@@ -22,10 +26,7 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use std::{
-    convert::Infallible,
-    future::Future,
     io::Write,
-    path::PathBuf,
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -85,73 +86,8 @@ fn crlf_and_lf_sse_terminal_survives_every_chunk_boundary() {
     }
 }
 
-#[derive(Clone, Default)]
-struct Tasks(Arc<Mutex<(bool, Vec<JoinHandle<()>>)>>);
-
-impl Tasks {
-    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let mut state = self.0.lock();
-        if !state.0 {
-            state.1.push(tokio::spawn(future));
-        }
-    }
-
-    fn close(&self) {
-        let mut state = self.0.lock();
-        state.0 = true;
-        for task in state.1.drain(..) {
-            task.abort();
-        }
-    }
-}
-
-struct Server {
-    port: u16,
-    tasks: Tasks,
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.tasks.close();
-    }
-}
-
-async fn server<F, Fut>(handler: F) -> Server
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let tasks = Tasks::default();
-    let accepted = tasks.clone();
-    let handler = Arc::new(handler);
-    tasks.spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            accepted.spawn(async move {
-                let service = hyper::service::service_fn(move |request| {
-                    let handler = handler.clone();
-                    async move { Ok::<_, Infallible>(handler(request).await) }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await;
-            });
-        }
-    });
-    Server { port, tasks }
-}
-
-struct Fixture {
-    gateway: Gateway,
-    usage: Service,
-    home: PathBuf,
-    _dir: tempfile::TempDir,
-}
-
 impl Fixture {
-    async fn new(upstream: &Server) -> Self {
+    async fn started(upstream: &LoopbackServer) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("fixture-home");
         std::fs::create_dir(&home).unwrap();
@@ -164,14 +100,7 @@ impl Fixture {
         )
         .unwrap();
         let gateway = Gateway::new(dir.path().join("gateway-data")).unwrap();
-        let usage = Service::new(&dir.path().join("usage-data"));
-        gateway.set_usage(usage.clone());
-        let fixture = Self {
-            gateway,
-            usage,
-            home,
-            _dir: dir,
-        };
+        let fixture = Self::over(dir, home, gateway);
         let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         fixture.edit(Edit::Settings {
             settings: Settings {
@@ -198,12 +127,6 @@ impl Fixture {
         fixture
     }
 
-    fn edit(&self, edit: Edit) {
-        self.gateway
-            .edit(edit, &self.gateway.view().revision, &self.home)
-            .unwrap();
-    }
-
     fn token(&self) -> String {
         self.gateway.0.inner.lock().store.local_token.clone()
     }
@@ -212,13 +135,6 @@ impl Fixture {
         TcpStream::connect(("127.0.0.1", self.gateway.view().settings.port))
             .await
             .unwrap()
-    }
-
-    async fn stop(&self) {
-        tokio::time::timeout(WAIT, self.gateway.stop())
-            .await
-            .unwrap()
-            .unwrap();
     }
 }
 
@@ -343,7 +259,7 @@ async fn sse_wire_case(payload: &'static [u8]) {
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let (mut sender, task) = connection(&fixture).await;
     let response = request(&mut sender, &fixture, "fixture-wire").await;
     assert_eq!(body_bytes(response).await.as_ref(), payload);
@@ -500,7 +416,7 @@ async fn http_write_half_close_still_delivers_the_complete_response() {
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let mut socket = fixture.socket().await;
     let headers = format!(
         "POST /v1/responses HTTP/1.1\r\nHost: fixture.invalid\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
@@ -574,7 +490,7 @@ async fn close_open_response(prefix: &'static [u8], terminal: bool) {
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let (mut sender, task) = connection(&fixture).await;
     let mut body = request(&mut sender, &fixture, "fixture-close")
         .await
@@ -651,7 +567,7 @@ async fn reused_connection_disconnect_does_not_rewrite_its_completed_request() {
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     // SendRequest owns one HTTP/1 connection, so the second request cannot
     // silently use a newly pooled TCP connection.
     let (mut sender, task) = connection(&fixture).await;
@@ -881,7 +797,7 @@ async fn compressed_sse_preserves_encoded_wire_bytes_and_terminal_usage_over_tcp
             }
         })
         .await;
-        let fixture = Fixture::new(&upstream).await;
+        let fixture = Fixture::started(&upstream).await;
         let (mut sender, task) = connection(&fixture).await;
         let response = request(&mut sender, &fixture, "fixture-compressed").await;
         assert_eq!(response.headers()["content-encoding"], encoding);
@@ -919,7 +835,7 @@ async fn large_sse_event_keeps_every_byte_and_terminal_metadata() {
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let (mut sender, task) = connection(&fixture).await;
     let response = request(&mut sender, &fixture, "fixture-large-event").await;
     let actual = body_bytes(response).await;
@@ -964,7 +880,7 @@ async fn terminal_event_keeps_late_usage_and_comment_tail_until_upstream_eof() {
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let (mut sender, task) = connection(&fixture).await;
     let mut body = request(&mut sender, &fixture, "fixture-delayed-tail")
         .await
@@ -1027,7 +943,7 @@ async fn slow_tcp_reader_backpressures_upstream_and_preserves_the_entire_stream(
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let socket = TcpSocket::new_v4().unwrap();
     socket.set_recv_buffer_size(16 * 1024).unwrap();
     let address = ([127, 0, 0, 1], fixture.gateway.view().settings.port).into();
@@ -1105,7 +1021,7 @@ async fn content_length_final_frame_release_race_keeps_each_reused_request_succe
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let (mut sender, task) = connection(&fixture).await;
     const REQUESTS: usize = 12;
     for index in 0..REQUESTS {
@@ -1260,7 +1176,7 @@ async fn empty_content_length_response_has_no_body_drop_error_and_reuses_the_con
         }
     })
     .await;
-    let fixture = Fixture::new(&upstream).await;
+    let fixture = Fixture::started(&upstream).await;
     let (mut sender, task) = connection(&fixture).await;
     let first = request(&mut sender, &fixture, "fixture-empty-response").await;
     assert_eq!(first.headers()["content-length"], "0");

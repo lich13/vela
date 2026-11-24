@@ -5,6 +5,11 @@ use super::{
     ClientId, Edit, Gateway, HttpClient, Settings,
 };
 use crate::gateway::test_support::form;
+use crate::gateway::test_support::{
+    downstream::usage_records as records,
+    scoped::{server_in_scope as server, LoopbackServer},
+    UsageFixture as Fixture,
+};
 use crate::usage::{
     model::{safe_id, Filter, Operation, Record},
     Service,
@@ -21,15 +26,12 @@ use parking_lot::Mutex;
 use serde_json::json;
 use std::{
     convert::Infallible,
-    future::Future,
-    path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
 };
-use tokio::task::JoinHandle;
 
 const WAIT: Duration = Duration::from_secs(5);
 const FIXTURE_KEY: &str = "fixture-only-key";
@@ -39,80 +41,6 @@ const HTTP_RESPONSE: &[u8] = br#" { "id":"fixture-http-response", "object":"resp
  "model":"gpt-response-fixture", "status":"completed", "unknown":9007199254740993,
  "usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":40}} } "#;
 const WS_DELTA: &str = r#"{"type":"response.output_text.delta","delta":"fixture"}"#;
-
-#[derive(Clone, Default)]
-struct TaskScope(Arc<Mutex<(bool, Vec<JoinHandle<()>>)>>);
-
-impl TaskScope {
-    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let mut state = self.0.lock();
-        if !state.0 {
-            state.1.push(tokio::spawn(future));
-        }
-    }
-
-    fn close(&self) {
-        let mut state = self.0.lock();
-        state.0 = true;
-        for task in state.1.drain(..) {
-            task.abort();
-        }
-    }
-}
-
-struct LoopbackServer {
-    port: u16,
-    tasks: TaskScope,
-}
-
-impl LoopbackServer {
-    fn url(&self, path: &str) -> String {
-        format!("http://127.0.0.1:{}{path}", self.port)
-    }
-}
-
-impl Drop for LoopbackServer {
-    fn drop(&mut self) {
-        self.tasks.close();
-    }
-}
-
-async fn server<F, Fut>(handler: F) -> LoopbackServer
-where
-    F: Fn(Request<Incoming>, TaskScope) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let tasks = TaskScope::default();
-    let accept_tasks = tasks.clone();
-    let handler = Arc::new(handler);
-    tasks.spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            let connection_tasks = accept_tasks.clone();
-            accept_tasks.spawn(async move {
-                let service = hyper::service::service_fn(move |request| {
-                    let handler = handler.clone();
-                    let tasks = connection_tasks.clone();
-                    async move { Ok::<_, Infallible>(handler(request, tasks).await) }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service)
-                    .with_upgrades()
-                    .await;
-            });
-        }
-    });
-    LoopbackServer { port, tasks }
-}
-
-struct Fixture {
-    gateway: Gateway,
-    usage: Service,
-    home: PathBuf,
-    _dir: tempfile::TempDir,
-}
 
 impl Fixture {
     async fn new(client: ClientId, urls: &[String]) -> Self {
@@ -149,15 +77,7 @@ impl Fixture {
                     .unwrap()
             }
         };
-        let usage = Service::new(&dir.path().join("usage-data"));
-        assert!(usage.state().error.is_none());
-        gateway.set_usage(usage.clone());
-        let fixture = Self {
-            gateway,
-            usage,
-            home,
-            _dir: dir,
-        };
+        let fixture = Self::over(dir, home, gateway);
         let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         fixture.edit(Edit::Settings {
             settings: Settings {
@@ -180,26 +100,6 @@ impl Fixture {
         }
         drop(reservation);
         fixture
-    }
-
-    fn edit(&self, edit: Edit) {
-        self.gateway
-            .edit(edit, &self.gateway.view().revision, &self.home)
-            .unwrap();
-    }
-
-    async fn start(&self) {
-        self.gateway
-            .start(&self.gateway.view().revision, &self.home)
-            .await
-            .unwrap();
-    }
-
-    async fn stop(&self) {
-        tokio::time::timeout(WAIT, self.gateway.stop())
-            .await
-            .unwrap()
-            .unwrap();
     }
 }
 
@@ -237,16 +137,6 @@ fn fragmented(bytes: &[u8]) -> WireBody {
         .map(|chunk| Ok::<_, BoxError>(Frame::data(Bytes::copy_from_slice(chunk))))
         .collect::<Vec<_>>();
     StreamBody::new(futures_util::stream::iter(frames)).boxed_unsync()
-}
-
-fn records(service: &Service) -> Vec<Record> {
-    service
-        .query(|store| {
-            let page = store.logs(&Filter::default())?;
-            assert_eq!(page.total, page.rows.len() as u64);
-            Ok(page.rows)
-        })
-        .unwrap()
 }
 
 async fn recorded(service: &Service, count: usize) -> Vec<Record> {

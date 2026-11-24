@@ -4,19 +4,16 @@ use super::{
     connector::Connector,
     grok_config::{self, Protocol},
     model::Edit,
-    replay::{self, WireBody},
-    ClientId, Gateway, HttpClient,
+    replay, ClientId, Gateway, HttpClient,
 };
-use crate::usage::{
-    model::{Filter, Record},
-    Service,
-};
+pub(super) use crate::gateway::test_support::scoped::{server, LoopbackServer};
+use crate::gateway::test_support::{downstream::usage_records, UsageFixture as Fixture};
+use crate::usage::{model::Record, Service};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Request, Response, StatusCode};
-use hyper_util::{client::legacy::Client, rt::TokioExecutor, rt::TokioIo};
+use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use parking_lot::Mutex;
-use std::{convert::Infallible, future::Future, path::PathBuf, sync::Arc, time::Duration};
-use tokio::task::JoinHandle;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 const WAIT: Duration = Duration::from_secs(5);
 const ORIGINAL_TOKEN: &str = "fixture-original-grok-token";
@@ -53,70 +50,6 @@ struct ObservedRequest {
     anthropic_version: Option<String>,
     model_private: Option<String>,
     provider_private: Option<String>,
-}
-
-#[derive(Clone, Default)]
-struct TaskScope(Arc<Mutex<(bool, Vec<JoinHandle<()>>)>>);
-
-impl TaskScope {
-    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let mut state = self.0.lock();
-        if !state.0 {
-            state.1.push(tokio::spawn(future));
-        }
-    }
-
-    fn close(&self) {
-        let mut state = self.0.lock();
-        state.0 = true;
-        for task in state.1.drain(..) {
-            task.abort();
-        }
-    }
-}
-
-pub(super) struct LoopbackServer {
-    port: u16,
-    tasks: TaskScope,
-}
-
-impl LoopbackServer {
-    pub(super) fn url(&self, path: &str) -> String {
-        format!("http://127.0.0.1:{}{path}", self.port)
-    }
-}
-
-impl Drop for LoopbackServer {
-    fn drop(&mut self) {
-        self.tasks.close();
-    }
-}
-
-pub(super) async fn server<F, Fut>(handler: F) -> LoopbackServer
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let tasks = TaskScope::default();
-    let accept_tasks = tasks.clone();
-    let handler = Arc::new(handler);
-    tasks.spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            accept_tasks.spawn(async move {
-                let service = hyper::service::service_fn(move |request| {
-                    let handler = handler.clone();
-                    async move { Ok::<_, Infallible>(handler(request).await) }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await;
-            });
-        }
-    });
-    LoopbackServer { port, tasks }
 }
 
 async fn capturing_server(
@@ -159,15 +92,8 @@ async fn capturing_server(
     .await
 }
 
-struct Fixture {
-    gateway: Gateway,
-    usage: Service,
-    home: PathBuf,
-    _dir: tempfile::TempDir,
-}
-
 impl Fixture {
-    async fn new(upstream: &str) -> Self {
+    async fn native(upstream: &str) -> Self {
         Self::new_with_config(native_config(upstream)).await
     }
 
@@ -197,9 +123,8 @@ impl Fixture {
             .grok_companion(dir.path().join("grok-gateway-data"))
             .unwrap();
         assert_eq!(gateway.client_id(), ClientId::Grok);
-        let usage = Service::new(&dir.path().join("usage-data"));
-        assert!(usage.state().error.is_none());
-        gateway.set_usage(usage.clone());
+        let fixture = Self::over(dir, home, gateway);
+        let (gateway, home) = (&fixture.gateway, &fixture.home);
         let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = reservation.local_addr().unwrap().port();
         gateway
@@ -212,12 +137,12 @@ impl Fixture {
         settings.idle_seconds = 5;
         settings.queue_seconds = 2;
         gateway
-            .edit(Edit::Settings { settings }, &gateway.view().revision, &home)
+            .edit(Edit::Settings { settings }, &gateway.view().revision, home)
             .unwrap();
         drop(reservation);
 
         // Grok discovery is read-only; import is an explicit preview/commit action.
-        gateway.import_initial(&home).unwrap();
+        gateway.import_initial(home).unwrap();
         assert!(gateway.view().providers.is_empty());
         assert_eq!(
             std::fs::read(home.join("config.toml")).unwrap().as_slice(),
@@ -225,47 +150,22 @@ impl Fixture {
         );
         if import_native_profile {
             let preview = gateway
-                .preview_grok_import_with_env(&home, None, false, &|_| None)
+                .preview_grok_import_with_env(home, None, false, &|_| None)
                 .unwrap();
             let token = preview
                 .token
                 .as_deref()
                 .expect("fixture Grok config should be importable");
             gateway
-                .commit_grok_import(&home, token, &preview.revision)
+                .commit_grok_import(home, token, &preview.revision)
                 .unwrap();
         }
 
-        Self {
-            gateway,
-            usage,
-            home,
-            _dir: dir,
-        }
-    }
-
-    fn edit(&self, edit: Edit) -> super::View {
-        self.gateway
-            .edit(edit, &self.gateway.view().revision, &self.home)
-            .unwrap()
+        fixture
     }
 
     fn config_path(&self) -> PathBuf {
         self.home.join("config.toml")
-    }
-
-    async fn start(&self) {
-        self.gateway
-            .start(&self.gateway.view().revision, &self.home)
-            .await
-            .unwrap();
-    }
-
-    async fn stop(&self) {
-        tokio::time::timeout(WAIT, self.gateway.stop())
-            .await
-            .unwrap()
-            .unwrap();
     }
 }
 
@@ -347,16 +247,6 @@ async fn response_bytes(response: Response<Incoming>) -> Vec<u8> {
         .unwrap()
         .to_bytes()
         .to_vec()
-}
-
-fn usage_records(service: &Service) -> Vec<Record> {
-    service
-        .query(|store| {
-            let page = store.logs(&Filter::default())?;
-            assert_eq!(page.total, page.rows.len() as u64);
-            Ok(page.rows)
-        })
-        .unwrap()
 }
 
 async fn recorded(service: &Service, count: usize) -> Vec<Record> {
@@ -465,7 +355,7 @@ async fn grok_gateway_routes_each_native_protocol_with_private_connection_data()
     let chat_upstream = capturing_server(chat_seen.clone(), CHAT_RESPONSE_BODY).await;
     let messages_upstream = capturing_server(messages_seen.clone(), MESSAGES_RESPONSE_BODY).await;
 
-    let fixture = Fixture::new(&responses_upstream.url("/v1")).await;
+    let fixture = Fixture::native(&responses_upstream.url("/v1")).await;
     let original_config = std::fs::read(fixture.config_path()).unwrap();
     let responses_id = fixture.gateway.view().providers[0].id.clone();
     fixture.edit(Edit::SaveGrokProvider {

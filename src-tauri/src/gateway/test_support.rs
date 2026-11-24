@@ -521,6 +521,147 @@ pub(crate) mod loopback {
     }
 }
 
+/// Loopback upstreams whose accept loop and connections end with their handle.
+pub(crate) mod scoped {
+    use crate::gateway::replay::WireBody;
+    use hyper::{body::Incoming, server::conn::http1, Request, Response};
+    use parking_lot::Mutex;
+    use std::{convert::Infallible, future::Future, sync::Arc};
+    use tokio::task::JoinHandle;
+
+    /// Tasks aborted together; a closed scope starts no more.
+    #[derive(Clone, Default)]
+    pub(crate) struct TaskScope(Arc<Mutex<(bool, Vec<JoinHandle<()>>)>>);
+
+    impl TaskScope {
+        pub(crate) fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+            let mut state = self.0.lock();
+            if !state.0 {
+                state.1.push(tokio::spawn(future));
+            }
+        }
+
+        pub(crate) fn close(&self) {
+            let mut state = self.0.lock();
+            state.0 = true;
+            for task in state.1.drain(..) {
+                task.abort();
+            }
+        }
+    }
+
+    pub(crate) struct LoopbackServer {
+        pub(crate) port: u16,
+        tasks: TaskScope,
+    }
+
+    impl LoopbackServer {
+        pub(crate) fn url(&self, path: &str) -> String {
+            format!("http://127.0.0.1:{}{path}", self.port)
+        }
+    }
+
+    impl Drop for LoopbackServer {
+        fn drop(&mut self) {
+            self.tasks.close();
+        }
+    }
+
+    pub(crate) async fn server<F, Fut>(handler: F) -> LoopbackServer
+    where
+        F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response<WireBody>> + Send + 'static,
+    {
+        server_with(http1::Builder::new(), move |request, _| handler(request)).await
+    }
+
+    /// Like `server`; the handler also gets the scope, for tasks of its own
+    /// that must end with the server.
+    pub(crate) async fn server_in_scope<F, Fut>(handler: F) -> LoopbackServer
+    where
+        F: Fn(Request<Incoming>, TaskScope) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response<WireBody>> + Send + 'static,
+    {
+        server_with(http1::Builder::new(), handler).await
+    }
+
+    /// Like `server_in_scope`, serving connections as `http` is set up.
+    pub(crate) async fn server_with<F, Fut>(http: http1::Builder, handler: F) -> LoopbackServer
+    where
+        F: Fn(Request<Incoming>, TaskScope) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response<WireBody>> + Send + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tasks = TaskScope::default();
+        let accept_tasks = tasks.clone();
+        let handler = Arc::new(handler);
+        tasks.spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let handler = handler.clone();
+                let connection_tasks = accept_tasks.clone();
+                let http = http.clone();
+                accept_tasks.spawn(async move {
+                    let service = hyper::service::service_fn(move |request| {
+                        let handler = handler.clone();
+                        let tasks = connection_tasks.clone();
+                        async move { Ok::<_, Infallible>(handler(request, tasks).await) }
+                    });
+                    let _ = http
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .with_upgrades()
+                        .await;
+                });
+            }
+        });
+        LoopbackServer { port, tasks }
+    }
+}
+
+/// A gateway with a usage service attached, edited and started from the
+/// client home it was given. Each test file adds the constructors it needs.
+pub(crate) struct UsageFixture {
+    pub(crate) gateway: Gateway,
+    pub(crate) usage: crate::usage::Service,
+    pub(crate) home: std::path::PathBuf,
+    pub(crate) _dir: tempfile::TempDir,
+}
+
+impl UsageFixture {
+    /// The fixture of `gateway`, recording usage under `dir`.
+    pub(crate) fn over(dir: tempfile::TempDir, home: std::path::PathBuf, gateway: Gateway) -> Self {
+        let usage = crate::usage::Service::new(&dir.path().join("usage-data"));
+        assert!(usage.state().error.is_none());
+        gateway.set_usage(usage.clone());
+        Self {
+            gateway,
+            usage,
+            home,
+            _dir: dir,
+        }
+    }
+
+    pub(crate) fn edit(&self, edit: Edit) -> View {
+        self.gateway
+            .edit(edit, &self.gateway.view().revision, &self.home)
+            .unwrap()
+    }
+
+    pub(crate) async fn start(&self) {
+        self.gateway
+            .start(&self.gateway.view().revision, &self.home)
+            .await
+            .unwrap();
+    }
+
+    pub(crate) async fn stop(&self) {
+        tokio::time::timeout(Duration::from_secs(5), self.gateway.stop())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
 /// A gateway driven over raw loopback TCP from the client side.
 pub(crate) mod downstream {
     use crate::{

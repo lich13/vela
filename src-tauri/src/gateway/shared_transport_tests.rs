@@ -2,6 +2,7 @@
 //! Real loopback transport tests for the shared client listener.
 use super::{replay, ClientId, Edit, Gateway};
 use crate::gateway::test_support::form;
+use crate::gateway::test_support::scoped::{server_with, LoopbackServer, TaskScope};
 use bytes::Bytes;
 use futures_util::{stream, SinkExt, StreamExt};
 use http_body_util::{BodyExt, StreamBody};
@@ -39,71 +40,14 @@ struct SeenRequest {
     authorization: Option<String>,
 }
 
-#[derive(Clone, Default)]
-struct TaskScope(Arc<Mutex<(bool, Vec<JoinHandle<()>>)>>);
-
-impl TaskScope {
-    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let mut state = self.0.lock();
-        if !state.0 {
-            state.1.push(tokio::spawn(future));
-        }
-    }
-
-    fn close(&self) {
-        let mut state = self.0.lock();
-        state.0 = true;
-        for task in state.1.drain(..) {
-            task.abort();
-        }
-    }
-}
-
-struct LoopbackServer {
-    port: u16,
-    tasks: TaskScope,
-}
-
-impl LoopbackServer {
-    fn url(&self, path: &str) -> String {
-        format!("http://127.0.0.1:{}{path}", self.port)
-    }
-}
-
-impl Drop for LoopbackServer {
-    fn drop(&mut self) {
-        self.tasks.close();
-    }
-}
-
 async fn server<F, Fut>(handler: F) -> LoopbackServer
 where
     F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Response<super::replay::WireBody>> + Send + 'static,
 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let tasks = TaskScope::default();
-    let accept_tasks = tasks.clone();
-    let handler = Arc::new(handler);
-    tasks.spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            accept_tasks.spawn(async move {
-                let service = hyper::service::service_fn(move |request| {
-                    let handler = handler.clone();
-                    async move { Ok::<_, Infallible>(handler(request).await) }
-                });
-                let connection = hyper::server::conn::http1::Builder::new()
-                    .preserve_header_case(true)
-                    .half_close(true)
-                    .serve_connection(TokioIo::new(stream), service)
-                    .with_upgrades();
-                let _ = connection.await;
-            });
-        }
-    });
-    LoopbackServer { port, tasks }
+    let mut http = hyper::server::conn::http1::Builder::new();
+    http.preserve_header_case(true).half_close(true);
+    server_with(http, move |request, _| handler(request)).await
 }
 
 fn fragmented_body(chunks: &[&[u8]]) -> super::replay::WireBody {
