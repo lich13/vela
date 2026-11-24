@@ -1225,7 +1225,9 @@ mod tests {
         let (_t, mut c) = setup();
         let a = c.import_raw(&oauth("a", "old"), None).unwrap();
         c.switch_account(&a, "missing").unwrap();
-        std::fs::write(c.home().join("auth.json"), oauth("a", "new")).unwrap();
+        // Another length: rewritten in place within one tick of a coarse clock,
+        // only the length tells the two apart.
+        std::fs::write(c.home().join("auth.json"), oauth("a", "newer")).unwrap();
         c.state().unwrap();
         std::fs::write(c.home().join("auth.json"), oauth("b", "other")).unwrap();
         let s = c.state().unwrap();

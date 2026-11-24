@@ -13,6 +13,10 @@ use std::{
 struct Stamp {
     len: u64,
     modified: Option<SystemTime>,
+    /// Which file it is: a replacement of the same length can carry the same
+    /// time where the clock behind it is coarse, as on Linux.
+    #[cfg(unix)]
+    file: (u64, u64),
 }
 
 fn stamp(path: &Path) -> Option<Stamp> {
@@ -23,6 +27,11 @@ fn stamp(path: &Path) -> Option<Stamp> {
     Some(Stamp {
         len: m.len(),
         modified: m.modified().ok(),
+        #[cfg(unix)]
+        file: {
+            use std::os::unix::fs::MetadataExt;
+            (m.dev(), m.ino())
+        },
     })
 }
 

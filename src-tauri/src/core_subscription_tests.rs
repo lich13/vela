@@ -346,7 +346,8 @@ fn missing_user_id_falls_back_to_subject_and_does_not_merge_by_email() {
         Some("fixture-fallback-workspace"),
         Some("plus"),
         200,
-        "fallback-new",
+        // Not the length of the original: see the in-place rewrite below.
+        "fallback-newer",
     );
     std::fs::write(&auth_path, &refreshed).unwrap();
     let updated = core.state().unwrap();
