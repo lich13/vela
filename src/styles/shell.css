@@ -204,6 +204,12 @@
   gap: 15px;
 }
 
+.list-tool-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .list-tools h2 span {
   color: var(--muted);
   font-weight: 400;

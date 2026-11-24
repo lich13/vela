@@ -1263,3 +1263,95 @@ fn migration_skips_a_vault_without_retired_content() {
         assert_eq!(fs::read_to_string(paths.vault_file()).unwrap(), vault);
     }
 }
+
+#[test]
+fn exported_accounts_are_read_back_without_touching_those_already_saved() {
+    let (tmp, paths) = setup_paths();
+    let (first, _, before) = two_accounts(&paths);
+    let renamed = rename_account_at(&paths, &first, "工作账号", &before.revision).unwrap();
+    let file = tmp.path().join("export").join("accounts.json");
+
+    let stale = export_accounts_at(&paths, "stale-rev", &file).unwrap_err();
+    assert_eq!(stale.code, code::CONFLICT);
+    assert!(!file.exists());
+    assert_eq!(
+        export_accounts_at(&paths, &renamed.revision, &file).unwrap(),
+        2
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    // Everything the file holds is already saved here.
+    let same = import_accounts_at(&paths, &renamed.revision, &file).unwrap();
+    assert_eq!((same.added, same.skipped), (0, 2));
+    assert_eq!(same.state.revision, renamed.revision);
+
+    // Another machine takes both, names included, and signs in to neither.
+    let (_other_tmp, other) = setup_paths();
+    let empty = state_at(&other).unwrap();
+    let taken = import_accounts_at(&other, &empty.revision, &file).unwrap();
+    assert_eq!((taken.added, taken.skipped), (2, 0));
+    let names: Vec<_> = taken
+        .state
+        .accounts
+        .iter()
+        .map(|a| (a.name.as_str(), a.email.as_deref(), a.current))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("工作账号", Some("u1@example.invalid"), false),
+            ("u2@example.invalid", Some("u2@example.invalid"), false),
+        ]
+    );
+    assert!(!other.oauth_file().exists());
+    let stale = import_accounts_at(&other, &empty.revision, &file).unwrap_err();
+    assert_eq!(stale.code, code::CONFLICT);
+
+    // An imported account can be switched to.
+    let lifecycle = MockLifecycle::new(false);
+    let id = taken.state.accounts[0].id.clone();
+    let switched = switch_account_at(&other, &lifecycle, &id, &taken.state.revision).unwrap();
+    assert_eq!(fs::read_to_string(other.oauth_file()).unwrap(), FIRST_LOGIN);
+    assert_eq!(active_account_id(&switched), Some(id));
+}
+
+#[test]
+fn a_file_vela_did_not_export_imports_nothing() {
+    let (tmp, paths) = setup_paths();
+    let (_, _, state) = two_accounts(&paths);
+    let vault = fs::read(paths.vault_file()).unwrap();
+    let file = tmp.path().join("accounts.json");
+    let account = |payload: &str| serde_json::json!({"name": "fixture", "payload": payload});
+    for (body, message) in [
+        (serde_json::json!([]), "不是 Vela 导出"),
+        (
+            serde_json::json!({"schema": "other", "version": 1, "accounts": []}),
+            "不是 Vela 导出",
+        ),
+        (
+            serde_json::json!({"schema": EXCHANGE_SCHEMA, "version": 2, "accounts": []}),
+            "版本较新",
+        ),
+        (
+            // One unreadable login keeps the readable one out as well.
+            serde_json::json!({"schema": EXCHANGE_SCHEMA, "version": 1, "accounts": [
+                account(r#"{"email":"u3@example.invalid","access_token":"tok-3"}"#),
+                account("[]"),
+            ]}),
+            "不是 Vela 导出",
+        ),
+    ] {
+        fs::write(&file, serde_json::to_vec(&body).unwrap()).unwrap();
+        let refused = import_accounts_at(&paths, &state.revision, &file).unwrap_err();
+        assert_eq!(refused.code, code::IMPORT);
+        assert!(refused.message.contains(message), "{}", refused.message);
+        assert_eq!(fs::read(paths.vault_file()).unwrap(), vault);
+    }
+}

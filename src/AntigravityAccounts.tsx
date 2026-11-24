@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeftRight,
   Check,
+  Download,
   Info,
   LoaderCircle,
   MoreHorizontal,
   Pencil,
   RefreshCw,
   Trash2,
+  Upload,
   UserRound,
   Users,
 } from "lucide-react";
@@ -102,21 +104,82 @@ export default function AntigravityAccounts({
     }
   };
 
+  /** Runs an import or export; `run` resolves to nothing when its dialog was dismissed. */
+  const transfer = async (run: () => Promise<string | null>) => {
+    setBusy(true);
+    setError("");
+    try {
+      const msg = await run();
+      if (msg) notify(msg);
+    } catch (e) {
+      setError(errorOf(e).message);
+      void load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
       <div className="list-tools">
         <h2>
           已保存账号 <span>{state?.accounts.length ?? 0}</span>
         </h2>
-        <button
-          type="button"
-          className="icon-button"
-          aria-label="刷新 Antigravity 认证状态"
-          disabled={busy}
-          onClick={() => void load()}
-        >
-          <RefreshCw size={14} />
-        </button>
+        <div className="list-tool-buttons">
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="导入 Antigravity 账号"
+            title="从 Vela 导出的文件导入账号"
+            disabled={busy || !state}
+            onClick={() =>
+              void transfer(async () => {
+                const result = await command("import_antigravity_accounts", {
+                  expectedRevision: state!.revision,
+                });
+                if (!result) return null;
+                setState(result.state);
+                const skipped = result.skipped
+                  ? `${result.skipped} 个账号已存在`
+                  : "";
+                return result.added
+                  ? `已导入 ${result.added} 个账号` +
+                      (skipped && `，${skipped}，未改动`)
+                  : `没有新账号可导入${skipped && `，${skipped}`}`;
+              })
+            }
+          >
+            <Upload size={14} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="导出 Antigravity 账号"
+            title="把全部账号导出为一个文件"
+            disabled={busy || !state?.accounts.length}
+            onClick={() =>
+              void transfer(async () => {
+                const count = await command("export_antigravity_accounts", {
+                  expectedRevision: state!.revision,
+                });
+                return count == null
+                  ? null
+                  : `已导出 ${count} 个账号；文件包含登录凭据，请妥善保管`;
+              })
+            }
+          >
+            <Download size={14} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="刷新 Antigravity 认证状态"
+            disabled={busy}
+            onClick={() => void load()}
+          >
+            <RefreshCw size={14} />
+          </button>
+        </div>
       </div>
 
       {!!state?.cliSessions && (

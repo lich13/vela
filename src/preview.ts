@@ -759,6 +759,9 @@ export async function run(
       };
       emit("login-state", login);
       return;
+    case "export_antigravity_accounts":
+    case "import_antigravity_accounts":
+      return null;
     case "get_antigravity_auth_state":
     case "switch_antigravity_account":
     case "rename_antigravity_account":

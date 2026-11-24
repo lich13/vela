@@ -167,6 +167,72 @@ describe("AntigravityAccounts", () => {
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
+  it("导入导出账号文件，并报告结果；取消对话框时不提示", async () => {
+    const notify = vi.fn();
+    const imported = {
+      ...initialState,
+      revision: "rev-2",
+      accounts: [
+        ...initialState.accounts,
+        {
+          ...initialState.accounts[0],
+          id: "imported",
+          name: "导入的账号",
+          current: false,
+        },
+      ],
+    };
+    const results: Record<string, unknown[]> = {
+      export_antigravity_accounts: [null, 2],
+      import_antigravity_accounts: [
+        { state: imported, added: 1, skipped: 2 },
+        { state: imported, added: 0, skipped: 3 },
+      ],
+    };
+    mockCommand.mockImplementation(async (name: string) =>
+      name in results ? results[name].shift() : initialState,
+    );
+    render(<AntigravityAccounts notify={notify} setError={vi.fn()} />);
+    const exporting = await screen.findByRole("button", {
+      name: "导出 Antigravity 账号",
+    });
+    await waitFor(() => expect(exporting).toBeEnabled());
+    fireEvent.click(exporting);
+    await waitFor(() => expect(exporting).toBeEnabled());
+    expect(notify).not.toHaveBeenCalled();
+    fireEvent.click(exporting);
+    await waitFor(() =>
+      expect(notify).toHaveBeenLastCalledWith(
+        "已导出 2 个账号；文件包含登录凭据，请妥善保管",
+      ),
+    );
+    expect(mockCommand).toHaveBeenLastCalledWith(
+      "export_antigravity_accounts",
+      { expectedRevision: initialState.revision },
+    );
+
+    const importing = screen.getByRole("button", {
+      name: "导入 Antigravity 账号",
+    });
+    fireEvent.click(importing);
+    await waitFor(() =>
+      expect(notify).toHaveBeenLastCalledWith(
+        "已导入 1 个账号，2 个账号已存在，未改动",
+      ),
+    );
+    expect(await screen.findByText("导入的账号")).toBeInTheDocument();
+    fireEvent.click(importing);
+    await waitFor(() =>
+      expect(notify).toHaveBeenLastCalledWith(
+        "没有新账号可导入，3 个账号已存在",
+      ),
+    );
+    expect(mockCommand).toHaveBeenLastCalledWith(
+      "import_antigravity_accounts",
+      { expectedRevision: "rev-2" },
+    );
+  });
+
   it("switches, renames and deletes against the latest revision", async () => {
     const notify = vi.fn();
     mockCommand.mockImplementation(async (name: string) => {

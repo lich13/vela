@@ -2691,6 +2691,8 @@ pub fn run() {
             antigravity::auth::switch_antigravity_account,
             antigravity::auth::rename_antigravity_account,
             antigravity::auth::delete_antigravity_account,
+            antigravity::auth::export_antigravity_accounts,
+            antigravity::auth::import_antigravity_accounts,
             usage::commands::get_usage_state,
             usage::commands::export_usage_bill,
             usage::commands::get_usage_dashboard,

@@ -600,6 +600,12 @@ export type CommandMap = {
     { id: string } & Revision,
     AntigravityAuthState
   >;
+  /** How many accounts were written; null when the dialog was dismissed. */
+  export_antigravity_accounts: Call<Revision, number | null>;
+  import_antigravity_accounts: Call<
+    Revision,
+    { state: AntigravityAuthState; added: number; skipped: number } | null
+  >;
   read_config: Call<Client, ConfigDocument>;
   read_previous_config: Call<Client, string>;
   validate_config: Call<Client & { text: string }, void>;

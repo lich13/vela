@@ -1414,6 +1414,107 @@ mod retired {
     }
 }
 pub(crate) use retired::migrate as migrate_retired_accounts;
+const EXCHANGE_SCHEMA: &str = "vela-antigravity-accounts";
+/// The saved accounts as one file, logins included, that Vela reads back.
+#[derive(Serialize, Deserialize)]
+struct ExchangeFile {
+    schema: String,
+    version: u32,
+    accounts: Vec<ExchangedAccount>,
+}
+#[derive(Serialize, Deserialize)]
+struct ExchangedAccount {
+    name: String,
+    payload: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityImport {
+    pub state: AntigravityAuthState,
+    pub added: usize,
+    /// Accounts the file holds that were already saved.
+    pub skipped: usize,
+}
+pub fn export_accounts_at(paths: &Paths, rev: &str, target: &Path) -> Result<usize> {
+    with_lock(|| {
+        verify_revision(paths, rev)?;
+        let (vault, _) = load_vault(paths)?;
+        if vault.entries.is_empty() {
+            return Err(err(code::ACCOUNT, "没有可导出的 Antigravity 账号"));
+        }
+        let file = ExchangeFile {
+            schema: EXCHANGE_SCHEMA.to_owned(),
+            version: 1,
+            accounts: vault
+                .entries
+                .iter()
+                .map(|e| ExchangedAccount {
+                    name: e.name.clone(),
+                    payload: e.payload.clone(),
+                })
+                .collect(),
+        };
+        let bytes = serde_json::to_vec_pretty(&file)
+            .map_err(|_| err(code::EXPORT, "无法序列化 Antigravity 账号"))?;
+        storage::atomic_write(target, &bytes, None)?;
+        Ok(file.accounts.len())
+    })
+}
+/// Adds the accounts of an exported file that are not saved yet. The login in
+/// use and the accounts already saved are left as they are.
+pub fn import_accounts_at(paths: &Paths, rev: &str, source: &Path) -> Result<AntigravityImport> {
+    let unknown = || {
+        err(
+            code::IMPORT,
+            "所选文件不是 Vela 导出的 Antigravity 账号文件",
+        )
+    };
+    let bytes = storage::read_optional(source)?.ok_or_else(unknown)?;
+    let file: ExchangeFile = serde_json::from_slice(&bytes).map_err(|_| unknown())?;
+    if file.schema != EXCHANGE_SCHEMA {
+        return Err(unknown());
+    }
+    if file.version != 1 {
+        return Err(err(code::IMPORT, "账号文件版本较新，请更新 Vela"));
+    }
+    let incoming = file
+        .accounts
+        .into_iter()
+        .map(|account| {
+            if account.payload.len() as u64 > CREDENTIAL_LIMIT {
+                return Err(unknown());
+            }
+            let (method, email) = parse_oauth_metadata(&account.payload).map_err(|_| unknown())?;
+            let name = clean_label(Some(&account.name), email.as_deref().unwrap_or(UNNAMED))?;
+            Ok((name, method, email, account.payload))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    with_lock(|| {
+        verify_revision(paths, rev)?;
+        let (mut vault, _) = load_vault(paths)?;
+        let before = vault.entries.len();
+        let total = incoming.len();
+        for (name, method, email, payload) in incoming {
+            let (digest, token) = (payload_digest(&payload), oauth_refresh_token(&payload));
+            let saved = vault.entries.iter().any(|e| {
+                entry_matches(e, Some(&digest), email.as_deref())
+                    || (token.is_some() && oauth_refresh_token(&e.payload) == token)
+            });
+            if !saved {
+                vault.push_new(name, &method, email, payload);
+            }
+        }
+        let added = vault.entries.len() - before;
+        if added > 0 {
+            save_vault(paths, &vault)?;
+        }
+        Ok(AntigravityImport {
+            state: state_at(paths)?,
+            added,
+            skipped: total - added,
+        })
+    })
+}
 pub(crate) fn with_usage_sync<T>(
     mut synchronize: impl FnMut(),
     action: impl FnOnce() -> Result<T>,
@@ -1481,6 +1582,63 @@ pub fn delete_antigravity_account(
     expected_revision: String,
 ) -> Result<AntigravityAuthState> {
     delete_account_at(&Paths::resolve(&r.data)?, &id, &expected_revision)
+}
+#[tauri::command]
+pub async fn export_antigravity_accounts(
+    app: tauri::AppHandle,
+    r: R<'_>,
+    expected_revision: String,
+) -> Result<Option<usize>> {
+    use tauri_plugin_dialog::DialogExt;
+    let data = r.data.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
+            .dialog()
+            .file()
+            .set_file_name("vela-antigravity-accounts.json")
+            .add_filter("JSON", &["json"])
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        let path = file
+            .into_path()
+            .map_err(|_| err(code::PATH, "请选择本地路径"))?;
+        export_accounts_at(&Paths::resolve(&data)?, &expected_revision, &path).map(Some)
+    })
+    .await
+    .map_err(|_| err(code::EXPORT, "账号导出失败"))?
+}
+#[tauri::command]
+pub async fn import_antigravity_accounts(
+    app: tauri::AppHandle,
+    r: R<'_>,
+    expected_revision: String,
+) -> Result<Option<AntigravityImport>> {
+    use tauri_plugin_dialog::DialogExt;
+    let data = r.data.clone();
+    let handle = app.clone();
+    let imported = tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = handle
+            .dialog()
+            .file()
+            .set_title("选择 Vela 导出的 Antigravity 账号文件")
+            .add_filter("JSON", &["json"])
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = file
+            .into_path()
+            .map_err(|_| err(code::PATH, "请选择本地 JSON 文件"))?;
+        import_accounts_at(&Paths::resolve(&data)?, &expected_revision, &path).map(Some)
+    })
+    .await
+    .map_err(|_| err(code::IMPORT, "账号导入失败"))??;
+    if let Some(imported) = &imported {
+        crate::emit_antigravity_auth_state(&app, &imported.state);
+    }
+    Ok(imported)
 }
 #[cfg(test)]
 #[path = "antigravity_auth_tests.rs"]
