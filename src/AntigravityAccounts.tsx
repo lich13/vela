@@ -14,6 +14,7 @@ import {
   Users,
 } from "lucide-react";
 import { command } from "./bridge";
+import { useInstance } from "./instance";
 import { subscriptions } from "./subscriptions";
 import type {
   AntigravityAccountItem,
@@ -38,6 +39,7 @@ export default function AntigravityAccounts({
   setError,
   onDirtyChange,
 }: Props) {
+  const { remote } = useInstance();
   const [state, setState] = useState<AntigravityAuthState | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -126,6 +128,9 @@ export default function AntigravityAccounts({
           已保存账号 <span>{state?.accounts.length ?? 0}</span>
         </h2>
         <div className="list-tool-buttons">
+          {/* Account files are read and written on this machine only. */}
+          {!remote && (
+            <>
           <button
             type="button"
             className="icon-button"
@@ -170,6 +175,8 @@ export default function AntigravityAccounts({
           >
             <Download size={14} />
           </button>
+            </>
+          )}
           <button
             type="button"
             className="icon-button"

@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { command } from "./bridge";
+import { useInstance } from "./instance";
 import { errorOf } from "./types";
 import { confirmAction } from "./confirmation";
 import ProviderPriceMappings from "./ProviderPriceMappings";
@@ -55,6 +56,7 @@ export default function Pricing({
     [busy, setBusy] = useState(false),
     [page, setPage] = useState<PricingSearchPage>({ rows: [], total: 0 }),
     [loading, setLoading] = useState(false);
+  const { remote } = useInstance();
   const searchGeneration = useRef(0);
   useEffect(() => {
     let disposed = false;
@@ -242,10 +244,13 @@ export default function Pricing({
                 }}
               />
             </label>
-            <button onClick={() => void action("open_pricing_directory")}>
-              <FolderOpen size={14} />
-              打开定价目录
-            </button>
+            {/* The directory of a server cannot be opened on this machine. */}
+            {!remote && (
+              <button onClick={() => void action("open_pricing_directory")}>
+                <FolderOpen size={14} />
+                打开定价目录
+              </button>
+            )}
             <button onClick={() => void action("reload_pricing")}>
               <RefreshCw size={14} />
               重新载入

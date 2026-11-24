@@ -1,4 +1,5 @@
 import UsageBill from "./UsageBill";
+import { useInstance } from "./instance";
 import Detail from "./UsageDetail";
 import Sources from "./UsageSources";
 import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
@@ -110,6 +111,7 @@ export default function Usage({
 }: {
   onDirtyChange?: (dirty: boolean) => void;
 }) {
+  const { remote } = useInstance();
   const [billOpen, setBillOpen] = useState(false);
   const [billResult, setBillResult] = useState("");
   const [range, setRange] = useState("today"),
@@ -511,7 +513,8 @@ export default function Usage({
             ))}
           </select>
           <button
-            disabled={busy || state?.syncing}
+            disabled={busy || state?.syncing || remote}
+            title={remote ? "账单导出到本机文件，仅本机实例可用" : undefined}
             onClick={() => {
               setBillResult("");
               setBillOpen(true);
