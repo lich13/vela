@@ -9,6 +9,7 @@ import { subscriptions } from "./subscriptions";
 import type { GatewayEdit, ProviderAction } from "./bridge-contracts";
 import QuotaRefreshSettings from "./QuotaRefreshSettings";
 import ClaudeProfile from "./ClaudeProfile";
+import { useInstance } from "./instance";
 import ClientSelection, {
   useClientSelection,
   clientName,
@@ -125,6 +126,7 @@ function GatewayContent({
     action?: ProviderAction;
   } | null;
 }) {
+  const { remote, takeover } = useInstance();
   const [modelsOpen, setModelsOpen] = useState(false);
   const dirtyParts = useRef({ quota: false, advanced: false, dialog: false });
   const markQuota = useCallback(
@@ -376,7 +378,10 @@ function GatewayContent({
           {clientId === "claude" && (
             <ClaudeProfile disabled={busy || !!dialog} notify={notify} />
           )}
-          {clientId === "agy" && (
+          {clientId === "agy" && remote && (
+            <span className="muted">服务器版暂不支持接管 agy</span>
+          )}
+          {clientId === "agy" && !remote && (
             <span
               className="muted"
               title={
@@ -431,7 +436,7 @@ function GatewayContent({
           </div>
           <button
             className={state.running ? "secondary" : "primary"}
-            disabled={busy}
+            disabled={busy || !takeover(clientId)}
             onClick={toggle}
           >
             <Power size={15} />

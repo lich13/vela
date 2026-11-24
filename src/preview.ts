@@ -6,6 +6,7 @@ import {
   powerPreview,
 } from "./power-preview";
 import { gatewayPreview } from "./gateway-preview";
+import { instanceCommands, instancePreview } from "./instance-preview";
 import { providerTestingPreview } from "./provider-testing-preview";
 import type { ViewState, ConfigDocument, LoginState } from "./types";
 import { densePreview } from "./preview-fixtures";
@@ -350,6 +351,7 @@ export async function run(
   if (name === "open_github" || name === "open_update_release") return;
   if (usageCommands.includes(name)) return usagePreview(name, args, emit);
   if (powerCommands.includes(name)) return powerPreview(name, args, emit);
+  if (instanceCommands.includes(name)) return instancePreview(name, args, emit);
   if (name === "get_quick") return { ...quick };
   if (name === "set_quick") {
     quick = { ...quick, ...args };

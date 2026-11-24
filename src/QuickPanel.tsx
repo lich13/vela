@@ -21,6 +21,8 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { command, preview } from "./bridge";
+import { useInstance } from "./instance";
+import { QuickInstances } from "./InstanceSwitch";
 import { errorOf, type GatewayState, type ViewState } from "./types";
 import { QuotaInfo, useProviderQuota } from "./Quota";
 import {
@@ -36,14 +38,16 @@ import SortableProviders, { type ProviderCommit } from "./SortableProviders";
 import type { QuickPreferences as Preferences } from "./bridge-contracts";
 export default function QuickPanel() {
   const [clientId, select] = useClientSelection("quick");
+  const instance = useInstance().key;
   useEffect(() => {
     void command("quick_ready").catch(() => {});
   }, []);
   return (
     <div className="quick-panel">
-      <QuickFreeze />
+      <QuickFreeze key={instance} />
+      <QuickInstances />
       <QuickContent
-        key={clientId}
+        key={`${instance}:${clientId}`}
         clientId={clientId}
         onClientChange={select}
       />
@@ -57,6 +61,7 @@ function QuickContent({
   clientId: ClientId;
   onClientChange: (id: ClientId) => void;
 }) {
+  const { remote, takeover } = useInstance();
   const [accounts, setAccounts] = useState<ViewState | null>(null);
   const [gateway, setGateway] = useState<GatewayState | null>(null);
   const [prefs, setPrefs] = useState<Preferences>({
@@ -170,14 +175,17 @@ function QuickContent({
       media.removeEventListener("change", change);
     };
   }, []);
+  const themeKnown = !!accounts;
   useEffect(() => {
+    // Starting over for another instance keeps the theme until its state arrives.
+    if (!themeKnown && document.documentElement.dataset.theme) return;
     document.documentElement.dataset.theme =
       !accounts || accounts.preferences.theme === "system"
         ? systemDark
           ? "dark"
           : "light"
         : accounts.preferences.theme;
-  }, [accounts?.preferences.theme, systemDark]);
+  }, [themeKnown, accounts?.preferences.theme, systemDark]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 6500);
@@ -314,7 +322,12 @@ function QuickContent({
                   <button
                     className="icon-button"
                     aria-label={gateway?.running ? "停用网关" : "启用网关"}
-                    disabled={busy || !gateway}
+                    title={
+                      takeover(clientId)
+                        ? undefined
+                        : `服务器版暂不支持接管 ${quickClientName(clientId)}`
+                    }
+                    disabled={busy || !gateway || !takeover(clientId)}
                     onClick={() =>
                       run(async () => {
                         if (!gateway) return;
@@ -506,7 +519,10 @@ function QuickContent({
           )}
         </div>
       </div>
-      <QuickControls visible={visible} notify={setNotice} error={setError} />
+      {/* Quitting clients and the lid setting act on this machine only. */}
+      {!remote && (
+        <QuickControls visible={visible} notify={setNotice} error={setError} />
+      )}
       <footer className="quick-footer">
         <button onClick={() => open()}>
           打开 Vela <ArrowUpRight size={12} />

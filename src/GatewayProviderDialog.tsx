@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Eye, EyeOff, LoaderCircle } from "lucide-react";
 import { subscriptions } from "./subscriptions";
 import { command } from "./bridge";
+import { useInstance } from "./instance";
 import {
   DEFAULT_LIMIT_REST_SECONDS,
   DEFAULT_LIMIT_RETRY_SECONDS,
@@ -97,6 +98,7 @@ function ProviderApiForm({
   onBusyChange: (busy: boolean) => void;
 }) {
   const baseline = useRef<EditRevision>(revision);
+  const { remote } = useInstance();
   const [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   useEffect(() => {
@@ -694,6 +696,13 @@ function ProviderApiForm({
               aria-label={showToken ? "隐藏 Token" : "显示 Token"}
               aria-pressed={showToken}
               aria-busy={revealing}
+              // A saved token is revealed from this machine's store only.
+              disabled={remote && !token && !!dialog.item}
+              title={
+                remote && !token && dialog.item
+                  ? "服务器上保存的 Token 不能在本机显示"
+                  : undefined
+              }
               onClick={() => void toggleToken()}
             >
               {revealing ? (

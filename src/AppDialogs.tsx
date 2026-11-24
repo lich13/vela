@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import { command } from "./bridge";
+import { useInstance } from "./instance";
 import { useDialogFocus } from "./Modal";
 import NotificationPermission from "./NotificationPermission";
 import PowerSettings from "./PowerSettings";
@@ -325,6 +326,7 @@ export function SettingsForm({
     [busy, setBusy] = useState(false),
     [checking, setChecking] = useState(false),
     [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const { remote } = useInstance();
   const isDirty =
     prefs.theme !== preferences.theme ||
     prefs.systemNotifications !== preferences.systemNotifications;
@@ -410,7 +412,8 @@ export function SettingsForm({
       <button className="primary full" disabled={busy}>
         保存设置
       </button>
-      <PowerSettings />
+      {/* The lid setting belongs to this machine, not to the server shown. */}
+      {!remote && <PowerSettings />}
       <div className="settings-update-row">
         <button
           type="button"
