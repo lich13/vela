@@ -971,7 +971,7 @@ mod gateway_broadcast_tests {
 #[cfg(test)]
 mod release_tests {
     use super::*;
-    use crate::gateway::{test_support::form, Edit, Settings};
+    use crate::gateway::{form, Edit, Settings};
     use serde_json::json;
 
     /// A runtime whose every directory is under `root`.

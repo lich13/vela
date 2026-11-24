@@ -121,7 +121,9 @@ pub(crate) fn recover_transactions(data: &Path) -> Result<()> {
     takeover::recover(data)
 }
 #[cfg(test)]
-pub(crate) mod test_support;
+mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::form;
 #[cfg(test)]
 mod tests;
 use crate::storage::{self, AppError, Result};
