@@ -217,15 +217,21 @@ fn exact_targets_preserve_other_users_own_children_and_changed_identities() {
     };
     let out = run(&mut f, 1, Target::Codex).unwrap();
     assert_eq!((out.terminated, out.failed), (2, 1));
-    assert_eq!(
-        f.calls,
-        [
-            (2, Termination::Graceful),
-            (3, Termination::Force),
-            (2, Termination::Force)
-        ]
-    );
-    assert_eq!(f.waits, [GRACE, EXIT_CONFIRMATION]);
+    if GRACEFUL {
+        assert_eq!(
+            f.calls,
+            [
+                (2, Termination::Graceful),
+                (3, Termination::Force),
+                (2, Termination::Force)
+            ]
+        );
+        assert_eq!(f.waits, [GRACE, EXIT_CONFIRMATION]);
+    } else {
+        // Windows ends them at once, descendants first.
+        assert_eq!(f.calls, [(3, Termination::Force), (2, Termination::Force)]);
+        assert_eq!(f.waits, [EXIT_CONFIRMATION]);
+    }
 }
 #[test]
 fn graceful_exit_avoids_kill_and_signal_acceptance_does_not_mean_exit() {
@@ -241,12 +247,12 @@ fn graceful_exit_avoids_kill_and_signal_acceptance_does_not_mean_exit() {
     };
     let out = run(&mut f, 1, Target::Codex).unwrap();
     assert_eq!((out.terminated, out.failed), (1, 1));
-    assert!(f.calls.contains(&(2, Termination::Graceful)));
-    assert!(!f.calls.contains(&(2, Termination::Force)));
+    assert_eq!(f.calls.contains(&(2, Termination::Graceful)), GRACEFUL);
+    assert_eq!(f.calls.contains(&(2, Termination::Force)), !GRACEFUL);
     assert!(f.calls.contains(&(3, Termination::Force)));
     assert_eq!(
         f.waits.len(),
-        2,
+        if GRACEFUL { 2 } else { 1 },
         "one common deadline per phase, not per process"
     );
 }
@@ -279,11 +285,16 @@ fn terminal_recovery_brackets_shutdown_and_reports_cleanup_failures() {
         (1, 0, 2)
     );
     assert_eq!(f.prepared_terminal_targets, [vec![2]]);
-    assert_eq!(f.calls, [(2, Termination::Graceful)]);
-    assert_eq!(
-        f.terminal_events,
-        ["prepare", "graceful", "wait", "wait", "cleanup"]
-    );
+    if GRACEFUL {
+        assert_eq!(f.calls, [(2, Termination::Graceful)]);
+        assert_eq!(
+            f.terminal_events,
+            ["prepare", "graceful", "wait", "wait", "cleanup"]
+        );
+    } else {
+        assert_eq!(f.calls, [(2, Termination::Force)]);
+        assert_eq!(f.terminal_events, ["prepare", "force", "wait", "cleanup"]);
+    }
 }
 
 #[test]

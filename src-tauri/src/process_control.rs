@@ -19,6 +19,9 @@ struct Entry {
     claude_code: bool,
 }
 const GRACE: Duration = Duration::from_secs(2);
+/// Windows has no termination a process can clean up on, so nothing is
+/// waited for before the processes are ended.
+const GRACEFUL: bool = cfg!(not(windows));
 const EXIT_CONFIRMATION: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -192,13 +195,15 @@ fn run(backend: &mut dyn Processes, own_pid: u32, target: Target) -> Result<Outc
     targets.sort_by_key(|p| std::cmp::Reverse(depth(p)));
     backend.prepare_terminals(&targets, &inventory);
     let selected: HashSet<_> = targets.iter().map(|p| p.pid).collect();
-    // Let each root clean up its TUI and children before touching descendants.
-    for p in &targets {
-        if !p.parent.is_some_and(|id| selected.contains(&id)) {
-            backend.terminate_if_same(p, Termination::Graceful);
+    if GRACEFUL {
+        // Let each root clean up its TUI and children before touching descendants.
+        for p in &targets {
+            if !p.parent.is_some_and(|id| selected.contains(&id)) {
+                backend.terminate_if_same(p, Termination::Graceful);
+            }
         }
+        backend.wait_for_exit(&targets, GRACE);
     }
-    backend.wait_for_exit(&targets, GRACE);
     for p in &targets {
         if backend.state(p) == State::Running {
             backend.terminate_if_same(p, Termination::Force);

@@ -101,9 +101,10 @@ pub(crate) fn find_cli(names: &[&str]) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
     if let Some(home) = dirs::home_dir() {
+        dirs.extend([home.join(".local/bin"), home.join(".npm-global/bin")]);
+        // On Windows these would be relative to the root of the current drive.
+        #[cfg(unix)]
         dirs.extend([
-            home.join(".local/bin"),
-            home.join(".npm-global/bin"),
             PathBuf::from("/opt/homebrew/bin"),
             PathBuf::from("/usr/local/bin"),
         ]);

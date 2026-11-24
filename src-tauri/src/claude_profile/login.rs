@@ -76,6 +76,9 @@ fn command(home: &Path) -> Result<Command> {
     cmd.current_dir(home)
         .stdin(Stdio::null())
         .kill_on_drop(true);
+    // No console window for the CLI or the Node.js that runs it.
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
     // Only this explicitly launched login process gets a clean connection env.
     // The caller's shell/system environment is never changed.
     for key in catalog::ENV {
