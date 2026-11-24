@@ -23,8 +23,7 @@ export default function QuickControls({
     [quitBusy, setQuitBusy] = useState<"codex" | "claude" | null>(null),
     [readError, setReadError] = useState(""),
     [powerError, setPowerError] = useState("");
-  const lock = useRef(false),
-    quitting = useRef(false);
+  const lock = useRef(false);
   useEffect(() => {
     const events = subscriptions((e) => setReadError(errorOf(e).message));
     events.watch("clamshell-state", (next) => {
@@ -80,8 +79,6 @@ export default function QuickControls({
     }
   };
   const quit = async (target: "codex" | "claude") => {
-    if (quitting.current) return;
-    quitting.current = true;
     setQuitBusy(target);
     try {
       const r = await command("force_quit_agent_clients", { target });
@@ -91,7 +88,6 @@ export default function QuickControls({
     } catch (e) {
       error(errorOf(e).message);
     } finally {
-      quitting.current = false;
       setQuitBusy(null);
     }
   };
