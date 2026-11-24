@@ -134,7 +134,7 @@ use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 pub(crate) use model::DelegateEdit;
 use model::Provider;
 pub(crate) use model::Store;
-pub use model::{Edit, Settings};
+pub use model::{Edit, ProviderCopy, Settings};
 use parking_lot::Mutex;
 use replay::WireBody;
 use serde::Serialize;
@@ -1463,6 +1463,10 @@ impl Gateway {
             },
             edit => edit,
         }
+    }
+    /// The provider `id` with its tokens, for another instance to add.
+    pub fn provider_copy(&self, id: &str) -> Result<ProviderCopy> {
+        Ok(self.0.inner.lock().store.provider_copy(id)?.1)
     }
     #[cfg(any(feature = "desktop", test))]
     pub fn edit(&self, edit: Edit, expected: &str, home: &Path) -> Result<View> {

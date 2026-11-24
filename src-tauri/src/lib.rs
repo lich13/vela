@@ -1134,6 +1134,9 @@ async fn call(
     name: String,
     args: serde_json::Value,
 ) -> Result<serde_json::Value> {
+    if rpc::internal(&name) {
+        return Err(rpc::unsupported());
+    }
     let result = rpc::call(r.inner(), &name, args).await?;
     if name == "set_preferences" {
         let preferences = r.core.lock().preferences();
@@ -1711,6 +1714,7 @@ pub fn run() {
             instances::select_instance,
             instances::test_instance,
             instances::remote_call,
+            instances::copy_provider,
             list_ssh_hosts,
             antigravity::auth::export_antigravity_accounts,
             antigravity::auth::import_antigravity_accounts,

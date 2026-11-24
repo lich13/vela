@@ -19,6 +19,7 @@ export const instanceCommands = [
   "select_instance",
   "test_instance",
   "list_ssh_hosts",
+  "copy_provider",
 ];
 export function instancePreview(
   name: string,
@@ -27,6 +28,7 @@ export function instancePreview(
 ): unknown {
   if (name === "get_instances") return structuredClone(state);
   if (name === "list_ssh_hosts") return ["tokyo", "tokyo-lan"];
+  if (name === "copy_provider") return null;
   if (name === "test_instance") {
     // An alias named `unreachable` previews the failure.
     if (args.sshHost === "unreachable")

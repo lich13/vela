@@ -430,6 +430,49 @@ async fn a_stale_revision_an_unknown_id_or_a_bad_field_changes_nothing() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_machine_that_is_not_selected_is_asked_over_a_channel_of_its_own() {
+    let bench = Bench::new();
+    let tokyo = bench.add("Tokyo", HOST).await;
+    let osaka = bench.add("Osaka", OTHER).await;
+    bench.select(&tokyo).await.unwrap();
+    bench.seen.take();
+
+    let answer = bench
+        .service
+        .ask(&osaka, "get_state", json!({"n": 1}))
+        .await
+        .unwrap();
+    assert_eq!(answer, json!({"host": OTHER, "args": {"n": 1}}));
+    // It was closed with the answer, and the selection never moved.
+    assert_eq!(bench.fleet.connected().await, [HOST]);
+    assert_eq!(bench.state().active, tokyo);
+    assert!(bench.seen.take().is_empty());
+
+    // The selected one is asked over the channel it has.
+    let dialed = bench.fleet.dialed().len();
+    let answer = bench.service.ask(&tokyo, "get_state", json!({})).await;
+    assert_eq!(answer.unwrap()["host"], HOST);
+    assert_eq!(bench.fleet.dialed().len(), dialed);
+
+    // What the machine does not list is not sent to it.
+    let error = bench
+        .service
+        .ask(&osaka, "start_gateway", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, code::UNSUPPORTED);
+    assert!(!bench
+        .fleet
+        .asked
+        .lock()
+        .iter()
+        .any(|asked| asked.ends_with("start_gateway")));
+    assert_eq!(bench.fleet.connected().await, [HOST]);
+    let unknown = bench.service.ask("nobody", "get_state", json!({})).await;
+    assert_eq!(unknown.unwrap_err().code, code::MISSING);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_mac_is_asked_for_its_app_and_never_for_sudo() {
     let bench = Bench::new();
     let state = bench

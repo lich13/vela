@@ -212,6 +212,61 @@ async fn an_unknown_command_and_the_agy_gateway_are_unsupported() {
 }
 
 #[tokio::test]
+async fn a_provider_is_handed_over_whole_and_taken_in_as_a_copy() {
+    let fixture = fixture().await;
+    let mut client = Client::connect(&fixture).await;
+    let gateway = client
+        .call("get_gateway", json!({"clientId": "claude"}))
+        .await
+        .unwrap();
+    let saved = client
+        .call(
+            "update_gateway",
+            json!({
+                "clientId": "claude",
+                "expectedRevision": gateway["revision"],
+                "edit": {
+                    "op": "saveProvider",
+                    "name": "Fixture",
+                    "baseUrl": "https://provider.example.invalid",
+                    "token": "fixture-token",
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let id = saved["providers"][0]["id"].clone();
+    assert!(!saved.to_string().contains("fixture-token"));
+
+    let named = json!({"clientId": "claude", "providerId": id});
+    let copy = client.call("export_provider_copy", named).await.unwrap();
+    assert_eq!(copy["provider"]["token"], "fixture-token");
+    let taken = client
+        .call(
+            "import_provider_copy",
+            json!({"clientId": "claude", "copy": copy}),
+        )
+        .await;
+    assert_eq!(taken.unwrap(), Value::Null);
+    let gateway = client
+        .call("get_gateway", json!({"clientId": "claude"}))
+        .await
+        .unwrap();
+    let names: Vec<_> = gateway["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|provider| provider["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Fixture", "Fixture (copy)"]);
+    assert_ne!(gateway["providers"][1]["id"], id);
+
+    let missing = json!({"clientId": "claude", "providerId": "missing"});
+    let error = client.call("export_provider_copy", missing).await;
+    assert_eq!(error.unwrap_err().code, code::PROVIDER);
+}
+
+#[tokio::test]
 async fn a_request_that_waits_does_not_hold_up_the_next() {
     let fixture = fixture().await;
     let mut client = Client::connect(&fixture).await;

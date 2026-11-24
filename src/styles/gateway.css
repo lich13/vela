@@ -1321,3 +1321,13 @@
 .model-mapping .modal-actions {
   padding-top: 8px;
 }
+
+/* Create a copy — where it goes */
+.copy-targets {
+  display: grid;
+  gap: 8px;
+}
+
+.copy-targets button {
+  justify-content: flex-start;
+}

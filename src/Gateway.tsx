@@ -60,6 +60,7 @@ type Dialog =
   | { kind: "dsh" }
   | { kind: "provider"; item?: Provider; tab?: ProviderTab }
   | { kind: "quota"; item: Provider }
+  | { kind: "copy"; item: Provider }
   | null;
 type GatewayProps = {
   quotaRefreshSeconds?: number;
@@ -126,7 +127,16 @@ function GatewayContent({
     action?: ProviderAction;
   } | null;
 }) {
-  const { remote, takeover } = useInstance();
+  const { remote, takeover, state: instance } = useInstance();
+  // Where else a copy of a provider can go. A server never takes over agy,
+  // so its providers stay on the machine they are on.
+  const elsewhere =
+    clientId === "agy"
+      ? []
+      : [
+          ...(remote ? [{ id: "local", name: "本机" }] : []),
+          ...instance.machines.filter((m) => m.id !== instance.active),
+        ];
   const [modelsOpen, setModelsOpen] = useState(false);
   const dirtyParts = useRef({ quota: false, advanced: false, dialog: false });
   const markQuota = useCallback(
@@ -362,6 +372,16 @@ function GatewayContent({
       await edit({ op: "duplicateProvider", id: p.id });
       notify("已创建副本");
     });
+  const copyProvider = (p: Provider, target: { id: string; name: string }) =>
+    run(async () => {
+      await command("copy_provider", {
+        clientId,
+        providerId: p.id,
+        instance: instance.active,
+        target: target.id,
+      });
+      notify(`已在「${target.name}」创建副本`);
+    });
   const deleteProvider = async (p: Provider) => {
     if (await confirmAction(`删除供应商“${p.name}”？`, "删除"))
       run(() => edit({ op: "deleteProvider", id: p.id }));
@@ -520,7 +540,10 @@ function GatewayContent({
                 {
                   name: "创建副本",
                   icon: <Copy size={14} />,
-                  run: () => duplicateProvider(p),
+                  run: () =>
+                    elsewhere.length
+                      ? setDialog({ kind: "copy", item: p })
+                      : duplicateProvider(p),
                 },
                 {
                   name: "删除",
@@ -747,6 +770,32 @@ function GatewayContent({
           />
         </Advanced>
       </>
+      {dialog?.kind === "copy" && (
+        <Modal title="创建副本" close={() => setDialog(null)} compact>
+          <p className="confirmation-message">
+            把「{dialog.item.name}」连同令牌和设置复制到：
+          </p>
+          <div className="copy-targets">
+            {[{ id: instance.active, name: "此实例" }, ...elsewhere].map(
+              (target) => (
+                <button
+                  key={target.id}
+                  type="button"
+                  className="secondary"
+                  onClick={() => {
+                    const item = dialog.item;
+                    setDialog(null);
+                    if (target.id === instance.active) duplicateProvider(item);
+                    else copyProvider(item, target);
+                  }}
+                >
+                  {target.name}
+                </button>
+              ),
+            )}
+          </div>
+        </Modal>
+      )}
       {dialog?.kind === "dsh" && (
         <DshProfile
           state={state}

@@ -1052,6 +1052,7 @@ fn a_copy_takes_everything_but_the_identity_and_sits_below_its_original() {
         (Some([403, 524].as_slice()), Some(0), Some(11))
     );
     let copied = copy.id.clone();
+    let original_id_version = (original.id.clone(), original.version.clone());
     assert_eq!(store.quota_access_tokens[&copied], "fixture-access");
     assert_eq!(
         store.provider_endpoints[&copied],
@@ -1063,6 +1064,36 @@ fn a_copy_takes_everything_but_the_identity_and_sits_below_its_original() {
     );
     assert_eq!(store.dsh_models[&copied], store.dsh_models[&id]);
     assert_eq!(store.model_maps[&copied], store.model_maps[&id]);
+
+    // Handed to another instance, the copy arrives as whole, as its last
+    // provider. A window cannot make the edit that takes it in.
+    let handed = serde_json::to_value(store.provider_copy(&id).unwrap().1).unwrap();
+    assert_eq!(handed["provider"]["token"], "fixture");
+    assert_eq!(handed["quotaAccessToken"], "fixture-access");
+    let mut other = Store::default();
+    other.edit(save("Theirs"), false).unwrap();
+    let copy = Box::new(serde_json::from_value(handed.clone()).unwrap());
+    other.edit(Edit::ImportCopy { copy }, false).unwrap();
+    let names: Vec<_> = other.providers.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Theirs", "Original (copy)"]);
+    let arrived = other.providers[1].clone();
+    assert_ne!(arrived.id, id);
+    let mut same = arrived.clone();
+    same.id.clone_from(&original_id_version.0);
+    same.version.clone_from(&original_id_version.1);
+    same.name = "Original".into();
+    assert_eq!(
+        serde_json::to_value(&same).unwrap(),
+        serde_json::to_value(&store.providers[0]).unwrap()
+    );
+    assert_eq!(other.quota_access_tokens[&arrived.id], "fixture-access");
+    assert_eq!(
+        other.provider_endpoints[&arrived.id],
+        store.provider_endpoints[&id]
+    );
+    assert_eq!(other.dsh_models[&arrived.id], store.dsh_models[&id]);
+    assert_eq!(other.model_maps[&arrived.id], store.model_maps[&id]);
+    assert!(serde_json::from_value::<Edit>(json!({"op": "importCopy", "copy": handed})).is_err());
 
     // A long name makes room for the suffix; a copy of a copy says so twice.
     store

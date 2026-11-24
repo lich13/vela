@@ -691,6 +691,11 @@ export type DesktopCommands = {
   >;
   /** The `Host` aliases of this machine's SSH configuration, names only. */
   list_ssh_hosts: Call<None, string[]>;
+  /**
+   * Adds a copy of a provider of `instance` to another instance, tokens
+   * included. Both are "local" or a machine id; the copy never reaches a window.
+   */
+  copy_provider: Call<Provider & { instance: string; target: string }, null>;
 };
 /** Commands a server instance also implements: they run on the current instance. */
 export type SharedCommands = {
@@ -994,6 +999,7 @@ export const desktopCommands = names<DesktopCommands>()([
   "select_instance",
   "test_instance",
   "list_ssh_hosts",
+  "copy_provider",
 ]);
 export const sharedCommands = names<SharedCommands>()([
   "get_state",

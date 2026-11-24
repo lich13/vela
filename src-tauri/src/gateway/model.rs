@@ -731,6 +731,12 @@ pub enum Edit {
     DuplicateProvider {
         id: String,
     },
+    /// Made by this app's Rust from what another instance handed over, never
+    /// from a request.
+    #[serde(skip)]
+    ImportCopy {
+        copy: Box<ProviderCopy>,
+    },
     DshModelsProvider {
         id: String,
         mapping: super::dsh::ModelMapping,
@@ -827,6 +833,75 @@ pub fn name(value: &str) -> Result<String> {
 }
 /// The name of a provider's copy: the original with a suffix, shortened to
 /// stay within the name limit.
+/// A provider with everything kept beside it, as a copy of it is made here
+/// or handed to another instance. It holds the provider's tokens, so it goes
+/// from one Rust to the other and is never shown.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCopy {
+    provider: Provider,
+    #[serde(default)]
+    quota_access_token: Option<String>,
+    #[serde(default)]
+    endpoints: Option<Vec<String>>,
+    #[serde(default)]
+    grok_connection: Option<super::grok_config::Connection>,
+    #[serde(default)]
+    dsh_models: Option<super::dsh::ModelMapping>,
+    #[serde(default)]
+    model_map: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    delegate: Option<Delegate>,
+}
+impl Store {
+    /// The provider `id` as it is copied, and where it stands in the list.
+    pub(super) fn provider_copy(&self, id: &str) -> Result<(usize, ProviderCopy)> {
+        let index = self
+            .providers
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))?;
+        let copy = ProviderCopy {
+            provider: self.providers[index].clone(),
+            quota_access_token: self.quota_access_tokens.get(id).cloned(),
+            endpoints: self.provider_endpoints.get(id).cloned(),
+            grok_connection: self.grok_connections.get(id).cloned(),
+            dsh_models: self.dsh_models.get(id).cloned(),
+            model_map: self.model_maps.get(id).cloned(),
+            delegate: self.delegates.get(id).cloned(),
+        };
+        Ok((index, copy))
+    }
+
+    /// Adds a copy at `index` as a provider of its own: a new id and
+    /// version, and a name that says it is a copy.
+    fn add_copy(&mut self, copy: ProviderCopy, index: usize) {
+        let mut provider = copy.provider;
+        provider.id = uuid::Uuid::new_v4().to_string();
+        provider.version = uuid::Uuid::new_v4().to_string();
+        provider.name = copy_name(&provider.name);
+        let id = &provider.id;
+        if let Some(token) = copy.quota_access_token {
+            self.quota_access_tokens.insert(id.clone(), token);
+        }
+        if let Some(urls) = copy.endpoints {
+            self.provider_endpoints.insert(id.clone(), urls);
+        }
+        if let Some(connection) = copy.grok_connection {
+            self.grok_connections.insert(id.clone(), connection);
+        }
+        if let Some(mapping) = copy.dsh_models {
+            self.dsh_models.insert(id.clone(), mapping);
+        }
+        if let Some(mapping) = copy.model_map {
+            self.model_maps.insert(id.clone(), mapping);
+        }
+        if let Some(delegate) = copy.delegate {
+            self.delegates.insert(id.clone(), delegate);
+        }
+        self.providers.insert(index, provider);
+    }
+}
 fn copy_name(original: &str) -> String {
     const SUFFIX: &str = " (copy)";
     let keep = 120 - SUFFIX.chars().count();
@@ -1108,34 +1183,14 @@ impl Store {
                 self.save_connection(existing, replacing_token, protocol)?;
             }
             Edit::DuplicateProvider { id } => {
-                let index = self
-                    .providers
-                    .iter()
-                    .position(|p| p.id == id)
-                    .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))?;
-                let mut copy = self.providers[index].clone();
-                copy.id = uuid::Uuid::new_v4().to_string();
-                copy.version = uuid::Uuid::new_v4().to_string();
-                copy.name = copy_name(&copy.name);
-                if let Some(token) = self.quota_access_tokens.get(&id).cloned() {
-                    self.quota_access_tokens.insert(copy.id.clone(), token);
-                }
-                if let Some(urls) = self.provider_endpoints.get(&id).cloned() {
-                    self.provider_endpoints.insert(copy.id.clone(), urls);
-                }
-                if let Some(connection) = self.grok_connections.get(&id).cloned() {
-                    self.grok_connections.insert(copy.id.clone(), connection);
-                }
-                if let Some(mapping) = self.dsh_models.get(&id).cloned() {
-                    self.dsh_models.insert(copy.id.clone(), mapping);
-                }
-                if let Some(mapping) = self.model_maps.get(&id).cloned() {
-                    self.model_maps.insert(copy.id.clone(), mapping);
-                }
-                if let Some(delegate) = self.delegates.get(&id).cloned() {
-                    self.delegates.insert(copy.id.clone(), delegate);
-                }
-                self.providers.insert(index + 1, copy);
+                let (index, copy) = self.provider_copy(&id)?;
+                self.add_copy(copy, index + 1);
+            }
+            Edit::ImportCopy { mut copy } => {
+                // The other instance held it to its own port.
+                copy.provider.base_url =
+                    base_url(&copy.provider.base_url, self.settings.port)?.into();
+                self.add_copy(*copy, self.providers.len());
             }
             Edit::ImportLink {
                 base_url: raw,

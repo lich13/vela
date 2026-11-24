@@ -460,12 +460,6 @@ impl Service {
     /// server answered, its errors included. `instance` is the one the caller
     /// believes is selected.
     pub(crate) async fn call(&self, instance: &str, name: &str, args: Value) -> Result<Value> {
-        let unsupported = || {
-            AppError::new(
-                code::UNSUPPORTED,
-                "服务器版本不支持此操作，请升级服务器上的 Vela",
-            )
-        };
         let (number, channel) = {
             let inner = self.loaded()?;
             let switched = || AppError::new(code::STALE, "实例已切换，请重试");
@@ -494,6 +488,34 @@ impl Service {
             return Err(unsupported());
         }
         channel.call(name, args).await
+    }
+
+    /// Runs a shared command on a machine of the list: the selected one over
+    /// its channel, any other over a channel of its own that is closed with
+    /// the answer.
+    pub(crate) async fn ask(&self, machine: &str, name: &str, args: Value) -> Result<Value> {
+        let target = {
+            let inner = self.loaded()?;
+            if inner.stored.active == machine {
+                None
+            } else {
+                Some(inner.stored.machine(machine).ok_or_else(missing)?.target())
+            }
+        };
+        let Some(target) = target else {
+            return self.call(machine, name, args).await;
+        };
+        let channel = Channel::new(target, self.dialer.clone(), Arc::new(remote::Silent));
+        let answer = async {
+            let capabilities = channel.connect().await?;
+            if !capabilities.commands.iter().any(|known| known == name) {
+                return Err(unsupported());
+            }
+            channel.call(name, args).await
+        }
+        .await;
+        channel.close();
+        answer
     }
 
     /// The state, read from the file the first time. A file that selects a
@@ -614,6 +636,13 @@ impl Service {
     }
 }
 
+fn unsupported() -> AppError {
+    AppError::new(
+        code::UNSUPPORTED,
+        "服务器版本不支持此操作，请升级服务器上的 Vela",
+    )
+}
+
 fn missing() -> AppError {
     AppError::new(code::MISSING, "实例不存在，请刷新后重试")
 }
@@ -675,7 +704,43 @@ pub(crate) async fn remote_call(
     name: String,
     args: Value,
 ) -> Result<Value> {
+    if crate::rpc::internal(&name) {
+        return Err(crate::rpc::unsupported());
+    }
     service.call(&instance, &name, args).await
+}
+
+/// Adds a copy of a provider of one instance to another. The copy holds the
+/// provider's tokens: it goes from one Rust to the other, over SSH where
+/// either is a server, and the window hears only whether it arrived. It is
+/// sent once; after a failure the user looks before trying again.
+#[tauri::command]
+pub(crate) async fn copy_provider(
+    service: tauri::State<'_, Arc<Service>>,
+    runtime: tauri::State<'_, Arc<crate::runtime::Runtime>>,
+    instance: String,
+    client_id: crate::gateway::ClientId,
+    provider_id: String,
+    target: String,
+) -> Result<()> {
+    if instance == target {
+        return Err(AppError::new(code::STALE, "请选择另一个实例"));
+    }
+    let on = |instance: String, name: &'static str, args: Value| {
+        let (service, runtime) = (service.inner().clone(), runtime.inner().clone());
+        async move {
+            if instance == LOCAL {
+                crate::rpc::call(&runtime, name, args).await
+            } else {
+                service.ask(&instance, name, args).await
+            }
+        }
+    };
+    let named = serde_json::json!({"clientId": client_id, "providerId": provider_id});
+    let copy = on(instance, "export_provider_copy", named).await?;
+    let handed = serde_json::json!({"clientId": client_id, "copy": copy});
+    on(target, "import_provider_copy", handed).await?;
+    Ok(())
 }
 
 #[cfg(test)]

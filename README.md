@@ -144,7 +144,7 @@ Get-FileHash .\Vela_*.exe -Algorithm SHA256
 更多专题文档：
 - [设计系统与交互规范 (DESIGN.md)](./DESIGN.md) · [隐私与安全边界 (PRIVACY.md)](./PRIVACY.md)
 - [客户端接入与配置 (docs/clients.md)](./docs/clients.md) · [网关调度与故障转移 (docs/gateway.md)](./docs/gateway.md)
-- [快捷面板与系统控制 (docs/controls.md)](./docs/controls.md) · [用量核算与计价口径 (docs/usage.md)](./docs/usage.md) · [数据目录与事务恢复 (docs/data.md)](./docs/data.md) · [Linux 服务器版与实例切换 (docs/server.md)](./docs/server.md)
+- [快捷面板与系统控制 (docs/controls.md)](./docs/controls.md) · [用量核算与计价口径 (docs/usage.md)](./docs/usage.md) · [数据目录与事务恢复 (docs/data.md)](./docs/data.md) · [服务器版与实例切换 (docs/server.md)](./docs/server.md)
 
 ---
 

@@ -31,8 +31,12 @@ fn assert_same(what: &str, ours: &BTreeSet<String>, theirs: &BTreeSet<String>) {
 
 #[test]
 fn the_table_holds_exactly_the_shared_commands_of_the_contract() {
-    let table: BTreeSet<_> = names().iter().map(|name| name.to_string()).collect();
+    let mut table: BTreeSet<_> = names().iter().map(|name| name.to_string()).collect();
     assert_eq!(table.len(), names().len(), "the table repeats a name");
+    // What no window may ask is in no contract of the windows.
+    for name in INTERNAL {
+        assert!(table.remove(*name), "{name} is answered");
+    }
     assert_same("shared commands", &table, &contract("sharedCommands"));
 }
 

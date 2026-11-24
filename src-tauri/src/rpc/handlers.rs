@@ -466,6 +466,31 @@ pub(crate) async fn update_gateway(
     }
     Ok(result)
 }
+/// A provider of this instance, with its tokens, for another to add.
+pub(crate) fn export_provider_copy(
+    r: &Runtime,
+    client_id: ClientId,
+    provider_id: String,
+) -> Result<gateway::ProviderCopy> {
+    r.gateway(client_id).provider_copy(&provider_id)
+}
+/// Adds what another instance exported as the last provider here.
+pub(crate) async fn import_provider_copy(
+    r: &Runtime,
+    client_id: ClientId,
+    copy: gateway::ProviderCopy,
+) -> Result<()> {
+    let _official_guard = r.official_tx.lock().await;
+    let home = r.home(client_id)?;
+    let gateway = r.gateway(client_id);
+    let revision = gateway.try_view()?.revision;
+    let copy = Box::new(copy);
+    gateway
+        .edit_checked(gateway::Edit::ImportCopy { copy }, &revision, &home, None)
+        .map_err(|e| r.config_failure(client_id, e))?;
+    let _ = r.refresh();
+    Ok(())
+}
 pub(crate) async fn start_gateway(
     r: &Runtime,
     client_id: ClientId,

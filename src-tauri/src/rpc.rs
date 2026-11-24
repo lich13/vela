@@ -51,6 +51,17 @@ pub(crate) fn names() -> &'static [&'static str] {
     NAMES
 }
 
+/// What one instance's Rust asks of another's and no window may ask: these
+/// carry a provider with its tokens. A server lists them like the rest; the
+/// two commands a window reaches the table through refuse them.
+#[cfg(any(feature = "desktop", test))]
+const INTERNAL: &[&str] = &["export_provider_copy", "import_provider_copy"];
+
+#[cfg(feature = "desktop")]
+pub(crate) fn internal(name: &str) -> bool {
+    INTERNAL.contains(&name)
+}
+
 pub(crate) fn unsupported() -> AppError {
     AppError::new(code::UNSUPPORTED, "此实例不支持该操作")
 }
@@ -136,6 +147,8 @@ commands! {
     blocking cancel_grok_import(token);
     async probe_provider_endpoints(client_id, provider_id);
     async update_gateway(client_id, edit, expected_revision, expected_config_revision);
+    blocking export_provider_copy(client_id, provider_id);
+    async import_provider_copy(client_id, copy);
     async start_gateway(client_id, expected_revision, expected_config_revision);
     async stop_gateway(client_id, expected_config_revision);
     async query_provider_quota(client_id, provider_id, force);

@@ -1128,6 +1128,58 @@ it("opens the model mapping tab for DSH model rules on request", async () => {
   ).toHaveAttribute("aria-pressed", "true");
 });
 
+it("asks where a copy goes once there is another instance, and names only the provider", async () => {
+  const { instanceState, setInstanceState } = await import("./instance");
+  const before = instanceState();
+  setInstanceState({
+    ...before,
+    machines: [
+      {
+        id: "m1",
+        name: "东京",
+        kind: "linux",
+        sshHost: "tokyo",
+        fallbackHost: null,
+        useSudo: false,
+      },
+    ],
+  });
+  try {
+    const user = userEvent.setup();
+    const notify = vi.fn();
+    render(<Gateway notify={notify} />);
+    const { id, name } = state.providers[0];
+    const actions = within(await screen.findByLabelText(`${name} 操作`));
+    const open = async () => {
+      await user.click(
+        actions.getByRole("button", { name: `${name} 创建副本` }),
+      );
+      return within(await screen.findByRole("dialog", { name: "创建副本" }));
+    };
+    await user.click((await open()).getByRole("button", { name: "东京" }));
+    await waitFor(() =>
+      expect(notify).toHaveBeenCalledWith("已在「东京」创建副本"),
+    );
+    expect(mock.command).toHaveBeenCalledWith("copy_provider", {
+      clientId: "codex",
+      providerId: id,
+      instance: "local",
+      target: "m1",
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await user.click((await open()).getByRole("button", { name: "此实例" }));
+    await waitFor(() => expect(notify).toHaveBeenCalledWith("已创建副本"));
+    expect(mock.command).toHaveBeenCalledWith("update_gateway", {
+      clientId: "codex",
+      edit: { op: "duplicateProvider", id },
+      expectedRevision: state.revision,
+    });
+  } finally {
+    setInstanceState(before);
+  }
+});
+
 it("copies a provider from its row and asks before deleting one", async () => {
   const user = userEvent.setup();
   const notify = vi.fn();
