@@ -503,12 +503,13 @@ async fn connection_failure_retries_but_output_followed_by_error_never_replays()
     .await;
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = closed.local_addr().unwrap().port();
-    drop(closed);
     let fixture = Fixture::new(
         &[format!("http://127.0.0.1:{port}/v1"), second.url("/v1")],
         false,
     )
     .await;
+    // Closed only now, so the gateway could not take the port for itself.
+    drop(closed);
     let response = fixture.request(models::FLASH, false).await;
     assert_eq!(response.status(), 200);
     response.bytes().await.unwrap();
