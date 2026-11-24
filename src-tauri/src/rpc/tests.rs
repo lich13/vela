@@ -39,15 +39,6 @@ fn the_table_holds_exactly_the_shared_commands_of_the_contract() {
 #[cfg(feature = "desktop")]
 #[test]
 fn the_desktop_registers_exactly_the_desktop_commands_of_the_contract() {
-    // The instance commands arrive with the remote client; until they are
-    // registered they are listed here. `remote_call` joins `call` then.
-    const PENDING: [&str; 5] = [
-        "get_instances",
-        "save_instance",
-        "delete_instance",
-        "select_instance",
-        "test_instance",
-    ];
     let source = include_str!("../lib.rs");
     let open = "generate_handler![";
     let from = source.find(open).expect("the handler list") + open.len();
@@ -63,16 +54,11 @@ fn the_desktop_registers_exactly_the_desktop_commands_of_the_contract() {
         })
         .filter(|name| !name.is_empty())
         .collect();
-    let mut registered: BTreeSet<_> = listed.iter().cloned().collect();
+    let registered: BTreeSet<_> = listed.iter().cloned().collect();
     assert_eq!(registered.len(), listed.len(), "a command is listed twice");
-    for name in PENDING {
-        assert!(
-            registered.insert(name.to_owned()),
-            "{name} is registered: drop it from the pending list"
-        );
-    }
     let mut expected = contract("desktopCommands");
-    expected.insert("call".into());
+    // The two ways a shared command is reached: here and on a server.
+    expected.extend(["call".into(), "remote_call".into()]);
     assert_same("desktop commands", &registered, &expected);
 }
 
