@@ -543,7 +543,142 @@ type None = Record<string, never>;
 type Client = { clientId: ClientId };
 type Provider = Client & { providerId: string };
 type Revision = { expectedRevision: string };
-export type CommandMap = {
+export type Machine = {
+  id: string;
+  name: string;
+  sshHost: string;
+  fallbackHost: string | null;
+  useSudo: boolean;
+};
+export type InstanceState = {
+  revision: string;
+  /** "local" or a machine id. */
+  active: string;
+  machines: Machine[];
+  connection: {
+    status: "local" | "connecting" | "connected" | "offline";
+    version: string | null;
+    error: string | null;
+    /** Shared command names the remote server does not implement. */
+    unsupported: string[];
+  };
+};
+/** Lists every key of `M`; a missing or unknown name is a type error. */
+const names =
+  <M>() =>
+  <const T extends readonly (keyof M)[]>(
+    list: T &
+      ([Exclude<keyof M, T[number]>] extends [never]
+        ? unknown
+        : { missing: Exclude<keyof M, T[number]> }),
+  ): T =>
+    list;
+/** Commands of the desktop app itself: they always run on this machine. */
+export type DesktopCommands = {
+  open_main: Call<
+    {
+      page?: string | null;
+      clientId?: ClientId;
+      providerId?: string | null;
+      eventId?: string | null;
+      providerAction?: ProviderAction;
+    },
+    void
+  >;
+  close_main: Call<None, void>;
+  ack_main_close: Call<None, void>;
+  frontend_ready: Call<None, void>;
+  get_startup_error: Call<None, AppError | null>;
+  get_quick: Call<None, QuickPreferences>;
+  set_quick: Call<
+    {
+      pinned?: boolean;
+      hiddenClients?: ClientId[];
+      selectedClient?: ClientId;
+    },
+    QuickPreferences
+  >;
+  quick_ready: Call<None, void>;
+  hide_quick: Call<None, void>;
+  notification_permission: Call<{ request?: boolean }, NotificationState>;
+  test_notification: Call<None, NotificationState>;
+  open_notification_settings: Call<None, void>;
+  get_clamshell_state: Call<None, PowerState>;
+  set_clamshell_awake: Call<{ enabled: boolean } & Revision, PowerState>;
+  install_power_helper: Call<None, PowerState>;
+  remove_power_helper: Call<None, PowerState>;
+  force_quit_agent_clients: Call<
+    { target: "codex" | "claude" },
+    { terminated: number; failed: number; terminalCleanupFailed?: number }
+  >;
+  get_startup: Call<None, StartupState>;
+  set_startup: Call<{ enabled: boolean }, StartupState>;
+  get_provider_imports: Call<None, PendingImport[]>;
+  confirm_provider_import: Call<
+    {
+      clientId: ClientId;
+      protocol: GrokProtocol;
+      id: string;
+      expectedRevision: string;
+    },
+    void
+  >;
+  cancel_provider_import: Call<{ id: string }, void>;
+  get_login: Call<None, LoginState>;
+  start_login: Call<
+    {
+      mode: "browser" | "device";
+      targetAccountId?: string | null;
+      expectedCredentialRevision?: string | null;
+    },
+    LoginState
+  >;
+  cancel_login: Call<None, void>;
+  open_login_url: Call<None, void>;
+  copy_login_value: Call<{ kind: "url" | "code" }, void>;
+  claude_login_status: Call<None, ClaudeLoginState>;
+  start_claude_login: Call<None, ClaudeLoginState>;
+  cancel_claude_login: Call<None, void>;
+  /** How many accounts were written; null when the dialog was dismissed. */
+  export_antigravity_accounts: Call<Revision, number | null>;
+  import_antigravity_accounts: Call<
+    Revision,
+    { state: AntigravityAuthState; added: number; skipped: number } | null
+  >;
+  export_usage_bill: Call<{ request: BillRequest }, BillExport | null>;
+  preview_account_import: Call<None, AccountImportPreview | null>;
+  commit_account_import: Call<
+    Revision & { token: string; selected: { id: number; update: boolean }[] },
+    ViewState
+  >;
+  cancel_account_exchange: Call<{ token: string }, void>;
+  preview_account_export: Call<None, AccountExportPreview>;
+  prepare_account_template: Call<
+    { ids: string[]; replaceTemplate?: boolean },
+    PreparedTemplate | null
+  >;
+  select_account_template: Call<{ token: string; id: number }, void>;
+  export_accounts: Call<Revision & { ids: string[]; format: string }, boolean>;
+  check_for_updates: Call<None, UpdateInfo>;
+  open_github: Call<None, void>;
+  open_update_release: Call<None, void>;
+  open_pricing_directory: Call<None, void>;
+  reveal_provider_token: Call<Provider & Revision, string>;
+  get_instances: Call<None, InstanceState>;
+  save_instance: Call<
+    Revision & { machine: Omit<Machine, "id"> & { id: string | null } },
+    InstanceState
+  >;
+  delete_instance: Call<Revision & { id: string }, InstanceState>;
+  /** Connects and handshakes before it commits. */
+  select_instance: Call<Revision & { id: string }, InstanceState>;
+  test_instance: Call<
+    { sshHost: string; fallbackHost: string | null; useSudo: boolean },
+    { version: string }
+  >;
+};
+/** Commands a server instance also implements: they run on the current instance. */
+export type SharedCommands = {
   get_state: Call<None, ViewState>;
   switch_account: Call<{ id: string } & Revision, ViewState>;
   use_official_account: Call<
@@ -600,12 +735,6 @@ export type CommandMap = {
     { id: string } & Revision,
     AntigravityAuthState
   >;
-  /** How many accounts were written; null when the dialog was dismissed. */
-  export_antigravity_accounts: Call<Revision, number | null>;
-  import_antigravity_accounts: Call<
-    Revision,
-    { state: AntigravityAuthState; added: number; skipped: number } | null
-  >;
   read_config: Call<Client, ConfigDocument>;
   read_previous_config: Call<Client, string>;
   validate_config: Call<Client & { text: string }, void>;
@@ -615,47 +744,6 @@ export type CommandMap = {
     { seconds: number; expectedSeconds: number },
     ViewState
   >;
-  get_startup: Call<None, StartupState>;
-  set_startup: Call<{ enabled: boolean }, StartupState>;
-  get_login: Call<None, LoginState>;
-  start_login: Call<
-    {
-      mode: "browser" | "device";
-      targetAccountId?: string | null;
-      expectedCredentialRevision?: string | null;
-    },
-    LoginState
-  >;
-  cancel_login: Call<None, void>;
-  open_login_url: Call<None, void>;
-  copy_login_value: Call<{ kind: "url" | "code" }, void>;
-  check_for_updates: Call<None, UpdateInfo>;
-  open_github: Call<None, void>;
-  open_update_release: Call<None, void>;
-  frontend_ready: Call<None, void>;
-  close_main: Call<None, void>;
-  ack_main_close: Call<None, void>;
-  open_main: Call<
-    {
-      page?: string | null;
-      clientId?: ClientId;
-      providerId?: string | null;
-      eventId?: string | null;
-      providerAction?: ProviderAction;
-    },
-    void
-  >;
-  get_quick: Call<None, QuickPreferences>;
-  set_quick: Call<
-    {
-      pinned?: boolean;
-      hiddenClients?: ClientId[];
-      selectedClient?: ClientId;
-    },
-    QuickPreferences
-  >;
-  quick_ready: Call<None, void>;
-  hide_quick: Call<None, void>;
   cancel_gateway_wait: Call<
     Client & { requestId: string },
     "resent" | "ended" | "gone"
@@ -709,7 +797,6 @@ export type CommandMap = {
   preview_grok_import: Call<{ selected?: string | null }, GrokImportPreview>;
   commit_grok_import: Call<{ token: string } & Revision, GatewayState>;
   cancel_grok_import: Call<{ token?: string | null }, void>;
-  reveal_provider_token: Call<Provider & Revision, string>;
   probe_provider_endpoints: Call<Provider, GatewayState>;
   update_gateway: Call<
     Client &
@@ -736,15 +823,6 @@ export type CommandMap = {
       lastAt: number;
     }[]
   >;
-  get_clamshell_state: Call<None, PowerState>;
-  set_clamshell_awake: Call<{ enabled: boolean } & Revision, PowerState>;
-  install_power_helper: Call<None, PowerState>;
-  remove_power_helper: Call<None, PowerState>;
-  force_quit_agent_clients: Call<
-    { target: "codex" | "claude" },
-    { terminated: number; failed: number; terminalCleanupFailed?: number }
-  >;
-  get_startup_error: Call<None, AppError | null>;
   get_app_events: Call<
     {
       filter: {
@@ -769,19 +847,6 @@ export type CommandMap = {
     import("./failure-policy-types").ErrorResponse | null
   >;
   clear_app_events: Call<None, void>;
-  preview_account_import: Call<None, AccountImportPreview | null>;
-  commit_account_import: Call<
-    Revision & { token: string; selected: { id: number; update: boolean }[] },
-    ViewState
-  >;
-  cancel_account_exchange: Call<{ token: string }, void>;
-  preview_account_export: Call<None, AccountExportPreview>;
-  prepare_account_template: Call<
-    { ids: string[]; replaceTemplate?: boolean },
-    PreparedTemplate | null
-  >;
-  select_account_template: Call<{ token: string; id: number }, void>;
-  export_accounts: Call<Revision & { ids: string[]; format: string }, boolean>;
   provider_test_state: Call<
     { clientId: ClientId; providerId: string },
     ProviderTestingState
@@ -822,31 +887,13 @@ export type CommandMap = {
     { engine: DetectionEngine },
     FingerprintBankState
   >;
-  get_provider_imports: Call<None, PendingImport[]>;
-  confirm_provider_import: Call<
-    {
-      clientId: ClientId;
-      protocol: GrokProtocol;
-      id: string;
-      expectedRevision: string;
-    },
-    void
-  >;
-  cancel_provider_import: Call<{ id: string }, void>;
   get_claude_profile: Call<None, ClaudeProfileState>;
   switch_claude_profile: Call<
     Revision & { mode: "official" | "api" },
     ClaudeProfileState
   >;
   recover_claude_profile: Call<None, ClaudeProfileState>;
-  claude_login_status: Call<None, ClaudeLoginState>;
-  start_claude_login: Call<None, ClaudeLoginState>;
-  cancel_claude_login: Call<None, void>;
-  notification_permission: Call<{ request?: boolean }, NotificationState>;
-  test_notification: Call<None, NotificationState>;
-  open_notification_settings: Call<None, void>;
   get_usage_state: Call<None, UsageState>;
-  export_usage_bill: Call<{ request: BillRequest }, BillExport | null>;
   get_usage_dashboard: Call<{ filter: UsageFilter }, Dashboard>;
   get_antigravity_usage_stats: Call<
     { filter: UsageFilter },
@@ -877,8 +924,155 @@ export type CommandMap = {
   configure_pricing: Call<Revision & { config: PricingConfig }, PricingView>;
   update_pricing: Call<None, PricingView>;
   reload_pricing: Call<None, PricingView>;
-  open_pricing_directory: Call<None, void>;
 };
+export const desktopCommands = names<DesktopCommands>()([
+  "open_main",
+  "close_main",
+  "ack_main_close",
+  "frontend_ready",
+  "get_startup_error",
+  "get_quick",
+  "set_quick",
+  "quick_ready",
+  "hide_quick",
+  "notification_permission",
+  "test_notification",
+  "open_notification_settings",
+  "get_clamshell_state",
+  "set_clamshell_awake",
+  "install_power_helper",
+  "remove_power_helper",
+  "force_quit_agent_clients",
+  "get_startup",
+  "set_startup",
+  "get_provider_imports",
+  "confirm_provider_import",
+  "cancel_provider_import",
+  "get_login",
+  "start_login",
+  "cancel_login",
+  "open_login_url",
+  "copy_login_value",
+  "claude_login_status",
+  "start_claude_login",
+  "cancel_claude_login",
+  "export_antigravity_accounts",
+  "import_antigravity_accounts",
+  "export_usage_bill",
+  "preview_account_import",
+  "commit_account_import",
+  "cancel_account_exchange",
+  "preview_account_export",
+  "prepare_account_template",
+  "select_account_template",
+  "export_accounts",
+  "check_for_updates",
+  "open_github",
+  "open_update_release",
+  "open_pricing_directory",
+  "reveal_provider_token",
+  "get_instances",
+  "save_instance",
+  "delete_instance",
+  "select_instance",
+  "test_instance",
+]);
+export const sharedCommands = names<SharedCommands>()([
+  "get_state",
+  "switch_account",
+  "use_official_account",
+  "disable_official_account",
+  "import_current",
+  "rename_account",
+  "delete_account",
+  "read_antigravity_config",
+  "save_antigravity_config",
+  "read_previous_antigravity_config",
+  "validate_antigravity_config",
+  "read_antigravity_cli_config",
+  "save_antigravity_cli_config",
+  "read_previous_antigravity_cli_config",
+  "validate_antigravity_cli_config",
+  "read_config_tree",
+  "patch_config_tree",
+  "get_antigravity_auth_state",
+  "switch_antigravity_account",
+  "rename_antigravity_account",
+  "delete_antigravity_account",
+  "read_config",
+  "read_previous_config",
+  "validate_config",
+  "save_config",
+  "set_preferences",
+  "set_quota_refresh",
+  "cancel_gateway_wait",
+  "get_gateway",
+  "get_gateway_freeze",
+  "set_gateway_frozen",
+  "set_gateway_freeze_resume",
+  "get_gateway_models",
+  "refresh_gateway_models",
+  "update_codex_catalog",
+  "search_models_dev",
+  "edit_model_list",
+  "dsh_official_models",
+  "read_dsh_file",
+  "read_previous_dsh_file",
+  "save_dsh_file",
+  "restore_dsh_file",
+  "attach_dsh_profiles",
+  "preview_dsh_profile",
+  "preview_grok_import",
+  "commit_grok_import",
+  "cancel_grok_import",
+  "probe_provider_endpoints",
+  "update_gateway",
+  "start_gateway",
+  "stop_gateway",
+  "query_provider_quota",
+  "list_provider_models",
+  "get_provider_seen_statuses",
+  "get_app_events",
+  "get_app_event",
+  "get_app_event_raw",
+  "clear_app_events",
+  "provider_test_state",
+  "provider_test_save_prompt",
+  "provider_test_set_platform",
+  "provider_test_start",
+  "provider_test_query",
+  "provider_test_cancel",
+  "provider_test_retry",
+  "provider_test_set_detection",
+  "provider_test_clear_mark",
+  "provider_test_models",
+  "provider_test_update_bank",
+  "get_claude_profile",
+  "switch_claude_profile",
+  "recover_claude_profile",
+  "get_usage_state",
+  "get_usage_dashboard",
+  "get_antigravity_usage_stats",
+  "get_claude_usage_stats",
+  "get_claude_usage_quota",
+  "get_usage_logs",
+  "get_usage_detail",
+  "set_usage_settings",
+  "sync_usage",
+  "get_pricing",
+  "calculate_usage_cost",
+  "get_usage_calculator_models",
+  "get_claude_requested_models",
+  "get_usage_calculator_totals",
+  "search_pricing",
+  "get_models_dev",
+  "update_models_dev",
+  "compare_model_prices",
+  "configure_pricing",
+  "update_pricing",
+  "reload_pricing",
+]);
+export type CommandMap = DesktopCommands & SharedCommands;
 export type CommandName = keyof CommandMap;
 export type CommandArgs<K extends CommandName> = CommandMap[K]["args"];
 export type CommandResult<K extends CommandName> = CommandMap[K]["result"];
@@ -902,9 +1096,9 @@ export type GatewayFreeze = FreezeStatus & {
   partial: boolean;
   clients: ClientFreeze[];
 };
-export type EventMap = {
+/** Events a server instance also emits: delivered from the current instance. */
+export type SharedEvents = {
   "switch-state": ViewState;
-  "login-state": LoginState;
   "switch-error": AppError;
   "switch-notice": string;
   "gateway-state": GatewayState;
@@ -915,21 +1109,26 @@ export type EventMap = {
     revision: string;
     guarded: boolean;
   };
-  "clamshell-state": PowerState;
-  "clamshell-error": AppError | null;
-  "notification-state": NotificationState;
   "claude-profile-state": ClaudeProfileState;
-  "claude-login-state": ClaudeLoginState;
   "antigravity-auth-state": AntigravityAuthState;
-  "quick-state": QuickPreferences;
-  "app-visibility": boolean;
-  "panel-visibility": boolean;
-  "provider-imports": null;
   "provider-tests": null;
   "usage-state": null;
   "pricing-state": null;
   /** The journal changed; the log page reloads rather than read the payload. */
   "app-event": unknown;
+};
+/** Events of the desktop app itself. */
+export type DesktopEvents = {
+  "instance-state": InstanceState;
+  "login-state": LoginState;
+  "clamshell-state": PowerState;
+  "clamshell-error": AppError | null;
+  "notification-state": NotificationState;
+  "claude-login-state": ClaudeLoginState;
+  "quick-state": QuickPreferences;
+  "app-visibility": boolean;
+  "panel-visibility": boolean;
+  "provider-imports": null;
   "event-log": { id: string; clientId: ClientId; providerId: string | null };
   "provider-settings": {
     id: string;
@@ -939,3 +1138,37 @@ export type EventMap = {
   "main-close-requested": { hidden?: boolean } | null;
   navigate: string;
 };
+export const sharedEvents = names<SharedEvents>()([
+  "switch-state",
+  "switch-error",
+  "switch-notice",
+  "gateway-state",
+  "gateway-freeze",
+  "provider-quota",
+  "config-state",
+  "claude-profile-state",
+  "antigravity-auth-state",
+  "provider-tests",
+  "usage-state",
+  "pricing-state",
+  "app-event",
+]);
+export const desktopEvents = names<DesktopEvents>()([
+  "instance-state",
+  "login-state",
+  "clamshell-state",
+  "clamshell-error",
+  "notification-state",
+  "claude-login-state",
+  "quick-state",
+  "app-visibility",
+  "panel-visibility",
+  "provider-imports",
+  "event-log",
+  "provider-settings",
+  "main-close-requested",
+  "navigate",
+]);
+export type EventMap = SharedEvents & DesktopEvents;
+/** How the desktop app forwards a shared event of a remote instance. */
+export type RemoteEvent = { instance: string; event: string; payload: unknown };
