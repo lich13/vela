@@ -123,6 +123,31 @@ async fn the_handshake_names_the_protocol_the_version_and_every_command() {
 }
 
 #[tokio::test]
+async fn a_handshake_sends_the_polling_on_its_round() {
+    let fixture = fixture().await;
+    let wake = &fixture.server.runtime.poll_wake;
+    let mut client = Client::connect(&fixture).await;
+    // A connection that has not shaken hands is nobody yet.
+    let frozen = client.call("get_gateway_freeze", json!({})).await;
+    assert!(frozen.is_ok(), "{frozen:?}");
+    assert!(!fixture.server.hub.attentive());
+    let woken = tokio::time::timeout(Duration::ZERO, wake.notified()).await;
+    assert!(woken.is_err(), "the polling was woken for nobody");
+
+    client.shake_hands().await;
+    tokio::time::timeout(Duration::from_secs(20), wake.notified())
+        .await
+        .expect("the polling is woken for whoever shook hands");
+    // Once for a connection, however often it asks.
+    client.shake_hands().await;
+    let again = tokio::time::timeout(Duration::ZERO, wake.notified()).await;
+    assert!(
+        again.is_err(),
+        "the polling was woken twice for one connection"
+    );
+}
+
+#[tokio::test]
 async fn a_change_is_answered_and_told_to_every_connection_that_shook_hands() {
     let fixture = fixture().await;
     let mut writer = Client::connect(&fixture).await;
@@ -433,6 +458,30 @@ async fn health_is_the_handshake_answered() {
         wire::write(&mut stream, &reply).await.unwrap();
     });
     assert_eq!(health(mute).await.unwrap_err(), "服务器没有按约定应答");
+}
+
+/// On the runtime the binary builds for itself rather than the test's own.
+#[test]
+fn the_servers_own_runtime_serves_connections_and_answers_health() {
+    let outcome = on_tokio(async {
+        let fixture = fixture().await;
+        health(fixture.socket.clone()).await?;
+        let mut client = Client::connect(&fixture).await;
+        client.shake_hands().await;
+        // A request that waits leaves the runtime free for the next.
+        let held = fixture.server.runtime.official_tx.lock().await;
+        client.ask(1, "disable_official_account", json!({})).await;
+        client
+            .ask(2, "get_gateway", json!({"clientId": "claude"}))
+            .await;
+        let (first, gateway, _) = client.answer().await;
+        assert_eq!(first, 2, "{gateway:?}");
+        assert_eq!(gateway.unwrap()["running"], false);
+        drop(held);
+        assert_eq!(client.answer().await.0, 1);
+        health(fixture.socket.clone()).await
+    });
+    assert_eq!(outcome, Ok(()));
 }
 
 #[test]

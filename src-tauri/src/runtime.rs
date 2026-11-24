@@ -283,7 +283,10 @@ impl Runtime {
         self.grok.observe_home(&self.home(gateway::ClientId::Grok)?);
         self.dsh.observe_home(&self.home(gateway::ClientId::Dsh)?);
         self.report_services();
-        self.keep_usage();
+        // Told, round after round of the polling below, that someone is
+        // watching: whatever rests for want of a watcher goes on.
+        let watched = Arc::new(tokio::sync::Notify::new());
+        self.keep_usage(watched.clone());
         {
             let r = self.clone();
             tokio::spawn(async move {
@@ -410,44 +413,32 @@ impl Runtime {
                     }
                 }
             });
-            let mut events = g.subscribe();
+            let events = g.subscribe();
             let r = self.clone();
+            let watched = watched.clone();
             tokio::spawn(async move {
                 // The view moves by the second, with no event to announce
                 // it, while a circuit counts down or a request is
                 // receiving its response. Only a web panel needs the
-                // latter: the native one refreshes itself.
-                let ticking = || {
+                // latter: the native one refreshes itself. Nobody watching
+                // needs it either, and the view is not read to find out.
+                let ticking = |attentive: bool| {
                     g.has_health_wait()
                         || (cfg!(not(target_os = "macos"))
+                            && attentive
                             && g.try_view().is_ok_and(|view| {
                                 view.pending_requests
                                     .iter()
                                     .any(|request| request.received_bytes.is_some())
                             }))
                 };
-                let mut waiting = ticking();
-                loop {
-                    tokio::select! {
-                        event = events.recv() => {
-                            if matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
-                                break;
-                            }
-                            coalesce_gateway_events(&mut events);
-                            waiting = ticking();
-                        }
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if waiting => {
-                            let current = ticking();
-                            let refresh = waiting || current;
-                            waiting = current;
-                            // Include the final zero so an idle open circuit
-                            // becomes visibly ready for a request probe.
-                            if !refresh { continue; }
-                        }
-                    }
+                let refresh = |attentive: bool| {
                     g.report_diagnostics();
-                    r.publish_gateway(&g);
-                }
+                    if attentive {
+                        r.tell_gateway(&g);
+                    }
+                };
+                follow_gateway(events, &watched, || r.sink.attentive(), ticking, refresh).await;
             });
         }
         let runtime = self.clone();
@@ -466,6 +457,10 @@ impl Runtime {
                 if runtime.quitting.load(Ordering::Relaxed) {
                     break;
                 }
+                let attentive = runtime.sink.attentive();
+                if attentive {
+                    watched.notify_waiters();
+                }
                 runtime
                     .gateway
                     .freeze_gate()
@@ -481,7 +476,7 @@ impl Runtime {
                     PollStateUpdate::Unchanged => {}
                 }
                 if should_poll_editor_configs(
-                    runtime.sink.attentive(),
+                    attentive,
                     [
                         &runtime.gateway,
                         &runtime.claude,
@@ -617,8 +612,9 @@ impl Runtime {
     }
 
     /// Keeps prices current and, when the user asked for it, reads the
-    /// clients' sessions every minute.
-    fn keep_usage(self: &Arc<Self>) {
+    /// clients' sessions every minute, or as rarely as the host lets them be
+    /// read while nobody is watching. `watched` ends that rest.
+    fn keep_usage(self: &Arc<Self>, watched: Arc<tokio::sync::Notify>) {
         // Price checks must not wait behind a session scan or historical compaction.
         self.usage.schedule_price_backfill();
         let runtime = Arc::downgrade(self);
@@ -662,21 +658,40 @@ impl Runtime {
             }
         });
         let runtime = Arc::downgrade(self);
+        let mut announced = self.usage.subscribe();
         tokio::spawn(async move {
+            let mut maintained: Option<tokio::time::Instant> = None;
             loop {
                 let Some(runtime) = runtime.upgrade() else {
                     break;
                 };
-                if runtime.usage.settings().auto_sync {
+                // What a gateway recorded since the last round, or the user
+                // had done. A failed tidying is announced too, and so tried
+                // again.
+                let mut written = take_announced(&mut announced);
+                let reading = runtime.usage.settings().auto_sync;
+                if reading {
                     let roots = runtime.usage_roots();
                     let usage = runtime.usage.clone();
                     let _ =
                         tokio::task::spawn_blocking(move || usage.sync_roots(roots, None)).await;
+                    // A reading announces itself whether or not it found
+                    // anything, so its reports are asked instead.
+                    take_announced(&mut announced);
                 }
-                let maintenance = runtime.usage.clone();
-                let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
+                let usage = runtime.usage.state();
+                written |= reading && usage.reports.values().any(|report| report.imported > 0);
+                let attentive = runtime.sink.attentive();
+                if maintenance_due(
+                    attentive || written || usage.maintenance.is_some(),
+                    maintained.map(|at| at.elapsed()),
+                ) {
+                    maintained = Some(tokio::time::Instant::now());
+                    let maintenance = runtime.usage.clone();
+                    let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
+                }
                 drop(runtime);
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                wait_next_usage_scan(attentive, UNWATCHED_USAGE_SCAN_INTERVAL, &watched).await;
             }
         });
     }
@@ -810,9 +825,11 @@ impl Runtime {
     }
     /// Publishes a gateway's view, which is only read when someone is watching.
     pub(crate) fn publish_gateway(&self, gateway: &gateway::Gateway) {
-        if !self.sink.attentive() {
-            return;
+        if self.sink.attentive() {
+            self.tell_gateway(gateway);
         }
+    }
+    fn tell_gateway(&self, gateway: &gateway::Gateway) {
         match gateway.try_view() {
             Ok(view) => self.sink.emit(Event::Gateway(&view)),
             Err(error) => self.sink.emit(Event::Error(&error)),
@@ -855,6 +872,97 @@ pub(crate) async fn wait_next_background_poll(
             _ = wake.notified() => {}
         }
     }
+}
+
+pub(crate) const USAGE_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long the clients' sessions go unread while nobody is watching. The
+/// desktop does not let them: the Antigravity app answers for a conversation
+/// only while it runs, so a session read late may be read without its details.
+/// A server has no such app, and what it reads are files that stay.
+pub(crate) const UNWATCHED_USAGE_SCAN_INTERVAL: std::time::Duration = if cfg!(feature = "desktop") {
+    USAGE_SCAN_INTERVAL
+} else {
+    std::time::Duration::from_secs(600)
+};
+
+/// Waits for the next reading of the clients' sessions. The wait of a run
+/// nobody watches is `unwatched` long, and when `wake` says someone has come
+/// it ends where it would have, had they been there from its start.
+pub(crate) async fn wait_next_usage_scan(
+    watched: bool,
+    unwatched: std::time::Duration,
+    wake: &tokio::sync::Notify,
+) {
+    let watched_next = tokio::time::Instant::now() + USAGE_SCAN_INTERVAL;
+    if !watched {
+        tokio::select! {
+            _ = tokio::time::sleep(unwatched) => return,
+            _ = wake.notified() => {}
+        }
+    }
+    tokio::time::sleep_until(watched_next).await;
+}
+
+/// Calls `refresh` after every change `events` announces, and every second
+/// while `ticking` says the view moves with nothing to announce it. Both are
+/// told whether anyone is watching, asked once for the two. When `ticking`
+/// was last asked on behalf of nobody, `wake` has it asked again: someone has
+/// come. Ends when `events` closes.
+pub(crate) async fn follow_gateway(
+    mut events: tokio::sync::broadcast::Receiver<()>,
+    wake: &tokio::sync::Notify,
+    attentive: impl Fn() -> bool,
+    ticking: impl Fn(bool) -> bool,
+    refresh: impl Fn(bool),
+) {
+    let mut watched = attentive();
+    let mut waiting = ticking(watched);
+    loop {
+        tokio::select! {
+            event = events.recv() => {
+                if matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                    break;
+                }
+                coalesce_gateway_events(&mut events);
+                watched = attentive();
+                waiting = ticking(watched);
+            }
+            // The last of these is the final zero, so an idle open circuit
+            // becomes visibly ready for a request probe.
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if waiting => {
+                watched = attentive();
+                waiting = ticking(watched);
+            }
+            _ = wake.notified(), if !watched => {
+                watched = attentive();
+                waiting = ticking(watched);
+                // Whoever has come has read the view for themselves.
+                continue;
+            }
+        }
+        refresh(watched);
+    }
+}
+
+/// How long the usage store goes untidied while nothing calls for it. Records
+/// grow old with nothing written: after a week their details are put away,
+/// and after a month they join the totals of their day.
+pub(crate) const UNCALLED_MAINTENANCE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(3600);
+
+/// Whether the usage store is tidied this round. Something calls for it when
+/// someone is watching, when records were written, or when the last tidying
+/// left work it could not finish; `since_last` is how long ago that was.
+pub(crate) fn maintenance_due(called_for: bool, since_last: Option<std::time::Duration>) -> bool {
+    called_for || since_last.is_none_or(|rested| rested >= UNCALLED_MAINTENANCE_INTERVAL)
+}
+
+/// Forgets what `events` announced so far and tells whether there was any of
+/// it.
+pub(crate) fn take_announced(events: &mut tokio::sync::broadcast::Receiver<()>) -> bool {
+    let any = !events.is_empty();
+    coalesce_gateway_events(events);
+    any
 }
 
 pub(crate) const fn should_poll_editor_configs(
@@ -965,6 +1073,178 @@ mod gateway_broadcast_tests {
             rx.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Closed)
         ));
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+    use std::time::Duration;
+
+    const REST: Duration = Duration::from_secs(600);
+    const MOMENT: Duration = Duration::from_millis(1);
+
+    /// Lets `wait` run as far as it can and tells whether it has ended.
+    async fn ended(wait: &tokio::task::JoinHandle<()>) -> bool {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        wait.is_finished()
+    }
+
+    /// A wait for the next reading that has begun.
+    async fn waiting(
+        watched: bool,
+        wake: &Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
+        let wake = wake.clone();
+        let wait = tokio::spawn(async move { wait_next_usage_scan(watched, REST, &wake).await });
+        assert!(!ended(&wait).await);
+        wait
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sessions_are_read_every_minute_while_someone_watches() {
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let wait = waiting(true, &wake).await;
+        tokio::time::advance(USAGE_SCAN_INTERVAL - MOMENT).await;
+        assert!(!ended(&wait).await);
+        tokio::time::advance(MOMENT).await;
+        assert!(ended(&wait).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unwatched_sessions_rest_until_someone_comes() {
+        let wake = Arc::new(tokio::sync::Notify::new());
+
+        // Nobody comes: the whole rest, and no longer.
+        let wait = waiting(false, &wake).await;
+        tokio::time::advance(REST - MOMENT).await;
+        assert!(!ended(&wait).await);
+        tokio::time::advance(MOMENT).await;
+        assert!(ended(&wait).await);
+
+        // Someone comes early: the minute they would have waited is kept.
+        let wait = waiting(false, &wake).await;
+        tokio::time::advance(Duration::from_secs(20)).await;
+        wake.notify_waiters();
+        tokio::time::advance(Duration::from_secs(40) - MOMENT).await;
+        assert!(!ended(&wait).await);
+        tokio::time::advance(MOMENT).await;
+        assert!(ended(&wait).await);
+
+        // Someone comes after that minute: the sessions are read at once.
+        let wait = waiting(false, &wake).await;
+        tokio::time::advance(Duration::from_secs(200)).await;
+        assert!(!ended(&wait).await);
+        wake.notify_waiters();
+        assert!(ended(&wait).await);
+
+        // Having been told while nothing waited leaves nothing behind.
+        wake.notify_waiters();
+        let wait = waiting(false, &wake).await;
+        tokio::time::advance(REST - MOMENT).await;
+        assert!(!ended(&wait).await);
+        wait.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unwatched_gateway_is_not_read_until_someone_comes() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        let (announce, events) = tokio::sync::broadcast::channel(8);
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let someone = Arc::new(AtomicBool::new(false));
+        // How often the view was read to learn whether it moves, which it
+        // does throughout: a request is receiving its response.
+        let reads = Arc::new(AtomicUsize::new(0));
+        // Who each refresh was for.
+        let refreshed = Arc::new(Mutex::new(Vec::new()));
+        let following = {
+            let (wake, someone) = (wake.clone(), someone.clone());
+            let (reads, refreshed) = (reads.clone(), refreshed.clone());
+            tokio::spawn(async move {
+                let ticking = |attentive: bool| {
+                    attentive && {
+                        reads.fetch_add(1, Ordering::Relaxed);
+                        true
+                    }
+                };
+                follow_gateway(
+                    events,
+                    &wake,
+                    || someone.load(Ordering::Relaxed),
+                    ticking,
+                    |attentive| refreshed.lock().push(attentive),
+                )
+                .await;
+            })
+        };
+        let reads = || reads.load(Ordering::Relaxed);
+        let refreshed = || refreshed.lock().clone();
+
+        // Nobody watches: nothing is read, and nothing refreshed by the second.
+        assert!(!ended(&following).await);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (0, vec![]));
+        // What is announced is still followed, for what it does besides.
+        announce.send(()).unwrap();
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (0, vec![false]));
+
+        // Someone comes: the view is read, and refreshed from the next second.
+        someone.store(true, Ordering::Relaxed);
+        wake.notify_waiters();
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (1, vec![false]));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (2, vec![false, true]));
+        // Being told again of someone already known changes nothing.
+        wake.notify_waiters();
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (2, vec![false, true]));
+
+        // They leave: one last refresh, and it rests again.
+        someone.store(false, Ordering::Relaxed);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(!ended(&following).await);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (2, vec![false, true, false]));
+
+        drop(announce);
+        assert!(ended(&following).await);
+    }
+
+    #[test]
+    fn the_usage_store_is_tidied_when_called_for_and_otherwise_once_an_hour() {
+        let hour = UNCALLED_MAINTENANCE_INTERVAL;
+        // A run begins with it.
+        assert!(maintenance_due(false, None));
+        assert!(!maintenance_due(false, Some(Duration::ZERO)));
+        assert!(!maintenance_due(false, Some(hour - MOMENT)));
+        assert!(maintenance_due(false, Some(hour)));
+        assert!(maintenance_due(true, Some(Duration::ZERO)));
+    }
+
+    #[test]
+    fn what_was_announced_is_taken_once() {
+        let (announce, mut announced) = tokio::sync::broadcast::channel(4);
+        assert!(!take_announced(&mut announced));
+        announce.send(()).unwrap();
+        announce.send(()).unwrap();
+        assert!(take_announced(&mut announced));
+        assert!(!take_announced(&mut announced));
+
+        // More than the channel holds is still something, and is all taken.
+        for _ in 0..16 {
+            announce.send(()).unwrap();
+        }
+        assert!(take_announced(&mut announced));
+        assert!(!take_announced(&mut announced));
+        announce.send(()).unwrap();
+        assert!(take_announced(&mut announced));
     }
 }
 

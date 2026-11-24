@@ -74,7 +74,11 @@ fn socket() -> PathBuf {
 }
 
 fn on_tokio(work: impl Future<Output = Outcome>) -> Outcome {
+    // A server mostly waits, and a thread for every core of a large machine
+    // would only be more threads asleep. Whatever takes long is on the
+    // blocking pool, which is left as it is.
     let tokio = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
         .map_err(|error| format!("无法启动运行时：{error}"))?;
@@ -433,7 +437,13 @@ impl Server {
                     // the answer is in line ahead of the first of them.
                     let mut listeners = self.hub.listeners.lock();
                     slot.send(reply);
-                    listeners.extend(listener.take());
+                    if let Some(listener) = listener.take() {
+                        listeners.push(listener);
+                        // Someone is watching now, as when a window of the
+                        // desktop app is shown: the polling goes its round
+                        // at once and what rested while nobody was goes on.
+                        self.runtime.poll_wake.notify_one();
+                    }
                     continue;
                 }
                 let Ok(permit) = running.clone().acquire_owned().await else {
