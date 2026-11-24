@@ -57,6 +57,9 @@ mod tray_macos;
 #[cfg(feature = "desktop")]
 mod update;
 mod usage;
+// Unused until the server and the SSH client that speak it are in.
+#[allow(dead_code)]
+mod wire;
 #[cfg(feature = "desktop")]
 use core::{Preferences, ViewState};
 #[cfg(feature = "desktop")]
