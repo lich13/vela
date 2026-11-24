@@ -255,7 +255,7 @@ function buildStats(
           reasoningTokens: 16200,
           costUsd: "1.2450",
           unpricedRequests: 0,
-          tokensPerHour: 0,
+          costPerHour: "0",
         },
         tracks: [
           {
@@ -273,7 +273,7 @@ function buildStats(
               reasoningTokens: 7_200,
               costUsd: "0.4200",
               unpricedRequests: 0,
-              tokensPerHour: 22_000,
+              costPerHour: "0.0840",
             },
             weekly7d: {
               period: {
@@ -287,7 +287,7 @@ function buildStats(
               reasoningTokens: 10_400,
               costUsd: "0.6850",
               unpricedRequests: 0,
-              tokensPerHour: 1_041.7,
+              costPerHour: "0.0041",
             },
           },
           {
@@ -305,7 +305,7 @@ function buildStats(
               reasoningTokens: 3_600,
               costUsd: "0.3500",
               unpricedRequests: 0,
-              tokensPerHour: 10_400,
+              costPerHour: "0.0700",
             },
             weekly7d: {
               period: {
@@ -319,7 +319,7 @@ function buildStats(
               reasoningTokens: 5_800,
               costUsd: "0.5600",
               unpricedRequests: 0,
-              tokensPerHour: 506.0,
+              costPerHour: "0.0033",
             },
           },
         ],
@@ -639,6 +639,12 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(tracks).getByText("最低剩余 42.0%")).toBeInTheDocument();
     expect(within(tracks).getByText("配额剩余 74.5%")).toBeInTheDocument();
     expect(within(tracks).getByText("配额剩余 42.0%")).toBeInTheDocument();
+    expect(within(tracks).getByText("$0.0840/h")).toHaveAttribute(
+      "title",
+      "0.0840/h",
+    );
+    expect(within(tracks).getByText("$0.0033/h")).toBeInTheDocument();
+    expect(within(tracks).queryByText(/Token\/h|K\/h/)).not.toBeInTheDocument();
 
     const creds = screen.getByLabelText("账号分布");
     expect(
@@ -684,11 +690,13 @@ describe("Usage Antigravity statistics tab", () => {
           burst5h: {
             ...t.burst5h,
             costUsd: "0",
+            costPerHour: "0",
             unpricedRequests: t.burst5h.requests,
           },
           weekly7d: {
             ...t.weekly7d,
             costUsd: "0",
+            costPerHour: "0",
             unpricedRequests: t.weekly7d.requests,
           },
         })),
@@ -707,7 +715,8 @@ describe("Usage Antigravity statistics tab", () => {
     const summary = await screen.findByLabelText("Token 构成与缓存节省");
     expect(within(summary).getByText("未定价")).toBeInTheDocument();
     const tracks = screen.getByLabelText("账号周期用量");
-    expect(within(tracks).getAllByText("未定价")).toHaveLength(4);
+    // Each window shows it twice: the cost badge and the hourly rate.
+    expect(within(tracks).getAllByText("未定价")).toHaveLength(8);
     const creds = screen.getByLabelText("账号分布");
     expect(within(creds).getAllByText("未定价")).toHaveLength(2);
   });

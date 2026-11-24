@@ -9,19 +9,22 @@ import {
   type AntigravityUsageStats,
 } from "./usage-types";
 
+/** True when nothing in the bucket could be priced, so its cost says nothing. */
+const allUnpriced = (
+  costUsd: string,
+  unpricedRequests: number,
+  requests: number,
+) =>
+  Number(costUsd) === 0 && unpricedRequests > 0 && unpricedRequests >= requests;
+
 function formatCostOrUnpriced(
   costUsd: string,
   unpricedRequests: number,
   requests: number,
 ): string {
-  if (
-    Number(costUsd) === 0 &&
-    unpricedRequests > 0 &&
-    unpricedRequests >= requests
-  ) {
-    return "未定价";
-  }
-  return money(costUsd);
+  return allUnpriced(costUsd, unpricedRequests, requests)
+    ? "未定价"
+    : money(costUsd);
 }
 
 function windowRemainingPercent(w: AntigravityTrackWindow): number | null {
@@ -49,6 +52,7 @@ function TrackWindowBlock({
     );
   const remaining = windowRemainingPercent(w);
   const tone = remaining != null ? quotaTone(remaining) : null;
+  const unpriced = allUnpriced(w.costUsd, w.unpricedRequests, w.requests);
   return (
     <div
       className={`usage-ag-window${tone ? ` is-${tone}` : ""}`}
@@ -102,8 +106,8 @@ function TrackWindowBlock({
         </div>
         <div>
           <dt>速率</dt>
-          <dd title={`${numeric(Math.round(w.tokensPerHour))} Token/h`}>
-            {compact(Math.round(w.tokensPerHour))}/h
+          <dd title={unpriced ? undefined : `${w.costPerHour}/h`}>
+            {unpriced ? "未定价" : `${money(w.costPerHour)}/h`}
           </dd>
         </div>
       </dl>
