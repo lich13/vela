@@ -413,44 +413,32 @@ impl Runtime {
                     }
                 }
             });
-            let mut events = g.subscribe();
+            let events = g.subscribe();
             let r = self.clone();
+            let watched = watched.clone();
             tokio::spawn(async move {
                 // The view moves by the second, with no event to announce
                 // it, while a circuit counts down or a request is
                 // receiving its response. Only a web panel needs the
-                // latter: the native one refreshes itself.
-                let ticking = || {
+                // latter: the native one refreshes itself. Nobody watching
+                // needs it either, and the view is not read to find out.
+                let ticking = |attentive: bool| {
                     g.has_health_wait()
                         || (cfg!(not(target_os = "macos"))
+                            && attentive
                             && g.try_view().is_ok_and(|view| {
                                 view.pending_requests
                                     .iter()
                                     .any(|request| request.received_bytes.is_some())
                             }))
                 };
-                let mut waiting = ticking();
-                loop {
-                    tokio::select! {
-                        event = events.recv() => {
-                            if matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
-                                break;
-                            }
-                            coalesce_gateway_events(&mut events);
-                            waiting = ticking();
-                        }
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if waiting => {
-                            let current = ticking();
-                            let refresh = waiting || current;
-                            waiting = current;
-                            // Include the final zero so an idle open circuit
-                            // becomes visibly ready for a request probe.
-                            if !refresh { continue; }
-                        }
-                    }
+                let refresh = |attentive: bool| {
                     g.report_diagnostics();
-                    r.publish_gateway(&g);
-                }
+                    if attentive {
+                        r.tell_gateway(&g);
+                    }
+                };
+                follow_gateway(events, &watched, || r.sink.attentive(), ticking, refresh).await;
             });
         }
         let runtime = self.clone();
@@ -469,7 +457,8 @@ impl Runtime {
                 if runtime.quitting.load(Ordering::Relaxed) {
                     break;
                 }
-                if runtime.sink.attentive() {
+                let attentive = runtime.sink.attentive();
+                if attentive {
                     watched.notify_waiters();
                 }
                 runtime
@@ -487,7 +476,7 @@ impl Runtime {
                     PollStateUpdate::Unchanged => {}
                 }
                 if should_poll_editor_configs(
-                    runtime.sink.attentive(),
+                    attentive,
                     [
                         &runtime.gateway,
                         &runtime.claude,
@@ -836,9 +825,11 @@ impl Runtime {
     }
     /// Publishes a gateway's view, which is only read when someone is watching.
     pub(crate) fn publish_gateway(&self, gateway: &gateway::Gateway) {
-        if !self.sink.attentive() {
-            return;
+        if self.sink.attentive() {
+            self.tell_gateway(gateway);
         }
+    }
+    fn tell_gateway(&self, gateway: &gateway::Gateway) {
         match gateway.try_view() {
             Ok(view) => self.sink.emit(Event::Gateway(&view)),
             Err(error) => self.sink.emit(Event::Error(&error)),
@@ -910,6 +901,47 @@ pub(crate) async fn wait_next_usage_scan(
         }
     }
     tokio::time::sleep_until(watched_next).await;
+}
+
+/// Calls `refresh` after every change `events` announces, and every second
+/// while `ticking` says the view moves with nothing to announce it. Both are
+/// told whether anyone is watching, asked once for the two. When `ticking`
+/// was last asked on behalf of nobody, `wake` has it asked again: someone has
+/// come. Ends when `events` closes.
+pub(crate) async fn follow_gateway(
+    mut events: tokio::sync::broadcast::Receiver<()>,
+    wake: &tokio::sync::Notify,
+    attentive: impl Fn() -> bool,
+    ticking: impl Fn(bool) -> bool,
+    refresh: impl Fn(bool),
+) {
+    let mut watched = attentive();
+    let mut waiting = ticking(watched);
+    loop {
+        tokio::select! {
+            event = events.recv() => {
+                if matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                    break;
+                }
+                coalesce_gateway_events(&mut events);
+                watched = attentive();
+                waiting = ticking(watched);
+            }
+            // The last of these is the final zero, so an idle open circuit
+            // becomes visibly ready for a request probe.
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if waiting => {
+                watched = attentive();
+                waiting = ticking(watched);
+            }
+            _ = wake.notified(), if !watched => {
+                watched = attentive();
+                waiting = ticking(watched);
+                // Whoever has come has read the view for themselves.
+                continue;
+            }
+        }
+        refresh(watched);
+    }
 }
 
 /// How long the usage store goes untidied while nothing calls for it. Records
@@ -1114,6 +1146,75 @@ mod idle_tests {
         tokio::time::advance(REST - MOMENT).await;
         assert!(!ended(&wait).await);
         wait.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unwatched_gateway_is_not_read_until_someone_comes() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        let (announce, events) = tokio::sync::broadcast::channel(8);
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let someone = Arc::new(AtomicBool::new(false));
+        // How often the view was read to learn whether it moves, which it
+        // does throughout: a request is receiving its response.
+        let reads = Arc::new(AtomicUsize::new(0));
+        // Who each refresh was for.
+        let refreshed = Arc::new(Mutex::new(Vec::new()));
+        let following = {
+            let (wake, someone) = (wake.clone(), someone.clone());
+            let (reads, refreshed) = (reads.clone(), refreshed.clone());
+            tokio::spawn(async move {
+                let ticking = |attentive: bool| {
+                    attentive && {
+                        reads.fetch_add(1, Ordering::Relaxed);
+                        true
+                    }
+                };
+                follow_gateway(
+                    events,
+                    &wake,
+                    || someone.load(Ordering::Relaxed),
+                    ticking,
+                    |attentive| refreshed.lock().push(attentive),
+                )
+                .await;
+            })
+        };
+        let reads = || reads.load(Ordering::Relaxed);
+        let refreshed = || refreshed.lock().clone();
+
+        // Nobody watches: nothing is read, and nothing refreshed by the second.
+        assert!(!ended(&following).await);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (0, vec![]));
+        // What is announced is still followed, for what it does besides.
+        announce.send(()).unwrap();
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (0, vec![false]));
+
+        // Someone comes: the view is read, and refreshed from the next second.
+        someone.store(true, Ordering::Relaxed);
+        wake.notify_waiters();
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (1, vec![false]));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (2, vec![false, true]));
+        // Being told again of someone already known changes nothing.
+        wake.notify_waiters();
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (2, vec![false, true]));
+
+        // They leave: one last refresh, and it rests again.
+        someone.store(false, Ordering::Relaxed);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(!ended(&following).await);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(!ended(&following).await);
+        assert_eq!((reads(), refreshed()), (2, vec![false, true, false]));
+
+        drop(announce);
+        assert!(ended(&following).await);
     }
 
     #[test]
