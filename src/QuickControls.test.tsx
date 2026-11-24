@@ -257,3 +257,27 @@ it("keeps a failed enable visible across polling and reopening", async () => {
     vi.useRealTimers();
   }
 });
+
+it("stops polling once the device reports the control as unsupported", async () => {
+  vi.useFakeTimers();
+  try {
+    mock.command.mockResolvedValue({
+      ...original,
+      supported: false,
+      helper: "unsupported",
+    });
+    const props = { notify: vi.fn(), error: vi.fn() };
+    const view = render(<QuickControls {...props} visible />);
+    await act(async () => {});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15000);
+    });
+    expect(mock.command).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("switch", { name: "合盖不休眠" }),
+    ).not.toBeInTheDocument();
+    view.unmount();
+  } finally {
+    vi.useRealTimers();
+  }
+});

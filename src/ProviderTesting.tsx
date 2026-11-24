@@ -81,10 +81,7 @@ const active = (job: ProviderTestJob) =>
 const date = (at: number | null | undefined) =>
   at == null
     ? "—"
-    : new Date(at).toLocaleString("zh-CN", {
-        timeZone: "Asia/Taipei",
-        hour12: false,
-      });
+    : new Date(at).toLocaleString("zh-CN", { hour12: false });
 const duration = (job: ProviderTestJob, now: number) =>
   `${((active(job) && job.startedAt ? Math.max(0, now - job.startedAt) : job.elapsedMs) / 1000).toFixed(2)} s`;
 

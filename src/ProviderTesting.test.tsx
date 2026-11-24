@@ -432,10 +432,7 @@ it.each([
     await act(async () => resolveUpdate(structuredClone(bank)));
     await waitFor(() => expect(button).toBeEnabled());
     const formatted = (at: number) =>
-      new Date(at).toLocaleString("zh-CN", {
-        timeZone: "Asia/Taipei",
-        hour12: false,
-      });
+      new Date(at).toLocaleString("zh-CN", { hour12: false });
     const verify = () => {
       expect(source.getByText("更新结果").nextElementSibling).toHaveTextContent(
         label,
