@@ -3,42 +3,17 @@
 //!
 //! This module is registered below the v0.20 fixture module so the loopback
 //! gateway helpers remain available. Every persisted value is synthetic.
-use crate::gateway::test_support::compacted_hints;
+use crate::gateway::test_support::{compacted_hints, policy_provider};
 use crate::gateway::{
     admission::{Budget, Rejected},
     compaction::Registry,
-    model::{Edit, Provider, Settings, Store},
+    model::{Edit, Settings, Store},
     protocol::Protocol,
     replay::RequestHints,
     routing::Requirement,
 };
 use serde_json::json;
 
-fn fixture_provider(id: &str, handoff: bool, take: bool) -> Provider {
-    Provider {
-        id: id.into(),
-        name: id.into(),
-        base_url: format!("https://{id}.example.invalid/v1"),
-        token: "fixture-token".into(),
-        queued: true,
-        version: format!("{id}-version"),
-        max_concurrency: 0,
-        max_rpm: 0,
-        allowed_models: None,
-        handoff_after_compaction: handoff,
-        take_new_threads: take,
-        end_on_message_stop: false,
-        filter_count_tokens: false,
-        buffer_complete_response: false,
-        endless_mode: false,
-        upstream_retry_seconds: 5,
-        normal_retry_seconds: 3,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
-    }
-}
 fn ordinary_hints() -> RequestHints {
     RequestHints::from_value(
         json!({"model":"fixture-model","input":[{"role":"user","content":"fixture"}]}),
@@ -159,8 +134,8 @@ async fn scheduler_lowering_limit_preserves_existing_active_slots() {
 fn protocol_receiver_handoff_commits_only_after_terminal_delivery() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path().join("owners.json"));
-    let old = fixture_provider("fixture-old", true, false);
-    let new = fixture_provider("fixture-new", true, false);
+    let old = policy_provider("fixture-old", true, false);
+    let new = policy_provider("fixture-new", true, false);
     let session = crate::storage::digest(b"fixture-delivery-gate");
     let boundary = crate::storage::digest(b"fixture-delivery-window");
     let initial = registry

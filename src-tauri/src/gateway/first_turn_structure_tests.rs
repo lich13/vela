@@ -6,47 +6,19 @@
 use super::{
     model::Edit,
     replay::{self, RequestHints, TurnEvidence, WireBody},
-    *,
 };
-use crate::gateway::test_support::form;
+use crate::gateway::test_support::loopback::{
+    probing_fixture, provider_ids, response_value, serve, start, thread_request, update,
+};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, Full};
-use hyper::{body::Incoming, Request, Response, StatusCode};
-use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use hyper::{Response, StatusCode};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{convert::Infallible, future::Future, io::Write, path::Path, sync::Arc, time::Duration};
+use std::{io::Write, path::Path, sync::Arc, time::Duration};
 
 use crate::usage::model::RoutingInput;
-
-async fn v0233_server<F, Fut>(handler: F) -> u16
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handler = Arc::new(handler);
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        hyper_util::rt::TokioIo::new(stream),
-                        hyper::service::service_fn(move |request| {
-                            let handler = handler.clone();
-                            async move { Ok::<_, Infallible>(handler(request).await) }
-                        }),
-                    )
-                    .with_upgrades()
-                    .await;
-            });
-        }
-    });
-    port
-}
 
 fn v0233_json_response(body: impl Into<Bytes>) -> Response<WireBody> {
     Response::builder()
@@ -54,88 +26,6 @@ fn v0233_json_response(body: impl Into<Bytes>) -> Response<WireBody> {
         .header("content-type", "application/json")
         .body(replay::full(body))
         .unwrap()
-}
-
-async fn v0233_fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
-    let dir = tempfile::tempdir().unwrap();
-    let first = urls
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "https://fixture.example.invalid/v1".into());
-    std::fs::write(
-        dir.path().join("config.toml"),
-        format!(
-            "model_provider='custom'\n[model_providers.custom]\nbase_url = {}\nexperimental_bearer_token = \"fixture-token\"\nwire_api='responses'\nsupports_websockets=false\n",
-            serde_json::to_string(&first).unwrap()
-        ),
-    )
-    .unwrap();
-    let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let mut settings = gateway.view().settings;
-    settings.port = port;
-    v0233_update(&gateway, &dir, Edit::Settings { settings });
-    for url in urls {
-        v0233_update(
-            &gateway,
-            &dir,
-            form(json!({"baseUrl": url, "token": "fixture-token"})),
-        );
-    }
-    v0233_update(
-        &gateway,
-        &dir,
-        Edit::Mode {
-            mode: "auto".into(),
-        },
-    );
-    (dir, gateway)
-}
-
-fn v0233_update(gateway: &Gateway, dir: &tempfile::TempDir, edit: Edit) {
-    gateway
-        .edit(edit, &gateway.view().revision, dir.path())
-        .unwrap();
-}
-
-async fn v0233_start(gateway: &Gateway, dir: &tempfile::TempDir) {
-    gateway
-        .start(&gateway.view().revision, dir.path())
-        .await
-        .unwrap();
-}
-
-async fn v0233_request(gateway: &Gateway, thread: &str, body: Vec<u8>) -> Response<Incoming> {
-    let client: Client<_, WireBody> = Client::builder(TokioExecutor::new())
-        .build(super::connector::Connector::new(Duration::from_secs(3), 0));
-    let (token, port) = {
-        let state = gateway.0.inner.lock();
-        (state.store.local_token.clone(), state.store.settings.port)
-    };
-    let request = Request::builder()
-        .method("POST")
-        .uri(format!("http://127.0.0.1:{port}/v1/responses"))
-        .header("authorization", format!("Bearer {token}"))
-        .header("content-type", "application/json")
-        .header("thread-id", thread)
-        .body(replay::full(body))
-        .unwrap();
-    client.request(request).await.unwrap()
-}
-
-async fn v0233_response_value(response: Response<Incoming>) -> Value {
-    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
-}
-
-fn v0233_ids(gateway: &Gateway) -> Vec<String> {
-    gateway
-        .view()
-        .providers
-        .iter()
-        .map(|provider| provider.id.clone())
-        .collect()
 }
 
 async fn v0233_inspect_bytes(bytes: Vec<u8>, encoding: &str, dir: &Path) -> RequestHints {
@@ -210,7 +100,7 @@ fn v0233_native_response(provider: &str) -> String {
 }
 
 async fn v0233_sse_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u8>>>>) -> u16 {
-    v0233_server(move |request| {
+    serve(move |request| {
         let seen = seen.clone();
         let response = v0233_sse_bytes(provider);
         async move {
@@ -242,7 +132,7 @@ async fn v0233_sse_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u8>>
 }
 
 async fn v0233_native_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u8>>>>) -> u16 {
-    v0233_server(move |mut request| {
+    serve(move |mut request| {
         let seen = seen.clone();
         let response_text = v0233_native_response(provider);
         async move {
@@ -291,16 +181,16 @@ async fn v0233_ws_turn(peer: &mut yawc::TcpWebSocket, body: &str) -> Vec<u8> {
 #[tokio::test]
 async fn v0233_http_additional_tools_and_initial_messages_route_to_new_thread_provider() {
     let ordinary_port =
-        v0233_server(|_| async { v0233_json_response(r#"{"provider":"ordinary"}"#) }).await;
+        serve(|_| async { v0233_json_response(r#"{"provider":"ordinary"}"#) }).await;
     let new_thread_port =
-        v0233_server(|_| async { v0233_json_response(r#"{"provider":"new-thread"}"#) }).await;
-    let (dir, gateway) = v0233_fixture(vec![
+        serve(|_| async { v0233_json_response(r#"{"provider":"new-thread"}"#) }).await;
+    let (dir, gateway) = probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{new_thread_port}/v1"),
     ])
     .await;
-    let ids = v0233_ids(&gateway);
-    v0233_update(
+    let ids = provider_ids(&gateway);
+    update(
         &gateway,
         &dir,
         Edit::TakeoverProvider {
@@ -309,7 +199,7 @@ async fn v0233_http_additional_tools_and_initial_messages_route_to_new_thread_pr
             take_new_threads: Some(true),
         },
     );
-    v0233_start(&gateway, &dir).await;
+    start(&gateway, &dir).await;
 
     // Reproduce the Codex HTTP Replay shape: an additional developer tool
     // declaration followed by multiple initial developer/user messages.
@@ -327,17 +217,15 @@ async fn v0233_http_additional_tools_and_initial_messages_route_to_new_thread_pr
             {"type":"message","role":"user","content":"fixture first turn"}
         ]
     });
-    let response = v0233_request(
+    let response = thread_request(
         &gateway,
+        "/v1/responses",
         "fixture-v0233-additional-tools-first-turn",
         serde_json::to_vec(&request).unwrap(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        v0233_response_value(response).await["provider"],
-        "new-thread"
-    );
+    assert_eq!(response_value(response).await["provider"], "new-thread");
     gateway.stop().await.unwrap();
 }
 
@@ -482,13 +370,13 @@ async fn v0233_http_sse_route_preserves_request_and_response_bytes() {
     let new_thread_seen = Arc::new(Mutex::new(Vec::new()));
     let ordinary_port = v0233_sse_endpoint("ordinary", ordinary_seen.clone()).await;
     let new_thread_port = v0233_sse_endpoint("new-thread", new_thread_seen.clone()).await;
-    let (dir, gateway) = v0233_fixture(vec![
+    let (dir, gateway) = probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{new_thread_port}/v1"),
     ])
     .await;
-    let ids = v0233_ids(&gateway);
-    v0233_update(
+    let ids = provider_ids(&gateway);
+    update(
         &gateway,
         &dir,
         Edit::TakeoverProvider {
@@ -497,7 +385,7 @@ async fn v0233_http_sse_route_preserves_request_and_response_bytes() {
             take_new_threads: Some(true),
         },
     );
-    v0233_start(&gateway, &dir).await;
+    start(&gateway, &dir).await;
 
     let request = json!({
         "model": "fixture-model",
@@ -510,8 +398,9 @@ async fn v0233_http_sse_route_preserves_request_and_response_bytes() {
     });
     let request_bytes = serde_json::to_vec(&request).unwrap();
     let expected_response = v0233_sse_bytes("new-thread");
-    let response = v0233_request(
+    let response = thread_request(
         &gateway,
+        "/v1/responses",
         "fixture-v0233-http-sse-first-turn",
         request_bytes.clone(),
     )
@@ -530,13 +419,13 @@ async fn v0233_native_ws_routes_new_thread_and_preserves_frame_bytes() {
     let new_thread_seen = Arc::new(Mutex::new(Vec::new()));
     let ordinary_port = v0233_native_endpoint("ordinary", ordinary_seen.clone()).await;
     let new_thread_port = v0233_native_endpoint("new-thread", new_thread_seen.clone()).await;
-    let (dir, gateway) = v0233_fixture(vec![
+    let (dir, gateway) = probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{new_thread_port}/v1"),
     ])
     .await;
-    let ids = v0233_ids(&gateway);
-    v0233_update(
+    let ids = provider_ids(&gateway);
+    update(
         &gateway,
         &dir,
         Edit::TakeoverProvider {
@@ -545,7 +434,7 @@ async fn v0233_native_ws_routes_new_thread_and_preserves_frame_bytes() {
             take_new_threads: Some(true),
         },
     );
-    v0233_start(&gateway, &dir).await;
+    start(&gateway, &dir).await;
 
     let token = gateway.0.inner.lock().store.local_token.clone();
     let mut peer = yawc::WebSocket::connect(

@@ -68,6 +68,7 @@ fn url_suffix_and_hop_headers() {
 }
 
 use super::replay::{full, WireBody};
+pub(super) use crate::gateway::test_support::loopback::serve as server;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, StreamBody};
@@ -78,38 +79,10 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use std::{
-    convert::Infallible,
     future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
-pub(super) async fn server<F, Fut>(handler: F) -> u16
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handler = Arc::new(handler);
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        TokioIo::new(stream),
-                        hyper::service::service_fn(move |req| {
-                            let handler = handler.clone();
-                            async move { Ok::<_, Infallible>(handler(req).await) }
-                        }),
-                    )
-                    .with_upgrades()
-                    .await;
-            });
-        }
-    });
-    port
-}
 async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
     let t = tempfile::tempdir().unwrap();
     let first = urls

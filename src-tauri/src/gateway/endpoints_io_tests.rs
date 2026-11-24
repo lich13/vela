@@ -1,10 +1,8 @@
-use super::super::{
-    model::{Edit, Provider},
-    replay, Gateway,
-};
+use super::super::{model::Edit, replay, Gateway};
 use super::{digest, now, pin_key, Pin, Service};
 use crate::errors::code;
 use crate::gateway::test_support::form;
+use crate::gateway::test_support::provider_at;
 use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::{
     client::legacy::Client,
@@ -21,32 +19,6 @@ use std::{
     },
     time::Duration,
 };
-
-fn fixture_provider(base_url: &str) -> Provider {
-    Provider {
-        id: "fixture-provider".into(),
-        name: "fixture-provider".into(),
-        base_url: base_url.into(),
-        token: "fixture-token".into(),
-        queued: true,
-        version: "fixture-version".into(),
-        max_concurrency: 0,
-        max_rpm: 0,
-        allowed_models: None,
-        handoff_after_compaction: false,
-        take_new_threads: false,
-        end_on_message_stop: false,
-        filter_count_tokens: false,
-        buffer_complete_response: false,
-        endless_mode: false,
-        upstream_retry_seconds: 5,
-        normal_retry_seconds: 3,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
-    }
-}
 
 fn pin_snapshot(entries: &HashMap<String, Pin>) -> BTreeMap<String, (String, u64)> {
     entries
@@ -68,7 +40,7 @@ fn read_snapshot(path: &Path) -> BTreeMap<String, (String, u64)> {
 #[test]
 fn failed_pin_write_for_another_thread_does_not_block_existing_selection() {
     let primary = "https://primary.example.invalid/v1";
-    let provider = fixture_provider(primary);
+    let provider = provider_at(primary);
     let urls = vec![primary.to_owned()];
     let existing_thread = "fixture-existing-thread";
     let failing_thread = "fixture-failing-thread";
@@ -133,7 +105,7 @@ fn successful_initial_pin_matches_the_persisted_entries() {
     fs::write(&path, b"{corrupt").unwrap();
     let service = Service::new(path.clone());
     assert!(service.pins.lock().is_empty());
-    let provider = fixture_provider("https://primary.example.invalid/v1");
+    let provider = provider_at("https://primary.example.invalid/v1");
     let thread = "fixture-thread";
 
     let selected = service

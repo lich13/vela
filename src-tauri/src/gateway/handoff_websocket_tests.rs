@@ -6,45 +6,15 @@ use super::*;
 use crate::gateway::compaction::Registry;
 use crate::gateway::test_support::digest;
 use crate::gateway::test_support::ids;
-use crate::gateway::test_support::loopback::{fixture, start};
+use crate::gateway::test_support::loopback::{fixture, serve as server, start};
 use futures_util::{SinkExt, StreamExt};
-use hyper::{body::Incoming, Request, Response};
-use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 const OLD: &str = "old";
 const NEW: &str = "new";
 const SESSION: &str = "fixture-ws-current-owner";
-
-async fn server<F, Fut>(handler: F) -> u16
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<replay::WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handler = Arc::new(handler);
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        TokioIo::new(stream),
-                        hyper::service::service_fn(move |request| {
-                            let handler = handler.clone();
-                            async move { Ok::<_, Infallible>(handler(request).await) }
-                        }),
-                    )
-                    .with_upgrades()
-                    .await;
-            });
-        }
-    });
-    port
-}
 
 async fn native_endpoint(name: &'static str) -> (u16, Arc<Mutex<Vec<Vec<u8>>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));

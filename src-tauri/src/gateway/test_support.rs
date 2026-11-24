@@ -157,6 +157,15 @@ pub(crate) fn policy_provider(id: &str, handoff: bool, take: bool) -> Provider {
     }
 }
 
+/// A queued provider at `base_url` under a fixed id and version.
+pub(crate) fn provider_at(base_url: &str) -> Provider {
+    Provider {
+        base_url: base_url.into(),
+        version: "fixture-version".into(),
+        ..policy_provider("fixture-provider", false, false)
+    }
+}
+
 /// Request hints that carry a compacted-window boundary.
 pub(crate) fn compacted_hints(boundary: &str) -> RequestHints {
     RequestHints {
@@ -210,6 +219,7 @@ pub(crate) mod loopback {
     };
     use bytes::Bytes;
     use futures_util::StreamExt;
+    use http_body_util::BodyExt;
     use hyper::{body::Incoming, Request, Response, StatusCode};
     use hyper_util::{client::legacy::Client, rt::TokioExecutor};
     use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
@@ -258,35 +268,52 @@ pub(crate) mod loopback {
     {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (stop, mut stopped) = oneshot::channel();
-        let handler = Arc::new(handler);
+        let (stop, stopped) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = &mut stopped => break,
-                    accepted = listener.accept() => {
-                        let Ok((stream, _)) = accepted else { break };
-                        let handler = handler.clone();
-                        tokio::spawn(async move {
-                            let _ = hyper::server::conn::http1::Builder::new()
-                                .serve_connection(
-                                    hyper_util::rt::TokioIo::new(stream),
-                                    hyper::service::service_fn(move |request| {
-                                        let handler = handler.clone();
-                                        async move { Ok::<_, Infallible>(handler(request).await) }
-                                    }),
-                                )
-                                .with_upgrades()
-                                .await;
-                        });
-                    }
-                }
+            tokio::select! {
+                _ = stopped => {}
+                _ = accept(listener, handler) => {}
             }
         });
         LoopbackServer {
             port,
             stop: Some(stop),
             task: Some(task),
+        }
+    }
+
+    /// An upstream that serves until the test's runtime ends, by its port.
+    pub(crate) async fn serve<F, Fut>(handler: F) -> u16
+    where
+        F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response<WireBody>> + Send + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(accept(listener, handler));
+        port
+    }
+
+    async fn accept<F, Fut>(listener: tokio::net::TcpListener, handler: F)
+    where
+        F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response<WireBody>> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        while let Ok((stream, _)) = listener.accept().await {
+            let handler = handler.clone();
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        hyper_util::rt::TokioIo::new(stream),
+                        hyper::service::service_fn(move |request| {
+                            let handler = handler.clone();
+                            async move { Ok::<_, Infallible>(handler(request).await) }
+                        }),
+                    )
+                    .with_upgrades()
+                    .await;
+            });
         }
     }
 
@@ -304,7 +331,19 @@ pub(crate) mod loopback {
         response.body(replay::full(body.into())).unwrap()
     }
 
+    /// A gateway over `urls` in automatic mode. Refused loopback ports stand
+    /// for failed providers here, not for a dead network, so the network
+    /// probe is off.
     pub(crate) async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
+        build(urls, false).await
+    }
+
+    /// Like `fixture`, with the network probe as a new store has it.
+    pub(crate) async fn probing_fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
+        build(urls, true).await
+    }
+
+    async fn build(urls: Vec<String>, network_probe: bool) -> (tempfile::TempDir, Gateway) {
         let dir = tempfile::tempdir().unwrap();
         let first = urls
             .first()
@@ -324,9 +363,9 @@ pub(crate) mod loopback {
         drop(listener);
         let mut settings = gateway.view().settings;
         settings.port = port;
-        // Refused loopback ports stand for failed providers here, not for a
-        // dead network; the probe tests turn this back on.
-        settings.network_probe = false;
+        if !network_probe {
+            settings.network_probe = false;
+        }
         update(&gateway, &dir, Edit::Settings { settings });
         for url in urls {
             update(
@@ -410,6 +449,48 @@ pub(crate) mod loopback {
             .body(replay::full(Bytes::copy_from_slice(body.as_ref())))
             .unwrap();
         client.request(req).await.unwrap()
+    }
+
+    /// Posts `body` to `path` on the gateway under the thread id.
+    pub(crate) async fn thread_request(
+        gateway: &Gateway,
+        path: &str,
+        thread: &str,
+        body: Vec<u8>,
+    ) -> Response<Incoming> {
+        let client: Client<_, WireBody> = Client::builder(TokioExecutor::new()).build(
+            crate::gateway::connector::Connector::new(Duration::from_secs(3), 0),
+        );
+        let (token, port) = {
+            let state = gateway.0.inner.lock();
+            (state.store.local_token.clone(), state.store.settings.port)
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{port}{path}"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .header("thread-id", thread)
+            .body(replay::full(body))
+            .unwrap();
+        client.request(request).await.unwrap()
+    }
+
+    pub(crate) async fn response_bytes(response: Response<Incoming>) -> Bytes {
+        response.into_body().collect().await.unwrap().to_bytes()
+    }
+
+    pub(crate) async fn response_value(response: Response<Incoming>) -> serde_json::Value {
+        serde_json::from_slice(&response_bytes(response).await).unwrap()
+    }
+
+    pub(crate) fn provider_ids(gateway: &Gateway) -> Vec<String> {
+        gateway
+            .view()
+            .providers
+            .iter()
+            .map(|provider| provider.id.clone())
+            .collect()
     }
 
     pub(crate) async fn ws_client(gateway: &Gateway, session: &str) -> yawc::TcpWebSocket {

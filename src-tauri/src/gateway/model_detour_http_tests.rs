@@ -59,14 +59,14 @@ async fn v0255_body(request: Request<Incoming>) -> Vec<u8> {
 async fn v0255_request(gateway: &Gateway, thread: &str, body: Vec<u8>) -> Response<Incoming> {
     tokio::time::timeout(
         Duration::from_secs(5),
-        super::v022_request(gateway, thread, body),
+        super::thread_request(gateway, "/v1/responses", thread, body),
     )
     .await
     .expect("fixture HTTP request timed out")
 }
 
 async fn v0255_response_body(response: Response<Incoming>) -> Bytes {
-    tokio::time::timeout(Duration::from_secs(5), super::v022_body(response))
+    tokio::time::timeout(Duration::from_secs(5), super::response_bytes(response))
         .await
         .expect("fixture HTTP response body timed out")
 }
@@ -76,11 +76,11 @@ async fn v0255_setup_ports(ports: &[u16]) -> (tempfile::TempDir, Gateway, Vec<St
         .iter()
         .map(|port| format!("http://127.0.0.1:{port}/v1"))
         .collect::<Vec<_>>();
-    let (dir, gateway) = super::v022_fixture(urls).await;
-    let ids = super::v022_ids(&gateway);
+    let (dir, gateway) = super::probing_fixture(urls).await;
+    let ids = super::provider_ids(&gateway);
     assert_eq!(ids.len(), ports.len());
     for (index, id) in ids.iter().enumerate() {
-        super::v022_update(
+        super::update(
             &gateway,
             &dir,
             Edit::PolicyProvider {
@@ -91,7 +91,7 @@ async fn v0255_setup_ports(ports: &[u16]) -> (tempfile::TempDir, Gateway, Vec<St
             },
         );
     }
-    super::v022_start(&gateway, &dir).await;
+    super::start(&gateway, &dir).await;
     (dir, gateway, ids)
 }
 
@@ -204,7 +204,7 @@ fn v0255_open_stream(
 async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_completion() {
     let main_requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let main_seen = main_requests.clone();
-    let main_port = super::v022_server(move |request| {
+    let main_port = super::serve(move |request| {
         let seen = main_seen.clone();
         async move {
             let body = v0255_body(request).await;
@@ -219,7 +219,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
     let (arrived_tx, mut arrived_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let side_gate = Arc::new(Semaphore::new(0));
     let side_release = side_gate.clone();
-    let side_port = super::v022_server(move |request| {
+    let side_port = super::serve(move |request| {
         let seen = side_seen.clone();
         let arrived = arrived_tx.clone();
         let release = side_release.clone();
@@ -395,7 +395,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
 async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unchanged() {
     let main_requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let main_seen = main_requests.clone();
-    let main_port = super::v022_server(move |request| {
+    let main_port = super::serve(move |request| {
         let seen = main_seen.clone();
         async move {
             let body = v0255_body(request).await;
@@ -413,7 +413,7 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
     let release_upstream = cancel_release.clone();
     let cancelled_upstream = Arc::new(Notify::new());
     let cancelled_signal = cancelled_upstream.clone();
-    let side_port = super::v022_server(move |request| {
+    let side_port = super::serve(move |request| {
         let seen = side_seen.clone();
         let attempts = retry_count.clone();
         let release = release_upstream.clone();
@@ -423,7 +423,7 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
             seen.lock().push(body.clone());
             if body.as_slice() == V0255_FAIL_RETRY_REQUEST {
                 if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    super::v022_json_response(StatusCode::BAD_REQUEST, V0255_FAILURE_RESPONSE)
+                    super::json_response(StatusCode::BAD_REQUEST, V0255_FAILURE_RESPONSE, None)
                 } else {
                     super::v022_sse_response(Bytes::from_static(V0255_SIDE_RESPONSE))
                 }
@@ -433,11 +433,11 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
                     .body(v0255_open_stream(release, cancelled))
                     .unwrap()
             } else {
-                super::v022_json_response(
+                super::json_response(
                     StatusCode::BAD_REQUEST,
                     Bytes::from_static(
                         br#"{"error":{"code":"fixture_unexpected","message":"unexpected fixture request"}}"#,
-                    ),
+                    ), None,
                 )
             }
         }
@@ -535,7 +535,7 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
 async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner() {
     let main_requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let main_seen = main_requests.clone();
-    let main_port = super::v022_server(move |request| {
+    let main_port = super::serve(move |request| {
         let seen = main_seen.clone();
         async move {
             let body = v0255_body(request).await;
@@ -547,14 +547,15 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
 
     let first_candidate_requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let first_candidate_seen = first_candidate_requests.clone();
-    let first_candidate_port = super::v022_server(move |request| {
+    let first_candidate_port = super::serve(move |request| {
         let seen = first_candidate_seen.clone();
         async move {
             let body = v0255_body(request).await;
             seen.lock().push(body);
-            super::v022_json_response(
+            super::json_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 V0255_INTERNAL_RETRY_FAILURE_RESPONSE,
+                None,
             )
         }
     })
@@ -562,7 +563,7 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
 
     let fallback_requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let fallback_seen = fallback_requests.clone();
-    let fallback_port = super::v022_server(move |request| {
+    let fallback_port = super::serve(move |request| {
         let seen = fallback_seen.clone();
         async move {
             let body = v0255_body(request).await;
