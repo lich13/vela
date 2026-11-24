@@ -2513,7 +2513,8 @@ impl Host {
                         .map(|s| s.inner().clone())
                     {
                         if let Ok(res) =
-                            tauri::async_runtime::spawn_blocking(move || r.power.state()).await
+                            tauri::async_runtime::spawn_blocking(move || r.shell.power.state())
+                                .await
                         {
                             let mut st = host.state.lock();
                             if !st.power_busy {

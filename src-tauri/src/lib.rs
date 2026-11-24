@@ -31,6 +31,7 @@ mod provider_testing;
 mod quick;
 #[cfg(target_os = "macos")]
 mod quick_macos;
+mod runtime;
 mod startup;
 #[cfg(target_os = "macos")]
 mod startup_macos;
@@ -39,14 +40,12 @@ mod storage;
 mod tray_macos;
 mod update;
 mod usage;
-use core::{Core, Preferences, ViewState};
+use core::{Preferences, ViewState};
 use parking_lot::Mutex;
-use std::{
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+pub(crate) use runtime::Runtime;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 use storage::{AppError, Result};
 use tauri::{
@@ -55,29 +54,15 @@ use tauri::{
     Emitter, Manager,
 };
 
-struct Runtime {
-    diagnostics: events::Service,
-    usage: usage::Service,
-    core: Mutex<Core>,
-    data: PathBuf,
+/// What only the desktop app keeps beside the services: its windows, the
+/// sign-ins it hosts and the system features it drives.
+pub(crate) struct Shell {
     imports: Mutex<links::Imports>,
-    provider_tests: provider_testing::Service,
-    gateway: gateway::Gateway,
-    claude: gateway::Gateway,
-    agy: gateway::Gateway,
-    grok: gateway::Gateway,
-    dsh: gateway::Gateway,
     login: Mutex<login::Session>,
     claude_login: Mutex<claude_profile::login::Session>,
-    quitting: AtomicBool,
-    quit_pending: AtomicBool,
     startup: startup::Service,
     force_quitting: AtomicBool,
     power: power::Service,
-    startup_error: Mutex<Option<AppError>>,
-    startup_error_consumed: AtomicBool,
-    official_tx: tokio::sync::Mutex<()>,
-    window_wake: tokio::sync::Notify,
     window_visible: [AtomicBool; 2],
     pending_main: PendingMainEvents,
     main_window: Mutex<MainWindowState>,
@@ -86,6 +71,25 @@ struct Runtime {
     /// Close requests sent to the frontend and the latest one it acknowledged.
     main_close_seq: std::sync::atomic::AtomicU64,
     main_close_ack: std::sync::atomic::AtomicU64,
+}
+impl Shell {
+    pub(crate) fn new() -> Self {
+        Self {
+            imports: Mutex::new(links::Imports::default()),
+            login: Mutex::new(Default::default()),
+            claude_login: Mutex::new(Default::default()),
+            startup: startup::Service::new(),
+            force_quitting: AtomicBool::new(false),
+            power: power::Service::new(),
+            window_visible: [AtomicBool::new(false), AtomicBool::new(false)],
+            pending_main: PendingMainEvents::default(),
+            main_window: Mutex::new(MainWindowState::default()),
+            main_create_lock: tokio::sync::Mutex::new(()),
+            main_destroyed: tokio::sync::Notify::new(),
+            main_close_seq: Default::default(),
+            main_close_ack: Default::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -282,73 +286,144 @@ impl PendingMainEvents {
 impl Runtime {
     pub(crate) fn mark_window_visible(&self, label: &str, visible: bool) -> bool {
         let slot = match label {
-            "main" => &self.window_visible[0],
-            "quick" => &self.window_visible[1],
+            "main" => &self.shell.window_visible[0],
+            "quick" => &self.shell.window_visible[1],
             _ => return visible,
         };
         let was_visible = slot.swap(visible, Ordering::Relaxed);
         if visible && !was_visible {
-            self.window_wake.notify_one();
+            self.poll_wake.notify_one();
         }
         was_visible
     }
+}
 
-    fn background_poll_active(&self) -> bool {
-        [
-            &self.gateway,
-            &self.claude,
-            &self.agy,
-            &self.grok,
-            &self.dsh,
-        ]
-        .into_iter()
-        .any(gateway::Gateway::is_running)
-            || login_active(&self.login.lock().state)
-            || matches!(
-                self.claude_login.lock().state.phase.as_str(),
-                "waiting" | "cancelling"
-            )
-    }
-
-    fn config_failure(&self, client: gateway::ClientId, error: AppError) -> AppError {
-        if let Some(record) = events::Record::configuration_failure(client, &error, false) {
-            self.diagnostics.emit(record);
-        }
-        error
-    }
-
-    fn gateway(&self, client: gateway::ClientId) -> &gateway::Gateway {
-        match client {
-            gateway::ClientId::Codex => &self.gateway,
-            gateway::ClientId::Claude => &self.claude,
-            gateway::ClientId::Agy => &self.agy,
-            gateway::ClientId::Grok => &self.grok,
-            gateway::ClientId::Dsh => &self.dsh,
-        }
-    }
-    /// Where a client keeps what the gateway changes for it. For Antigravity
-    /// that is the user's own home: its `agy` function lives in the shell
-    /// startup files there.
-    fn home(&self, client: gateway::ClientId) -> Result<PathBuf> {
-        let core = self.core.lock();
-        Ok(match client {
-            gateway::ClientId::Codex => core.home(),
-            gateway::ClientId::Claude => PathBuf::from(core.preferences().claude_home),
-            gateway::ClientId::Agy => {
-                dirs::home_dir().ok_or_else(|| AppError::new(code::PATH, "无法定位用户主目录"))?
+/// The desktop end of the runtime's sink: visible windows, the tray and the
+/// native panel.
+struct Host {
+    app: tauri::AppHandle,
+    /// Whether the lid setting was already closed for the current freeze.
+    power_attempted: Mutex<bool>,
+    #[cfg(windows)]
+    tray_dark: Mutex<Option<bool>>,
+}
+impl runtime::Sink for Host {
+    fn emit(&self, event: runtime::Event<'_>) {
+        use runtime::Event;
+        let app = &self.app;
+        let name = event.name();
+        match &event {
+            Event::State(state) => {
+                if let Some(tray) = app.tray_by_id("switch") {
+                    let _ = tray.set_tooltip(Some(tray_tooltip_text(state)));
+                }
+                for window in visible_windows(app) {
+                    let _ = window.emit(name, state);
+                }
+                #[cfg(target_os = "macos")]
+                quick_macos::notify_state_changed(app);
             }
-            gateway::ClientId::Grok => PathBuf::from(core.preferences().grok_home),
-            gateway::ClientId::Dsh => PathBuf::from(core.preferences().dsh_home),
+            Event::Error(error) => emit_switch_error(app, (*error).clone()),
+            Event::StartupError(error) => {
+                #[cfg(target_os = "macos")]
+                quick_macos::notify_state_changed(app);
+                let _ = app.emit(name, error);
+            }
+            Event::Gateway(view) => {
+                for window in visible_windows(app) {
+                    let _ = window.emit(name, view);
+                }
+                #[cfg(target_os = "macos")]
+                if quick_macos::is_visible() {
+                    quick_macos::notify_state_changed(app);
+                }
+            }
+            Event::Freeze(view) => {
+                for window in visible_windows(app) {
+                    let _ = window.emit(name, view);
+                }
+                #[cfg(target_os = "macos")]
+                quick_macos::on_freeze_changed(app);
+                if power::close_after_freeze(
+                    &mut self.power_attempted.lock(),
+                    view.frozen,
+                    view.draining,
+                ) {
+                    let r = app.state::<Arc<Runtime>>().inner().clone();
+                    let gate = r.gateway.freeze_gate();
+                    let app_handle = app.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        match r.shell.power.disable_if_enabled(|| {
+                            let v = gate.view();
+                            v.frozen && v.draining == 0
+                        }) {
+                            Ok(Some(state)) => {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    quick_macos::push_power_state(&app_handle, state.clone());
+                                    quick_macos::push_power_error(&app_handle, None);
+                                }
+                                let _ = app_handle.emit("clamshell-state", state);
+                                let _ =
+                                    app_handle.emit("clamshell-error", Option::<AppError>::None);
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                #[cfg(target_os = "macos")]
+                                quick_macos::push_power_error(
+                                    &app_handle,
+                                    Some(err.message.clone()),
+                                );
+                                let _ = app_handle.emit("clamshell-error", Some(err));
+                            }
+                        }
+                    });
+                }
+            }
+            #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+            Event::Quota { client_id, quota } => {
+                for window in visible_windows(app) {
+                    let _ = window.emit(name, &event);
+                }
+                #[cfg(target_os = "macos")]
+                quick_macos::push_quota(app, *client_id, (*quota).clone());
+            }
+            Event::Config { key, state } => emit_main_config_state(app, key, (*state).clone()),
+            Event::AntigravityAuth(state) => emit_antigravity_auth_state(app, state),
+        }
+    }
+    fn attentive(&self) -> bool {
+        has_visible_ui(&self.app)
+    }
+    fn busy(&self) -> bool {
+        self.app.try_state::<Arc<Runtime>>().is_some_and(|r| {
+            login_active(&r.shell.login.lock().state)
+                || matches!(
+                    r.shell.claude_login.lock().state.phase.as_str(),
+                    "waiting" | "cancelling"
+                )
         })
     }
-    async fn stop_gateways(&self) -> Result<()> {
-        let _official_guard = self.official_tx.lock().await;
-        let a = self.gateway.stop_for_exit().await;
-        let b = self.claude.stop_for_exit().await;
-        let c = self.agy.stop_for_exit().await;
-        let d = self.grok.stop_for_exit().await;
-        let e = self.dsh.stop_for_exit().await;
-        a.and(b).and(c).and(d).and(e).map(|_| ())
+    fn tick(&self) {
+        #[cfg(windows)]
+        {
+            let dark = tray_is_dark();
+            let mut last = self.tray_dark.lock();
+            if *last != Some(dark) {
+                if let Some(tray) = self.app.tray_by_id("switch") {
+                    let bytes = if dark {
+                        include_bytes!("../icons/tray-white.png").as_slice()
+                    } else {
+                        include_bytes!("../icons/tray-black.png").as_slice()
+                    };
+                    if let Ok(image) = tauri::image::Image::from_bytes(bytes) {
+                        if tray.set_icon(Some(image)).is_ok() {
+                            *last = Some(dark);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -382,7 +457,7 @@ fn login_active(s: &login::LoginState) -> bool {
 pub(crate) fn visible_windows(app: &tauri::AppHandle) -> Vec<tauri::WebviewWindow> {
     let main_ready = app
         .try_state::<Arc<Runtime>>()
-        .is_none_or(|r| r.main_window.lock().phase == MainWindowPhase::Ready);
+        .is_none_or(|r| r.shell.main_window.lock().phase == MainWindowPhase::Ready);
     let quick_ready = app.try_state::<quick::Panel>().is_none_or(|p| p.is_ready());
     ["main", "quick"]
         .into_iter()
@@ -401,7 +476,7 @@ pub(crate) fn has_visible_ui(app: &tauri::AppHandle) -> bool {
 pub(crate) fn main_visible_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
     if app
         .try_state::<Arc<Runtime>>()
-        .is_some_and(|r| r.main_window.lock().phase != MainWindowPhase::Ready)
+        .is_some_and(|r| r.shell.main_window.lock().phase != MainWindowPhase::Ready)
     {
         return None;
     }
@@ -418,35 +493,10 @@ pub(crate) fn emit_switch_error(app: &tauri::AppHandle, error: AppError) {
     #[cfg(target_os = "macos")]
     quick_macos::push_error(app, error.message.clone());
     if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        if r.main_window.lock().phase != MainWindowPhase::Ready {
-            r.pending_main.record_switch_error(error.clone());
+        if r.shell.main_window.lock().phase != MainWindowPhase::Ready {
+            r.shell.pending_main.record_switch_error(error.clone());
         }
     }
-    let _ = app.emit("switch-error", error);
-}
-pub(crate) fn record_startup_error(
-    app: &tauri::AppHandle,
-    r: &Runtime,
-    error: AppError,
-    overwrite: bool,
-) {
-    let already_consumed = {
-        let mut slot = r.startup_error.lock();
-        if r.startup_error_consumed.load(Ordering::Acquire) {
-            true
-        } else {
-            if overwrite || slot.is_none() {
-                *slot = Some(error.clone());
-            }
-            false
-        }
-    };
-    if already_consumed {
-        emit_switch_error(app, error);
-        return;
-    }
-    #[cfg(target_os = "macos")]
-    quick_macos::notify_state_changed(app);
     let _ = app.emit("switch-error", error);
 }
 pub(crate) fn emit_if_main_visible<S: serde::Serialize + Clone>(
@@ -457,21 +507,21 @@ pub(crate) fn emit_if_main_visible<S: serde::Serialize + Clone>(
     if let Some(window) = main_visible_window(app) {
         let _ = window.emit(signal.event_name(), payload);
     } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        r.pending_main.record_signal(signal);
+        r.shell.pending_main.record_signal(signal);
     }
 }
 pub(crate) fn emit_main_app_event(app: &tauri::AppHandle, change: &events::Change) {
     if let Some(window) = main_visible_window(app) {
         let _ = window.emit("app-event", change);
     } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        r.pending_main.record_app_event(change);
+        r.shell.pending_main.record_app_event(change);
     }
 }
 pub(crate) fn emit_main_notification_state(app: &tauri::AppHandle, state: notifications::State) {
     if let Some(window) = main_visible_window(app) {
         let _ = window.emit("notification-state", state);
     } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        r.pending_main.record_notification_state(state);
+        r.shell.pending_main.record_notification_state(state);
     }
 }
 pub(crate) fn emit_main_config_state(
@@ -482,7 +532,9 @@ pub(crate) fn emit_main_config_state(
     if let Some(window) = main_visible_window(app) {
         let _ = window.emit("config-state", payload);
     } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        r.pending_main.record_config_state(client_key, payload);
+        r.shell
+            .pending_main
+            .record_config_state(client_key, payload);
     }
 }
 pub(crate) fn emit_antigravity_auth_state(
@@ -495,7 +547,7 @@ pub(crate) fn emit_antigravity_auth_state(
             let _ = window.emit("switch-notice", "新账号已自动加入切换列表");
         }
     } else if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        r.pending_main.record_antigravity_auth(state);
+        r.shell.pending_main.record_antigravity_auth(state);
     }
 }
 pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
@@ -505,7 +557,7 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     let Some(r) = app.try_state::<Arc<Runtime>>() else {
         return;
     };
-    if label == "main" && r.main_window.lock().phase != MainWindowPhase::Ready {
+    if label == "main" && r.shell.main_window.lock().phase != MainWindowPhase::Ready {
         return;
     }
     if label == "quick"
@@ -516,7 +568,7 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
         return;
     }
     let was_visible = r.mark_window_visible(label, true);
-    if let Some(drained) = r.pending_main.drain_for_window(label) {
+    if let Some(drained) = r.shell.pending_main.drain_for_window(label) {
         if let Some(err) = drained.switch_error {
             let _ = window.emit("switch-error", err);
         }
@@ -660,14 +712,14 @@ fn present_main_window(
     Ok(())
 }
 async fn ensure_main_window(app: &tauri::AppHandle, r: &Arc<Runtime>) -> Result<()> {
-    let _guard = r.main_create_lock.lock().await;
+    let _guard = r.shell.main_create_lock.lock().await;
     let mut absent_polls = 0u32;
     let gen = loop {
-        let notified = r.main_destroyed.notified();
+        let notified = r.shell.main_destroyed.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
         {
-            let mut st = r.main_window.lock();
+            let mut st = r.shell.main_window.lock();
             if !st.want_show || r.quitting.load(Ordering::Relaxed) {
                 return Ok(());
             }
@@ -742,7 +794,7 @@ async fn ensure_main_window(app: &tauri::AppHandle, r: &Arc<Runtime>) -> Result<
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 let still_creating = {
-                    let mut st = fallback_r.main_window.lock();
+                    let mut st = fallback_r.shell.main_window.lock();
                     let creating = st.phase == MainWindowPhase::Creating
                         && st.generation == gen
                         && st.want_show;
@@ -762,7 +814,7 @@ async fn ensure_main_window(app: &tauri::AppHandle, r: &Arc<Runtime>) -> Result<
             Ok(())
         }
         _ => {
-            r.main_window.lock().phase = MainWindowPhase::Absent;
+            r.shell.main_window.lock().phase = MainWindowPhase::Absent;
             Err(AppError::new(code::WINDOW, "无法创建主窗口"))
         }
     }
@@ -772,7 +824,7 @@ fn destroy_main_window(app: &tauri::AppHandle) -> Result<()> {
         return Ok(());
     };
     let previous = {
-        let mut st = r.main_window.lock();
+        let mut st = r.shell.main_window.lock();
         let previous = st.phase;
         if !st.begin_destroying() {
             return Ok(());
@@ -781,7 +833,7 @@ fn destroy_main_window(app: &tauri::AppHandle) -> Result<()> {
     };
     if let Some(w) = app.get_webview_window("main") {
         if w.destroy().is_err() {
-            r.main_window.lock().phase = previous;
+            r.shell.main_window.lock().phase = previous;
             return Err(AppError::new(code::WINDOW, "无法关闭主窗口"));
         }
         r.mark_window_visible("main", false);
@@ -798,14 +850,14 @@ fn on_main_window_destroyed(app: &tauri::AppHandle) {
     let Some(r) = app.try_state::<Arc<Runtime>>().map(|s| s.inner().clone()) else {
         return;
     };
-    let Some(want_show) = r.main_window.lock().on_destroyed() else {
+    let Some(want_show) = r.shell.main_window.lock().on_destroyed() else {
         return;
     };
     r.mark_window_visible("main", false);
     r.grok.cancel_grok_import(None);
     r.core.lock().exchange_clear();
     let reopen = want_show && !r.quitting.load(Ordering::Relaxed);
-    r.main_destroyed.notify_waiters();
+    r.shell.main_destroyed.notify_waiters();
     if reopen {
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -824,15 +876,16 @@ pub(crate) fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
         return Ok(());
     };
     let phase = r
+        .shell
         .main_window
         .lock()
         .request_open(page.map(|p| MainTarget::Page(p.to_owned())));
     if phase == MainWindowPhase::Ready {
         if let Some(w) = app.get_webview_window("main") {
-            let target = r.main_window.lock().pending_target.take();
+            let target = r.shell.main_window.lock().pending_target.take();
             return present_main_window(app, &w, target);
         }
-        r.main_window.lock().phase = MainWindowPhase::Absent;
+        r.shell.main_window.lock().phase = MainWindowPhase::Absent;
     }
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -919,13 +972,13 @@ async fn open_main(
     let Some(r) = app.try_state::<Arc<Runtime>>().map(|s| s.inner().clone()) else {
         return Ok(());
     };
-    let phase = r.main_window.lock().request_open(target);
+    let phase = r.shell.main_window.lock().request_open(target);
     if phase == MainWindowPhase::Ready {
         if let Some(w) = app.get_webview_window("main") {
-            let pending = r.main_window.lock().pending_target.take();
+            let pending = r.shell.main_window.lock().pending_target.take();
             return present_main_window(&app, &w, pending);
         }
-        r.main_window.lock().phase = MainWindowPhase::Absent;
+        r.shell.main_window.lock().phase = MainWindowPhase::Absent;
     }
     ensure_main_window(&app, &r).await
 }
@@ -940,54 +993,13 @@ fn close_main(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<()>
 #[tauri::command]
 fn ack_main_close(window: tauri::WebviewWindow, r: tauri::State<'_, Arc<Runtime>>) {
     if window.label() == "main" {
-        r.main_close_ack
-            .store(r.main_close_seq.load(Ordering::Relaxed), Ordering::Relaxed);
+        r.shell.main_close_ack.store(
+            r.shell.main_close_seq.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
     }
 }
 const MAIN_CLOSE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const VISIBLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-const HIDDEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
-
-async fn wait_next_background_poll(has_visible_windows: bool, wake: &tokio::sync::Notify) {
-    if has_visible_windows {
-        tokio::time::sleep(VISIBLE_POLL_INTERVAL).await;
-    } else {
-        tokio::select! {
-            _ = tokio::time::sleep(HIDDEN_POLL_INTERVAL) => {}
-            _ = wake.notified() => {}
-        }
-    }
-}
-
-const fn should_poll_editor_configs(has_visible_windows: bool, background_active: bool) -> bool {
-    has_visible_windows || background_active
-}
-
-fn emit_account_sync_diagnostic(diagnostics: &events::Service, state: &ViewState) -> bool {
-    let should_emit = state.error.is_some()
-        || state
-            .auth_sync
-            .as_ref()
-            .is_some_and(|s| matches!(s.state.as_str(), "invalid" | "missing" | "error"));
-    if should_emit {
-        let mut record = events::Record::new(
-            Some(gateway::ClientId::Codex),
-            None,
-            None,
-            events::Reason::AccountSync,
-            events::Action::Stopped,
-            None,
-            None,
-        );
-        record.details.local_code = Some(code::AUTH.into());
-        record.details.message = state
-            .error
-            .clone()
-            .or_else(|| state.auth_sync.as_ref().map(|s| s.message.clone()));
-        diagnostics.emit(record);
-    }
-    should_emit
-}
 
 fn tray_tooltip_text(state: &ViewState) -> String {
     let current = state
@@ -999,126 +1011,22 @@ fn tray_tooltip_text(state: &ViewState) -> String {
     format!("Vela · {current}")
 }
 
-enum PollStateUpdate {
-    Unchanged,
-    StateChanged(ViewState),
-    ErrorChanged(ViewState),
-}
-
-fn poll_account_state_step(
-    core: &Mutex<Core>,
-    gateway: &gateway::Gateway,
-    last: &mut Option<ViewState>,
-) -> PollStateUpdate {
-    let result = {
-        let mut c = core.lock();
-        c.state().map(|s| (s, c.home()))
-    };
-    match result {
-        Ok((s, home)) => {
-            if last.as_ref() != Some(&s) {
-                gateway.observe_home(&home);
-                *last = Some(s.clone());
-                return PollStateUpdate::StateChanged(s);
-            }
-        }
-        Err(e) => {
-            if let Some(mut s) = last.clone() {
-                if s.error.as_ref() != Some(&e.message) {
-                    s.error = Some(e.message);
-                    *last = Some(s.clone());
-                    return PollStateUpdate::ErrorChanged(s);
-                }
-            }
-        }
-    }
-    PollStateUpdate::Unchanged
-}
-
 fn publish(app: &tauri::AppHandle, state: ViewState) {
     if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        emit_account_sync_diagnostic(&r.diagnostics, &state);
-    }
-    if let Some(tray) = app.tray_by_id("switch") {
-        let _ = tray.set_tooltip(Some(tray_tooltip_text(&state)));
-    }
-    for window in visible_windows(app) {
-        let _ = window.emit("switch-state", &state);
-    }
-    #[cfg(target_os = "macos")]
-    quick_macos::notify_state_changed(app);
-}
-fn refresh(app: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
-    let state = state_for(r)?;
-    let home = r.core.lock().home();
-    r.gateway.observe_home(&home);
-    publish(app, state.clone());
-    Ok(state)
-}
-pub(crate) fn coalesce_gateway_events(events: &mut tokio::sync::broadcast::Receiver<()>) {
-    // Drain only the backlog observed now. A busy producer cannot postpone
-    // publishing the latest view or the periodic final zero indefinitely.
-    let pending = events.len();
-    for _ in 0..pending {
-        match events.try_recv() {
-            Ok(()) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => (),
-            Err(_) => break,
-        }
+        r.publish(state);
     }
 }
-#[cfg(test)]
-mod gateway_broadcast_tests {
-    #[tokio::test]
-    async fn coalesced_burst_publishes_latest_and_leaves_future_notification_live() {
-        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
-        let mut final_state = 0;
-        for n in 1..=32 {
-            final_state = n;
-            tx.send(()).unwrap();
-        }
-        let _ = rx.recv().await;
-        super::coalesce_gateway_events(&mut rx);
-        assert_eq!(final_state, 32);
-        assert!(matches!(
-            rx.try_recv(),
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-        ));
-        tx.send(()).unwrap();
-        rx.recv().await.unwrap();
-        drop(tx);
-        super::coalesce_gateway_events(&mut rx);
-        assert!(matches!(
-            rx.try_recv(),
-            Err(tokio::sync::broadcast::error::TryRecvError::Closed)
-        ));
-    }
+fn refresh(_: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
+    r.refresh()
 }
+pub(crate) use runtime::coalesce_gateway_events;
 fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
-    let windows = visible_windows(app);
-    #[cfg(target_os = "macos")]
-    let macos_quick = quick_macos::is_visible();
-    #[cfg(not(target_os = "macos"))]
-    let macos_quick = false;
-    if windows.is_empty() && !macos_quick {
-        return;
-    }
-    match gateway.try_view() {
-        Ok(view) => {
-            for window in windows {
-                let _ = window.emit("gateway-state", &view);
-            }
-            #[cfg(target_os = "macos")]
-            if macos_quick {
-                quick_macos::notify_state_changed(app);
-            }
-        }
-        Err(error) => {
-            emit_switch_error(app, error);
-        }
+    if let Some(r) = app.try_state::<Arc<Runtime>>() {
+        r.publish_gateway(gateway);
     }
 }
 fn state_for(r: &Runtime) -> Result<ViewState> {
-    r.core.lock().state()
+    r.state()
 }
 #[tauri::command]
 async fn list_provider_models(
@@ -1278,7 +1186,7 @@ fn delete_account(
     id: String,
 ) -> Result<ViewState> {
     {
-        let session = r.login.lock();
+        let session = r.shell.login.lock();
         if login_active(&session.state)
             && session.state.target_account_id.as_deref() == Some(id.as_str())
         {
@@ -1359,7 +1267,7 @@ async fn set_preferences(
 ) -> Result<ViewState> {
     let _official_guard = r.official_tx.lock().await;
     if matches!(
-        r.claude_login.lock().state.phase.as_str(),
+        r.shell.claude_login.lock().state.phase.as_str(),
         "waiting" | "cancelling"
     ) && r.core.lock().preferences().claude_home != preferences.claude_home
     {
@@ -1368,7 +1276,7 @@ async fn set_preferences(
             "请先完成或取消 Claude 登录",
         ));
     }
-    if login_active(&r.login.lock().state) {
+    if login_active(&r.shell.login.lock().state) {
         return Err(AppError::new(code::LOGIN_BUSY, "请先完成或取消登录"));
     }
     if (r.gateway.guarded_home() || official::blocks_gateway(&r.data))
@@ -1433,20 +1341,20 @@ async fn set_preferences(
 #[tauri::command]
 async fn get_startup(r: tauri::State<'_, Arc<Runtime>>) -> Result<startup::View> {
     let r = r.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || r.startup.view())
+    tauri::async_runtime::spawn_blocking(move || r.shell.startup.view())
         .await
         .map_err(|_| AppError::new(code::STARTUP, "读取启动设置失败"))?
 }
 #[tauri::command]
 async fn set_startup(r: tauri::State<'_, Arc<Runtime>>, enabled: bool) -> Result<startup::View> {
     let r = r.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || r.startup.update(enabled))
+    tauri::async_runtime::spawn_blocking(move || r.shell.startup.update(enabled))
         .await
         .map_err(|_| AppError::new(code::STARTUP, "更新启动设置失败"))?
 }
 #[tauri::command]
 fn get_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<login::LoginState> {
-    Ok(r.login.lock().state.clone())
+    Ok(r.shell.login.lock().state.clone())
 }
 #[tauri::command]
 fn start_login(
@@ -1474,7 +1382,7 @@ fn start_login(
         }
         None => None,
     };
-    let mut session = r.login.lock();
+    let mut session = r.shell.login.lock();
     if login_active(&session.state) {
         return Err(AppError::new(code::LOGIN_BUSY, "已有登录正在进行"));
     }
@@ -1489,7 +1397,7 @@ fn start_login(
     };
     let initial = session.state.clone();
     drop(session);
-    r.window_wake.notify_one();
+    r.poll_wake.notify_one();
     let runtime = r.inner().clone();
     tauri::async_runtime::spawn(async move {
         let (sender, mut events) = tokio::sync::mpsc::channel(8);
@@ -1499,7 +1407,7 @@ fn start_login(
             tokio::select! {
                            Some(mut state) = events.recv() => {
                                {
-            let mut s = runtime.login.lock();
+            let mut s = runtime.shell.login.lock();
                                    // Buffered CLI prompts must not revive a cancelled session.
                                    if s.cancel.is_some() {
                                        state.target_account_id = target_account_id.clone();
@@ -1514,7 +1422,7 @@ fn start_login(
         let _connection_guard = runtime.official_tx.lock().await;
         let mut final_state = match result {
             Ok(Some(raw)) => match (|| -> Result<bool> {
-                let s = runtime.login.lock();
+                let s = runtime.shell.login.lock();
                 if s.cancel.is_none() {
                     return Err(AppError::new(code::LOGIN_CANCELLED, "登录已取消"));
                 }
@@ -1559,7 +1467,7 @@ fn start_login(
         };
         final_state.target_account_id = target_account_id;
         {
-            let mut s = runtime.login.lock();
+            let mut s = runtime.shell.login.lock();
             s.state = final_state.clone();
             s.cancel = None;
         }
@@ -1573,7 +1481,7 @@ fn start_login(
 }
 #[tauri::command]
 fn cancel_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
-    let mut s = r.login.lock();
+    let mut s = r.shell.login.lock();
     if let Some(tx) = s.cancel.take() {
         let _ = tx.send(());
         s.state.phase = "cancelling".into();
@@ -1582,7 +1490,7 @@ fn cancel_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
 }
 #[tauri::command]
 fn open_login_url(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
-    let s = r.login.lock();
+    let s = r.shell.login.lock();
     let url = s
         .state
         .auth_url
@@ -1598,7 +1506,8 @@ fn copy_login_value(
     kind: login::CopyKind,
 ) -> Result<()> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
-    r.login
+    r.shell
+        .login
         .lock()
         .copy_value(kind, |value| app.clipboard().write_text(value))
 }
@@ -1616,9 +1525,9 @@ fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
             return;
         }
         runtime.quitting.store(true, Ordering::Relaxed);
-        runtime.window_wake.notify_one();
+        runtime.poll_wake.notify_one();
         {
-            let mut s = runtime.login.lock();
+            let mut s = runtime.shell.login.lock();
             if let Some(tx) = s.cancel.take() {
                 let _ = tx.send(());
                 return;
@@ -1945,7 +1854,7 @@ pub(crate) async fn start_gateway_for(
         .start_checked(expected_revision, &home, expected_config_revision)
         .await
         .map_err(|e| r.config_failure(client_id, e))?;
-    r.window_wake.notify_one();
+    r.poll_wake.notify_one();
     let _ = refresh(app, r);
     Ok(result)
 }
@@ -1961,7 +1870,7 @@ pub(crate) async fn stop_gateway_for(
         .stop_checked(expected_config_revision)
         .await
         .map_err(|e| r.config_failure(client_id, e))?;
-    r.window_wake.notify_one();
+    r.poll_wake.notify_one();
     let _ = refresh(app, r);
     Ok(result)
 }
@@ -1997,7 +1906,7 @@ async fn frontend_ready(
     if window.label() != "main" {
         return Ok(());
     }
-    let Some((want_show, target)) = r.main_window.lock().finish_ready() else {
+    let Some((want_show, target)) = r.shell.main_window.lock().finish_ready() else {
         return Ok(());
     };
     if !want_show {
@@ -2033,237 +1942,31 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(move |app| {
-            let user_home = dirs::home_dir()
-                .ok_or_else(|| AppError::new(code::PATH, "无法定位用户主目录"))?;
-            let data = user_home.join(".vela");
-            storage::private_dir(&data)?;
-            let home = std::env::var_os("CODEX_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| user_home.join(".codex"));
-            // Single-instance registration has completed; no current spool exists yet.
-            cleanup_spool::clean(&data);
-            official::recover_interrupted(&data);
-            let core = Core::new(data.clone(), home)?;
-            let gateway = gateway::Gateway::new(data.clone())?;
-            let claude = gateway.companion(data.join("claude"))?;
-            let agy = gateway.agy_companion(data.join("antigravity"))?;
-            let grok = gateway.grok_companion(data.join("grok"))?;
-            let dsh = gateway.dsh_companion(data.join("dsh"))?;
-            let startup = startup::Service::new();
             let start_silently = startup::login_source(&args);
-            app.manage(quick::Panel::new(&data)?);
-            let power = power::Service::new();
-            let antigravity_migration_error = migrations::antigravity_accounts(&data).err();
-            let auth_data = data.clone();
-            let _ = tauri::async_runtime::block_on(tauri::async_runtime::spawn_blocking(move || {
-                antigravity::auth::poll_state(&auth_data, &mut None)
-            }));
-            let usage = usage::Service::new(&data);
-            gateway.set_usage(usage.clone());
-            claude.set_usage(usage.clone());
-            agy.set_usage(usage.clone());
-            grok.set_usage(usage.clone());
-            dsh.set_usage(usage.clone());
-            let codex_import_error = gateway.import_initial(&core.home()).err();
-            let claude_import_error = {
-                let home=std::path::PathBuf::from(core.preferences().claude_home);
-                let recovery=if claude_profile::recovery_pending(&data) && claude_profile::login::running_sessions()? {
-                    Err(AppError::new(code::CLAUDE_RUNNING,"请先退出 Claude Code，再恢复配置切换事务"))
-                } else {claude_profile::recover(&data,&home,&claude_profile::user_home()?)};
-                match recovery {
-                    Err(e)=>Some(e),
-                    Ok(()) if !claude_profile::blocks(&data)=>claude.import_initial(&home).err(),
-                    Ok(())=>None,
-                }
-            };
-            let grok_import_error = grok.import_initial(&PathBuf::from(core.preferences().grok_home)).err();
-            gateway.set_quota_interval(core.preferences().quota_refresh_seconds);
-            agy.set_quota_interval(core.preferences().quota_refresh_seconds);
-            grok.set_quota_interval(core.preferences().quota_refresh_seconds);
-            dsh.set_quota_interval(core.preferences().quota_refresh_seconds);
-            claude.set_quota_interval(core.preferences().quota_refresh_seconds);
-            let diagnostics = events::Service::new(&data);
-            gateway.set_diagnostics(diagnostics.clone());
-            claude.set_diagnostics(diagnostics.clone());
-            agy.set_diagnostics(diagnostics.clone());
-            grok.set_diagnostics(diagnostics.clone());
-            dsh.set_diagnostics(diagnostics.clone());
-            let provider_tests = provider_testing::Service::new(&data, [gateway.clone(), claude.clone(), agy.clone(), grok.clone(), dsh.clone()])?;
-            let runtime = Arc::new(Runtime {
-                usage,
-                diagnostics,
-                core: Mutex::new(core),
-                data,
-                imports: Mutex::new(links::Imports::default()),
-                provider_tests,
-                gateway,
-                claude,
-                agy,
-                grok,
-                dsh,
-                login: Mutex::new(Default::default()),
-                claude_login: Mutex::new(Default::default()),
-                quitting: AtomicBool::new(false),
-                quit_pending: AtomicBool::new(false),
-                startup,
-                power,
-                force_quitting: AtomicBool::new(false),
-                startup_error: Mutex::new(codex_import_error.or(claude_import_error).or(grok_import_error).or(antigravity_migration_error)),
-                startup_error_consumed: AtomicBool::new(false),
-                official_tx: tokio::sync::Mutex::new(()),
-                window_wake: tokio::sync::Notify::new(),
-                window_visible: [AtomicBool::new(false), AtomicBool::new(false)],
-                pending_main: PendingMainEvents::default(),
-                main_window: Mutex::new(MainWindowState::default()),
-                main_create_lock: tokio::sync::Mutex::new(()),
-                main_destroyed: tokio::sync::Notify::new(),
-                main_close_seq: Default::default(),
-                main_close_ack: Default::default(),
-            });
-            runtime
-                .gateway
-                .observe_home(&runtime.core.lock().home());
-            runtime
-                .claude
-                .observe_home(&runtime.home(gateway::ClientId::Claude)?);
-            let state = state_for(&runtime)?;
+            let runtime = Runtime::new(Arc::new(Host {
+                app: app.handle().clone(),
+                power_attempted: Mutex::new(false),
+                #[cfg(windows)]
+                tray_dark: Mutex::new(None),
+            }))?;
+            app.manage(quick::Panel::new(&runtime.data)?);
             app.manage(runtime.clone());
             #[cfg(target_os = "macos")]
             quick_macos::connect(app.handle());
             provider_testing::commands::connect(app.handle());
             notifications::connect(app.handle(), &runtime.diagnostics);
             usage::commands::connect(app.handle(), &runtime);
-            runtime.agy.observe_home(&runtime.home(gateway::ClientId::Agy)?);
-            runtime.grok.observe_home(&runtime.home(gateway::ClientId::Grok)?);
-            runtime.dsh.observe_home(&runtime.home(gateway::ClientId::Dsh)?);
-            {
-                let resume_app = app.handle().clone();
-                let r = runtime.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _official_guard = r.official_tx.lock().await;
-                    for client in [
-                        gateway::ClientId::Codex,
-                        gateway::ClientId::Claude,
-                        gateway::ClientId::Agy,
-                        gateway::ClientId::Grok,
-                        gateway::ClientId::Dsh,
-                    ] {
-                        if r.quit_pending.load(Ordering::Relaxed)
-                            || r.quitting.load(Ordering::Relaxed)
-                        {
-                            break;
-                        }
-                        if (client == gateway::ClientId::Codex
-                            && official::blocks_gateway(&r.data))
-                            || (client == gateway::ClientId::Claude
-                                && claude_profile::blocks(&r.data))
-                        {
-                            continue;
-                        }
-                        let outcome = match r.home(client) {
-                            Ok(home) => r.gateway(client).resume(&home).await,
-                            Err(e) => Err(e),
-                        };
-                        if let Err(e) = outcome {
-                            let e = AppError::new(
-                                &e.code,
-                                &format!("{}：{}", client.name(), e.message),
-                            );
-                            if let Some(record) =
-                                events::Record::configuration_failure(client, &e, true)
-                            {
-                                r.diagnostics.emit(record);
-                            }
-                            record_startup_error(&resume_app, &r, e, true);
-                        }
-                        publish_gateway(&resume_app, r.gateway(client));
-                    }
-                });
-            }
-            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.agy.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
-                tauri::async_runtime::spawn(async move {
-                    if let Err(e) = g.backfill_models().await {
-                        g.report_model_error(e);
-                    }
-                });
-            }
-            {
-                // An hourly look; the catalog is fetched once a day, and only when chosen.
-                let codex = runtime.gateway.clone();
-                tauri::async_runtime::spawn(async move {
-                    let mut hourly = tokio::time::interval(std::time::Duration::from_secs(3600));
-                    hourly.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    loop {
-                        hourly.tick().await;
-                        let _ = codex.refresh_official_catalog(false).await;
-                    }
-                });
-            }
-            runtime.gateway.report_diagnostics();
-            runtime.agy.report_diagnostics();
-            runtime.grok.report_diagnostics();
-            runtime.dsh.report_diagnostics();
-            runtime.claude.report_diagnostics();
+            runtime.start()?;
             {
                 let handle = app.handle().clone();
                 let r = runtime.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) = links::ensure_association(&handle).await {
-                        record_startup_error(&handle, &r, error, false);
+                        r.record_startup_error(error, false);
                     }
                 });
             }
             links::receive(app.handle(), args.iter().cloned());
-            let freeze = runtime.gateway.freeze_gate();
-            let mut freeze_events = freeze.subscribe();
-            let freeze_app = app.handle().clone();
-            let freeze_runtime = runtime.clone();
-            tauri::async_runtime::spawn(async move {
-                let mut power_attempted = false;
-                loop {
-                    let next = freeze.next_resume();
-                    tokio::select! {
-                        changed = freeze_events.changed() => if changed.is_err() { break; },
-                        _ = async {
-                            if let Some(at) = next {
-                                let delay = at.saturating_sub(usage::model::now()).max(0) as u64;
-                                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                            } else { std::future::pending::<()>().await; }
-                        } => {},
-                    }
-                    freeze.resume_due(usage::model::now());
-                    let view = freeze.view();
-                    for window in visible_windows(&freeze_app) {
-                        let _ = window.emit("gateway-freeze", &view);
-                    }
-                    #[cfg(target_os = "macos")]
-                    quick_macos::on_freeze_changed(&freeze_app);
-                    if power::close_after_freeze(&mut power_attempted, view.frozen, view.draining) {
-                        let gate = freeze.clone();
-                        let r = freeze_runtime.clone();
-                        let app_handle = freeze_app.clone();
-                        tauri::async_runtime::spawn_blocking(move || {
-                            match r.power.disable_if_enabled(|| { let v = gate.view(); v.frozen && v.draining == 0 }) {
-                                Ok(Some(state)) => {
-                                    #[cfg(target_os = "macos")]
-                                    {
-                                        quick_macos::push_power_state(&app_handle, state.clone());
-                                        quick_macos::push_power_error(&app_handle, None);
-                                    }
-                                    let _ = app_handle.emit("clamshell-state", state);
-                                    let _ = app_handle.emit("clamshell-error", Option::<AppError>::None);
-                                }
-                                Ok(None) => {}
-                                Err(err) => {
-                                    #[cfg(target_os = "macos")]
-                                    quick_macos::push_power_error(&app_handle, Some(err.message.clone()));
-                                    let _ = app_handle.emit("clamshell-error", Some(err));
-                                }
-                            }
-                        });
-                    }
-                }
-            });
             #[cfg(target_os = "macos")]
             if start_silently {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -2272,102 +1975,6 @@ pub fn run() {
             app.set_menu(application_menu(app.handle())?)?;
             if !start_silently {
                 let _ = show(app.handle(), None);
-            }
-            for probe_gateway in [
-                runtime.gateway.clone(),
-                runtime.claude.clone(),
-                runtime.agy.clone(),
-                runtime.grok.clone(),
-                runtime.dsh.clone(),
-            ] {
-                let mut probe_freeze = probe_gateway.freeze_gate().subscribe_control();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        if probe_gateway
-                            .next_endpoint_probe_wait()
-                            .is_some_and(|w| w.is_zero())
-                        {
-                            probe_gateway.probe_due_endpoints().await;
-                        }
-                        let sleep_for = probe_gateway
-                            .next_endpoint_probe_wait()
-                            .map(|w| w.max(std::time::Duration::from_secs(1)));
-                        tokio::select! {
-                            _ = probe_gateway.wait_endpoint_probe_wake() => {}
-                            res = probe_freeze.changed() => if res.is_err() { break; },
-                            _ = async {
-                                if let Some(d) = sleep_for {
-                                    tokio::time::sleep(d).await;
-                                } else {
-                                    std::future::pending::<()>().await;
-                                }
-                            } => {}
-                        }
-                    }
-                });
-            }
-            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.agy.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
-                let mut quota_events = g.quota_events();
-                let quota_app = app.handle().clone();
-                let client_id = g.client_id();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        match quota_events.recv().await {
-                            Ok(view) => {
-                                let windows = visible_windows(&quota_app);
-                                if !windows.is_empty() {
-                                    let payload = serde_json::json!({"clientId":client_id,"quota":&view});
-                                    for window in windows {
-                                        let _ = window.emit("provider-quota", &payload);
-                                    }
-                                }
-                                #[cfg(target_os = "macos")]
-                                quick_macos::push_quota(&quota_app, client_id, view);
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(_) => break,
-                        }
-                    }
-                });
-                let mut events = g.subscribe();
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    // The view moves by the second, with no event to announce
-                    // it, while a circuit counts down or a request is
-                    // receiving its response. Only a web panel needs the
-                    // latter: the native one refreshes itself.
-                    let ticking = || {
-                        g.has_health_wait()
-                            || (cfg!(not(target_os = "macos"))
-                                && g.try_view().is_ok_and(|view| {
-                                    view.pending_requests
-                                        .iter()
-                                        .any(|request| request.received_bytes.is_some())
-                                }))
-                    };
-                    let mut waiting = ticking();
-                    loop {
-                        tokio::select! {
-                            event = events.recv() => {
-                                if matches!(event, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
-                                    break;
-                                }
-                                coalesce_gateway_events(&mut events);
-                                waiting = ticking();
-                            }
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if waiting => {
-                                let current = ticking();
-                                let refresh = waiting || current;
-                                waiting = current;
-                                // Include the final zero so an idle open circuit
-                                // becomes visibly ready for a request probe.
-                                if !refresh { continue; }
-                            }
-                        }
-                        g.report_diagnostics();
-                        publish_gateway(&handle, &g);
-                    }
-                });
             }
             let mut tray = TrayIconBuilder::with_id("switch")
                 .menu(&tray_menu(app.handle())?)
@@ -2432,7 +2039,9 @@ pub fn run() {
                     "open" => {
                         let handle = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            if let Err(err) = open_main(handle.clone(), None, None, None, None, None).await {
+                            if let Err(err) =
+                                open_main(handle.clone(), None, None, None, None, None).await
+                            {
                                 emit_switch_error(&handle, err);
                             }
                         });
@@ -2441,7 +2050,9 @@ pub fn run() {
                         let handle = app.clone();
                         let page = e.id().as_ref().to_owned();
                         tauri::async_runtime::spawn(async move {
-                            if let Err(err) = open_main(handle.clone(), Some(page), None, None, None, None).await {
+                            if let Err(err) =
+                                open_main(handle.clone(), Some(page), None, None, None, None).await
+                            {
                                 emit_switch_error(&handle, err);
                             }
                         });
@@ -2454,7 +2065,8 @@ pub fn run() {
                         tauri::async_runtime::spawn(async move {
                             match update::latest().await {
                                 Ok(info) if info.has_update => {
-                                    let version = info.latest_version.as_deref().unwrap_or("latest");
+                                    let version =
+                                        info.latest_version.as_deref().unwrap_or("latest");
                                     emit_switch_notice(&handle, format!("发现新版本 v{version}"));
                                     let _ = update::open_releases();
                                 }
@@ -2474,138 +2086,6 @@ pub fn run() {
             tray_macos::install(&tray)?;
             #[cfg(not(target_os = "macos"))]
             let _ = tray;
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let mut last = Some(state);
-                let mut config_versions = std::collections::HashMap::new();
-                let mut config_cache = std::collections::HashMap::new();
-                let mut agy_config_version: Option<String> = None;
-                let mut agy_config_cache = auth_cache::Cache::default();
-                let mut agy_auth_stamp: Option<String> = None;
-                let mut agy_auth_revision: Option<String> = None;
-                let mut agy_auth_error: Option<String> = None;
-                #[cfg(windows)]
-                let mut last_tray_dark: Option<bool> = None;
-                loop {
-                    let has_visible = has_visible_ui(&handle);
-                    wait_next_background_poll(has_visible, &runtime.window_wake).await;
-                    if runtime.quitting.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    runtime.gateway.freeze_gate().resume_due(usage::model::now());
-                    match poll_account_state_step(
-                        &runtime.core,
-                        &runtime.gateway,
-                        &mut last,
-                    ) {
-                        PollStateUpdate::StateChanged(s) => {
-                            publish_gateway(&handle, &runtime.gateway);
-                            publish(&handle, s);
-                        }
-                        PollStateUpdate::ErrorChanged(s) => {
-                            publish(&handle, s);
-                        }
-                        PollStateUpdate::Unchanged => {}
-                    }
-                    if should_poll_editor_configs(
-                        has_visible_ui(&handle),
-                        runtime.background_poll_active(),
-                    ) {
-                        for client in [
-                            gateway::ClientId::Codex,
-                            gateway::ClientId::Claude,
-                            gateway::ClientId::Grok,
-                            gateway::ClientId::Dsh,
-                        ] {
-                            if let Ok(stamp) = runtime.home(client).and_then(|home| {
-                                runtime
-                                    .gateway(client)
-                                    .config_stamp(&home, config_cache.entry(client).or_default())
-                            }) {
-                                if config_versions.get(&client) != Some(&stamp) {
-                                    let key = serde_json::to_string(&client).unwrap_or_default();
-                                    emit_main_config_state(
-                                        &handle,
-                                        &key,
-                                        serde_json::json!({"clientId":client,"revision":stamp.1,"guarded":stamp.2}),
-                                    );
-                                    config_versions.insert(client, stamp);
-                                    if client != gateway::ClientId::Codex {
-                                        publish_gateway(&handle, runtime.gateway(client));
-                                    }
-                                }
-                            }
-                        }
-                        if let Ok(rev) = antigravity::home()
-                            .and_then(|home| antigravity::config_stamp(&home, &mut agy_config_cache))
-                        {
-                            if agy_config_version.as_ref() != Some(&rev) {
-                                emit_main_config_state(
-                                    &handle,
-                                    "antigravity",
-                                    serde_json::json!({"clientId":"antigravity","revision":rev,"guarded":false}),
-                                );
-                                agy_config_version = Some(rev);
-                            }
-                        }
-                    }
-                    // Like the Codex account, a new Antigravity login is picked
-                    // up whether or not a window is open.
-                    let data = runtime.data.clone();
-                    let mut stamp = agy_auth_stamp.take();
-                    let polled = tauri::async_runtime::spawn_blocking(move || {
-                        let result = antigravity::auth::poll_state(&data, &mut stamp);
-                        (stamp, result)
-                    }).await;
-                    let result = match polled {
-                        Ok((stamp, result)) => { agy_auth_stamp = stamp; result }
-                        Err(_) => Err(storage::AppError::new(errors::code::PROCESS, "读取 Antigravity 账号任务异常中断")),
-                    };
-                    match result {
-                        Ok(state) => {
-                            agy_auth_error = None;
-                            if let Some(auth_state) = state {
-                                if agy_auth_revision.as_ref() != Some(&auth_state.revision) {
-                                    agy_auth_revision = Some(auth_state.revision.clone());
-                                    emit_antigravity_auth_state(&handle, &auth_state);
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            let signature = format!("{}:{}", error.code, error.message);
-                            if agy_auth_error.as_ref() != Some(&signature) {
-                                agy_auth_error = Some(signature);
-                                let mut record = events::Record::new(
-                                    None, None, None, events::Reason::AccountSync,
-                                    events::Action::Stopped, None, None,
-                                );
-                                record.client_id = Some(events::JournalClient::External(events::ExternalClient::Antigravity));
-                                record.details.local_code = Some(error.code);
-                                record.details.message = Some(error.message);
-                                runtime.diagnostics.emit(record);
-                            }
-                        }
-                    }
-                    #[cfg(windows)]
-                    {
-                        let dark = tray_is_dark();
-                        if last_tray_dark != Some(dark) {
-                            if let Some(tray) = handle.tray_by_id("switch") {
-                                let bytes = if dark {
-                                    include_bytes!("../icons/tray-white.png").as_slice()
-                                } else {
-                                    include_bytes!("../icons/tray-black.png").as_slice()
-                                };
-                                if let Ok(image) = tauri::image::Image::from_bytes(bytes) {
-                                    if tray.set_icon(Some(image)).is_ok() {
-                                        last_tray_dark = Some(dark);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            });
             Ok(())
         })
         .on_menu_event(|app, event| {
@@ -2626,8 +2106,17 @@ pub fn run() {
             let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
             if matches!(event, tauri::WindowEvent::Focused(true))
                 || (matches!(event, tauri::WindowEvent::Focused(false)) && !visible)
-                || (matches!(event, tauri::WindowEvent::Resized(_)) && w.is_minimized().unwrap_or(false)) {
-                let _ = w.emit(if w.label() == "quick" { "panel-visibility" } else { "app-visibility" }, visible);
+                || (matches!(event, tauri::WindowEvent::Resized(_))
+                    && w.is_minimized().unwrap_or(false))
+            {
+                let _ = w.emit(
+                    if w.label() == "quick" {
+                        "panel-visibility"
+                    } else {
+                        "app-visibility"
+                    },
+                    visible,
+                );
                 if visible {
                     sync_window_on_show(w.app_handle(), w.label());
                 } else if let Some(r) = w.app_handle().try_state::<Arc<Runtime>>() {
@@ -2652,10 +2141,11 @@ pub fn run() {
                     let r = w.state::<Arc<Runtime>>();
                     if !r.quitting.load(Ordering::Relaxed) {
                         api.prevent_close();
-                        let phase = r.main_window.lock().phase;
+                        let phase = r.shell.main_window.lock().phase;
                         match phase {
                             MainWindowPhase::Ready => {
-                                let seq = r.main_close_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                                let seq =
+                                    r.shell.main_close_seq.fetch_add(1, Ordering::Relaxed) + 1;
                                 let _ = w.emit(
                                     "main-close-requested",
                                     serde_json::json!({ "hidden": !visible }),
@@ -2665,8 +2155,8 @@ pub fn run() {
                                 let r = r.inner().clone();
                                 tauri::async_runtime::spawn(async move {
                                     tokio::time::sleep(MAIN_CLOSE_ACK_TIMEOUT).await;
-                                    if r.main_close_seq.load(Ordering::Relaxed) == seq
-                                        && r.main_close_ack.load(Ordering::Relaxed) < seq
+                                    if r.shell.main_close_seq.load(Ordering::Relaxed) == seq
+                                        && r.shell.main_close_ack.load(Ordering::Relaxed) < seq
                                     {
                                         let _ = destroy_main_window(&app);
                                     }
@@ -2855,11 +2345,15 @@ pub fn run() {
 #[cfg(test)]
 mod page_whitelist_tests {
     use super::{
-        core::Core, emit_account_sync_diagnostic, events, gateway, poll_account_state_step,
-        resolve_window_background_color, should_poll_editor_configs, tray_tooltip_text,
-        valid_main_page, wait_next_background_poll, AppError, MainSignal, MainTarget,
-        MainWindowPhase, MainWindowState, PendingMainEvents, PollStateUpdate, ProviderAction,
-        HIDDEN_POLL_INTERVAL, VISIBLE_POLL_INTERVAL,
+        core::Core,
+        events, gateway, resolve_window_background_color,
+        runtime::{
+            emit_account_sync_diagnostic, poll_account_state_step, should_poll_editor_configs,
+            wait_next_background_poll, PollStateUpdate, HIDDEN_POLL_INTERVAL,
+            VISIBLE_POLL_INTERVAL,
+        },
+        tray_tooltip_text, valid_main_page, AppError, MainSignal, MainTarget, MainWindowPhase,
+        MainWindowState, PendingMainEvents, ProviderAction,
     };
     use parking_lot::Mutex;
     use std::sync::Arc;

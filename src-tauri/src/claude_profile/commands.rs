@@ -19,7 +19,7 @@ pub async fn switch_claude_profile(
     let home = r.home(ClientId::Claude)?;
     let user = user_home()?;
     if matches!(
-        r.claude_login.lock().state.phase.as_str(),
+        r.shell.claude_login.lock().state.phase.as_str(),
         "waiting" | "cancelling"
     ) {
         return Err(fail("请先完成或取消 Claude 登录"));
@@ -92,10 +92,10 @@ pub async fn recover_claude_profile(r: R<'_>, app: tauri::AppHandle) -> Result<V
 #[tauri::command]
 pub async fn claude_login_status(r: R<'_>) -> Result<login::State> {
     if matches!(
-        r.claude_login.lock().state.phase.as_str(),
+        r.shell.claude_login.lock().state.phase.as_str(),
         "waiting" | "cancelling"
     ) {
-        return Ok(r.claude_login.lock().state.clone());
+        return Ok(r.shell.claude_login.lock().state.clone());
     }
     let home = r.home(ClientId::Claude)?;
     let result = login::status(&home).await;
@@ -110,7 +110,7 @@ pub async fn claude_login_status(r: R<'_>) -> Result<login::State> {
             ..Default::default()
         },
     };
-    r.claude_login.lock().state = state.clone();
+    r.shell.claude_login.lock().state = state.clone();
     Ok(state)
 }
 #[tauri::command]
@@ -122,7 +122,7 @@ pub async fn start_claude_login(r: R<'_>, app: tauri::AppHandle) -> Result<login
         return Err(fail("请先切换到有效的 Claude 官方配置"));
     }
     if matches!(
-        r.claude_login.lock().state.phase.as_str(),
+        r.shell.claude_login.lock().state.phase.as_str(),
         "waiting" | "cancelling"
     ) {
         return Err(fail("Claude 登录正在进行"));
@@ -139,7 +139,7 @@ pub async fn start_claude_login(r: R<'_>, app: tauri::AppHandle) -> Result<login
             authenticated: true,
             error: None,
         };
-        r.claude_login.lock().state = state.clone();
+        r.shell.claude_login.lock().state = state.clone();
         return Ok(state);
     }
     let (cancel, receiver) = tokio::sync::oneshot::channel();
@@ -148,11 +148,11 @@ pub async fn start_claude_login(r: R<'_>, app: tauri::AppHandle) -> Result<login
         ..Default::default()
     };
     {
-        let mut session = r.claude_login.lock();
+        let mut session = r.shell.claude_login.lock();
         session.state = state.clone();
         session.cancel = Some(cancel);
     }
-    r.window_wake.notify_one();
+    r.poll_wake.notify_one();
     let runtime = r.inner().clone();
     tauri::async_runtime::spawn(async move {
         let result = login::run(&home, receiver).await;
@@ -173,7 +173,7 @@ pub async fn start_claude_login(r: R<'_>, app: tauri::AppHandle) -> Result<login
             },
         };
         {
-            let mut session = runtime.claude_login.lock();
+            let mut session = runtime.shell.claude_login.lock();
             session.cancel = None;
             session.state = state.clone();
         }
@@ -183,7 +183,7 @@ pub async fn start_claude_login(r: R<'_>, app: tauri::AppHandle) -> Result<login
 }
 #[tauri::command]
 pub fn cancel_claude_login(r: R<'_>) -> Result<()> {
-    let mut session = r.claude_login.lock();
+    let mut session = r.shell.claude_login.lock();
     if let Some(cancel) = session.cancel.take() {
         session.state.phase = "cancelling".into();
         let _ = cancel.send(());

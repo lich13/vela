@@ -226,7 +226,7 @@ pub fn receive(app: &tauri::AppHandle, urls: impl IntoIterator<Item = String>) {
         return;
     };
     for url in urls.into_iter().filter(|url| url.starts_with("ccswitch:")) {
-        let outcome = r.imports.lock().enqueue(&url);
+        let outcome = r.shell.imports.lock().enqueue(&url);
         match outcome {
             Ok(true) => {
                 let _ = app.emit("provider-imports", ());
@@ -264,7 +264,8 @@ pub fn get_provider_imports(
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<Vec<LinkPreview>> {
     main_only(&window)?;
-    Ok(r.imports
+    Ok(r.shell
+        .imports
         .lock()
         .pending
         .iter()
@@ -279,7 +280,7 @@ pub fn cancel_provider_import(
     id: String,
 ) -> Result<()> {
     main_only(&window)?;
-    let mut queue = r.imports.lock();
+    let mut queue = r.shell.imports.lock();
     queue.claim(&id)?;
     queue.remove(&id);
     let _ = window.emit("provider-imports", ());
@@ -295,7 +296,7 @@ pub fn confirm_provider_import(
     protocol: gateway::provider_protocol::Protocol,
 ) -> Result<()> {
     main_only(&window)?;
-    let raw = r.imports.lock().claim(&id)?;
+    let raw = r.shell.imports.lock().claim(&id)?;
     let outcome: Result<()> = (|| {
         let p = parse(&raw)?;
         let home = r.home(client_id)?;
@@ -312,10 +313,13 @@ pub fn confirm_provider_import(
         Ok(())
     })();
     if let Err(error) = outcome {
-        r.imports.lock().release(&id, Some(error.message.clone()));
+        r.shell
+            .imports
+            .lock()
+            .release(&id, Some(error.message.clone()));
         return Err(error);
     }
-    r.imports.lock().remove(&id);
+    r.shell.imports.lock().remove(&id);
     let _ = window.emit("provider-imports", ());
     Ok(())
 }
