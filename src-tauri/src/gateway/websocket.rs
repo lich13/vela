@@ -1176,17 +1176,8 @@ async fn connect(
         if *attempts > 0 || !hard_denied.is_empty() {
             budget.handoff_owner = None;
         }
-        let matches_model = candidates
-            .iter()
-            .any(|r| requirement.allows(r.provider.allowed_models.as_deref()));
-        let new_thread_model_denied = ownership.as_ref().is_some_and(|lease| {
-            lease.admission_policy().0 == super::compaction::Intake::NewThread
-        }) && candidates.iter().any(|r| {
-            r.provider.take_new_threads && !requirement.allows(r.provider.allowed_models.as_deref())
-        });
-        if matches_model {
-            candidates.retain(|r| requirement.allows(r.provider.allowed_models.as_deref()));
-        }
+        let (matches_model, new_thread_model_denied) =
+            super::attempt::serving_model(&mut candidates, requirement, ownership.as_deref());
         budget.capacity_owner = None;
         if let Some(owner) = retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);

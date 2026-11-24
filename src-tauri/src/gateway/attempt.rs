@@ -20,21 +20,41 @@ pub(super) fn queue(
     path: &str,
 ) -> (Vec<String>, std::collections::HashMap<String, super::Route>) {
     let mut ids = gateway.routing_ids(pinned);
+    let mut routes = std::collections::HashMap::new();
     ids.retain(|id| {
-        gateway
+        let Some(route) = gateway
             .route(id)
-            .is_some_and(|route| !hard_denied.contains(&(id.clone(), route.provider.version)))
+            .filter(|route| !hard_denied.contains(&(id.clone(), route.provider.version.clone())))
+        else {
+            return false;
+        };
+        if route.accepts_protocol(path) {
+            routes.insert(id.clone(), route);
+        }
+        true
     });
-    let routes = ids
-        .iter()
-        .filter_map(|id| {
-            gateway
-                .route(id)
-                .filter(|route| route.accepts_protocol(path))
-                .map(|route| (id.clone(), route))
-        })
-        .collect();
     (ids, routes)
+}
+
+/// Keeps the candidates that serve the model when any does. Says whether one
+/// did, and whether a provider that takes new threads was passed over for
+/// not serving it.
+pub(super) fn serving_model(
+    candidates: &mut Vec<super::Route>,
+    requirement: &super::routing::Requirement,
+    ownership: Option<&super::compaction::Lease>,
+) -> (bool, bool) {
+    let serves = |r: &super::Route| requirement.allows(r.provider.allowed_models.as_deref());
+    let any = candidates.iter().any(serves);
+    let new_thread_denied = ownership
+        .is_some_and(|lease| lease.admission_policy().0 == super::compaction::Intake::NewThread)
+        && candidates
+            .iter()
+            .any(|r| r.provider.take_new_threads && !serves(r));
+    if any {
+        candidates.retain(serves);
+    }
+    (any, new_thread_denied)
 }
 
 pub(super) struct DeliveryGuard {

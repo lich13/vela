@@ -1919,27 +1919,11 @@ impl Exchange<'_> {
                 .filter_map(|id| self.gateway.route(id))
                 .filter(|r| !r.accepts_protocol(self.parts.uri.path())),
         );
-        let matches_model = candidates.iter().any(|r| {
-            self.plan
-                .requirement
-                .allows(r.provider.allowed_models.as_deref())
-        });
-        let new_thread_model_denied = self.plan.ownership.as_ref().is_some_and(|lease| {
-            lease.admission_policy().0 == super::compaction::Intake::NewThread
-        }) && candidates.iter().any(|r| {
-            r.provider.take_new_threads
-                && !self
-                    .plan
-                    .requirement
-                    .allows(r.provider.allowed_models.as_deref())
-        });
-        if matches_model {
-            candidates.retain(|r| {
-                self.plan
-                    .requirement
-                    .allows(r.provider.allowed_models.as_deref())
-            });
-        }
+        let (matches_model, new_thread_model_denied) = super::attempt::serving_model(
+            &mut candidates,
+            &self.plan.requirement,
+            self.plan.ownership.as_deref(),
+        );
         self.wait_budget.capacity_owner = None;
         if let Some(owner) = self.retry_owner.take() {
             candidates.retain(|route| route.provider.id == owner);
