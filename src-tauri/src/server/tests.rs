@@ -113,6 +113,31 @@ async fn the_handshake_names_the_protocol_the_version_and_every_command() {
 }
 
 #[tokio::test]
+async fn a_handshake_sends_the_polling_on_its_round() {
+    let fixture = fixture().await;
+    let wake = &fixture.server.runtime.poll_wake;
+    let mut client = Client::connect(&fixture).await;
+    // A connection that has not shaken hands is nobody yet.
+    let frozen = client.call("get_gateway_freeze", json!({})).await;
+    assert!(frozen.is_ok(), "{frozen:?}");
+    assert!(!fixture.server.hub.attentive());
+    let woken = tokio::time::timeout(Duration::ZERO, wake.notified()).await;
+    assert!(woken.is_err(), "the polling was woken for nobody");
+
+    client.shake_hands().await;
+    tokio::time::timeout(Duration::from_secs(20), wake.notified())
+        .await
+        .expect("the polling is woken for whoever shook hands");
+    // Once for a connection, however often it asks.
+    client.shake_hands().await;
+    let again = tokio::time::timeout(Duration::ZERO, wake.notified()).await;
+    assert!(
+        again.is_err(),
+        "the polling was woken twice for one connection"
+    );
+}
+
+#[tokio::test]
 async fn a_change_is_answered_and_told_to_every_connection_that_shook_hands() {
     let fixture = fixture().await;
     let mut writer = Client::connect(&fixture).await;

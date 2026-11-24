@@ -342,7 +342,13 @@ impl Server {
                     // the answer is in line ahead of the first of them.
                     let mut listeners = self.hub.listeners.lock();
                     slot.send(reply);
-                    listeners.extend(listener.take());
+                    if let Some(listener) = listener.take() {
+                        listeners.push(listener);
+                        // Someone is watching now, as when a window of the
+                        // desktop app is shown: the polling goes its round
+                        // at once and what rested while nobody was goes on.
+                        self.runtime.poll_wake.notify_one();
+                    }
                     continue;
                 }
                 let Ok(permit) = running.clone().acquire_owned().await else {
