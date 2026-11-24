@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { InstanceState, SharedCommands } from "./bridge-contracts";
+import type { ClientId } from "./types";
 
 // Which Vela the pages show and operate: this machine or a server reached over
 // SSH. `bridge.ts` keeps it current and routes by it; components read it here.
@@ -35,13 +36,20 @@ export function setInstanceState(state: InstanceState) {
 export function useInstance() {
   const { state, epoch } = useSyncExternalStore(watch, () => snapshot);
   const remote = state.active !== "local";
+  const supports = (name: keyof SharedCommands) =>
+    !remote || !state.connection.unsupported.includes(name);
   return {
     state,
     /** The pages act on a server: entries that only work on this machine go away. */
     remote,
     /** Changes whenever the pages have to read everything again. */
     key: `${state.active}#${epoch}`,
-    supports: (name: keyof SharedCommands) =>
-      !remote || !state.connection.unsupported.includes(name),
+    supports,
+    /** Whether the instance can start and stop this client's gateway; a server never takes over agy. */
+    takeover: (clientId: ClientId) =>
+      !remote ||
+      (clientId !== "agy" &&
+        supports("start_gateway") &&
+        supports("stop_gateway")),
   };
 }

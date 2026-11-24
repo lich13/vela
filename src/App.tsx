@@ -36,6 +36,8 @@ import {
   Pencil,
 } from "lucide-react";
 import { command } from "./bridge";
+import { useInstance } from "./instance";
+import InstanceSwitch from "./InstanceSwitch";
 import { AccountEdit, AddAccount, AppModal, SettingsForm } from "./AppDialogs";
 import AuthSyncNotice from "./AuthSyncNotice";
 import AccountPlan from "./AccountPlan";
@@ -70,7 +72,13 @@ const emptyLogin: LoginState = {
   code: null,
   message: "",
 };
+/** The whole window starts over with the instance it shows. */
 export default function App() {
+  return <Shell key={useInstance().key} />;
+}
+function Shell() {
+  // Importing, exporting and signing in act on this machine's files only.
+  const { remote } = useInstance();
   const [exchangeMode, setExchangeMode] = useState<"import" | "export" | null>(
     null,
   );
@@ -136,6 +144,20 @@ export default function App() {
   dirtyRef.current = dirty;
   pageRef.current = page;
   const notify = useCallback((s: string) => setMessage(s), []);
+  const leaveInstance = useCallback(
+    async () =>
+      (await flushTestPrompt()) &&
+      (!(
+        gatewayDirty.current ||
+        usageDirty.current ||
+        dirtyRef.current ||
+        dialogDirty.current ||
+        agDirty.current ||
+        exchangeDirty.current
+      ) ||
+        confirmAction("切换实例会丢弃未保存的修改。")),
+    [],
+  );
   const navigate = useCallback(
     async (
       next: "accounts" | "config" | "gateway" | "freeze" | "logs" | "usage",
@@ -338,9 +360,12 @@ export default function App() {
         : systemDark
           ? "dark"
           : "light";
+  const themeKnown = Boolean(state || themePreview);
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, [theme]);
+    // Starting over for another instance keeps the theme until its state arrives.
+    if (themeKnown || !document.documentElement.dataset.theme)
+      document.documentElement.dataset.theme = theme;
+  }, [theme, themeKnown]);
   const action = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setError("");
@@ -395,6 +420,7 @@ export default function App() {
             <strong>Vela</strong>
           </div>
         </div>
+        <InstanceSwitch confirm={leaveInstance} />
         <nav aria-label="主导航">
           <button
             data-nav="accounts"
@@ -534,7 +560,7 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              {accountClient === "codex" && (
+              {accountClient === "codex" && !remote && (
                 <div className="account-actions">
                   <div
                     className="exchange-button-group"
@@ -671,9 +697,11 @@ export default function App() {
                   <p>
                     {search
                       ? "尝试其他名称或邮箱"
-                      : "登录 ChatGPT，或导入已有 auth.json。"}
+                      : remote
+                        ? "服务器上还没有保存的账号。"
+                        : "登录 ChatGPT，或导入已有 auth.json。"}
                   </p>
-                  {!search && (
+                  {!search && !remote && (
                     <button
                       className="secondary"
                       onClick={() => setDialog("add")}
@@ -746,7 +774,7 @@ export default function App() {
                             使用官方账号
                           </button>
                         ))}
-                      {a.kind === "chatgpt" && (
+                      {a.kind === "chatgpt" && !remote && (
                         <button
                           className="text-button"
                           disabled={
