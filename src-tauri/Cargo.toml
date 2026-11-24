@@ -13,7 +13,6 @@ crate-type = ["rlib"]
 [[bin]]
 name = "vela"
 path = "src/main.rs"
-required-features = ["desktop"]
 
 [features]
 default = ["desktop"]
@@ -66,7 +65,7 @@ dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 toml = "0.9"
-tokio = { version = "1", features = ["process", "io-util", "time", "sync", "macros", "net", "fs", "rt-multi-thread"] }
+tokio = { version = "1", features = ["process", "io-util", "time", "sync", "macros", "net", "fs", "rt-multi-thread", "signal"] }
 open = { version = "5", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 hyper = { version = "1", features = ["client", "server", "http1"] }

@@ -45,10 +45,14 @@ pub(crate) async fn call(rt: &Arc<Runtime>, name: &str, args: Value) -> Result<V
     dispatch(rt, name, Args::new(args)?).await
 }
 
-/// Every command `call` answers.
-#[cfg(test)]
+/// Every command `call` answers. A server lists them in its handshake.
+#[cfg(any(unix, test))]
 pub(crate) fn names() -> &'static [&'static str] {
     NAMES
+}
+
+pub(crate) fn unsupported() -> AppError {
+    AppError::new(code::UNSUPPORTED, "此实例不支持该操作")
 }
 
 /// Builds the table. Each line names a function of the same name as its
@@ -58,13 +62,12 @@ pub(crate) fn names() -> &'static [&'static str] {
 /// `plain` ones run there without it.
 macro_rules! commands {
     ($($mode:ident $name:ident($($arg:ident),*);)*) => {
-        // Read by the contract test alone until the server lists them.
-        #[cfg_attr(not(test), allow(dead_code))]
+        #[cfg(any(unix, test))]
         const NAMES: &[&str] = &[$(stringify!($name)),*];
         async fn dispatch(rt: &Arc<Runtime>, name: &str, mut args: Args) -> Result<Value> {
             match name {
                 $(stringify!($name) => commands!(@$mode rt, args, $name($($arg),*)),)*
-                _ => Err(AppError::new(code::UNSUPPORTED, "此实例不支持该操作")),
+                _ => Err(unsupported()),
             }
         }
     };

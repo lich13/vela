@@ -1,5 +1,4 @@
-// Until the server arrives, nothing in the build without the desktop shell
-// calls the command table.
+// The desktop-only parts of the shared modules are gated in the next step.
 #![cfg_attr(not(feature = "desktop"), allow(dead_code, unused_imports))]
 #[cfg(all(feature = "desktop", not(any(target_os = "macos", windows))))]
 compile_error!("The Vela desktop app supports only macOS and Windows");
@@ -46,6 +45,8 @@ mod quick;
 mod quick_macos;
 mod rpc;
 mod runtime;
+#[cfg(unix)]
+pub mod server;
 #[cfg(feature = "desktop")]
 mod startup;
 #[cfg(feature = "desktop")]
@@ -58,8 +59,8 @@ mod tray_macos;
 #[cfg(feature = "desktop")]
 mod update;
 mod usage;
-// Unused until the server that speaks it is in.
-#[allow(dead_code)]
+// Only the server speaks it so far, and Windows has none.
+#[cfg_attr(not(unix), allow(dead_code))]
 mod wire;
 #[cfg(feature = "desktop")]
 use core::ViewState;
