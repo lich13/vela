@@ -53,6 +53,8 @@ mod runtime;
 #[cfg(unix)]
 pub mod server;
 #[cfg(feature = "desktop")]
+mod ssh_hosts;
+#[cfg(feature = "desktop")]
 mod startup;
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
@@ -1360,6 +1362,15 @@ fn reveal_provider_token(
     r.gateway(client_id)
         .reveal_provider_token(window.label(), &provider_id, &expected_revision)
 }
+/// The `Host` aliases of this user's SSH configuration, for the manage
+/// dialog to choose from. Names only, and none when there is no home.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn list_ssh_hosts() -> Vec<String> {
+    dirs::home_dir()
+        .map(|home| ssh_hosts::list(&home))
+        .unwrap_or_default()
+}
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn frontend_ready(
@@ -1670,6 +1681,7 @@ pub fn run() {
             instances::select_instance,
             instances::test_instance,
             instances::remote_call,
+            list_ssh_hosts,
             antigravity::auth::export_antigravity_accounts,
             antigravity::auth::import_antigravity_accounts,
             usage::commands::export_usage_bill,

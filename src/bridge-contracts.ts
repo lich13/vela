@@ -680,6 +680,8 @@ export type DesktopCommands = {
     { sshHost: string; fallbackHost: string | null; useSudo: boolean },
     { version: string }
   >;
+  /** The `Host` aliases of this machine's SSH configuration, names only. */
+  list_ssh_hosts: Call<None, string[]>;
 };
 /** Commands a server instance also implements: they run on the current instance. */
 export type SharedCommands = {
@@ -982,6 +984,7 @@ export const desktopCommands = names<DesktopCommands>()([
   "delete_instance",
   "select_instance",
   "test_instance",
+  "list_ssh_hosts",
 ]);
 export const sharedCommands = names<SharedCommands>()([
   "get_state",
