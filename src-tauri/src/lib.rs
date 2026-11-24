@@ -44,6 +44,10 @@ mod quick;
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 mod quick_macos;
+// Unused until the instance commands are registered.
+#[cfg(feature = "desktop")]
+#[allow(dead_code)]
+mod remote;
 mod runtime;
 #[cfg(feature = "desktop")]
 mod startup;
