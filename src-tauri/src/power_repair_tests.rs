@@ -1,85 +1,14 @@
 // 覆盖电源助手修复、取消与状态冲突。
 //! Isolated helper transactions; no native power command or authorization UI runs.
-use super::{Service, State, System};
-use crate::storage::{AppError, Result};
+use super::{
+    tests::{fixture, RepairGate},
+    State,
+};
 use parking_lot::Mutex;
 use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc, Arc,
-    },
+    sync::{atomic::Ordering, mpsc, Arc},
     time::Duration,
 };
-
-struct Reply {
-    state: State,
-    error: Option<&'static str>,
-}
-
-struct RepairGate {
-    entered: mpsc::Sender<()>,
-    release: Mutex<mpsc::Receiver<()>>,
-}
-
-struct MockHelper {
-    current: Mutex<State>,
-    repaired: Mutex<Option<State>>,
-    repair_error: Mutex<Option<&'static str>>,
-    repair_gate: Mutex<Option<RepairGate>>,
-    replies: Mutex<VecDeque<Reply>>,
-    repairs: AtomicUsize,
-    reads: AtomicUsize,
-    calls: Mutex<Vec<bool>>,
-}
-
-impl MockHelper {
-    fn reply(&self, state: State, error: Option<&'static str>) {
-        self.replies.lock().push_back(Reply { state, error });
-    }
-    fn repair_to(&self, state: State) {
-        *self.repaired.lock() = Some(state);
-    }
-    fn repair_count(&self) -> usize {
-        self.repairs.load(Ordering::SeqCst)
-    }
-}
-
-impl System for MockHelper {
-    fn read(&self) -> Result<State> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        Ok(self.current.lock().clone())
-    }
-    fn prepare(&self) -> Result<()> {
-        self.repairs.fetch_add(1, Ordering::SeqCst);
-        if let Some(gate) = self.repair_gate.lock().take() {
-            gate.entered.send(()).unwrap();
-            gate.release
-                .lock()
-                .recv_timeout(Duration::from_secs(5))
-                .expect("fixture repair was not released");
-        }
-        if let Some(code) = *self.repair_error.lock() {
-            return Err(AppError::new(code, "fixture authorization failed"));
-        }
-        if let Some(prepared) = self.repaired.lock().take() {
-            *self.current.lock() = prepared;
-        }
-        Ok(())
-    }
-    fn apply(&self, enabled: bool) -> Result<State> {
-        self.calls.lock().push(enabled);
-        let reply = self
-            .replies
-            .lock()
-            .pop_front()
-            .expect("fixture apply reply");
-        *self.current.lock() = reply.state.clone();
-        reply.error.map_or(Ok(reply.state), |code| {
-            Err(AppError::new(code, "fixture helper transaction failed"))
-        })
-    }
-}
 
 fn state(helper: &str, enabled: bool, minutes: u16, revision: &str) -> State {
     State {
@@ -89,25 +18,6 @@ fn state(helper: &str, enabled: bool, minutes: u16, revision: &str) -> State {
         battery_sleep: minutes,
         revision: revision.into(),
     }
-}
-
-fn fixture(initial: State) -> (tempfile::TempDir, Service, Arc<MockHelper>) {
-    let dir = tempfile::tempdir().unwrap();
-    let helper = Arc::new(MockHelper {
-        current: Mutex::new(initial),
-        repaired: Mutex::new(None),
-        repair_error: Mutex::new(None),
-        repair_gate: Mutex::new(None),
-        replies: Mutex::new(VecDeque::new()),
-        repairs: AtomicUsize::new(0),
-        reads: AtomicUsize::new(0),
-        calls: Mutex::new(Vec::new()),
-    });
-    let service = Service {
-        system: helper.clone(),
-        lock: Mutex::new(()),
-    };
-    (dir, service, helper)
 }
 
 #[test]

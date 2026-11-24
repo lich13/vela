@@ -264,32 +264,52 @@ mod tests {
     use super::*;
     use std::{
         collections::VecDeque,
-        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
+        },
+        time::Duration,
     };
 
     struct Reply {
         state: State,
         error: Option<&'static str>,
     }
-    struct MockHelper {
+    /// Holds `prepare` until the test releases it.
+    pub(super) struct RepairGate {
+        pub(super) entered: mpsc::Sender<()>,
+        pub(super) release: Mutex<mpsc::Receiver<()>>,
+    }
+    /// Scripted helper shared with `repair_tests`; no native power command or
+    /// authorization UI runs.
+    pub(super) struct MockHelper {
         current: Mutex<State>,
         replies: Mutex<VecDeque<Reply>>,
-        calls: Mutex<Vec<bool>>,
+        pub(super) calls: Mutex<Vec<bool>>,
+        pub(super) reads: AtomicUsize,
         ready: AtomicBool,
-        cancelled: AtomicBool,
         approvals: AtomicUsize,
         prepares: AtomicUsize,
         after_prepare: Mutex<Option<State>>,
+        pub(super) repair_error: Mutex<Option<&'static str>>,
+        pub(super) repair_gate: Mutex<Option<RepairGate>>,
         remove_reply: Mutex<Option<Reply>>,
         removals: AtomicUsize,
     }
     impl MockHelper {
-        fn reply(&self, state: State, error: Option<&'static str>) {
+        pub(super) fn reply(&self, state: State, error: Option<&'static str>) {
             self.replies.lock().push_back(Reply { state, error });
+        }
+        pub(super) fn repair_to(&self, state: State) {
+            *self.after_prepare.lock() = Some(state);
+        }
+        pub(super) fn repair_count(&self) -> usize {
+            self.prepares.load(Ordering::SeqCst)
         }
     }
     impl System for MockHelper {
         fn read(&self) -> Result<State> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             let mut state = self.current.lock().clone();
             if !self.ready.load(Ordering::SeqCst) && state.supported {
                 state.helper = "missing".into();
@@ -299,8 +319,15 @@ mod tests {
         fn prepare(&self) -> Result<()> {
             self.prepares.fetch_add(1, Ordering::SeqCst);
             self.approvals.fetch_add(1, Ordering::SeqCst);
-            if self.cancelled.load(Ordering::SeqCst) {
-                return Err(AppError::new(code::POWER_AUTH, "已取消系统授权"));
+            if let Some(gate) = self.repair_gate.lock().take() {
+                gate.entered.send(()).unwrap();
+                gate.release
+                    .lock()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("fixture repair was not released");
+            }
+            if let Some(code) = *self.repair_error.lock() {
+                return Err(AppError::new(code, "fixture authorization failed"));
             }
             self.ready.store(true, Ordering::SeqCst);
             if let Some(state) = self.after_prepare.lock().take() {
@@ -309,23 +336,21 @@ mod tests {
             Ok(())
         }
         fn apply(&self, enabled: bool) -> Result<State> {
-            let mut state = self.current.lock();
             self.calls.lock().push(enabled);
             // The native tests own restoration semantics. These explicit replies
             // verify that Service accepts only the helper's authoritative result.
             let reply = self.replies.lock().pop_front().expect("helper reply");
-            *state = reply.state;
-            reply.error.map_or_else(
-                || Ok(state.clone()),
-                |code| Err(AppError::new(code, "助手事务失败")),
-            )
+            *self.current.lock() = reply.state.clone();
+            reply.error.map_or(Ok(reply.state), |code| {
+                Err(AppError::new(code, "fixture helper transaction failed"))
+            })
         }
         fn remove(&self) -> Result<()> {
             self.removals.fetch_add(1, Ordering::SeqCst);
             let reply = self.remove_reply.lock().take().expect("remove reply");
             *self.current.lock() = reply.state;
             if let Some(code) = reply.error {
-                return Err(AppError::new(code, "助手移除失败"));
+                return Err(AppError::new(code, "fixture helper removal failed"));
             }
             self.ready.store(false, Ordering::SeqCst);
             Ok(())
@@ -335,18 +360,20 @@ mod tests {
     fn state(enabled: bool, minutes: u16) -> State {
         State::new(true, enabled, minutes)
     }
-    fn fixture(initial: State) -> (tempfile::TempDir, Service, Arc<MockHelper>) {
+    pub(super) fn fixture(initial: State) -> (tempfile::TempDir, Service, Arc<MockHelper>) {
         let dir = tempfile::tempdir().unwrap();
         let mut service = Service::new();
         let helper = Arc::new(MockHelper {
             current: Mutex::new(initial),
             replies: Mutex::new(VecDeque::new()),
             calls: Mutex::new(Vec::new()),
+            reads: AtomicUsize::new(0),
             ready: AtomicBool::new(true),
-            cancelled: AtomicBool::new(false),
             approvals: AtomicUsize::new(0),
             prepares: AtomicUsize::new(0),
             after_prepare: Mutex::new(None),
+            repair_error: Mutex::new(None),
+            repair_gate: Mutex::new(None),
             remove_reply: Mutex::new(None),
             removals: AtomicUsize::new(0),
         });
@@ -374,7 +401,7 @@ mod tests {
         original.helper = "missing".into();
         let (_dir, service, helper) = fixture(original.clone());
         helper.ready.store(false, Ordering::SeqCst);
-        helper.cancelled.store(true, Ordering::SeqCst);
+        *helper.repair_error.lock() = Some(code::POWER_AUTH);
         assert_eq!(
             service.set(true, &original.revision).unwrap_err().code,
             code::POWER_AUTH
