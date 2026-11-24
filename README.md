@@ -114,7 +114,9 @@ flowchart LR
 请从 [GitHub Releases](https://github.com/lich13/vela/releases) 下载对应平台的安装包：
 
 - **macOS（Apple Silicon）**：`.dmg` 磁盘映像（采用 ad-hoc 签名；首次打开如遇系统拦截，请按 macOS 提示在「系统设置 → 隐私与安全性」中确认打开）。
-- **Windows（x64）**：NSIS `.exe` 安装程序（SmartScreen 提示时选择确认运行即可）。升级时直接运行新版安装程序即可覆盖安装，无需先卸载，设置与数据均会保留。
+- **Windows（x64）**：NSIS `.exe` 安装程序（SmartScreen 提示时选择确认运行即可）。升级时直接运行新版安装程序即可覆盖安装，无需先卸载，设置与数据均会保留。卸载时勾选“删除应用数据”会先还原被接管的客户端配置，再删除 `~\.vela`。
+
+- **Linux 服务器（x86_64，glibc 2.35 及以上）**：`vela-server_<版本>_x86_64-linux.tar.gz`，无界面，解压后 `sudo sh ./install.sh` 安装为 systemd 服务，由本机 app 经 SSH 控制，见 [docs/server.md](./docs/server.md)。
 
 下载后建议使用同一 Release 附带的 `SHA256SUMS` 文件校验安装包完整性：
 
@@ -142,7 +144,7 @@ Get-FileHash .\Vela_*.exe -Algorithm SHA256
 更多专题文档：
 - [设计系统与交互规范 (DESIGN.md)](./DESIGN.md) · [隐私与安全边界 (PRIVACY.md)](./PRIVACY.md)
 - [客户端接入与配置 (docs/clients.md)](./docs/clients.md) · [网关调度与故障转移 (docs/gateway.md)](./docs/gateway.md)
-- [快捷面板与系统控制 (docs/controls.md)](./docs/controls.md) · [用量核算与计价口径 (docs/usage.md)](./docs/usage.md) · [数据目录与事务恢复 (docs/data.md)](./docs/data.md)
+- [快捷面板与系统控制 (docs/controls.md)](./docs/controls.md) · [用量核算与计价口径 (docs/usage.md)](./docs/usage.md) · [数据目录与事务恢复 (docs/data.md)](./docs/data.md) · [Linux 服务器版与实例切换 (docs/server.md)](./docs/server.md)
 
 ---
 

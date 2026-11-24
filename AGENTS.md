@@ -1,9 +1,10 @@
 # Vela
 
-- 简体中文协作。先读 DESIGN.md；保持产品名 Vela、包名 vela。
+- 先读 DESIGN.md；保持产品名 Vela、包名 vela。
 - Codex／Claude Code／Grok Build 共用回环监听，默认端口 43721；无前缀请求按独立本地令牌分流，供应商与调度状态隔离，全部直连；Codex Bearer 模式仅写 custom 两字段（配置缺少 custom 选择或子表时，启用网关会先补上，已明确选择其他 provider 时不覆盖），普通 API 模式仅写 auth.json 和当前选中 provider 的 base_url；“接管模型列表”开启时 Codex 另写顶层 model_catalog_json 与 vela-models.json，Grok 另写 vela/ 前缀的模型表，均按值或前缀判定归属、不进入事务记录；首次识别不改用户文件，升级保留已有连接方式。Claude 网关管理 settings.json 的 env 地址、Token，并在接管期间启用 CLAUDE_CODE_GATEWAY_HINT_HEADERS 与 CLAUDE_ENABLE_STREAM_WATCHDOG=0，停用时按受管值无冲突还原；Grok 明确导入后管理独立 API 模型连接（多文件写入失败时在进程内还原，不落盘事务记录），原生模型选择和官方 OAuth 仍由 Grok 管理，旧快照保留兼容恢复；Antigravity 网关只接管终端里的 agy：启用时写私有的 ~/.vela/antigravity/agy.env 并在 shell 启动文件写入带标记的固定 agy 函数，不改 ~/.gemini 下的文件，Antigravity app 不经过网关；Claude 配置编辑器只改用户选择的字段。内部身份统一为 com.lich13.vela，应用数据目录统一位于 ~/.vela。
 - Claude 官方／API 配置切换是独立的全局多文件事务；仅按文件角色处理 settings.json、旧 claude.json、config.json 的 primaryApiKey 和全局 .claude.json 的 API 批准记录。不得替换或回滚 OAuth 凭据、机器身份、MCP、项目信任和 shell；普通网关操作只涉及地址、Token 和接管期间的提示头与流看门狗开关。
 - 账号切换仅写 auth.json；config.toml 独立原文编辑，Claude settings.json 支持可视化与 JSON 共用内存草稿，保留注释和未知字段。禁止自动重启 Codex。
+- 平台为 macOS／Windows 桌面版和 Linux 服务器版。服务器版是同一 crate 去掉 Cargo feature `desktop`（`vela-server`，无界面，以 root 的 systemd 服务运行，数据在 /root/.vela），控制通道只有 Unix socket /run/vela/rpc.sock，不新增网络端口；不依赖桌面的命令统一登记在 src-tauri/src/rpc.rs 的分派表，桌面端经 `call`、服务器经同一张表执行，新增命令先判断属于哪一边。服务以 root 写入其他用户目录时沿用所在目录的属主。本机经系统 ssh 控制服务器实例（src-tauri/src/remote.rs、instances.rs）：只接受 ~/.ssh/config 的 Host 别名，参数固定、非交互、不复用连接，远端命令固定为 `[sudo -n] /usr/local/bin/vela-server rpc-stdio`；不保存密码或密钥，写入类操作超时不自动重发。服务器不支持的功能（agy 网关与账号、浏览器登录、文件对话框、查看令牌、强制退出、电源、通知、开机启动、ccswitch 链接）在选中服务器时隐藏或停用，不做降级模拟。用户说明见 docs/server.md。
 - Rust 独占文件及凭据操作；列表和事件只能返回脱敏元数据。真实凭据、用户配置和登录输出不得提交、截图或写入日志。
 - 前端命令／事件契约集中于 src/bridge-contracts.ts，生命周期由 src/subscriptions.ts 管理；Rust 持久化在 src-tauri/src/storage/，应用级迁移入口在 migrations.rs，共享协议结算在 gateway/health_settlement.rs。用户操作细节位于 docs/，版本历史保留于 RELEASE.md。
 - 按本次改动选择 pnpm test／pnpm build、cargo test／cargo clippy 的最小必要检查范围，验证编译、类型和明确代码故障；完整回归及 Windows 构建沿用现有 CI。Browser、原生程序、官方 OAuth 和业务流程验收默认交用户，提供入口、步骤、预期结果和未覆盖项；仅在用户明确要求或具体代码硬性故障需要时执行必要验收。

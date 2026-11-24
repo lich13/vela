@@ -10,6 +10,10 @@ DSH 目录使用 profile 原有的 `cordis.patch.yml`、`.env` 和 `.credentials
 
 `gateway-listener.json` 保存各客户端共用的端口及格式版本（v2）。Grok 明确导入不落盘事务记录：TOML、可选 `endpoint.env` 与供应商库任一写入失败时，在进程内还原已写入的文件并报错重试，遇外部修改保持原样。
 
+`instances.json` 保存服务器实例列表和当前选中的实例：每台服务器的名称、SSH 主机别名、备用别名和是否使用 sudo，不含密码、密钥或主机指纹（这些由 `~/.ssh` 管理）。文件不存在时只有本机。
+
+Windows 卸载时勾选“删除应用数据”，卸载程序先运行 `Vela.exe --vela-uninstall-cleanup`：不开窗口，把仍被接管的 Codex／Claude Code／Grok Build／DSH 配置按恢复记录还原，并移除 PowerShell profile 里的 `agy` 函数；全部成功后才删除 `~\.vela`。还原失败时保留 `~\.vela` 并提示重新安装后停用网关再卸载。不勾选或升级安装时不运行这一步，数据保留。
+
 数据目录统一位于 `~/.vela`（权限 `0700`）。`accounts.json` 保存完整账号，`previous-auth.json`、`previous-config.toml`、`claude/previous-settings.json` 各保留一份最近写入前的文件。`quick.json` 保存快捷面板固定状态、`hiddenClients` 与 `selectedClient`，旧设置默认显示全部平台。`gateway.json` 保存 Codex 状态，`claude/gateway.json` 保存 Claude 状态，`grok/gateway.json` 保存 Grok 状态（供应商、并发、RPM、模型白名单、访问令牌和恢复意图）；供应商条目同时保存无尽模式的开关、三个重试间隔、限流静默、风控代码和动态强度；Claude 供应商的模型映射，以及 Codex 与 Claude 供应商的压缩／辅助请求接管设置（开关、模型、思考强度），按供应商 ID 保存在各自的 `gateway.json`，删除供应商时一并移除；各客户端目录内的 `gateway-recovery.json` 保存版本化的连接事务与停止目标；普通 API 模式写入两文件时不另存恢复现场，失败即在进程内还原。61 秒 RPM 滑动窗口仅在内存中维护；`endpoint-owners.json` 持久化保存 7 天端点归属钉选。供应商 Token 仅用于其上游认证；凭据不写日志、不返回到列表或事件。文件采用当前用户权限，**未加密**，应像原 `auth.json` 一样保护。
 
 损坏的用量设置保留原文件，并在同一私有目录保存按内容摘要去重的备份，通过已有错误通道反馈；正常设置和数据格式保持兼容。启动清理只处理客户端私有目录内可确认归属的遗留请求暂存文件，恢复事务不按年龄删除。
