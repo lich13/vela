@@ -13,7 +13,7 @@ export type Tokens = {
   audioInput?: number | null;
   audioOutput?: number | null;
 };
-export type PriceSnapshot = {
+type PriceSnapshot = {
   version: string;
   source: string;
   model: string;
@@ -54,7 +54,7 @@ export type PriceComparison = {
     level: "equal" | "close" | "deviation" | "severe" | "zero_conflict";
   }[];
 };
-export type RoutingEvidence = {
+type RoutingEvidence = {
   input: string;
   hasToolDeclarations: boolean;
   restriction?: string | null;
@@ -150,7 +150,7 @@ export type Attempt = {
   serviceTier: string | null;
   price: PriceSnapshot | null;
 };
-export type FailoverEvidence = {
+type FailoverEvidence = {
   stage:
     | "initial"
     | "proactive_handoff"
@@ -228,7 +228,7 @@ export type UsageFilter = {
   page?: number;
 };
 
-export type AntigravityTokenMix = {
+type AntigravityTokenMix = {
   input: number;
   cacheRead: number;
   cacheWrite: number;
@@ -260,14 +260,14 @@ export type AntigravityTrackWindow = {
   costPerHour: string;
 };
 
-export type AntigravityQuotaTrack = {
+type AntigravityQuotaTrack = {
   id: string;
   label: string;
   burst5h: AntigravityTrackWindow;
   weekly7d: AntigravityTrackWindow;
 };
 
-export type AntigravityProviderGroup = {
+type AntigravityProviderGroup = {
   id: string;
   requests: number;
   tokens: number;
@@ -278,7 +278,7 @@ export type AntigravityProviderGroup = {
   sharePercent: number;
 };
 
-export type AntigravityFamilyGroup = {
+type AntigravityFamilyGroup = {
   family: string;
   label: string;
   requests: number;
@@ -400,7 +400,7 @@ export type CostCalculation = {
   costs: [string, string, string, string, string];
   total: string;
 };
-export type PricingSearchRow = {
+type PricingSearchRow = {
   model: string;
   name: string | null;
   source: string;

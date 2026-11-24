@@ -319,9 +319,6 @@
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
-.usage-table .usage-model {
-  overflow-wrap: anywhere;
-}
 .usage-error-dot {
   display: inline-block;
   width: 6px;
@@ -986,20 +983,6 @@
   color: var(--ink);
   box-sizing: border-box;
 }
-.usage-calculator-source {
-  display: flex;
-  align-items: end;
-  gap: 14px;
-}
-.usage-calculator-source label {
-  flex: 1;
-}
-.usage-calculator-source button {
-  height: 36px;
-  margin-bottom: 14px;
-  flex-shrink: 0;
-}
-.usage-calculator-ratios,
 .usage-calculator-section {
   padding-top: 16px;
   border-top: 1px solid var(--line);
@@ -1396,8 +1379,7 @@
   gap: 12px;
 }
 .usage-ranking,
-.usage-pricing,
-.usage-detail {
+.usage-pricing {
   font-size: 13px;
 }
 
