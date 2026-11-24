@@ -6,7 +6,10 @@ use crate::{
 };
 use parking_lot::RwLock;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -29,11 +32,31 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_options: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<Value>,
+    pub limit: Option<Limit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_cost: Option<Value>,
+}
+/// The two sizes kept of what models.dev says about a model's limits. The
+/// index holds one per model, so it is two numbers and not a tree.
+#[derive(Clone, Copy, Serialize, PartialEq)]
+pub struct Limit {
+    pub context: Option<u64>,
+    pub output: Option<u64>,
+}
+impl<'de> Deserialize<'de> for Limit {
+    /// Reads an object; a size that is not a whole number is unknown.
+    fn deserialize<D: Deserializer<'de>>(from: D) -> std::result::Result<Self, D::Error> {
+        let listed = Value::deserialize(from)?;
+        if !listed.is_object() {
+            return Err(D::Error::custom("a limit is an object"));
+        }
+        Ok(Self {
+            context: listed["context"].as_u64(),
+            output: listed["output"].as_u64(),
+        })
+    }
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 struct Provider {
@@ -109,62 +132,22 @@ fn validate(index: &Index) -> bool {
             valid_id(id) && p.models.len() <= 30000 && p.models.keys().all(|id| valid_id(id))
         })
 }
-fn crop(value: Value) -> Result<Index> {
-    let root = value
-        .as_object()
-        .ok_or_else(|| failure("models.dev 格式无效"))?;
-    let mut providers = BTreeMap::new();
-    for (id, p) in root {
-        let entries = p["models"]
-            .as_object()
-            .ok_or_else(|| failure("models.dev 模型列表无效"))?;
-        let mut models = BTreeMap::new();
-        for (key, v) in entries {
-            let model_id = v["id"].as_str().unwrap_or(key);
-            if !valid_id(model_id) || !v.is_object() {
-                return Err(failure("models.dev 模型 ID 无效"));
-            }
-            let mut model: Model =
-                serde_json::from_value(v.clone()).map_err(|_| failure("models.dev 元数据无效"))?;
-            // A mode named fast can instead mean OpenAI priority. Only the
-            // explicit Anthropic speed contract is a fast tariff here.
-            let fast = &v["experimental"]["modes"]["fast"];
-            model.fast_cost = (fast["provider"]["body"]["speed"] == "fast")
-                .then(|| fast["cost"].clone())
-                .filter(Value::is_object);
-            if model
-                .name
-                .as_ref()
-                .is_some_and(|s| s.len() > 512 || s.chars().any(char::is_control))
-                || model
-                    .canonical_model_id
-                    .as_ref()
-                    .is_some_and(|s| !valid_id(s))
-                || model.reasoning_options.len() > 16
-            {
-                return Err(failure("models.dev 元数据超过限制"));
-            }
-            // Keep only data needed by the client metadata/price contract.
-            if let Some(limit) = model.limit.take() {
-                if !limit.is_object() {
-                    return Err(failure("models.dev 限额格式无效"));
-                }
-                model.limit = Some(
-                    json!({"context":limit["context"].as_u64(),"output":limit["output"].as_u64()}),
-                );
-            }
-            models.insert(model_id.to_owned(), model);
-        }
-        if !models.is_empty() {
-            providers.insert(
-                id.clone(),
-                Provider {
-                    name: p["name"].as_str().unwrap_or(id).to_owned(),
-                    models,
-                },
-            );
-        }
-    }
+/// Reads models.dev's `api.json` into the index one model at a time: the
+/// document is several megabytes and is never held as a tree.
+fn crop(bytes: &[u8]) -> Result<Index> {
+    // Why the document was refused, when its JSON is sound.
+    let mut refused = None;
+    let mut document = serde_json::Deserializer::from_slice(bytes);
+    let listing = Listing {
+        refused: &mut refused,
+    };
+    let providers = listing
+        .deserialize(&mut document)
+        .and_then(|providers| document.end().map(|()| providers))
+        .map_err(|error| match error.classify() {
+            serde_json::error::Category::Data => failure(refused.unwrap_or("models.dev 格式无效")),
+            _ => failure("models.dev 没有返回有效 JSON"),
+        })?;
     let index = Index {
         schema: 1,
         updated_at: now(),
@@ -174,6 +157,157 @@ fn crop(value: Value) -> Result<Index> {
         return Err(failure("models.dev 目录为空或超过限制"));
     }
     Ok(index)
+}
+
+/// The document: providers by id.
+struct Listing<'a> {
+    refused: &'a mut Option<&'static str>,
+}
+impl<'de> DeserializeSeed<'de> for Listing<'_> {
+    type Value = BTreeMap<String, Provider>;
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        from: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        from.deserialize_map(self)
+    }
+}
+impl<'de> Visitor<'de> for Listing<'_> {
+    type Value = BTreeMap<String, Provider>;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("the providers of models.dev")
+    }
+    fn visit_map<A: MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut providers = BTreeMap::new();
+        while let Some(id) = map.next_key::<String>()? {
+            // What is wrong with a provider unless one of its models says.
+            *self.refused = Some("models.dev 模型列表无效");
+            let (name, models) = map.next_value_seed(Listed {
+                refused: &mut *self.refused,
+            })?;
+            *self.refused = None;
+            // A provider named twice is the one named last.
+            providers.remove(&id);
+            if !models.is_empty() {
+                let name = name.as_str().unwrap_or(&id).to_owned();
+                providers.insert(id, Provider { name, models });
+            }
+        }
+        Ok(providers)
+    }
+}
+
+/// One provider: its name, whatever it is, and its models.
+struct Listed<'a> {
+    refused: &'a mut Option<&'static str>,
+}
+impl<'de> DeserializeSeed<'de> for Listed<'_> {
+    type Value = (Value, BTreeMap<String, Model>);
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        from: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        from.deserialize_map(self)
+    }
+}
+impl<'de> Visitor<'de> for Listed<'_> {
+    type Value = (Value, BTreeMap<String, Model>);
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a provider with models")
+    }
+    fn visit_map<A: MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let (mut name, mut models) = (Value::Null, None);
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "name" => name = map.next_value()?,
+                "models" => {
+                    models = Some(map.next_value_seed(Models {
+                        refused: &mut *self.refused,
+                    })?);
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        let models = models.ok_or_else(|| A::Error::missing_field("models"))?;
+        Ok((name, models))
+    }
+}
+
+/// The models of one provider, each cropped as it is read.
+struct Models<'a> {
+    refused: &'a mut Option<&'static str>,
+}
+impl<'de> DeserializeSeed<'de> for Models<'_> {
+    type Value = BTreeMap<String, Model>;
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        from: D,
+    ) -> std::result::Result<Self::Value, D::Error> {
+        from.deserialize_map(self)
+    }
+}
+impl<'de> Visitor<'de> for Models<'_> {
+    type Value = BTreeMap<String, Model>;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("models by id")
+    }
+    fn visit_map<A: MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut models = BTreeMap::new();
+        while let Some(key) = map.next_key::<String>()? {
+            match cropped(&key, map.next_value()?) {
+                Ok((id, model)) => models.insert(id, model),
+                Err(reason) => {
+                    *self.refused = Some(reason);
+                    return Err(A::Error::custom(reason));
+                }
+            };
+        }
+        Ok(models)
+    }
+}
+
+/// A listed model as the index keeps it, under the id it gives itself or,
+/// without one, the key it is listed under.
+fn cropped(key: &str, listed: Value) -> std::result::Result<(String, Model), &'static str> {
+    let id = listed["id"].as_str().unwrap_or(key).to_owned();
+    if !valid_id(&id) || !listed.is_object() {
+        return Err("models.dev 模型 ID 无效");
+    }
+    if !matches!(listed["limit"], Value::Null | Value::Object(_)) {
+        return Err("models.dev 限额格式无效");
+    }
+    // A mode named fast can instead mean OpenAI priority. Only the
+    // explicit Anthropic speed contract is a fast tariff here.
+    let fast = &listed["experimental"]["modes"]["fast"];
+    let fast_cost = (fast["provider"]["body"]["speed"] == "fast")
+        .then(|| fast["cost"].clone())
+        .filter(Value::is_object);
+    let mut model: Model = serde_json::from_value(listed).map_err(|_| "models.dev 元数据无效")?;
+    model.fast_cost = fast_cost;
+    if model
+        .name
+        .as_ref()
+        .is_some_and(|s| s.len() > 512 || s.chars().any(char::is_control))
+        || model
+            .canonical_model_id
+            .as_ref()
+            .is_some_and(|s| !valid_id(s))
+        || model.reasoning_options.len() > 16
+    {
+        return Err("models.dev 元数据超过限制");
+    }
+    Ok((id, model))
 }
 impl Catalog {
     pub fn new(dir: &Path) -> Self {
@@ -347,8 +481,8 @@ impl Catalog {
             matched_by: basis.into(),
             name: first.name.clone(),
             reasoning: first.reasoning,
-            context: first.limit.as_ref().and_then(|l| l["context"].as_u64()),
-            output: first.limit.as_ref().and_then(|l| l["output"].as_u64()),
+            context: first.limit.and_then(|limit| limit.context),
+            output: first.limit.and_then(|limit| limit.output),
             reasoning_efforts: (!efforts.is_empty()).then_some(efforts),
         })
     }
@@ -416,8 +550,8 @@ impl Catalog {
                         provider_name: p.name.clone(),
                         model: key.clone(),
                         name: model.name.clone(),
-                        context: model.limit.as_ref().and_then(|v| v["context"].as_u64()),
-                        output: model.limit.as_ref().and_then(|v| v["output"].as_u64()),
+                        context: model.limit.and_then(|limit| limit.context),
+                        output: model.limit.and_then(|limit| limit.output),
                         cost: model.cost.clone(),
                     })
             })
@@ -474,8 +608,7 @@ async fn download(source: &str) -> Result<Index> {
     if !matches!(encoding.as_str(), "identity" | "") {
         return Err(failure("models.dev 压缩格式不支持"));
     }
-    let plain = bytes;
-    crop(serde_json::from_slice(&plain).map_err(|_| failure("models.dev 没有返回有效 JSON"))?)
+    crop(&bytes)
 }
 
 /// Generate only reversible naming wrappers; callers still require a known,
@@ -762,8 +895,67 @@ mod tests {
             self.metadata_from(id, None)
         }
     }
+    /// The index of a document models.dev could have sent.
+    fn listing(source: Value) -> Result<Index> {
+        crop(&serde_json::to_vec(&source).unwrap())
+    }
+    #[test]
+    fn a_document_is_refused_for_what_is_wrong_with_it_and_read_whatever_its_order() {
+        let refused = |document: &str| crop(document.as_bytes()).err().unwrap().message;
+        for (document, reason) in [
+            ("[]", "models.dev 格式无效"),
+            (
+                r#"{"x":{"models":{"a":{}}}"#,
+                "models.dev 没有返回有效 JSON",
+            ),
+            (
+                r#"{"x":{"models":{"a":{}}}} more"#,
+                "models.dev 没有返回有效 JSON",
+            ),
+            (r#"{"x":7}"#, "models.dev 模型列表无效"),
+            (r#"{"x":{"name":"X"}}"#, "models.dev 模型列表无效"),
+            (r#"{"x":{"models":[]}}"#, "models.dev 模型列表无效"),
+            (r#"{"x":{"models":{"a":7}}}"#, "models.dev 模型 ID 无效"),
+            (
+                r#"{"x":{"models":{"a":{"id":""}}}}"#,
+                "models.dev 模型 ID 无效",
+            ),
+            (
+                r#"{"x":{"models":{"a":{"name":7}}}}"#,
+                "models.dev 元数据无效",
+            ),
+            (
+                r#"{"x":{"models":{"a":{"limit":7}}}}"#,
+                "models.dev 限额格式无效",
+            ),
+            (r#"{"x":{"models":{}}}"#, "models.dev 目录为空或超过限制"),
+        ] {
+            assert_eq!(refused(document), reason, "{document}");
+        }
+
+        let index = crop(
+            br#"{"x":{"doc":"https://example.invalid","models":{
+                "listed":{"id":"own-id","limit":{"context":8,"output":2,"input":1},"extra":[1,{"a":2}]},
+                "keyed":{"experimental":{"modes":{"fast":{"provider":{"body":{"speed":"fast"}},"cost":{"input":3}}}}}
+            },"name":"Fixture","npm":"@example/x"},"empty":{"models":{}}}"#,
+        )
+        .unwrap();
+        assert_eq!(index.providers.keys().collect::<Vec<_>>(), ["x"]);
+        let provider = &index.providers["x"];
+        assert_eq!(provider.name, "Fixture");
+        assert_eq!(
+            provider.models.keys().collect::<Vec<_>>(),
+            ["keyed", "own-id"]
+        );
+        let limit = serde_json::to_value(provider.models["own-id"].limit).unwrap();
+        assert_eq!(limit, json!({"context": 8, "output": 2}));
+        assert_eq!(
+            provider.models["keyed"].fast_cost,
+            Some(json!({"input": 3}))
+        );
+    }
     fn catalog(dir: &Path, source: Value) -> Catalog {
-        let index = crop(source).unwrap();
+        let index = listing(source).unwrap();
         storage::atomic_write(
             &dir.join("models-dev-index.json"),
             &serde_json::to_vec(&index).unwrap(),
@@ -782,7 +974,7 @@ mod tests {
             cat.state.read().index.as_ref().unwrap(),
             frozen.state.read().index.as_ref().unwrap()
         ));
-        cat.state.write().index = Some(Arc::new(crop(source(9)).unwrap()));
+        cat.state.write().index = Some(Arc::new(listing(source(9)).unwrap()));
         assert_eq!(
             cat.price("fixture-model").unwrap().0["models_dev_cost"]["input"],
             9
@@ -934,8 +1126,8 @@ mod tests {
             false
         )
         .is_none());
-        assert!(crop(json!({})).is_err());
-        assert!(crop(json!({"x":{"models":[]}})).is_err());
+        assert!(listing(json!({})).is_err());
+        assert!(listing(json!({"x":{"models":[]}})).is_err());
     }
     #[tokio::test]
     async fn existing_cache_is_offline_and_corruption_is_preserved() {
@@ -988,7 +1180,7 @@ mod tests {
         cat.refresh_stale_from(hour, &url).await.unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 0);
         let dir = tempfile::tempdir().unwrap();
-        let mut old = crop(source).unwrap();
+        let mut old = listing(source).unwrap();
         old.updated_at -= 2 * 3_600_000;
         std::fs::write(
             dir.path().join("models-dev-index.json"),

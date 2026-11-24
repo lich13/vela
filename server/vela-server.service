@@ -7,6 +7,8 @@ Wants=network-online.target
 Type=simple
 User=root
 Environment=HOME=/root
+# A few threads allocate now and then; an arena each keeps memory they freed.
+Environment=MALLOC_ARENA_MAX=2
 # Site settings, such as the Claude Code directory of another user.
 EnvironmentFile=-/etc/vela/server.env
 ExecStart=/usr/local/bin/vela-server serve
