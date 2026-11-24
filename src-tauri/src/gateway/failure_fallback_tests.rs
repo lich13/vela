@@ -400,6 +400,25 @@ async fn v024_send_compacted_http(fixture: &V024SeededHttp) -> (StatusCode, Vec<
     (status, response_bytes(response).await.to_vec())
 }
 
+/// Sends the compacted request and stops the gateway once it has settled:
+/// the reply, what the first receiver saw, the thread's owner, and whether
+/// its boundary still matches.
+async fn v024_compacted_http_outcome(
+    fixture: &V024SeededHttp,
+) -> (StatusCode, Vec<u8>, Vec<Vec<u8>>, Option<String>, bool) {
+    let (status, body) = v024_send_compacted_http(fixture).await;
+    settled(&fixture.gateway).await;
+    let receiver_requests = fixture.receivers_seen[0].lock().clone();
+    let owner = fixture.gateway.0.compaction.owner(&fixture.session);
+    let boundary_fresh = fixture
+        .gateway
+        .0
+        .compaction
+        .boundary_matches(&fixture.session, Some(&fixture.boundary));
+    fixture.gateway.stop().await.unwrap();
+    (status, body, receiver_requests, owner, boundary_fresh)
+}
+
 async fn v024_ws_endpoint(
     provider: &'static str,
     owner: bool,
@@ -1087,17 +1106,9 @@ async fn v024_compacted_http_insufficient_balance_429_fails_over_to_ordinary_pro
         V024NextResponse::HttpRejection(V024_BALANCE_429),
     )
     .await;
-    let (status, body) = v024_send_compacted_http(&fixture).await;
-    settled(&fixture.gateway).await;
-    let receiver_requests = fixture.receivers_seen[0].lock().clone();
+    let (status, body, receiver_requests, owner, boundary_fresh) =
+        v024_compacted_http_outcome(&fixture).await;
     let old_requests = fixture.owner_seen.lock().clone();
-    let owner = fixture.gateway.0.compaction.owner(&fixture.session);
-    let boundary_fresh = fixture
-        .gateway
-        .0
-        .compaction
-        .boundary_matches(&fixture.session, Some(&fixture.boundary));
-    fixture.gateway.stop().await.unwrap();
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(receiver_requests.len(), 1);
@@ -1121,16 +1132,8 @@ async fn v024_compacted_http_can_use_a_lower_priority_compaction_receiver() {
     let receiver_id = fixture.receiver_ids[0].clone();
     v024_set_policy(&fixture, &receiver_id, true, false);
 
-    let (status, body) = v024_send_compacted_http(&fixture).await;
-    settled(&fixture.gateway).await;
-    let receiver_requests = fixture.receivers_seen[0].lock().clone();
-    let owner = fixture.gateway.0.compaction.owner(&fixture.session);
-    let boundary_fresh = fixture
-        .gateway
-        .0
-        .compaction
-        .boundary_matches(&fixture.session, Some(&fixture.boundary));
-    fixture.gateway.stop().await.unwrap();
+    let (status, body, receiver_requests, owner, boundary_fresh) =
+        v024_compacted_http_outcome(&fixture).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(receiver_requests.len(), 1);
@@ -1208,17 +1211,9 @@ async fn v024_compacted_http_account_rejection_never_fails_over_to_a_new_thread_
     ];
     update(&fixture.gateway, &fixture.dir, Edit::Reorder { ids });
 
-    let (status, body) = v024_send_compacted_http(&fixture).await;
-    settled(&fixture.gateway).await;
-    let new_only_requests = fixture.receivers_seen[0].lock().clone();
+    let (status, body, new_only_requests, owner, boundary_fresh) =
+        v024_compacted_http_outcome(&fixture).await;
     let ordinary_requests = fixture.receivers_seen[1].lock().clone();
-    let owner = fixture.gateway.0.compaction.owner(&fixture.session);
-    let boundary_fresh = fixture
-        .gateway
-        .0
-        .compaction
-        .boundary_matches(&fixture.session, Some(&fixture.boundary));
-    fixture.gateway.stop().await.unwrap();
 
     assert_eq!(status, StatusCode::OK);
     assert!(new_only_requests.is_empty());

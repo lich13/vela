@@ -5,21 +5,18 @@
 //! decimal classifier and the service's single-flight state without adding a
 //! product-facing hook.
 use super::*;
-use crate::gateway::test_support::loopback::LoopbackServer;
+use crate::gateway::test_support::loopback::server;
 use bytes::Bytes;
-use hyper::{body::Incoming, Request, Response, StatusCode};
+use hyper::{Response, StatusCode};
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use serde_json::{json, Value};
 use std::{
-    convert::Infallible,
-    future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
 };
-use tokio::sync::oneshot;
 
 fn check(value: Value) -> QuotaCheck {
     sub2_evidence(&value)
@@ -47,44 +44,6 @@ fn query(base: String, id: &str, version: &str) -> Query {
         base,
         token: "fixture-token".into(),
         client: http_client(),
-    }
-}
-
-async fn server<F, Fut>(handler: F) -> LoopbackServer
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<replay::WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let (stop, mut stopped) = oneshot::channel();
-    let handler = Arc::new(handler);
-    let task = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = &mut stopped => break,
-                accepted = listener.accept() => {
-                    let Ok((stream, _)) = accepted else { break };
-                    let handler = handler.clone();
-                    tokio::spawn(async move {
-                        let _ = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(
-                                hyper_util::rt::TokioIo::new(stream),
-                                hyper::service::service_fn(move |request| {
-                                    let handler = handler.clone();
-                                    async move { Ok::<_, Infallible>(handler(request).await) }
-                                }),
-                            )
-                            .await;
-                    });
-                }
-            }
-        }
-    });
-    LoopbackServer {
-        port,
-        stop: Some(stop),
-        task: Some(task),
     }
 }
 
