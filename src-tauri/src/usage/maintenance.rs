@@ -34,6 +34,23 @@ fn vacuum_has_room(connection: &Connection, copies: u64) -> rusqlite::Result<boo
         let stats = unsafe { stats.assume_init() };
         stats.f_bavail.saturating_mul(u64::from(stats.f_bsize))
     };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let available = {
+        use std::os::unix::ffi::OsStrExt;
+        // The widths of the counts differ between targets.
+        fn wide(count: impl Into<u64>) -> u64 {
+            count.into()
+        }
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| Error::InvalidPath(path.to_owned()))?;
+        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+            return Err(Error::InvalidQuery);
+        }
+        // statvfs initialized the complete output on success.
+        let stats = unsafe { stats.assume_init() };
+        wide(stats.f_bavail).saturating_mul(wide(stats.f_frsize))
+    };
     #[cfg(windows)]
     let available = {
         use std::os::windows::ffi::OsStrExt;
@@ -59,7 +76,7 @@ fn vacuum_has_room(connection: &Connection, copies: u64) -> rusqlite::Result<boo
     Ok(available >= required)
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, unix))]
 #[test]
 fn filesystem_probe_handles_database_paths_and_reports_missing_files() {
     let dir = tempfile::tempdir().unwrap();

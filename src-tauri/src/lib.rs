@@ -1,11 +1,16 @@
-#[cfg(not(any(target_os = "macos", windows)))]
-compile_error!("Vela supports only macOS and Windows");
+// Until the command table arrives, the build without the desktop shell
+// compiles the services but not the commands that call them.
+#![cfg_attr(not(feature = "desktop"), allow(dead_code, unused_imports))]
+#[cfg(all(feature = "desktop", not(any(target_os = "macos", windows))))]
+compile_error!("The Vela desktop app supports only macOS and Windows");
 
 mod antigravity;
+#[cfg(feature = "desktop")]
 use crate::errors::code;
 mod auth_cache;
 mod claude_profile;
 mod cleanup_spool;
+#[cfg(feature = "desktop")]
 mod commands;
 mod configuration;
 mod core;
@@ -17,37 +22,53 @@ mod exchange_template;
 #[cfg(test)]
 mod exchange_template_tests;
 mod gateway;
+#[cfg(feature = "desktop")]
 mod links;
 mod login;
 mod migrations;
 mod models_dev;
+#[cfg(feature = "desktop")]
 mod notifications;
 mod official;
+#[cfg(feature = "desktop")]
 mod power;
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 mod power_macos;
+// Ending a client's processes is written for macOS and Windows only.
+#[cfg(any(target_os = "macos", windows))]
 mod process_control;
 mod provider_testing;
+#[cfg(feature = "desktop")]
 mod quick;
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 mod quick_macos;
 mod runtime;
+#[cfg(feature = "desktop")]
 mod startup;
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 mod startup_macos;
 mod storage;
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 mod tray_macos;
+#[cfg(feature = "desktop")]
 mod update;
 mod usage;
+#[cfg(feature = "desktop")]
 use core::{Preferences, ViewState};
+#[cfg(feature = "desktop")]
 use parking_lot::Mutex;
 pub(crate) use runtime::Runtime;
+#[cfg(feature = "desktop")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use storage::{AppError, Result};
+#[cfg(feature = "desktop")]
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -56,6 +77,7 @@ use tauri::{
 
 /// What only the desktop app keeps beside the services: its windows, the
 /// sign-ins it hosts and the system features it drives.
+#[cfg(feature = "desktop")]
 pub(crate) struct Shell {
     imports: Mutex<links::Imports>,
     login: Mutex<login::Session>,
@@ -72,6 +94,7 @@ pub(crate) struct Shell {
     main_close_seq: std::sync::atomic::AtomicU64,
     main_close_ack: std::sync::atomic::AtomicU64,
 }
+#[cfg(feature = "desktop")]
 impl Shell {
     pub(crate) fn new() -> Self {
         Self {
@@ -92,6 +115,7 @@ impl Shell {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum MainWindowPhase {
     #[default]
@@ -101,6 +125,7 @@ pub(crate) enum MainWindowPhase {
     Destroying,
 }
 
+#[cfg(feature = "desktop")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MainTarget {
     Page(String),
@@ -116,6 +141,7 @@ pub(crate) enum MainTarget {
     },
 }
 
+#[cfg(feature = "desktop")]
 #[derive(Default)]
 pub(crate) struct MainWindowState {
     pub(crate) phase: MainWindowPhase,
@@ -126,6 +152,7 @@ pub(crate) struct MainWindowState {
     pub(crate) shown_early: bool,
 }
 
+#[cfg(feature = "desktop")]
 impl MainWindowState {
     pub(crate) fn request_open(&mut self, target: Option<MainTarget>) -> MainWindowPhase {
         self.want_show = true;
@@ -180,12 +207,14 @@ impl MainWindowState {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MainSignal {
     ProviderTests,
     PricingState,
     UsageState,
 }
+#[cfg(feature = "desktop")]
 impl MainSignal {
     pub(crate) const fn event_name(self) -> &'static str {
         match self {
@@ -196,6 +225,7 @@ impl MainSignal {
     }
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) struct DrainedMainEvents {
     app_event: Option<events::Change>,
     notification_state: Option<notifications::State>,
@@ -207,6 +237,7 @@ pub(crate) struct DrainedMainEvents {
     switch_error: Option<AppError>,
 }
 
+#[cfg(feature = "desktop")]
 #[derive(Default)]
 pub(crate) struct PendingMainEvents {
     app_event: Mutex<Option<events::Change>>,
@@ -218,6 +249,7 @@ pub(crate) struct PendingMainEvents {
     pricing_state: AtomicBool,
     usage_state: AtomicBool,
 }
+#[cfg(feature = "desktop")]
 impl PendingMainEvents {
     fn record_switch_error(&self, error: AppError) {
         *self.switch_error.lock() = Some(error);
@@ -283,6 +315,7 @@ impl PendingMainEvents {
         (label == "main").then(|| self.drain())
     }
 }
+#[cfg(feature = "desktop")]
 impl Runtime {
     pub(crate) fn mark_window_visible(&self, label: &str, visible: bool) -> bool {
         let slot = match label {
@@ -300,6 +333,7 @@ impl Runtime {
 
 /// The desktop end of the runtime's sink: visible windows, the tray and the
 /// native panel.
+#[cfg(feature = "desktop")]
 struct Host {
     app: tauri::AppHandle,
     /// Whether the lid setting was already closed for the current freeze.
@@ -307,6 +341,7 @@ struct Host {
     #[cfg(windows)]
     tray_dark: Mutex<Option<bool>>,
 }
+#[cfg(feature = "desktop")]
 impl runtime::Sink for Host {
     fn emit(&self, event: runtime::Event<'_>) {
         use runtime::Event;
@@ -427,6 +462,7 @@ impl runtime::Sink for Host {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 fn application_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     // The native predefined Quit calls NSApplication.terminate directly.
@@ -451,9 +487,11 @@ fn application_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     menu.insert(&application, 0)?;
     Ok(menu)
 }
+#[cfg(feature = "desktop")]
 fn login_active(s: &login::LoginState) -> bool {
     ["starting", "waiting", "cancelling"].contains(&s.phase.as_str())
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn visible_windows(app: &tauri::AppHandle) -> Vec<tauri::WebviewWindow> {
     let main_ready = app
         .try_state::<Arc<Runtime>>()
@@ -466,6 +504,7 @@ pub(crate) fn visible_windows(app: &tauri::AppHandle) -> Vec<tauri::WebviewWindo
         .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
         .collect()
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn has_visible_ui(app: &tauri::AppHandle) -> bool {
     #[cfg(target_os = "macos")]
     if quick_macos::is_visible() {
@@ -473,6 +512,7 @@ pub(crate) fn has_visible_ui(app: &tauri::AppHandle) -> bool {
     }
     !visible_windows(app).is_empty()
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn main_visible_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
     if app
         .try_state::<Arc<Runtime>>()
@@ -483,12 +523,14 @@ pub(crate) fn main_visible_window(app: &tauri::AppHandle) -> Option<tauri::Webvi
     app.get_webview_window("main")
         .filter(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn emit_switch_notice(app: &tauri::AppHandle, message: impl Into<String>) {
     let message = message.into();
     #[cfg(target_os = "macos")]
     quick_macos::push_notice(app, message.clone());
     let _ = app.emit("switch-notice", message);
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn emit_switch_error(app: &tauri::AppHandle, error: AppError) {
     #[cfg(target_os = "macos")]
     quick_macos::push_error(app, error.message.clone());
@@ -499,6 +541,7 @@ pub(crate) fn emit_switch_error(app: &tauri::AppHandle, error: AppError) {
     }
     let _ = app.emit("switch-error", error);
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn emit_if_main_visible<S: serde::Serialize + Clone>(
     app: &tauri::AppHandle,
     signal: MainSignal,
@@ -510,6 +553,7 @@ pub(crate) fn emit_if_main_visible<S: serde::Serialize + Clone>(
         r.shell.pending_main.record_signal(signal);
     }
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn emit_main_app_event(app: &tauri::AppHandle, change: &events::Change) {
     if let Some(window) = main_visible_window(app) {
         let _ = window.emit("app-event", change);
@@ -517,6 +561,7 @@ pub(crate) fn emit_main_app_event(app: &tauri::AppHandle, change: &events::Chang
         r.shell.pending_main.record_app_event(change);
     }
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn emit_main_notification_state(app: &tauri::AppHandle, state: notifications::State) {
     if let Some(window) = main_visible_window(app) {
         let _ = window.emit("notification-state", state);
@@ -524,6 +569,7 @@ pub(crate) fn emit_main_notification_state(app: &tauri::AppHandle, state: notifi
         r.shell.pending_main.record_notification_state(state);
     }
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn emit_main_config_state(
     app: &tauri::AppHandle,
     client_key: &str,
@@ -537,6 +583,7 @@ pub(crate) fn emit_main_config_state(
             .record_config_state(client_key, payload);
     }
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn emit_antigravity_auth_state(
     app: &tauri::AppHandle,
     state: &antigravity::auth::AntigravityAuthState,
@@ -550,6 +597,7 @@ pub(crate) fn emit_antigravity_auth_state(
         r.shell.pending_main.record_antigravity_auth(state);
     }
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     let Some(window) = app.get_webview_window(label) else {
         return;
@@ -620,6 +668,7 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
         let _ = window.emit("pricing-state", ());
     }
 }
+#[cfg(feature = "desktop")]
 pub(crate) const fn resolve_window_background_color(
     pref_theme: &str,
     system_dark: bool,
@@ -635,6 +684,7 @@ pub(crate) const fn resolve_window_background_color(
         tauri::window::Color(0xF3, 0xF6, 0xFC, 0xFF)
     }
 }
+#[cfg(feature = "desktop")]
 #[cfg(windows)]
 fn apps_use_dark_theme() -> bool {
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
@@ -644,6 +694,7 @@ fn apps_use_dark_theme() -> bool {
         .unwrap_or(1)
         == 0
 }
+#[cfg(feature = "desktop")]
 fn system_apps_dark() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -654,9 +705,11 @@ fn system_apps_dark() -> bool {
         apps_use_dark_theme()
     }
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn window_background_color_for_theme(pref_theme: &str) -> tauri::window::Color {
     resolve_window_background_color(pref_theme, system_apps_dark())
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn window_background_color(app: &tauri::AppHandle) -> tauri::window::Color {
     let pref = app
         .try_state::<Arc<Runtime>>()
@@ -664,6 +717,7 @@ pub(crate) fn window_background_color(app: &tauri::AppHandle) -> tauri::window::
         .unwrap_or_else(|| "system".into());
     window_background_color_for_theme(&pref)
 }
+#[cfg(feature = "desktop")]
 fn emit_main_target(window: &tauri::WebviewWindow, target: MainTarget) {
     match target {
         MainTarget::Page(page) => {
@@ -691,6 +745,7 @@ fn emit_main_target(window: &tauri::WebviewWindow, target: MainTarget) {
         }
     }
 }
+#[cfg(feature = "desktop")]
 fn present_main_window(
     app: &tauri::AppHandle,
     window: &tauri::WebviewWindow,
@@ -711,6 +766,7 @@ fn present_main_window(
     }
     Ok(())
 }
+#[cfg(feature = "desktop")]
 async fn ensure_main_window(app: &tauri::AppHandle, r: &Arc<Runtime>) -> Result<()> {
     let _guard = r.shell.main_create_lock.lock().await;
     let mut absent_polls = 0u32;
@@ -819,6 +875,7 @@ async fn ensure_main_window(app: &tauri::AppHandle, r: &Arc<Runtime>) -> Result<
         }
     }
 }
+#[cfg(feature = "desktop")]
 fn destroy_main_window(app: &tauri::AppHandle) -> Result<()> {
     let Some(r) = app.try_state::<Arc<Runtime>>() else {
         return Ok(());
@@ -846,6 +903,7 @@ fn destroy_main_window(app: &tauri::AppHandle) -> Result<()> {
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
     Ok(())
 }
+#[cfg(feature = "desktop")]
 fn on_main_window_destroyed(app: &tauri::AppHandle) {
     let Some(r) = app.try_state::<Arc<Runtime>>().map(|s| s.inner().clone()) else {
         return;
@@ -870,6 +928,7 @@ fn on_main_window_destroyed(app: &tauri::AppHandle) {
         let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
     }
 }
+#[cfg(feature = "desktop")]
 pub(crate) fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
     notifications::on_manual_open(app);
     let Some(r) = app.try_state::<Arc<Runtime>>().map(|s| s.inner().clone()) else {
@@ -895,6 +954,7 @@ pub(crate) fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
     });
     Ok(())
 }
+#[cfg(feature = "desktop")]
 fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     for (id, label) in [
@@ -913,18 +973,22 @@ fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     }
     Ok(menu)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn check_for_updates() -> Result<update::Info> {
     update::latest().await
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn open_github() -> Result<()> {
     update::open_repository()
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn open_update_release() -> Result<()> {
     update::open_releases()
 }
+#[cfg(feature = "desktop")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum ProviderAction {
@@ -933,12 +997,14 @@ pub(crate) enum ProviderAction {
     Testing,
     Edit,
 }
+#[cfg(feature = "desktop")]
 fn valid_main_page(page: &str) -> bool {
     [
         "accounts", "config", "gateway", "freeze", "logs", "usage", "settings",
     ]
     .contains(&page)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn open_main(
     app: tauri::AppHandle,
@@ -982,6 +1048,7 @@ async fn open_main(
     }
     ensure_main_window(&app, &r).await
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn close_main(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<()> {
     if window.label() != "main" {
@@ -990,6 +1057,7 @@ fn close_main(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<()>
     destroy_main_window(&app)
 }
 /// The frontend received a close request and now owns the decision.
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn ack_main_close(window: tauri::WebviewWindow, r: tauri::State<'_, Arc<Runtime>>) {
     if window.label() == "main" {
@@ -999,8 +1067,10 @@ fn ack_main_close(window: tauri::WebviewWindow, r: tauri::State<'_, Arc<Runtime>
         );
     }
 }
+#[cfg(feature = "desktop")]
 const MAIN_CLOSE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+#[cfg(feature = "desktop")]
 fn tray_tooltip_text(state: &ViewState) -> String {
     let current = state
         .accounts
@@ -1011,23 +1081,29 @@ fn tray_tooltip_text(state: &ViewState) -> String {
     format!("Vela · {current}")
 }
 
+#[cfg(feature = "desktop")]
 fn publish(app: &tauri::AppHandle, state: ViewState) {
     if let Some(r) = app.try_state::<Arc<Runtime>>() {
         r.publish(state);
     }
 }
+#[cfg(feature = "desktop")]
 fn refresh(_: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
     r.refresh()
 }
+#[cfg(feature = "desktop")]
 pub(crate) use runtime::coalesce_gateway_events;
+#[cfg(feature = "desktop")]
 fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
     if let Some(r) = app.try_state::<Arc<Runtime>>() {
         r.publish_gateway(gateway);
     }
 }
+#[cfg(feature = "desktop")]
 fn state_for(r: &Runtime) -> Result<ViewState> {
     r.state()
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn list_provider_models(
     client_id: gateway::ClientId,
@@ -1039,6 +1115,7 @@ async fn list_provider_models(
 }
 /// The upstream error statuses met by the providers that share a host with
 /// the given provider, or with the address of one that is not saved yet.
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn get_provider_seen_statuses(
     client_id: gateway::ClientId,
@@ -1051,10 +1128,12 @@ fn get_provider_seen_statuses(
         .same_host_providers(provider_id.as_deref(), base_url.as_deref());
     r.diagnostics.seen_statuses(client_id, &providers)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn get_state(r: tauri::State<'_, Arc<Runtime>>) -> Result<ViewState> {
     state_for(r.inner())
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn switch_account(
     app: tauri::AppHandle,
@@ -1086,6 +1165,7 @@ async fn switch_account(
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn use_official_account(
     app: tauri::AppHandle,
@@ -1149,6 +1229,7 @@ async fn use_official_account(
     Ok(next)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn disable_official_account(
     app: tauri::AppHandle,
@@ -1161,6 +1242,7 @@ async fn disable_official_account(
     emit_switch_notice(&app, "官方连接已关闭，配置已恢复");
     Ok(next)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn import_current(app: tauri::AppHandle, r: tauri::State<'_, Arc<Runtime>>) -> Result<ViewState> {
     let mut c = r.core.lock();
@@ -1169,6 +1251,7 @@ fn import_current(app: tauri::AppHandle, r: tauri::State<'_, Arc<Runtime>>) -> R
     drop(c);
     refresh(&app, &r)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn rename_account(
     app: tauri::AppHandle,
@@ -1179,6 +1262,7 @@ fn rename_account(
     r.core.lock().rename(&id, &name)?;
     refresh(&app, &r)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn delete_account(
     app: tauri::AppHandle,
@@ -1199,6 +1283,7 @@ fn delete_account(
     r.core.lock().delete(&id)?;
     refresh(&app, &r)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn read_config(
     client_id: gateway::ClientId,
@@ -1206,6 +1291,7 @@ fn read_config(
 ) -> Result<configuration::Document> {
     r.gateway(client_id).read_config(&r.home(client_id)?)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn read_previous_config(
     client_id: gateway::ClientId,
@@ -1213,10 +1299,12 @@ fn read_previous_config(
 ) -> Result<String> {
     r.gateway(client_id).previous_config()
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn validate_config(client_id: gateway::ClientId, text: String) -> Result<()> {
     configuration::validate(client_id, &text)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn save_config(
     app: tauri::AppHandle,
@@ -1243,6 +1331,7 @@ async fn save_config(
     refresh(&app, &r)?;
     Ok(doc)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn set_quota_refresh(
     app: tauri::AppHandle,
@@ -1259,6 +1348,7 @@ fn set_quota_refresh(
     publish(&app, state.clone());
     Ok(state)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn set_preferences(
     app: tauri::AppHandle,
@@ -1338,6 +1428,7 @@ async fn set_preferences(
     publish(&app, s.clone());
     Ok(s)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn get_startup(r: tauri::State<'_, Arc<Runtime>>) -> Result<startup::View> {
     let r = r.inner().clone();
@@ -1345,6 +1436,7 @@ async fn get_startup(r: tauri::State<'_, Arc<Runtime>>) -> Result<startup::View>
         .await
         .map_err(|_| AppError::new(code::STARTUP, "读取启动设置失败"))?
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn set_startup(r: tauri::State<'_, Arc<Runtime>>, enabled: bool) -> Result<startup::View> {
     let r = r.inner().clone();
@@ -1352,10 +1444,12 @@ async fn set_startup(r: tauri::State<'_, Arc<Runtime>>, enabled: bool) -> Result
         .await
         .map_err(|_| AppError::new(code::STARTUP, "更新启动设置失败"))?
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn get_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<login::LoginState> {
     Ok(r.shell.login.lock().state.clone())
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn start_login(
     app: tauri::AppHandle,
@@ -1479,6 +1573,7 @@ fn start_login(
     });
     Ok(initial)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn cancel_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
     let mut s = r.shell.login.lock();
@@ -1488,6 +1583,7 @@ fn cancel_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn open_login_url(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
     let s = r.shell.login.lock();
@@ -1499,6 +1595,7 @@ fn open_login_url(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
         .ok_or_else(|| AppError::new(code::LOGIN_URL, "登录链接尚未生成"))?;
     open::that(url).map_err(|_| AppError::new(code::OPEN, "无法打开浏览器"))
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn copy_login_value(
     app: tauri::AppHandle,
@@ -1511,6 +1608,7 @@ fn copy_login_value(
         .lock()
         .copy_value(kind, |value| app.clipboard().write_text(value))
 }
+#[cfg(feature = "desktop")]
 fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
     if r.quit_pending.swap(true, Ordering::Relaxed) {
         return;
@@ -1539,10 +1637,12 @@ fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
         app.exit(0);
     });
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn get_gateway_freeze(r: tauri::State<'_, Arc<Runtime>>) -> gateway::freeze::View {
     r.gateway.freeze_gate().view()
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn set_gateway_frozen(
     frozen: bool,
@@ -1555,6 +1655,7 @@ fn set_gateway_frozen(
         None => gate.set(frozen),
     }
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn set_gateway_freeze_resume(
     client_id: gateway::ClientId,
@@ -1565,6 +1666,7 @@ fn set_gateway_freeze_resume(
         .freeze_gate()
         .schedule(client_id, resume_at, usage::model::now())
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn get_gateway(
     client_id: gateway::ClientId,
@@ -1575,6 +1677,7 @@ fn get_gateway(
     }
     r.gateway(client_id).try_view()
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn cancel_gateway_wait(
     client_id: gateway::ClientId,
@@ -1583,6 +1686,7 @@ fn cancel_gateway_wait(
 ) -> &'static str {
     r.gateway(client_id).interrupt_wait(&request_id)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn get_gateway_models(
     client_id: gateway::ClientId,
@@ -1590,6 +1694,7 @@ fn get_gateway_models(
 ) -> Result<gateway::model_list::View> {
     r.gateway(client_id).gateway_models()
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn refresh_gateway_models(
     client_id: gateway::ClientId,
@@ -1601,11 +1706,13 @@ async fn refresh_gateway_models(
         .await
 }
 /// Downloads OpenAI's Codex catalog now instead of at the day's turn.
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn update_codex_catalog(r: tauri::State<'_, Arc<Runtime>>) -> Result<gateway::View> {
     r.gateway.refresh_official_catalog(true).await?;
     r.gateway.try_view()
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn search_models_dev(
     query: String,
@@ -1617,6 +1724,7 @@ fn search_models_dev(
         .models_dev
         .search(&query, limit.unwrap_or(50)))
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn edit_model_list(
     client_id: gateway::ClientId,
@@ -1634,6 +1742,7 @@ fn edit_model_list(
         gateway::model_list::Custom { context, efforts },
     )
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn dsh_official_models(
     refresh: bool,
@@ -1643,6 +1752,7 @@ async fn dsh_official_models(
         .dsh_official_models(&r.home(gateway::ClientId::Dsh)?, refresh)
         .await
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn preview_dsh_profile(
     profile: Option<String>,
@@ -1651,6 +1761,7 @@ fn preview_dsh_profile(
     r.dsh
         .preview_dsh(&r.home(gateway::ClientId::Dsh)?, profile.as_deref())
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn attach_dsh_profiles(
     options: gateway::dsh::Options,
@@ -1670,6 +1781,7 @@ async fn attach_dsh_profiles(
         .await
         .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn read_dsh_file(
     profile: Option<String>,
@@ -1679,6 +1791,7 @@ fn read_dsh_file(
     r.dsh
         .read_dsh_file(&r.home(gateway::ClientId::Dsh)?, profile.as_deref(), key)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn read_previous_dsh_file(
     profile: Option<String>,
@@ -1688,6 +1801,7 @@ fn read_previous_dsh_file(
     r.dsh
         .previous_dsh_file(&r.home(gateway::ClientId::Dsh)?, profile.as_deref(), key)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn save_dsh_file(
     profile: Option<String>,
@@ -1707,6 +1821,7 @@ async fn save_dsh_file(
         .await
         .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn restore_dsh_file(
     profile: Option<String>,
@@ -1725,6 +1840,7 @@ async fn restore_dsh_file(
         .await
         .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn preview_grok_import(
     selected: Option<String>,
@@ -1733,10 +1849,12 @@ fn preview_grok_import(
     r.grok
         .preview_grok_import(&r.home(gateway::ClientId::Grok)?, selected.as_deref())
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn cancel_grok_import(token: Option<String>, r: tauri::State<'_, Arc<Runtime>>) {
     r.grok.cancel_grok_import(token.as_deref());
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn commit_grok_import(
     token: String,
@@ -1757,6 +1875,7 @@ async fn commit_grok_import(
     let _ = refresh(&app, &r);
     result
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn reveal_provider_token(
     window: tauri::WebviewWindow,
@@ -1768,6 +1887,7 @@ fn reveal_provider_token(
     r.gateway(client_id)
         .reveal_provider_token(window.label(), &provider_id, &expected_revision)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn probe_provider_endpoints(
     client_id: gateway::ClientId,
@@ -1778,6 +1898,7 @@ async fn probe_provider_endpoints(
         .probe_endpoints(&provider_id, true)
         .await
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn update_gateway(
     client_id: gateway::ClientId,
@@ -1813,6 +1934,7 @@ async fn update_gateway(
     }
     Ok(result)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn start_gateway(
     client_id: gateway::ClientId,
@@ -1834,6 +1956,7 @@ async fn start_gateway(
 }
 /// Starts one client's gateway and refreshes every window. The main window
 /// command and the native panel share it; each words its own notice.
+#[cfg(feature = "desktop")]
 pub(crate) async fn start_gateway_for(
     app: &tauri::AppHandle,
     r: &Arc<Runtime>,
@@ -1858,6 +1981,7 @@ pub(crate) async fn start_gateway_for(
     let _ = refresh(app, r);
     Ok(result)
 }
+#[cfg(feature = "desktop")]
 pub(crate) async fn stop_gateway_for(
     app: &tauri::AppHandle,
     r: &Arc<Runtime>,
@@ -1874,6 +1998,7 @@ pub(crate) async fn stop_gateway_for(
     let _ = refresh(app, r);
     Ok(result)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn stop_gateway(
     client_id: gateway::ClientId,
@@ -1888,6 +2013,7 @@ async fn stop_gateway(
     );
     Ok(result)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn query_provider_quota(
     client_id: gateway::ClientId,
@@ -1897,6 +2023,7 @@ async fn query_provider_quota(
 ) -> Result<gateway::QuotaView> {
     r.gateway(client_id).query_quota(&provider_id, force).await
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn frontend_ready(
     app: tauri::AppHandle,
@@ -1915,6 +2042,7 @@ async fn frontend_ready(
     }
     present_main_window(&app, &window, target)
 }
+#[cfg(feature = "desktop")]
 #[cfg(windows)]
 fn tray_is_dark() -> bool {
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
@@ -1924,6 +2052,7 @@ fn tray_is_dark() -> bool {
         .unwrap_or(0)
         == 0
 }
+#[cfg(feature = "desktop")]
 pub fn run() {
     // Setup, sync commands and window callbacks all run on this thread, and
     // the services they call spawn onto whichever tokio runtime is current.
@@ -2342,6 +2471,7 @@ pub fn run() {
         });
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(test)]
 mod page_whitelist_tests {
     use super::{

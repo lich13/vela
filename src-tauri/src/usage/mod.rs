@@ -7,6 +7,7 @@ mod calculator;
 pub(crate) mod claude_quota;
 #[cfg(test)]
 mod claude_stats_tests;
+#[cfg(feature = "desktop")]
 pub mod commands;
 #[cfg(test)]
 mod decimal_v13_tests;
