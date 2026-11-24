@@ -1,4 +1,5 @@
 use super::*;
+use crate::gateway::test_support::form;
 use crate::gateway::test_support::until;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -359,24 +360,10 @@ async fn capacity_round_reads_new_queue_and_routes_without_touching_files() {
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: None,
-            base_url: format!("http://127.0.0.1:{third}/v1"),
-            token: "new-fixture-key".into(),
-            name: None,
-        },
+        form(serde_json::json!({
+            "baseUrl": format!("http://127.0.0.1:{third}/v1"),
+            "token": "new-fixture-key",
+        })),
     );
     let mut ids: Vec<_> = g.view().providers.iter().map(|p| p.id.clone()).collect();
     let added = ids.pop().unwrap();

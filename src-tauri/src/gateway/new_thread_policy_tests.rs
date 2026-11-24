@@ -13,6 +13,7 @@ use super::{
     *,
 };
 use crate::gateway::test_support::digest;
+use crate::gateway::test_support::form;
 use crate::gateway::test_support::loopback::{start, update};
 use crate::usage::Service;
 use http_body_util::BodyExt;
@@ -173,24 +174,11 @@ fn policy_edit_changes_only_the_requested_provider_flags() {
     let mut store = Store::default();
     store
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://fixture.example.invalid/v1".into(),
-                token: "fixture-token".into(),
-                name: Some("fixture".into()),
-            },
+            form(json!({
+                "name": "fixture",
+                "baseUrl": "https://fixture.example.invalid/v1",
+                "token": "fixture-token",
+            })),
             false,
         )
         .unwrap();
@@ -474,24 +462,7 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
         update(
             &gateway,
             &dir,
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: url,
-                token: "fixture-token".into(),
-                name: None,
-            },
+            form(json!({"baseUrl": url, "token": "fixture-token"})),
         );
     }
     gateway

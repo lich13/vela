@@ -605,24 +605,11 @@ mod tests {
             for n in 0..4 {
                 store
                     .edit(
-                        super::super::Edit::SaveProvider {
-                            delegate: Default::default(),
-                            end_on_message_stop: None,
-                            filter_count_tokens: None,
-                            buffer_complete_response: None,
-                            endless_mode: None,
-                            upstream_retry_seconds: None,
-                            normal_retry_seconds: None,
-                            risk_codes: None,
-                            retry_intensity: None,
-                            limit_retry_seconds: None,
-                            limit_rest_seconds: None,
-                            quota_access_token: None,
-                            id: None,
-                            name: Some(format!("Fixture {n}")),
-                            base_url: format!("http://127.0.0.1:{port}/{n}/v1"),
-                            token: "fixture-key".into(),
-                        },
+                        crate::gateway::test_support::form(serde_json::json!({
+                            "name": format!("Fixture {n}"),
+                            "baseUrl": format!("http://127.0.0.1:{port}/{n}/v1"),
+                            "token": "fixture-key",
+                        })),
                         false,
                     )
                     .unwrap();

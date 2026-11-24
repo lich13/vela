@@ -179,24 +179,10 @@ pub(super) mod tests {
         };
         store
             .edit(
-                super::super::Edit::SaveProvider {
-                    delegate: Default::default(),
-                    end_on_message_stop: None,
-                    filter_count_tokens: None,
-                    buffer_complete_response: None,
-                    endless_mode: None,
-                    upstream_retry_seconds: None,
-                    normal_retry_seconds: None,
-                    risk_codes: None,
-                    retry_intensity: None,
-                    limit_retry_seconds: None,
-                    limit_rest_seconds: None,
-                    quota_access_token: None,
-                    id: None,
-                    base_url: "https://relay.example.invalid/v1".into(),
-                    token: "fixture-key".into(),
-                    name: None,
-                },
+                crate::gateway::test_support::form(serde_json::json!({
+                    "baseUrl": "https://relay.example.invalid/v1",
+                    "token": "fixture-key",
+                })),
                 false,
             )
             .unwrap();

@@ -8,6 +8,7 @@ use super::{
     replay::{full, WireBody},
     Edit, Gateway, Settings,
 };
+use crate::gateway::test_support::form;
 use crate::usage::{
     model::{EndCause, Filter, Record},
     Service,
@@ -183,24 +184,11 @@ impl Fixture {
                 ..Settings::default()
             },
         });
-        fixture.edit(Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: None,
-            base_url: url,
-            token: "fixture-only-key".into(),
-            name: Some("fixture-provider".into()),
-        });
+        fixture.edit(form(serde_json::json!({
+            "name": "fixture-provider",
+            "baseUrl": url,
+            "token": "fixture-only-key",
+        })));
         drop(reservation);
         fixture
             .gateway

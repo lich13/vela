@@ -941,10 +941,7 @@ pub(crate) fn next_page(url: &mut url::Url, after: &str, cursor: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        model::{Edit, Store},
-        ClientId, Gateway,
-    };
+    use super::super::{model::Store, ClientId, Gateway};
     use super::*;
     const LIMIT: usize = 2 * 1024 * 1024;
     #[test]
@@ -1259,24 +1256,10 @@ mod tests {
         {
             store
                 .edit(
-                    Edit::SaveProvider {
-                        delegate: Default::default(),
-                        end_on_message_stop: None,
-                        filter_count_tokens: None,
-                        buffer_complete_response: None,
-                        endless_mode: None,
-                        upstream_retry_seconds: None,
-                        normal_retry_seconds: None,
-                        risk_codes: None,
-                        retry_intensity: None,
-                        limit_retry_seconds: None,
-                        limit_rest_seconds: None,
-                        quota_access_token: None,
-                        id: None,
-                        base_url: format!("https://p{n}.example.invalid"),
-                        token: format!("fixture-{n}"),
-                        name: None,
-                    },
+                    crate::gateway::test_support::form(serde_json::json!({
+                        "baseUrl": format!("https://p{n}.example.invalid"),
+                        "token": format!("fixture-{n}"),
+                    })),
                     false,
                 )
                 .unwrap();

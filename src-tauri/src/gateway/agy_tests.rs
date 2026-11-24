@@ -1,4 +1,5 @@
 use super::*;
+use crate::gateway::test_support::form;
 use crate::gateway::test_support::{
     downstream::{attach_observers, usage_records},
     until,
@@ -23,24 +24,9 @@ impl Fixture {
             .unwrap()
     }
     fn save(&self, base: &str) -> String {
-        self.edit(Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: None,
-            base_url: base.into(),
-            token: "fixture-upstream".into(),
-            name: Some("Fixture".into()),
-        })
+        self.edit(form(
+            json!({"name": "Fixture", "baseUrl": base, "token": "fixture-upstream"}),
+        ))
         .providers
         .last()
         .unwrap()

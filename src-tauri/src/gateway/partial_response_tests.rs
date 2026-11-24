@@ -4,6 +4,7 @@ use super::{
     replay::{full, WireBody},
     Edit, Gateway,
 };
+use crate::gateway::test_support::form;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -163,24 +164,11 @@ impl Fixture {
         for (index, url) in urls.iter().enumerate() {
             gateway
                 .edit(
-                    Edit::SaveProvider {
-                        delegate: Default::default(),
-                        end_on_message_stop: None,
-                        filter_count_tokens: None,
-                        buffer_complete_response: None,
-                        endless_mode: None,
-                        upstream_retry_seconds: None,
-                        normal_retry_seconds: None,
-                        risk_codes: None,
-                        retry_intensity: None,
-                        limit_retry_seconds: None,
-                        limit_rest_seconds: None,
-                        quota_access_token: None,
-                        id: None,
-                        base_url: url.clone(),
-                        token: FIXTURE_TOKEN.into(),
-                        name: Some(format!("fixture-provider-{}", index + 1)),
-                    },
+                    form(serde_json::json!({
+                        "name": format!("fixture-provider-{}", index + 1),
+                        "baseUrl": url,
+                        "token": FIXTURE_TOKEN,
+                    })),
                     &gateway.view().revision,
                     dir.path(),
                 )

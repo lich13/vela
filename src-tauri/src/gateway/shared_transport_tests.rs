@@ -1,6 +1,7 @@
 // 覆盖共享入口的 HTTP/SSE/WS 原始字节透传。
 //! Real loopback transport tests for the shared client listener.
 use super::{replay, ClientId, Edit, Gateway};
+use crate::gateway::test_support::form;
 use bytes::Bytes;
 use futures_util::{stream, SinkExt, StreamExt};
 use http_body_util::{BodyExt, StreamBody};
@@ -193,24 +194,11 @@ fn seed_configs(codex_home: &Path, claude_home: &Path) {
 fn add_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) {
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: base_url.to_owned(),
-                token: token.to_owned(),
-                name: Some("fixture-upstream".into()),
-            },
+            form(serde_json::json!({
+                "name": "fixture-upstream",
+                "baseUrl": base_url.to_owned(),
+                "token": token.to_owned(),
+            })),
             &gateway.view().revision,
             home,
         )

@@ -1,4 +1,5 @@
 use super::*;
+use crate::gateway::test_support::form;
 use http_body_util::BodyExt;
 use hyper::Response;
 use std::sync::{
@@ -121,24 +122,11 @@ async fn quota_cache_is_invalidated_when_provider_version_changes() {
     update(
         &g,
         &t,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: Some(id.clone()),
-            base_url: format!("http://127.0.0.1:{port}/v1"),
-            token: "changed-fixture-token".into(),
-            name: None,
-        },
+        form(serde_json::json!({
+            "id": id,
+            "baseUrl": format!("http://127.0.0.1:{port}/v1"),
+            "token": "changed-fixture-token",
+        })),
     );
     g.query_quota(&id, false).await.unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 2);

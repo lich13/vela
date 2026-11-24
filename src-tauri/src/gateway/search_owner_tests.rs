@@ -6,6 +6,7 @@
 //! the compaction boundary or changing ownership. With a provider set to take
 //! web searches, a search is that queue's alone.
 use super::*;
+use crate::gateway::test_support::form;
 use crate::usage::{
     model::{Filter, Operation, Record},
     Service,
@@ -1206,25 +1207,16 @@ fn searching(gateway: &Gateway, id: &str, endless: bool) -> Edit {
         .into_iter()
         .find(|p| p.id == id)
         .unwrap();
-    Edit::SaveProvider {
-        delegate: super::super::model::DelegateEdit {
-            take_web_search: Some(true),
-            ..Default::default()
-        },
-        id: Some(id.to_owned()),
-        base_url: provider.base_url,
-        token: String::new(),
-        quota_access_token: None,
-        name: None,
-        end_on_message_stop: None,
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: Some(endless),
-        upstream_retry_seconds: Some(1),
-        normal_retry_seconds: Some(1),
-        risk_codes: None,
-        retry_intensity: Some(0),
-        limit_retry_seconds: Some(1),
-        limit_rest_seconds: Some(0),
-    }
+    form(json!({
+        "id": id,
+        "baseUrl": provider.base_url,
+        "token": "",
+        "endlessMode": endless,
+        "upstreamRetrySeconds": 1,
+        "normalRetrySeconds": 1,
+        "retryIntensity": 0,
+        "limitRetrySeconds": 1,
+        "limitRestSeconds": 0,
+        "takeWebSearch": true,
+    }))
 }

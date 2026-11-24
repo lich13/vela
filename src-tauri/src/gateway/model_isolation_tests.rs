@@ -8,6 +8,7 @@ use super::{
     replay::{self, RequestHints, TurnEvidence, WireBody},
     *,
 };
+use crate::gateway::test_support::form;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Request, Response, StatusCode};
@@ -103,24 +104,7 @@ async fn v022_fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
         v022_update(
             &gateway,
             &dir,
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: url,
-                token: "fixture-token".into(),
-                name: None,
-            },
+            form(json!({"baseUrl": url, "token": "fixture-token"})),
         );
     }
     v022_update(

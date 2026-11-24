@@ -1,5 +1,6 @@
 use super::tests::{current, prepare};
 use super::*;
+use crate::gateway::test_support::form;
 use crate::gateway::{
     current::{Kind, Match},
     model::Store,
@@ -146,24 +147,10 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
     let mut store = Store::default();
     store
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                name: None,
-                base_url: "https://relay.example.invalid/v1".into(),
-                token: "fixture-provider".into(),
-            },
+            form(serde_json::json!({
+                "baseUrl": "https://relay.example.invalid/v1",
+                "token": "fixture-provider",
+            })),
             false,
         )
         .unwrap();

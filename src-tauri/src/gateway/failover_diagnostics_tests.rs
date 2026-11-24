@@ -5,6 +5,7 @@
 use super::*;
 use crate::events::{self, Action, Reason};
 use crate::gateway::test_support::digest;
+use crate::gateway::test_support::form;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -883,24 +884,11 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
     update(
         &gateway,
         &dir,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: Some(backup_id.clone()),
-            base_url: providers[1].base_url.clone(),
-            token: "fixture-rotated-token".into(),
-            name: None,
-        },
+        form(json!({
+            "id": backup_id,
+            "baseUrl": providers[1].base_url,
+            "token": "fixture-rotated-token",
+        })),
     );
     let current_backup = gateway.route(&backup_id).expect("updated backup route");
     assert_ne!(

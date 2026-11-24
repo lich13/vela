@@ -10,6 +10,7 @@ use super::{
     takeover::{self, Pair},
     ClientId, Edit, Gateway,
 };
+use crate::gateway::test_support::form;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -329,24 +330,7 @@ async fn v020_gateway_api_mode_owns_only_base_and_auth_through_select_start_swit
     let second = edit(
         &gateway,
         &home,
-        Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: None,
-            base_url: second_base.into(),
-            token: "second-key".into(),
-            name: Some("second".into()),
-        },
+        form(json!({"name": "second", "baseUrl": second_base, "token": "second-key"})),
     );
     let second_id = second.providers[1].id.clone();
     let source_mask = mask_base(&config);

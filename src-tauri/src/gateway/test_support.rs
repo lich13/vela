@@ -67,6 +67,21 @@ impl Gateway {
     }
 }
 
+/// A provider form as the interface sends it, with `fields` over a new
+/// provider's.
+pub(crate) fn form(fields: serde_json::Value) -> Edit {
+    let mut edit = serde_json::json!({
+        "op": "saveProvider",
+        "id": null,
+        "baseUrl": "https://one.example.invalid",
+        "token": "fixture",
+    });
+    edit.as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    serde_json::from_value(edit).unwrap()
+}
+
 /// The stored form of a thread or window identifier.
 pub(crate) fn digest(value: &str) -> String {
     crate::storage::digest(value.as_bytes())
@@ -317,24 +332,7 @@ pub(crate) mod loopback {
             update(
                 &gateway,
                 &dir,
-                Edit::SaveProvider {
-                    delegate: Default::default(),
-                    end_on_message_stop: None,
-                    filter_count_tokens: None,
-                    buffer_complete_response: None,
-                    endless_mode: None,
-                    upstream_retry_seconds: None,
-                    normal_retry_seconds: None,
-                    risk_codes: None,
-                    retry_intensity: None,
-                    limit_retry_seconds: None,
-                    limit_rest_seconds: None,
-                    quota_access_token: None,
-                    id: None,
-                    base_url: url,
-                    token: "fixture-token".into(),
-                    name: None,
-                },
+                super::form(serde_json::json!({"baseUrl": url, "token": "fixture-token"})),
             );
         }
         update(

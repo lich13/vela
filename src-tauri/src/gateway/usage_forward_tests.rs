@@ -4,6 +4,7 @@ use super::{
     replay::{self, full, WireBody},
     ClientId, Edit, Gateway, HttpClient, Settings,
 };
+use crate::gateway::test_support::form;
 use crate::usage::{
     model::{safe_id, Filter, Operation, Record},
     Service,
@@ -171,24 +172,11 @@ impl Fixture {
             },
         });
         for (index, url) in urls.iter().enumerate() {
-            fixture.edit(Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: url.clone(),
-                token: FIXTURE_KEY.into(),
-                name: Some(format!("fixture-P{}", index + 1)),
-            });
+            fixture.edit(form(json!({
+                "name": format!("fixture-P{}", index + 1),
+                "baseUrl": url,
+                "token": FIXTURE_KEY,
+            })));
         }
         drop(reservation);
         fixture
@@ -1353,24 +1341,12 @@ async fn lingering(
     .await;
     let fixture = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
     let provider = &fixture.gateway.view().providers[0];
-    fixture.edit(Edit::SaveProvider {
-        delegate: Default::default(),
-        id: Some(provider.id.clone()),
-        base_url: provider.base_url.clone(),
-        token: String::new(),
-        name: None,
-        quota_access_token: None,
-        end_on_message_stop: Some(end_on_message_stop),
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: None,
-        upstream_retry_seconds: None,
-        normal_retry_seconds: None,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
-    });
+    fixture.edit(form(json!({
+        "id": provider.id,
+        "baseUrl": provider.base_url,
+        "token": "",
+        "endOnMessageStop": end_on_message_stop,
+    })));
     fixture.start().await;
     (fixture, release, closed, sent, upstream)
 }
@@ -1465,24 +1441,12 @@ async fn message_stop_uses_the_failover_target_provider_setting() {
                 .unwrap()
         })
         .await;
-        fixture.edit(Edit::SaveProvider {
-            delegate: Default::default(),
-            id: None,
-            name: Some("Failing provider".into()),
-            base_url: failed.url("/v1"),
-            token: FIXTURE_KEY.into(),
-            quota_access_token: None,
-            end_on_message_stop: Some(!enabled),
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-        });
+        fixture.edit(form(json!({
+            "name": "Failing provider",
+            "baseUrl": failed.url("/v1"),
+            "token": FIXTURE_KEY,
+            "endOnMessageStop": !enabled,
+        })));
         let providers = fixture.gateway.view().providers;
         let target_id = providers[0].id.clone();
         fixture.edit(Edit::Reorder {

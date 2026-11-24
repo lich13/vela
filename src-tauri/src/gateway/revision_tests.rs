@@ -1,4 +1,5 @@
 use super::*;
+use crate::gateway::test_support::form;
 
 #[tokio::test]
 async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
@@ -17,24 +18,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         std::fs::write(home.join("auth.json"), "unchanged-auth").unwrap();
         let edit = |e| g.edit(e, &g.view().revision, &home).unwrap();
         for (url, token) in [("https://a.invalid", "a"), ("https://b.invalid", "b")] {
-            edit(Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: url.into(),
-                token: token.into(),
-                name: None,
-            });
+            edit(form(serde_json::json!({"baseUrl": url, "token": token})));
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -69,24 +53,7 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         let peer_revision = peer.view().revision;
         let selected = g.view().selected;
         g.edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://c.invalid/sub".into(),
-                token: "c".into(),
-                name: None,
-            },
+            form(serde_json::json!({"baseUrl": "https://c.invalid/sub", "token": "c"})),
             &revision,
             &home,
         )
@@ -191,26 +158,13 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
     let initial = gateway.view();
     let id = initial.providers[0].id.clone();
     let version = gateway.0.inner.lock().store.providers[0].version.clone();
-    let edit = |base: &str, role: Option<bool>| Edit::SaveProvider {
-        delegate: crate::gateway::model::DelegateEdit {
-            take_web_search: role,
-            ..Default::default()
-        },
-        id: Some(id.clone()),
-        base_url: base.into(),
-        token: "fixture-rotated".into(),
-        quota_access_token: None,
-        name: None,
-        end_on_message_stop: None,
-        filter_count_tokens: None,
-        buffer_complete_response: None,
-        endless_mode: None,
-        upstream_retry_seconds: None,
-        normal_retry_seconds: None,
-        risk_codes: None,
-        retry_intensity: None,
-        limit_retry_seconds: None,
-        limit_rest_seconds: None,
+    let edit = |base: &str, role: Option<bool>| {
+        form(serde_json::json!({
+            "id": id,
+            "baseUrl": base,
+            "token": "fixture-rotated",
+            "takeWebSearch": role,
+        }))
     };
     assert!(gateway
         .edit(edit("invalid", Some(true)), &initial.revision, dir.path())
@@ -255,27 +209,11 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
     let claude = gateway.companion(dir.path().join("claude-policy")).unwrap();
     claude
         .edit(
-            Edit::SaveProvider {
-                delegate: crate::gateway::model::DelegateEdit {
-                    take_web_search: Some(true),
-                    ..Default::default()
-                },
-                id: None,
-                base_url: "https://claude.example.invalid".into(),
-                token: "fixture".into(),
-                quota_access_token: None,
-                name: None,
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-            },
+            form(serde_json::json!({
+                "baseUrl": "https://claude.example.invalid",
+                "token": "fixture",
+                "takeWebSearch": true,
+            })),
             &claude.view().revision,
             dir.path(),
         )

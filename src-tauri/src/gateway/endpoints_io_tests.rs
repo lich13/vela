@@ -4,6 +4,7 @@ use super::super::{
 };
 use super::{digest, now, pin_key, Pin, Service};
 use crate::errors::code;
+use crate::gateway::test_support::form;
 use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::{
     client::legacy::Client,
@@ -208,24 +209,11 @@ async fn first_affinity_persist_failure_returns_before_sending_to_upstream() {
         .unwrap();
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: base_url.clone(),
-                token: "fixture-token".into(),
-                name: Some("fixture".into()),
-            },
+            form(serde_json::json!({
+                "name": "fixture",
+                "baseUrl": base_url,
+                "token": "fixture-token",
+            })),
             &gateway.view().revision,
             temp.path(),
         )
@@ -307,24 +295,7 @@ async fn frozen_queued_probes_preserve_complete_samples_and_manual_probes_still_
     let primary = format!("http://127.0.0.1:{port}/v1");
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                id: None,
-                name: None,
-                base_url: primary.clone(),
-                token: "fixture-token".into(),
-                quota_access_token: None,
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-            },
+            form(serde_json::json!({"baseUrl": primary, "token": "fixture-token"})),
             &gateway.view().revision,
             dir.path(),
         )

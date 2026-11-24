@@ -4,8 +4,9 @@ use super::{
     model::Settings,
     protocol::{Protocol, Terminal},
     routing::Requirement,
-    Edit, Gateway, Route,
+    Gateway, Route,
 };
+use crate::gateway::test_support::form;
 use crate::{errors::code, events::HealthScope};
 use serde_json::json;
 use std::time::Duration;
@@ -18,24 +19,11 @@ fn fixture() -> (tempfile::TempDir, Gateway, Route) {
     let revision = gateway.view().revision;
     let view = gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://example.invalid/v1".into(),
-                token: "fixture-token".into(),
-                name: Some("settlement fixture".into()),
-            },
+            form(json!({
+                "name": "settlement fixture",
+                "baseUrl": "https://example.invalid/v1",
+                "token": "fixture-token",
+            })),
             &revision,
             data.path(),
         )

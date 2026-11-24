@@ -3,6 +3,7 @@ use super::super::{
     replay, Gateway,
 };
 use super::{Batch, Measurement, Service};
+use crate::gateway::test_support::form;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, header, Request, Response};
 use hyper_util::rt::TokioIo;
@@ -41,24 +42,11 @@ fn v0212_store_normalizes_validates_and_swaps_endpoint_roles_without_rotating_pr
     let primary_raw = "HTTPS://PRIMARY.example.invalid:443/v1/";
     store
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: primary_raw.into(),
-                token: "fixture-token".into(),
-                name: Some("fixture".into()),
-            },
+            form(serde_json::json!({
+                "name": "fixture",
+                "baseUrl": primary_raw,
+                "token": "fixture-token",
+            })),
             false,
         )
         .unwrap();
@@ -154,24 +142,11 @@ fn v0212_gateway_rejects_stale_edit_revision_and_persists_endpoints_across_resta
     let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: "https://primary.example.invalid/v1".into(),
-                token: "fixture-token".into(),
-                name: Some("fixture".into()),
-            },
+            form(serde_json::json!({
+                "name": "fixture",
+                "baseUrl": "https://primary.example.invalid/v1",
+                "token": "fixture-token",
+            })),
             &gateway.view().revision,
             dir.path(),
         )
@@ -335,24 +310,11 @@ async fn v0212_loopback_probe_sends_no_authorization_or_business_rpm_and_keeps_e
     let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
     gateway
         .edit(
-            Edit::SaveProvider {
-                delegate: Default::default(),
-                end_on_message_stop: None,
-                filter_count_tokens: None,
-                buffer_complete_response: None,
-                endless_mode: None,
-                upstream_retry_seconds: None,
-                normal_retry_seconds: None,
-                risk_codes: None,
-                retry_intensity: None,
-                limit_retry_seconds: None,
-                limit_rest_seconds: None,
-                quota_access_token: None,
-                id: None,
-                base_url: format!("http://127.0.0.1:{upstream_port}/v1"),
-                token: "fixture-token".into(),
-                name: Some("loopback".into()),
-            },
+            form(serde_json::json!({
+                "name": "loopback",
+                "baseUrl": format!("http://127.0.0.1:{upstream_port}/v1"),
+                "token": "fixture-token",
+            })),
             &gateway.view().revision,
             dir.path(),
         )

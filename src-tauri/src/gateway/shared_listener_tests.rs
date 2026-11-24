@@ -1,5 +1,6 @@
 // 覆盖共享监听的客户端生命周期和认证隔离。
 use super::{grok_config::Protocol, listener, ClientId, Edit, Gateway};
+use crate::gateway::test_support::form;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, Request, Response, StatusCode, Uri};
@@ -319,24 +320,11 @@ fn add_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) {
             name: Some("fixture-provider".into()),
             protocol: Protocol::Responses,
         },
-        ClientId::Codex | ClientId::Claude => Edit::SaveProvider {
-            delegate: Default::default(),
-            end_on_message_stop: None,
-            filter_count_tokens: None,
-            buffer_complete_response: None,
-            endless_mode: None,
-            upstream_retry_seconds: None,
-            normal_retry_seconds: None,
-            risk_codes: None,
-            retry_intensity: None,
-            limit_retry_seconds: None,
-            limit_rest_seconds: None,
-            quota_access_token: None,
-            id: None,
-            base_url: base_url.to_owned(),
-            token: token.to_owned(),
-            name: Some("fixture-provider".into()),
-        },
+        ClientId::Codex | ClientId::Claude => form(json!({
+            "name": "fixture-provider",
+            "baseUrl": base_url.to_owned(),
+            "token": token.to_owned(),
+        })),
     };
     gateway.edit(edit, &gateway.view().revision, home).unwrap();
     let id = gateway.view().providers[0].id.clone();
