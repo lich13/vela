@@ -110,13 +110,6 @@ pub(crate) async fn force_quit(
     r.shell.force_quitting.store(false, Ordering::Release);
     result?
 }
-#[cfg(test)]
-pub(crate) fn consume_startup_error_for_label(
-    slot: &parking_lot::Mutex<Option<AppError>>,
-    label: &str,
-) -> Option<AppError> {
-    take_startup_error_for_label(slot, &std::sync::atomic::AtomicBool::new(false), label)
-}
 pub(crate) fn take_startup_error_for_label(
     slot: &parking_lot::Mutex<Option<AppError>>,
     consumed_by_main: &std::sync::atomic::AtomicBool,
@@ -275,20 +268,18 @@ mod startup_error_tests {
     #[test]
     fn quick_reads_preserve_startup_error_until_main_consumes_it_once() {
         let slot = Mutex::new(Some(AppError::new(code::GATEWAY, "端口占用")));
+        let consumed = std::sync::atomic::AtomicBool::new(false);
+        let take = |label| take_startup_error_for_label(&slot, &consumed, label);
         assert_eq!(
-            consume_startup_error_for_label(&slot, "quick")
-                .as_ref()
-                .map(|e| e.message.as_str()),
+            take("quick").as_ref().map(|e| e.message.as_str()),
             Some("端口占用")
         );
         assert_eq!(
-            consume_startup_error_for_label(&slot, "main")
-                .as_ref()
-                .map(|e| e.message.as_str()),
+            take("main").as_ref().map(|e| e.message.as_str()),
             Some("端口占用")
         );
-        assert!(consume_startup_error_for_label(&slot, "main").is_none());
-        assert!(consume_startup_error_for_label(&slot, "quick").is_none());
+        assert!(take("main").is_none());
+        assert!(take("quick").is_none());
     }
 
     #[test]

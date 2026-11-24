@@ -1,6 +1,7 @@
 // 覆盖压缩边界交接、归属及原始请求透传。
 //! Isolated protocol fixtures for compaction boundaries; never use production clients.
 use super::*;
+use crate::gateway::test_support::NotifyOnDrop;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -10,14 +11,6 @@ use tokio::sync::Notify;
 
 const WINDOW: &str = "fixture-opaque-window";
 const NEXT_WINDOW: &str = "fixture-next-opaque-window";
-
-struct CancelGuard(Arc<Notify>);
-
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        self.0.notify_one();
-    }
-}
 
 fn automatic(g: &Gateway, t: &tempfile::TempDir) {
     update(
@@ -419,7 +412,7 @@ async fn terminal_then_client_disconnect_keeps_completed_without_usage_tail() {
         let generated = generated_copy.clone();
         let release = release_copy.clone();
         async move {
-            let guard = CancelGuard(cancelled);
+            let guard = NotifyOnDrop(cancelled);
             let chunks = async_stream::try_stream! {
                 let _guard = guard;
                 yield Frame::data(Bytes::from_static(b"event: response.completed\ndata: {\"response\":{\"id\":\"fixture-tail\",\"status\":\"completed\"}}\n\n"));

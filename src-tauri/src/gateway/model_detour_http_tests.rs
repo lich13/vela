@@ -1,7 +1,7 @@
 //! HTTP/SSE regressions for cross-model side requests preserving a thread owner.
 //! All providers, request bodies, responses, and thread identifiers are fixtures.
 use super::*;
-use crate::gateway::test_support::settled;
+use crate::gateway::test_support::{settled, NotifyOnDrop};
 use bytes::Bytes;
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{
@@ -151,19 +151,11 @@ async fn v0255_wait_for_detour_usage(
     .expect("fixture detour usage rows were not persisted")
 }
 
-struct V0255UpstreamBodyDropped(Arc<Notify>);
-
-impl Drop for V0255UpstreamBodyDropped {
-    fn drop(&mut self) {
-        self.0.notify_one();
-    }
-}
-
 fn v0255_open_stream(
     release: Arc<Notify>,
     cancelled: Arc<Notify>,
 ) -> super::super::replay::WireBody {
-    let guard = V0255UpstreamBodyDropped(cancelled);
+    let guard = NotifyOnDrop(cancelled);
     let chunks = async_stream::try_stream! {
         let _guard = guard;
         yield Frame::data(Bytes::from_static(V0255_CANCEL_PREFIX));
