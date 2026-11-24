@@ -1,6 +1,7 @@
 import { subscriptions } from "./subscriptions";
 import { useCallback, useEffect, useState } from "react";
 import { command } from "./bridge";
+import { useDirtyReport } from "./draft-report";
 import { errorOf, type ClientId, type GrokProtocol } from "./types";
 import { clients, clientName } from "./ClientSelection";
 import { clientProtocols, protocolNames } from "./client-protocols";
@@ -29,10 +30,7 @@ export default function ProviderImports({
       .then((q) => setQueue(q ?? []))
       .catch((e) => setError(errorOf(e).message));
   }, []);
-  useEffect(() => {
-    onDirtyChange?.(active !== null);
-  }, [active, onDirtyChange]);
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+  useDirtyReport(active !== null, onDirtyChange);
   useEffect(() => {
     let disposed = false;
     const events = subscriptions((e) => setError(errorOf(e).message));

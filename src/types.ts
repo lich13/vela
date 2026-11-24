@@ -39,7 +39,7 @@ export type ViewState = {
   error: string | null;
   officialMode: OfficialMode;
 };
-export type OfficialMode = {
+type OfficialMode = {
   enabled: boolean;
   state: "disabled" | "enabled" | "conflict" | "unavailable" | string;
   accountId: string | null;
@@ -324,7 +324,7 @@ export type QuotaPlan = {
   unlimited: boolean;
   resetAt: string | null;
 };
-export type QuotaUsage = {
+type QuotaUsage = {
   requests: number | null;
   tokens: number | null;
   cost: number | null;

@@ -14,6 +14,7 @@ import {
   Users,
 } from "lucide-react";
 import { command } from "./bridge";
+import { useDirtyReport } from "./draft-report";
 import { useInstance } from "./instance";
 import { subscriptions } from "./subscriptions";
 import type {
@@ -50,10 +51,7 @@ export default function AntigravityAccounts({
 
   const [dialogError, setDialogError] = useState("");
   const isDialogDirty = dialog?.type === "rename" && name !== dialog.item.name;
-  useEffect(() => {
-    onDirtyChange?.(isDialogDirty);
-  }, [isDialogDirty, onDirtyChange]);
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+  useDirtyReport(isDialogDirty, onDirtyChange);
   const closeDialog = () => {
     setDialog(null);
     setDialogError("");

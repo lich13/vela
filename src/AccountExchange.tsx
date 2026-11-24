@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import Modal from "./Modal";
 import TemplateChoice, { type PreparedTemplate } from "./TemplateChoice";
 import { command } from "./bridge";
+import { useDirtyReport } from "./draft-report";
 import { errorOf, type ViewState } from "./types";
 
 import type { AccountImportPreview as Preview, AccountExportPreview as ExportPreview } from "./bridge-contracts";
@@ -23,10 +24,7 @@ export default function AccountExchange({ mode, close, update, notify, onDirtyCh
   const [error, setError] = useState("");
   const [stale, setStale] = useState(false);
   const isDirty = preview !== null || template !== null;
-  useEffect(() => {
-    onDirtyChange?.(isDirty);
-  }, [isDirty, onDirtyChange]);
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+  useDirtyReport(isDirty, onDirtyChange);
   const token = useRef<string | null>(null), templateToken = useRef<string | null>(null);
   const mounted = useRef(true), started = useRef(false), submitting = useRef(false);
   const perform = async (work: () => Promise<void>) => {

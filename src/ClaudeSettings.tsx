@@ -304,7 +304,7 @@ function append(editing: Editing, path: Path, item: string) {
   if (Array.isArray(list)) editing.change([...path, list.length], item);
   else editing.change(path, [item]);
 }
-export function StringList({
+function StringList({
   path,
   label,
   hint,
@@ -376,7 +376,7 @@ export function StringList({
   );
 }
 /** A table of text values, one row per key; every change patches a single key. */
-export function StringMap({
+function StringMap({
   path,
   label,
   hint,

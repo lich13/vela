@@ -200,29 +200,6 @@
   border-radius: var(--radius-pill);
 }
 
-.provider-name {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-  flex: 1;
-}
-
-.provider-name strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 14px;
-}
-
-.provider-name code {
-  font-size: 12px;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .provider-secondary {
   display: flex;
   gap: 12px;
@@ -688,13 +665,6 @@
 
 .model-table td > strong {
   font-weight: 560;
-}
-
-.model-provider {
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .model-sources {

@@ -19,6 +19,8 @@ export const preciseDate = (n: number) =>
     fractionalSecondDigits: 3,
     hour12: false,
   });
+export const seconds = (ms: number, digits: 2 | 3) =>
+  `${(ms / 1000).toFixed(digits)}s`;
 // 1024 to a step, one decimal from KB up: 718.6 KB.
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -99,7 +101,7 @@ export function missingReason(
 
 // Folds aliases of one model together: case, `models/` and vendor prefixes,
 // trailing release dates and `-latest`.
-export function normalizeModelName(model: string): string {
+function normalizeModelName(model: string): string {
   let name = model.trim().toLowerCase();
   name = name.slice(name.lastIndexOf("/") + 1);
   for (;;) {
@@ -109,7 +111,7 @@ export function normalizeModelName(model: string): string {
   }
 }
 
-export type ModelRelation = {
+type ModelRelation = {
   // The upstream was asked for a different model than the client requested.
   mapped: boolean;
   // The upstream answered with a different model than the one it was sent.

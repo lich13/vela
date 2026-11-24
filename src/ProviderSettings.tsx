@@ -5,6 +5,7 @@ import { RefreshCw, Search } from "lucide-react";
 import type { EditRevision } from "./gateway-edit";
 import { confirmAction } from "./confirmation";
 import { command } from "./bridge";
+import { useBusyReport, useDirtyReport } from "./draft-report";
 import { errorOf, sortEfforts } from "./types";
 import type { ClientId, ModelCatalog, Provider } from "./types";
 function StandardProviderSettings({
@@ -50,13 +51,8 @@ function StandardProviderSettings({
       baseline.current = revision;
     }
   }, [JSON.stringify(runtime.allowedModels), revision, dirty, saving, error]);
-  useEffect(() => {
-    onDirtyChange?.(dirty);
-  }, [dirty, onDirtyChange]);
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
-  useEffect(() => {
-    onBusyChange?.(saving);
-  }, [saving, onBusyChange]);
+  useDirtyReport(dirty, onDirtyChange);
+  useBusyReport(saving, onBusyChange);
   const load = async (force: boolean) => {
     const current = ++generation.current;
     setLoading(true);

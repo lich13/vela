@@ -11,6 +11,7 @@ import {
   promptTokens,
   missingReason,
   modelRelation,
+  seconds,
 } from "./usage-format";
 import { durationSeverity, firstTokenSeverity } from "./latency-health";
 import {
@@ -480,9 +481,7 @@ export default function UsageLogTable({
                           : `${first} ms`
                     }
                   >
-                    {native || first == null
-                      ? "—"
-                      : `${(first! / 1000).toFixed(2)}s`}
+                    {native || first == null ? "—" : seconds(first!, 2)}
                   </span>
                 ),
                 duration: (
@@ -502,9 +501,7 @@ export default function UsageLogTable({
                           : `${approx}${elapsed} ms${estimated}`)
                     }
                   >
-                    {elapsed == null
-                      ? "—"
-                      : `${approx}${(elapsed / 1000).toFixed(2)}s`}
+                    {elapsed == null ? "—" : `${approx}${seconds(elapsed, 2)}`}
                     {state && <span className="usage-interruption"> ⚠</span>}
                   </span>
                 ),

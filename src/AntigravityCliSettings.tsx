@@ -2,7 +2,7 @@ import { useState } from "react";
 import { get, type Field, type Json } from "./claude-settings";
 import { JsonRoot, Rules, Settings, jsonEditing } from "./ClaudeSettings";
 
-export const antigravityCliGroups = [
+const antigravityCliGroups = [
   "外观与交互",
   "执行与安全",
   "模型",

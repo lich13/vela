@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { command } from "./bridge";
-import { Drawer } from "./UsageDrawer";
+import { Drawer } from "./Drawer";
 import { errorOf, type ClientId } from "./types";
 import type {
   CalculatorModel,

@@ -1,3 +1,4 @@
+import { DrawerShell } from "./Drawer";
 import FailureRuleDialog from "./FailureRuleDialog";
 import type { ErrorResponse } from "./failure-policy-types";
 import {
@@ -7,6 +8,7 @@ import {
   quotaBasisLabel,
   type QuotaCheck,
 } from "./limit-labels";
+import { date } from "./usage-format";
 import type { RoutingDetails } from "./usage-types";
 import {
   routingReason,
@@ -25,7 +27,7 @@ import { command } from "./bridge";
 import { confirmAction } from "./confirmation";
 import { errorOf, type ClientId, type GatewayState } from "./types";
 
-export const reasons = {
+const reasons = {
   model_unavailable: "模型不支持",
   authentication: "认证失败",
   upstream_service: "上游服务异常",
@@ -177,15 +179,7 @@ const client = (id: ClientId | ExternalClient | null) =>
               ? "Grok Build"
               : "应用";
 
-const time = (seconds: number) =>
-  new Date(seconds * 1000).toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
+const time = (seconds: number) => date(seconds * 1000);
 
 function displayName(name: string, id: string) {
   return name.length <= 120 &&
@@ -879,7 +873,6 @@ function EventDetail({
   provider: string;
   onClose: () => void;
 }) {
-  const ref = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const [raw, setRaw] = useState<ErrorResponse | null>(null);
   const [rawError, setRawError] = useState("");
@@ -900,34 +893,18 @@ function EventDetail({
     };
   }, [r.id, r.details?.rawError]);
   const [addingRule, setAddingRule] = useState(false);
+  // Runs after the shell's own effect has opened the dialog.
   useEffect(() => {
-    const focus = document.activeElement as HTMLElement | null;
-    const dialog = ref.current;
-    dialog?.showModal();
     heading.current?.focus({ preventScroll: true });
-    return () => {
-      dialog?.close();
-      queueMicrotask(() => {
-        if (!dialog?.isConnected && focus?.isConnected)
-          focus.focus({ preventScroll: true });
-      });
-    };
   }, []);
 
   const eventCategory = r.category;
   return (
-    <dialog
-      ref={ref}
+    <DrawerShell
       className="event-drawer"
       data-category={eventCategory}
       aria-labelledby="event-title"
-      onCancel={(e) => {
-        e.preventDefault();
-        onClose();
-      }}
-      onClick={(e) => {
-        if (e.target === ref.current) onClose();
-      }}
+      onClose={onClose}
     >
       <div className="event-drawer-inner">
         {addingRule &&
@@ -1197,6 +1174,6 @@ function EventDetail({
           ))}
         </dl>
       </div>
-    </dialog>
+    </DrawerShell>
   );
 }

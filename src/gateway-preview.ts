@@ -251,14 +251,14 @@ export const grokGatewayDemo: GatewayState = {
     takeNewThreads: false,
   })),
 };
-export const dshGatewayDemo: GatewayState = {
+const dshGatewayDemo: GatewayState = {
   ...structuredClone(grokGatewayDemo),
   clientId: "dsh",
   revision: "preview-dsh",
   providers: [],
   running: false,
 };
-export const agyGatewayDemo: GatewayState = {
+const agyGatewayDemo: GatewayState = {
   ...structuredClone(grokGatewayDemo),
   clientId: "agy",
   revision: "preview-agy",

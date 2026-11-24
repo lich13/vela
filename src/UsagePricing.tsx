@@ -11,12 +11,13 @@ import {
   X,
 } from "lucide-react";
 import { command } from "./bridge";
+import { useDirtyReport } from "./draft-report";
 import { useInstance } from "./instance";
 import { errorOf } from "./types";
 import { confirmAction } from "./confirmation";
 import ProviderPriceMappings from "./ProviderPriceMappings";
 import UsageCostCalculator from "./UsageCostCalculator";
-import { Drawer } from "./UsageDrawer";
+import { Drawer } from "./Drawer";
 import type {
   ModelsDevState,
   PriceComparison,
@@ -117,12 +118,10 @@ export default function Pricing({
       if (generation === searchGeneration.current) setLoading(false);
     }
   };
-  useEffect(() => {
-    onDirtyChange?.(
-      editor !== null || sync || mapping || billing || calculator,
-    );
-    return () => onDirtyChange?.(false);
-  }, [editor, sync, mapping, billing, calculator, onDirtyChange]);
+  useDirtyReport(
+    editor !== null || sync || mapping || billing || calculator,
+    onDirtyChange,
+  );
   const save = async (config: PricingConfig, revision?: string) => {
     if (!view) return;
     setBusy(true);

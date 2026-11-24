@@ -2,6 +2,7 @@ import type { GatewayEdit } from "./bridge-contracts";
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpDown, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { command } from "./bridge";
+import { useBusyReport, useDirtyReport } from "./draft-report";
 import { confirmAction } from "./confirmation";
 import type { EditRevision } from "./gateway-edit";
 import {
@@ -48,13 +49,8 @@ export default function ProviderEndpoints({
       mounted.current = false;
     };
   }, []);
-  useEffect(() => {
-    onDirtyChange?.(dirty);
-  }, [dirty, onDirtyChange]);
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
-  useEffect(() => {
-    onBusyChange?.(busy);
-  }, [busy, onBusyChange]);
+  useDirtyReport(dirty, onDirtyChange);
+  useBusyReport(busy, onBusyChange);
   useEffect(() => {
     if (!dirty && !busy && !error) {
       const values = runtime.extraBaseUrls;

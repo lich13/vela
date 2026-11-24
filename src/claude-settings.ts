@@ -274,7 +274,7 @@ export const sensitive = (path: Path) =>
 export const managed = (path: Path) =>
   path[0] === "env" &&
   (path[1] === "ANTHROPIC_BASE_URL" || path[1] === "ANTHROPIC_AUTH_TOKEN");
-export function redact(value: Json, path: Path = []): Json {
+function redact(value: Json, path: Path = []): Json {
   if (sensitive(path)) return "••••••••";
   if (Array.isArray(value)) return value.map((v, i) => redact(v, [...path, i]));
   if (value && typeof value === "object")

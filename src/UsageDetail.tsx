@@ -6,12 +6,13 @@ import {
   routingBoundary,
   routingOutcome,
 } from "./routing-labels";
-import { Drawer } from "./UsageDrawer";
+import { Drawer } from "./Drawer";
 import {
   preciseDate,
   promptTokens,
   missingReason,
   modelRelation,
+  seconds,
 } from "./usage-format";
 import {
   interruption,
@@ -783,16 +784,16 @@ function AttemptDetails({
               </span>
             ) : timing.estimated ? (
               <span tabIndex={0} title={estimatedTimeNote}>
-                ≈{(elapsed / 1000).toFixed(3)}s
+                ≈{seconds(elapsed, 3)}
               </span>
             ) : (
-              `${(elapsed / 1000).toFixed(3)}s`
+              seconds(elapsed, 3)
             ),
           ],
           [
             "首字",
             first != null ? (
-              `${(first / 1000).toFixed(3)}s`
+              seconds(first, 3)
             ) : (
               <span
                 tabIndex={0}
@@ -824,9 +825,7 @@ function AttemptDetails({
             ? ([
                 [
                   "生成耗时",
-                  a.generationMs == null
-                    ? "—"
-                    : `${(a.generationMs / 1000).toFixed(3)}s`,
+                  a.generationMs == null ? "—" : seconds(a.generationMs, 3),
                 ],
                 [
                   "生成 TPS",

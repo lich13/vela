@@ -1,7 +1,7 @@
 import { useEffect, useState, type ComponentType } from "react";
 import type { CodeMirrorSurfaceProps } from "./CodeMirrorSurface";
 
-export type CodeMirrorSurfaceComponent = ComponentType<CodeMirrorSurfaceProps>;
+type CodeMirrorSurfaceComponent = ComponentType<CodeMirrorSurfaceProps>;
 
 let cached: CodeMirrorSurfaceComponent | null = null;
 let pending: Promise<CodeMirrorSurfaceComponent> | null = null;

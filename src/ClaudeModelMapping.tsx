@@ -8,6 +8,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { command } from "./bridge";
+import { useBusyReport, useDirtyReport } from "./draft-report";
 import type { GatewayEdit } from "./bridge-contracts";
 import { confirmAction } from "./confirmation";
 import type { EditRevision } from "./gateway-edit";
@@ -169,13 +170,8 @@ export default function ClaudeModelMapping({
       gone = true;
     };
   }, []);
-  useEffect(() => {
-    onDirtyChange?.(dirty);
-    return () => onDirtyChange?.(false);
-  }, [dirty, onDirtyChange]);
-  useEffect(() => {
-    onBusyChange?.(busy);
-  }, [busy, onBusyChange]);
+  useDirtyReport(dirty, onDirtyChange);
+  useBusyReport(busy, onBusyChange);
   const leave = async () => {
     if (!dirty || (await confirmAction("放弃未保存的模型映射？"))) close();
   };
