@@ -105,4 +105,6 @@ Grok 会话只提取轮次与会话标识摘要、模型、时间、调用次数
 
 启动时若账号库里仍有旧版本保存的 Google Cloud ADC 凭据、Vertex API Key 或接管记录（含当时的本地令牌与设置快照），Vela 把它们从账号库中移除，只保留 OAuth 账号。App 的 `~/.antigravity/settings.json` 仅在其 `gateway` 仍是 Vela 当时写入的回环地址与本地令牌时，才把 `gateway`、`models` 两个键还原为接管前的值；已被改动、不是 JSON 或不存在时不触碰。此过程不改动 `~/.config/gcloud`、`~/.config/agswitch`、App `config.json` 的 `enableAdc`、钥匙串和令牌文件，旧版留在这些位置的 ADC 文件由用户自行处理。
 
+App 未运行时，账号额度周期改由 Vela 运行本机的 `agy -p /usage --output-format json` 读取：只在已有登录账号时运行，不传入任何凭据（由 `agy` 用自己的登录查询），只取各窗口的剩余比例和重置时间，结果只在内存保留 60 秒；`agy` 的报错在显示前去掉邮箱和形似令牌的字符串。
+
 用量通过 App 本地只读接口与历史文件采集。Antigravity 2.33.0 起，Vela 只读 `~/.gemini/antigravity/daemon/` 下的 `hub_*.json` 与 `ls_*.json`，从中取得实例的本机端口和本机接口令牌；令牌只在内存中使用，只发往 `127.0.0.1` 上的该实例做只读查询，不写入 Vela 的文件、日志、事件或前端。`~/.gemini/antigravity/conversations/` 只列出会话库文件名并读取文件身份、大小和修改时间，不打开会话库、不读取其中内容。App 返回的模型目录只含模型 ID、内部名称和显示名，保存在本机用量数据库。会话标题按 App 原名保存在现有私有同步游标中，关闭 App 后仍可供账单使用；标题可能包含用户输入内容，仅在本机保存，不写入公开日志、通知或项目服务。内部关联继续使用摘要；完整消息正文、工具参数与认证头不进入用量记录。
