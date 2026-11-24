@@ -39,6 +39,16 @@ pub(crate) enum Event<'a> {
         state: &'a serde_json::Value,
     },
     AntigravityAuth(&'a antigravity::auth::AntigravityAuthState),
+    /// A sentence telling the user what a change they just made means.
+    Notice(&'a str),
+    ClaudeProfile(&'a claude_profile::View),
+    /// The journal gained a record or failed to keep one.
+    Journal(&'a events::Change),
+    /// Provider test results, usage or prices changed. Nothing rides along:
+    /// whoever shows them reads them again.
+    ProviderTests,
+    Usage,
+    Pricing,
 }
 impl Event<'_> {
     pub(crate) const fn name(&self) -> &'static str {
@@ -50,6 +60,12 @@ impl Event<'_> {
             Self::Quota { .. } => "provider-quota",
             Self::Config { .. } => "config-state",
             Self::AntigravityAuth(_) => "antigravity-auth-state",
+            Self::Notice(_) => "switch-notice",
+            Self::ClaudeProfile(_) => "claude-profile-state",
+            Self::Journal(_) => "app-event",
+            Self::ProviderTests => "provider-tests",
+            Self::Usage => "usage-state",
+            Self::Pricing => "pricing-state",
         }
     }
 }
@@ -68,6 +84,10 @@ impl serde::Serialize for Event<'_> {
             }
             Self::Config { state, .. } => state.serialize(serializer),
             Self::AntigravityAuth(state) => state.serialize(serializer),
+            Self::Notice(message) => message.serialize(serializer),
+            Self::ClaudeProfile(view) => view.serialize(serializer),
+            Self::Journal(change) => change.serialize(serializer),
+            Self::ProviderTests | Self::Usage | Self::Pricing => serializer.serialize_unit(),
         }
     }
 }
@@ -78,13 +98,24 @@ pub(crate) trait Sink: Send + Sync + 'static {
     fn emit(&self, event: Event<'_>);
     /// Whether someone is watching; background polling slows down when nobody is.
     fn attentive(&self) -> bool;
-    /// Whether the host has work under way that a client's configuration
-    /// files may answer, such as a sign-in. They are polled while it has.
-    fn busy(&self) -> bool {
-        false
+    /// The sign-ins the host is running. A client's configuration files are
+    /// polled while there is one, and a change that would cut across one is
+    /// refused.
+    fn sign_ins(&self) -> SignIns {
+        SignIns::default()
     }
     /// Runs once per polling round, for upkeep the host does at that pace.
     fn tick(&self) {}
+}
+
+#[derive(Default)]
+pub(crate) struct SignIns {
+    /// A Codex sign-in is starting, waiting or being cancelled.
+    pub(crate) codex: bool,
+    /// The saved account that sign-in refreshes.
+    pub(crate) codex_account: Option<String>,
+    /// A Claude sign-in is waiting or being cancelled.
+    pub(crate) claude: bool,
 }
 
 pub(crate) struct Runtime {
@@ -92,6 +123,8 @@ pub(crate) struct Runtime {
     pub(crate) usage: usage::Service,
     pub(crate) core: Mutex<Core>,
     pub(crate) data: PathBuf,
+    /// The user's own home directory, where the clients keep theirs.
+    pub(crate) user_home: PathBuf,
     pub(crate) provider_tests: provider_testing::Service,
     pub(crate) gateway: gateway::Gateway,
     pub(crate) claude: gateway::Gateway,
@@ -119,11 +152,18 @@ impl Runtime {
     pub(crate) fn new(sink: Arc<dyn Sink>) -> Result<Arc<Self>> {
         let user_home =
             dirs::home_dir().ok_or_else(|| AppError::new(code::PATH, "无法定位用户主目录"))?;
-        let data = user_home.join(".vela");
-        storage::private_dir(&data)?;
         let home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| user_home.join(".codex"));
+        Self::at(sink, user_home, home)
+    }
+
+    /// The same over a home directory the caller names, with Codex in `home`
+    /// until the preferences say otherwise. Tests keep both in a temporary
+    /// directory.
+    pub(crate) fn at(sink: Arc<dyn Sink>, user_home: PathBuf, home: PathBuf) -> Result<Arc<Self>> {
+        let data = user_home.join(".vela");
+        storage::private_dir(&data)?;
         // No other instance is running, so no current spool exists yet.
         cleanup_spool::clean(&data);
         official::recover_interrupted(&data);
@@ -133,12 +173,14 @@ impl Runtime {
         let agy = gateway.agy_companion(data.join("antigravity"))?;
         let grok = gateway.grok_companion(data.join("grok"))?;
         let dsh = gateway.dsh_companion(data.join("dsh"))?;
-        let antigravity_migration_error = migrations::antigravity_accounts(&data).err();
+        let antigravity_paths = antigravity::auth::Paths::from_roots(&user_home, &data);
+        let antigravity_migration_error =
+            migrations::antigravity_accounts(&antigravity_paths).err();
         // The first look at the Antigravity login may wait on the system
         // credential store, so it runs off the calling thread.
         std::thread::scope(|scope| {
             let _ = scope
-                .spawn(|| antigravity::auth::poll_state(&data, &mut None))
+                .spawn(|| antigravity::auth::poll_state(&antigravity_paths, &mut None))
                 .join();
         });
         let usage = usage::Service::new(&data);
@@ -158,7 +200,7 @@ impl Runtime {
                     "请先退出 Claude Code，再恢复配置切换事务",
                 ))
             } else {
-                claude_profile::recover(&data, &home, &claude_profile::user_home()?)
+                claude_profile::recover(&data, &home, &user_home)
             };
             match recovery {
                 Err(e) => Some(e),
@@ -195,6 +237,7 @@ impl Runtime {
             diagnostics,
             core: Mutex::new(core),
             data,
+            user_home,
             provider_tests,
             gateway,
             claude,
@@ -231,6 +274,8 @@ impl Runtime {
         self.agy.observe_home(&self.home(gateway::ClientId::Agy)?);
         self.grok.observe_home(&self.home(gateway::ClientId::Grok)?);
         self.dsh.observe_home(&self.home(gateway::ClientId::Dsh)?);
+        self.report_services();
+        self.keep_usage();
         {
             let r = self.clone();
             tokio::spawn(async move {
@@ -438,7 +483,10 @@ impl Runtime {
                     ]
                     .into_iter()
                     .any(gateway::Gateway::is_running)
-                        || runtime.sink.busy(),
+                        || {
+                            let sign_ins = runtime.sink.sign_ins();
+                            sign_ins.codex || sign_ins.claude
+                        },
                 ) {
                     for client in [
                         gateway::ClientId::Codex,
@@ -452,11 +500,7 @@ impl Runtime {
                                 .config_stamp(&home, config_cache.entry(client).or_default())
                         }) {
                             if config_versions.get(&client) != Some(&stamp) {
-                                let key = serde_json::to_string(&client).unwrap_or_default();
-                                runtime.sink.emit(Event::Config {
-                                    key: &key,
-                                    state: &serde_json::json!({"clientId":client,"revision":stamp.1,"guarded":stamp.2}),
-                                });
+                                runtime.publish_config(client, &stamp.1, stamp.2);
                                 config_versions.insert(client, stamp);
                                 if client != gateway::ClientId::Codex {
                                     runtime.publish_gateway(runtime.gateway(client));
@@ -464,9 +508,10 @@ impl Runtime {
                             }
                         }
                     }
-                    if let Ok(rev) = antigravity::home()
-                        .and_then(|home| antigravity::config_stamp(&home, &mut agy_config_cache))
-                    {
+                    if let Ok(rev) = antigravity::config_stamp(
+                        &runtime.antigravity_home(),
+                        &mut agy_config_cache,
+                    ) {
                         if agy_config_version.as_ref() != Some(&rev) {
                             runtime.sink.emit(Event::Config {
                                 key: "antigravity",
@@ -478,10 +523,10 @@ impl Runtime {
                 }
                 // Like the Codex account, a new Antigravity login is picked
                 // up whether or not anyone is watching.
-                let data = runtime.data.clone();
+                let paths = runtime.antigravity_paths();
                 let mut stamp = agy_auth_stamp.take();
                 let polled = tokio::task::spawn_blocking(move || {
-                    let result = antigravity::auth::poll_state(&data, &mut stamp);
+                    let result = antigravity::auth::poll_state(&paths, &mut stamp);
                     (stamp, result)
                 })
                 .await;
@@ -533,6 +578,104 @@ impl Runtime {
         Ok(())
     }
 
+    /// Passes on what the journal, the provider tests and the usage store
+    /// announce, and starts the scheduled provider tests.
+    fn report_services(self: &Arc<Self>) {
+        use tokio::sync::broadcast::error::RecvError;
+        let mut journal = self.diagnostics.subscribe();
+        let sink = self.sink.clone();
+        tokio::spawn(async move {
+            loop {
+                match journal.recv().await {
+                    Ok(change) => sink.emit(Event::Journal(&change)),
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+        let mut tests = self.provider_tests.subscribe();
+        let sink = self.sink.clone();
+        tokio::spawn(async move {
+            while let Ok(()) | Err(RecvError::Lagged(_)) = tests.recv().await {
+                sink.emit(Event::ProviderTests);
+            }
+        });
+        self.provider_tests.run_scheduler();
+        let mut usage = self.usage.subscribe();
+        let sink = self.sink.clone();
+        tokio::spawn(async move {
+            while let Ok(()) | Err(RecvError::Lagged(_)) = usage.recv().await {
+                coalesce_gateway_events(&mut usage);
+                sink.emit(Event::Usage);
+            }
+        });
+    }
+
+    /// Keeps prices current and, when the user asked for it, reads the
+    /// clients' sessions every minute.
+    fn keep_usage(self: &Arc<Self>) {
+        // Price checks must not wait behind a session scan or historical compaction.
+        self.usage.schedule_price_backfill();
+        let runtime = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut scheduled = tokio::time::interval(std::time::Duration::from_secs(600));
+            scheduled.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            scheduled.tick().await;
+            // An unpriced row asks models.dev for newer prices sooner than the timer.
+            let mut hinted = false;
+            loop {
+                let Some(runtime) = runtime.upgrade() else {
+                    break;
+                };
+                let usage = runtime.usage.clone();
+                if let Ok(prices) = usage.prices() {
+                    let before = prices.sync_stamp();
+                    let _ = usage.update_prices(false).await;
+                    let after = prices.sync_stamp();
+                    let index = prices.models_dev.view().version;
+                    let max_age =
+                        std::time::Duration::from_secs(if hinted { 3_600 } else { 21_600 });
+                    let refreshed = prices
+                        .models_dev
+                        .refresh_stale(max_age)
+                        .await
+                        .is_ok_and(|view| view.version != index);
+                    if refreshed {
+                        usage.schedule_price_backfill();
+                    }
+                    if before.1 != after.1 || refreshed {
+                        runtime.emit(Event::Pricing);
+                    }
+                }
+                drop(runtime);
+                // Coalesce hints from unpriced requests, including high-volume streams.
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                hinted = tokio::select! {
+                    _ = scheduled.tick() => false,
+                    _ = usage.wait_price_hint() => true,
+                };
+            }
+        });
+        let runtime = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                let Some(runtime) = runtime.upgrade() else {
+                    break;
+                };
+                if runtime.usage.settings().auto_sync {
+                    let roots = runtime.usage_roots();
+                    let usage = runtime.usage.clone();
+                    let _ =
+                        tokio::task::spawn_blocking(move || usage.sync_roots(roots, None)).await;
+                }
+                let maintenance = runtime.usage.clone();
+                let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
+                drop(runtime);
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+    }
+
     fn gateways(&self) -> [gateway::Gateway; 5] {
         [
             self.gateway.clone(),
@@ -560,12 +703,55 @@ impl Runtime {
         Ok(match client {
             gateway::ClientId::Codex => core.home(),
             gateway::ClientId::Claude => PathBuf::from(core.preferences().claude_home),
-            gateway::ClientId::Agy => {
-                dirs::home_dir().ok_or_else(|| AppError::new(code::PATH, "无法定位用户主目录"))?
-            }
+            gateway::ClientId::Agy => self.user_home.clone(),
             gateway::ClientId::Grok => PathBuf::from(core.preferences().grok_home),
             gateway::ClientId::Dsh => PathBuf::from(core.preferences().dsh_home),
         })
+    }
+    /// Where Antigravity keeps its settings and, off the system credential
+    /// store, its login.
+    pub(crate) fn antigravity_home(&self) -> PathBuf {
+        self.user_home.join(".gemini")
+    }
+    pub(crate) fn antigravity_paths(&self) -> antigravity::auth::Paths {
+        antigravity::auth::Paths::from_roots(&self.user_home, &self.data)
+    }
+    /// The session directories usage is read from, by source.
+    pub(crate) fn usage_roots(&self) -> Vec<(String, Result<PathBuf>)> {
+        vec![
+            ("codex".into(), self.home(gateway::ClientId::Codex)),
+            ("claude".into(), self.home(gateway::ClientId::Claude)),
+            ("grok".into(), self.home(gateway::ClientId::Grok)),
+            ("antigravity".into(), Ok(self.antigravity_home())),
+        ]
+    }
+    pub(crate) fn emit(&self, event: Event<'_>) {
+        self.sink.emit(event);
+    }
+    pub(crate) fn notice(&self, message: &str) {
+        self.sink.emit(Event::Notice(message));
+    }
+    pub(crate) fn sign_ins(&self) -> SignIns {
+        self.sink.sign_ins()
+    }
+    /// Announces a client's configuration file as it now stands.
+    pub(crate) fn publish_config(&self, client: gateway::ClientId, revision: &str, guarded: bool) {
+        let key = serde_json::to_string(&client).unwrap_or_default();
+        self.sink.emit(Event::Config {
+            key: &key,
+            state: &serde_json::json!({"clientId":client,"revision":revision,"guarded":guarded}),
+        });
+    }
+    pub(crate) fn set_quota_interval(&self, seconds: u64) {
+        for gateway in [
+            &self.gateway,
+            &self.claude,
+            &self.agy,
+            &self.grok,
+            &self.dsh,
+        ] {
+            gateway.set_quota_interval(seconds);
+        }
     }
     pub(crate) fn config_failure(&self, client: gateway::ClientId, error: AppError) -> AppError {
         if let Some(record) = events::Record::configuration_failure(client, &error, false) {

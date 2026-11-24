@@ -1,7 +1,6 @@
 //! Reversible Claude global profiles. OAuth stores never belong to this transaction.
 use crate::errors::code;
 mod catalog;
-#[cfg(feature = "desktop")]
 pub mod commands;
 mod json;
 pub(crate) mod login;

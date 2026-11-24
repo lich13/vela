@@ -310,14 +310,12 @@ pub fn patch(
     Ok(after.0)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn read_config_tree(format: Format, text: String) -> Result<Node> {
     let mut node = tree(format, &text)?;
     mask(&mut node, false);
     Ok(node)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn patch_config_tree(
     format: Format,
     text: String,

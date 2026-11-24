@@ -353,7 +353,7 @@ impl Pricing {
     pub(super) fn content_version(&self) -> String {
         self.state.read().cache.catalog_hash.clone()
     }
-    pub(super) fn sync_stamp(&self) -> (String, Option<i64>) {
+    pub(crate) fn sync_stamp(&self) -> (String, Option<i64>) {
         let s = self.state.read();
         (s.cache.hash.clone(), s.cache.checked_at)
     }

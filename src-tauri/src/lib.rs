@@ -1,5 +1,5 @@
-// Until the command table arrives, the build without the desktop shell
-// compiles the services but not the commands that call them.
+// Until the server arrives, nothing in the build without the desktop shell
+// calls the command table.
 #![cfg_attr(not(feature = "desktop"), allow(dead_code, unused_imports))]
 #[cfg(all(feature = "desktop", not(any(target_os = "macos", windows))))]
 compile_error!("The Vela desktop app supports only macOS and Windows");
@@ -44,6 +44,7 @@ mod quick;
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 mod quick_macos;
+mod rpc;
 mod runtime;
 #[cfg(feature = "desktop")]
 mod startup;
@@ -57,11 +58,11 @@ mod tray_macos;
 #[cfg(feature = "desktop")]
 mod update;
 mod usage;
-// Unused until the server and the SSH client that speak it are in.
+// Unused until the server that speaks it is in.
 #[allow(dead_code)]
 mod wire;
 #[cfg(feature = "desktop")]
-use core::{Preferences, ViewState};
+use core::ViewState;
 #[cfg(feature = "desktop")]
 use parking_lot::Mutex;
 pub(crate) use runtime::Runtime;
@@ -428,19 +429,34 @@ impl runtime::Sink for Host {
             }
             Event::Config { key, state } => emit_main_config_state(app, key, (*state).clone()),
             Event::AntigravityAuth(state) => emit_antigravity_auth_state(app, state),
+            Event::Notice(message) => emit_switch_notice(app, *message),
+            Event::ClaudeProfile(view) => {
+                let _ = app.emit(name, view);
+            }
+            Event::Journal(change) => emit_main_app_event(app, change),
+            Event::ProviderTests => emit_if_main_visible(app, MainSignal::ProviderTests, ()),
+            Event::Usage => emit_if_main_visible(app, MainSignal::UsageState, ()),
+            Event::Pricing => emit_if_main_visible(app, MainSignal::PricingState, ()),
         }
     }
     fn attentive(&self) -> bool {
         has_visible_ui(&self.app)
     }
-    fn busy(&self) -> bool {
-        self.app.try_state::<Arc<Runtime>>().is_some_and(|r| {
-            login_active(&r.shell.login.lock().state)
-                || matches!(
-                    r.shell.claude_login.lock().state.phase.as_str(),
-                    "waiting" | "cancelling"
-                )
-        })
+    fn sign_ins(&self) -> runtime::SignIns {
+        let Some(r) = self.app.try_state::<Arc<Runtime>>() else {
+            return Default::default();
+        };
+        let codex = r.shell.login.lock().state.clone();
+        let active = login_active(&codex);
+        let claude = matches!(
+            r.shell.claude_login.lock().state.phase.as_str(),
+            "waiting" | "cancelling"
+        );
+        runtime::SignIns {
+            codex: active,
+            codex_account: codex.target_account_id.filter(|_| active),
+            claude,
+        }
     }
     fn tick(&self) {
         #[cfg(windows)]
@@ -651,7 +667,7 @@ pub(crate) fn sync_window_on_show(app: &tauri::AppHandle, label: &str) {
     if was_visible {
         return;
     }
-    if let Ok(state) = state_for(&r) {
+    if let Ok(state) = r.state() {
         let _ = window.emit("switch-state", &state);
     }
     for g in [&r.gateway, &r.claude, &r.agy, &r.grok, &r.dsh] {
@@ -1084,353 +1100,33 @@ fn tray_tooltip_text(state: &ViewState) -> String {
     format!("Vela · {current}")
 }
 
-#[cfg(feature = "desktop")]
-fn publish(app: &tauri::AppHandle, state: ViewState) {
-    if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        r.publish(state);
-    }
-}
-#[cfg(feature = "desktop")]
-fn refresh(_: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
-    r.refresh()
-}
-#[cfg(feature = "desktop")]
-pub(crate) use runtime::coalesce_gateway_events;
-#[cfg(feature = "desktop")]
-fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
-    if let Some(r) = app.try_state::<Arc<Runtime>>() {
-        r.publish_gateway(gateway);
-    }
-}
-#[cfg(feature = "desktop")]
-fn state_for(r: &Runtime) -> Result<ViewState> {
-    r.state()
-}
+/// Runs a shared command on this machine. What the command changes reaches
+/// the windows through the runtime's sink; only what belongs to the windows
+/// themselves is done here.
 #[cfg(feature = "desktop")]
 #[tauri::command]
-async fn list_provider_models(
-    client_id: gateway::ClientId,
-    r: tauri::State<'_, Arc<Runtime>>,
-    provider_id: String,
-    force: bool,
-) -> Result<gateway::catalog::View> {
-    r.gateway(client_id).list_models(&provider_id, force).await
-}
-/// The upstream error statuses met by the providers that share a host with
-/// the given provider, or with the address of one that is not saved yet.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn get_provider_seen_statuses(
-    client_id: gateway::ClientId,
-    r: tauri::State<'_, Arc<Runtime>>,
-    provider_id: Option<String>,
-    base_url: Option<String>,
-) -> Vec<events::SeenStatus> {
-    let providers = r
-        .gateway(client_id)
-        .same_host_providers(provider_id.as_deref(), base_url.as_deref());
-    r.diagnostics.seen_statuses(client_id, &providers)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn get_state(r: tauri::State<'_, Arc<Runtime>>) -> Result<ViewState> {
-    state_for(r.inner())
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn switch_account(
+async fn call(
     app: tauri::AppHandle,
     r: tauri::State<'_, Arc<Runtime>>,
-    id: String,
-    expected_revision: String,
-) -> Result<ViewState> {
-    let _connection_guard = r.official_tx.lock().await;
-    let mut core = r.core.lock();
-    let official_view = core.official_view();
-    if official::blocks_gateway(&r.data) && official_view.account_id.as_deref() != Some(id.as_str())
-    {
-        return Err(AppError::new(
-            code::OFFICIAL_MODE,
-            "请先关闭官方账号连接，再切换其他账号",
-        ));
-    }
-    let result = core.switch_account(&id, &expected_revision);
-    drop(core);
-    match result {
-        Ok(s) => {
-            publish(&app, s.clone());
-            Ok(s)
-        }
-        Err(e) => {
-            let _ = refresh(&app, &r);
-            Err(e)
-        }
-    }
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn use_official_account(
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-    account_id: String,
-    expected_auth_revision: String,
-    expected_config_revision: String,
-) -> Result<ViewState> {
-    let _official_guard = r.official_tx.lock().await;
-    let state = get_state(r.clone())?;
-    let account = state
-        .accounts
-        .iter()
-        .find(|a| a.id == account_id)
-        .ok_or_else(|| AppError::new(code::ACCOUNT, "账号不存在"))?;
-    if account.kind != "chatgpt" {
-        return Err(AppError::new(
-            code::OFFICIAL_MODE,
-            "只有 ChatGPT 账号可以使用官方连接",
-        ));
-    }
-    if state.official_mode.enabled {
-        if state.official_mode.account_id.as_deref() == Some(account_id.as_str()) {
-            return Ok(state);
-        }
-        return Err(AppError::new(
-            code::OFFICIAL_MODE,
-            "已有官方账号连接，请先关闭",
-        ));
-    }
-    if r.gateway.try_view()?.recovery_pending && !r.gateway.try_view()?.running {
-        return Err(AppError::new(
-            code::RECOVERY,
-            "请先处理 Codex 网关的恢复事务",
-        ));
-    }
-    let gateway_was_running = r.gateway.try_view()?.running;
-    if gateway_was_running {
-        r.gateway.stop_checked(None).await?;
-    }
-    let home = r.home(gateway::ClientId::Codex)?;
-    let config_revision = r.gateway.read_config(&home)?.revision;
-    if !gateway_was_running
-        && config_revision != expected_config_revision
-        && !expected_config_revision.is_empty()
-    {
-        return Err(AppError::new(
-            code::CONFLICT,
-            "Codex 配置已变化，请刷新后重试",
-        ));
-    }
-    let auth_revision = expected_auth_revision.clone();
-    official::enable_with_switch(&r.data, &home, &account_id, &config_revision, || {
-        r.core
-            .lock()
-            .switch_account(&account_id, &auth_revision)
-            .map(|_| ())
-    })?;
-    let next = refresh(&app, &r)?;
-    emit_switch_notice(&app, "官方账号已启用，请重新打开 Codex");
-    Ok(next)
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn disable_official_account(
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<ViewState> {
-    let _official_guard = r.official_tx.lock().await;
-    let home = r.home(gateway::ClientId::Codex)?;
-    official::disable(&r.data, &home)?;
-    let next = refresh(&app, &r)?;
-    emit_switch_notice(&app, "官方连接已关闭，配置已恢复");
-    Ok(next)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn import_current(app: tauri::AppHandle, r: tauri::State<'_, Arc<Runtime>>) -> Result<ViewState> {
-    let mut c = r.core.lock();
-    let path = c.home().join("auth.json");
-    c.import_file(&path, None)?;
-    drop(c);
-    refresh(&app, &r)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn rename_account(
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-    id: String,
     name: String,
-) -> Result<ViewState> {
-    r.core.lock().rename(&id, &name)?;
-    refresh(&app, &r)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn delete_account(
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-    id: String,
-) -> Result<ViewState> {
-    {
-        let session = r.shell.login.lock();
-        if login_active(&session.state)
-            && session.state.target_account_id.as_deref() == Some(id.as_str())
-        {
-            return Err(AppError::new(
-                code::LOGIN_BUSY,
-                "该账号正在刷新登录，请先取消或等待完成",
-            ));
+    args: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let result = rpc::call(r.inner(), &name, args).await?;
+    if name == "set_preferences" {
+        let preferences = r.core.lock().preferences();
+        if preferences.system_notifications {
+            notifications::on_manual_open(&app);
+        }
+        let bg = window_background_color_for_theme(&preferences.theme);
+        for label in ["main", "quick"] {
+            if let Some(w) = app.get_webview_window(label) {
+                let _ = w.set_background_color(Some(bg));
+            }
         }
     }
-    r.core.lock().delete(&id)?;
-    refresh(&app, &r)
+    Ok(result)
 }
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn read_config(
-    client_id: gateway::ClientId,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<configuration::Document> {
-    r.gateway(client_id).read_config(&r.home(client_id)?)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn read_previous_config(
-    client_id: gateway::ClientId,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<String> {
-    r.gateway(client_id).previous_config()
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn validate_config(client_id: gateway::ClientId, text: String) -> Result<()> {
-    configuration::validate(client_id, &text)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn save_config(
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-    text: String,
-    expected_revision: String,
-    client_id: gateway::ClientId,
-) -> Result<configuration::Document> {
-    let _official_guard = r.official_tx.lock().await;
-    let home = r.home(client_id)?;
-    if client_id == gateway::ClientId::Codex {
-        official::guard_save(&r.data, &home, &text)?;
-    } else if client_id == gateway::ClientId::Claude {
-        claude_profile::guard_save(&r.data, &home, &claude_profile::user_home()?, &text)?;
-    }
-    let doc = r
-        .gateway(client_id)
-        .save_config(&home, &text, &expected_revision)
-        .map_err(|e| r.config_failure(client_id, e))?;
-    let _ = app.emit(
-        "config-state",
-        serde_json::json!({"clientId":client_id,"revision":doc.revision,"guarded":doc.guarded}),
-    );
-    refresh(&app, &r)?;
-    Ok(doc)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn set_quota_refresh(
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-    seconds: u64,
-    expected_seconds: u64,
-) -> Result<ViewState> {
-    let state = r.core.lock().set_quota_refresh(seconds, expected_seconds)?;
-    r.gateway.set_quota_interval(seconds);
-    r.claude.set_quota_interval(seconds);
-    r.agy.set_quota_interval(seconds);
-    r.grok.set_quota_interval(seconds);
-    r.dsh.set_quota_interval(seconds);
-    publish(&app, state.clone());
-    Ok(state)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn set_preferences(
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-    mut preferences: Preferences,
-) -> Result<ViewState> {
-    let _official_guard = r.official_tx.lock().await;
-    if matches!(
-        r.shell.claude_login.lock().state.phase.as_str(),
-        "waiting" | "cancelling"
-    ) && r.core.lock().preferences().claude_home != preferences.claude_home
-    {
-        return Err(AppError::new(
-            code::LOGIN_BUSY,
-            "请先完成或取消 Claude 登录",
-        ));
-    }
-    if login_active(&r.shell.login.lock().state) {
-        return Err(AppError::new(code::LOGIN_BUSY, "请先完成或取消登录"));
-    }
-    if (r.gateway.guarded_home() || official::blocks_gateway(&r.data))
-        && r.core.lock().preferences().codex_home != preferences.codex_home
-    {
-        return Err(AppError::new(
-            code::GATEWAY_ACTIVE,
-            "更换 Codex 目录前请先停用网关并恢复配置",
-        ));
-    }
-    if (r.claude.guarded_home() || claude_profile::blocks(&r.data))
-        && r.core.lock().preferences().claude_home != preferences.claude_home
-    {
-        return Err(AppError::new(
-            code::GATEWAY,
-            "请先停止 Claude Code 网关并处理恢复事务",
-        ));
-    }
-    if r.dsh.guarded_home() && r.core.lock().preferences().dsh_home != preferences.dsh_home {
-        return Err(AppError::new(
-            code::GATEWAY,
-            "请先停止 DSH 网关并处理恢复事务",
-        ));
-    }
-    if r.grok.guarded_home() && r.core.lock().preferences().grok_home != preferences.grok_home {
-        return Err(AppError::new(
-            code::GATEWAY,
-            "请先停止 Grok Build 网关并处理恢复事务",
-        ));
-    }
-    let s = {
-        let mut core = r.core.lock();
-        preferences.quota_refresh_seconds = core.preferences().quota_refresh_seconds;
-        core.set_preferences(preferences)?
-    };
-    r.gateway
-        .set_quota_interval(s.preferences.quota_refresh_seconds);
-    r.claude
-        .set_quota_interval(s.preferences.quota_refresh_seconds);
-    r.agy
-        .set_quota_interval(s.preferences.quota_refresh_seconds);
-    r.grok
-        .set_quota_interval(s.preferences.quota_refresh_seconds);
-    r.dsh
-        .set_quota_interval(s.preferences.quota_refresh_seconds);
-    if s.preferences.system_notifications {
-        notifications::on_manual_open(&app);
-    }
-    r.gateway.observe_home(&r.home(gateway::ClientId::Codex)?);
-    r.claude.observe_home(&r.home(gateway::ClientId::Claude)?);
-    r.grok.observe_home(&r.home(gateway::ClientId::Grok)?);
-    r.dsh.observe_home(&r.home(gateway::ClientId::Dsh)?);
-    let bg = window_background_color_for_theme(&s.preferences.theme);
-    for label in ["main", "quick"] {
-        if let Some(w) = app.get_webview_window(label) {
-            let _ = w.set_background_color(Some(bg));
-        }
-    }
-    publish(&app, s.clone());
-    Ok(s)
-}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 async fn get_startup(r: tauri::State<'_, Arc<Runtime>>) -> Result<startup::View> {
@@ -1569,7 +1265,7 @@ fn start_login(
             s.cancel = None;
         }
         let _ = app.emit("login-state", final_state);
-        let _ = refresh(&app, &runtime);
+        let _ = runtime.refresh();
         if runtime.quitting.load(Ordering::Relaxed) {
             app.exit(0);
         }
@@ -1642,244 +1338,6 @@ fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
 }
 #[cfg(feature = "desktop")]
 #[tauri::command]
-fn get_gateway_freeze(r: tauri::State<'_, Arc<Runtime>>) -> gateway::freeze::View {
-    r.gateway.freeze_gate().view()
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn set_gateway_frozen(
-    frozen: bool,
-    client_id: Option<gateway::ClientId>,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::freeze::View> {
-    let gate = r.gateway.freeze_gate();
-    match client_id {
-        Some(client) => gate.set_selected(Some(client), frozen),
-        None => gate.set(frozen),
-    }
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn set_gateway_freeze_resume(
-    client_id: gateway::ClientId,
-    resume_at: Option<i64>,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::freeze::View> {
-    r.gateway
-        .freeze_gate()
-        .schedule(client_id, resume_at, usage::model::now())
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn get_gateway(
-    client_id: gateway::ClientId,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::View> {
-    if let Ok(home) = r.home(client_id) {
-        r.gateway(client_id).observe_home(&home);
-    }
-    r.gateway(client_id).try_view()
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn cancel_gateway_wait(
-    client_id: gateway::ClientId,
-    request_id: String,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> &'static str {
-    r.gateway(client_id).interrupt_wait(&request_id)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn get_gateway_models(
-    client_id: gateway::ClientId,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::model_list::View> {
-    r.gateway(client_id).gateway_models()
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn refresh_gateway_models(
-    client_id: gateway::ClientId,
-    provider_ids: Option<Vec<String>>,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::model_list::View> {
-    r.gateway(client_id)
-        .refresh_gateway_models(provider_ids)
-        .await
-}
-/// Downloads OpenAI's Codex catalog now instead of at the day's turn.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn update_codex_catalog(r: tauri::State<'_, Arc<Runtime>>) -> Result<gateway::View> {
-    r.gateway.refresh_official_catalog(true).await?;
-    r.gateway.try_view()
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn search_models_dev(
-    query: String,
-    limit: Option<usize>,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<models_dev::Search> {
-    Ok(r.usage
-        .prices()?
-        .models_dev
-        .search(&query, limit.unwrap_or(50)))
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn edit_model_list(
-    client_id: gateway::ClientId,
-    op: gateway::model_list::Operation,
-    id: String,
-    source: Option<String>,
-    context: Option<u64>,
-    efforts: Option<Vec<String>>,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::model_list::View> {
-    r.gateway(client_id).edit_model_list(
-        op,
-        &id,
-        source.as_deref(),
-        gateway::model_list::Custom { context, efforts },
-    )
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn dsh_official_models(
-    refresh: bool,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::dsh::official::CatalogView> {
-    r.dsh
-        .dsh_official_models(&r.home(gateway::ClientId::Dsh)?, refresh)
-        .await
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn preview_dsh_profile(
-    profile: Option<String>,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::dsh::Preview> {
-    r.dsh
-        .preview_dsh(&r.home(gateway::ClientId::Dsh)?, profile.as_deref())
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn attach_dsh_profiles(
-    options: gateway::dsh::Options,
-    all: bool,
-    expected_revision: String,
-    preview_revision: String,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::dsh::Batch> {
-    r.dsh
-        .attach_dsh_profiles(
-            &r.home(gateway::ClientId::Dsh)?,
-            options,
-            all,
-            &expected_revision,
-            Some(&preview_revision),
-        )
-        .await
-        .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn read_dsh_file(
-    profile: Option<String>,
-    key: gateway::dsh::editor::FileKey,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::dsh::editor::FileView> {
-    r.dsh
-        .read_dsh_file(&r.home(gateway::ClientId::Dsh)?, profile.as_deref(), key)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn read_previous_dsh_file(
-    profile: Option<String>,
-    key: gateway::dsh::editor::FileKey,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<String> {
-    r.dsh
-        .previous_dsh_file(&r.home(gateway::ClientId::Dsh)?, profile.as_deref(), key)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn save_dsh_file(
-    profile: Option<String>,
-    key: gateway::dsh::editor::FileKey,
-    text: String,
-    expected_revision: String,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::dsh::editor::FileView> {
-    r.dsh
-        .save_dsh_file(
-            &r.home(gateway::ClientId::Dsh)?,
-            profile.as_deref(),
-            key,
-            Some(&text),
-            &expected_revision,
-        )
-        .await
-        .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn restore_dsh_file(
-    profile: Option<String>,
-    key: gateway::dsh::editor::FileKey,
-    expected_revision: String,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::dsh::editor::FileView> {
-    r.dsh
-        .save_dsh_file(
-            &r.home(gateway::ClientId::Dsh)?,
-            profile.as_deref(),
-            key,
-            None,
-            &expected_revision,
-        )
-        .await
-        .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn preview_grok_import(
-    selected: Option<String>,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::GrokImportPreview> {
-    r.grok
-        .preview_grok_import(&r.home(gateway::ClientId::Grok)?, selected.as_deref())
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-fn cancel_grok_import(token: Option<String>, r: tauri::State<'_, Arc<Runtime>>) {
-    r.grok.cancel_grok_import(token.as_deref());
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn commit_grok_import(
-    token: String,
-    expected_revision: String,
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::View> {
-    let _guard = r.official_tx.lock().await;
-    let view = r.grok.commit_grok_import(
-        &r.home(gateway::ClientId::Grok)?,
-        &token,
-        &expected_revision,
-    )?;
-    let result = r
-        .grok
-        .start(&view.revision, &r.home(gateway::ClientId::Grok)?)
-        .await;
-    let _ = refresh(&app, &r);
-    result
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
 fn reveal_provider_token(
     window: tauri::WebviewWindow,
     client_id: gateway::ClientId,
@@ -1889,142 +1347,6 @@ fn reveal_provider_token(
 ) -> Result<String> {
     r.gateway(client_id)
         .reveal_provider_token(window.label(), &provider_id, &expected_revision)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn probe_provider_endpoints(
-    client_id: gateway::ClientId,
-    provider_id: String,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::View> {
-    r.gateway(client_id)
-        .probe_endpoints(&provider_id, true)
-        .await
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn update_gateway(
-    client_id: gateway::ClientId,
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-    edit: gateway::Edit,
-    expected_revision: String,
-    expected_config_revision: Option<String>,
-) -> Result<gateway::View> {
-    let _official_guard = r.official_tx.lock().await;
-    let home = r.home(client_id)?;
-    let selected = matches!(&edit, gateway::Edit::Select { .. });
-    let edit = r.gateway(client_id).with_new_provider_defaults(edit);
-    let result = r
-        .gateway(client_id)
-        .edit_checked(
-            edit,
-            &expected_revision,
-            &home,
-            expected_config_revision.as_deref(),
-        )
-        .map_err(|e| r.config_failure(client_id, e))?;
-    let _ = refresh(&app, &r);
-    if selected {
-        emit_switch_notice(
-            &app,
-            if result.running {
-                "已切换供应商，新请求立即生效".to_string()
-            } else {
-                format!("文件已切换，请重新打开 {}", client_id.name())
-            },
-        );
-    }
-    Ok(result)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn start_gateway(
-    client_id: gateway::ClientId,
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-    expected_revision: String,
-    expected_config_revision: Option<String>,
-) -> Result<gateway::View> {
-    let result = start_gateway_for(
-        &app,
-        &r,
-        client_id,
-        &expected_revision,
-        expected_config_revision.as_deref(),
-    )
-    .await?;
-    emit_switch_notice(&app, format!("网关已启用，请重新打开 {}", client_id.name()));
-    Ok(result)
-}
-/// Starts one client's gateway and refreshes every window. The main window
-/// command and the native panel share it; each words its own notice.
-#[cfg(feature = "desktop")]
-pub(crate) async fn start_gateway_for(
-    app: &tauri::AppHandle,
-    r: &Arc<Runtime>,
-    client_id: gateway::ClientId,
-    expected_revision: &str,
-    expected_config_revision: Option<&str>,
-) -> Result<gateway::View> {
-    let _official_guard = r.official_tx.lock().await;
-    if client_id == gateway::ClientId::Codex && official::blocks_gateway(&r.data) {
-        return Err(AppError::new(
-            code::OFFICIAL_MODE,
-            "请先关闭官方账号连接，再启动 Codex 网关",
-        ));
-    }
-    let home = r.home(client_id)?;
-    let result = r
-        .gateway(client_id)
-        .start_checked(expected_revision, &home, expected_config_revision)
-        .await
-        .map_err(|e| r.config_failure(client_id, e))?;
-    r.poll_wake.notify_one();
-    let _ = refresh(app, r);
-    Ok(result)
-}
-#[cfg(feature = "desktop")]
-pub(crate) async fn stop_gateway_for(
-    app: &tauri::AppHandle,
-    r: &Arc<Runtime>,
-    client_id: gateway::ClientId,
-    expected_config_revision: Option<&str>,
-) -> Result<gateway::View> {
-    let _official_guard = r.official_tx.lock().await;
-    let result = r
-        .gateway(client_id)
-        .stop_checked(expected_config_revision)
-        .await
-        .map_err(|e| r.config_failure(client_id, e))?;
-    r.poll_wake.notify_one();
-    let _ = refresh(app, r);
-    Ok(result)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn stop_gateway(
-    client_id: gateway::ClientId,
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-    expected_config_revision: Option<String>,
-) -> Result<gateway::View> {
-    let result = stop_gateway_for(&app, &r, client_id, expected_config_revision.as_deref()).await?;
-    emit_switch_notice(
-        &app,
-        format!("已写入当前供应商，请重新打开 {}", client_id.name()),
-    );
-    Ok(result)
-}
-#[cfg(feature = "desktop")]
-#[tauri::command]
-async fn query_provider_quota(
-    client_id: gateway::ClientId,
-    r: tauri::State<'_, Arc<Runtime>>,
-    provider_id: String,
-    force: bool,
-) -> Result<gateway::QuotaView> {
-    r.gateway(client_id).query_quota(&provider_id, force).await
 }
 #[cfg(feature = "desktop")]
 #[tauri::command]
@@ -2085,9 +1407,7 @@ pub fn run() {
             app.manage(runtime.clone());
             #[cfg(target_os = "macos")]
             quick_macos::connect(app.handle());
-            provider_testing::commands::connect(app.handle());
             notifications::connect(app.handle(), &runtime.diagnostics);
-            usage::commands::connect(app.handle(), &runtime);
             runtime.start()?;
             {
                 let handle = app.handle().clone();
@@ -2304,56 +1624,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            antigravity::read_antigravity_config,
-            antigravity::save_antigravity_config,
-            antigravity::read_previous_antigravity_config,
-            antigravity::validate_antigravity_config,
-            antigravity::cli::read_antigravity_cli_config,
-            antigravity::cli::save_antigravity_cli_config,
-            antigravity::cli::read_previous_antigravity_cli_config,
-            antigravity::cli::validate_antigravity_cli_config,
-            configuration::tree::read_config_tree,
-            configuration::tree::patch_config_tree,
-            antigravity::auth::get_antigravity_auth_state,
-            antigravity::auth::switch_antigravity_account,
-            antigravity::auth::rename_antigravity_account,
-            antigravity::auth::delete_antigravity_account,
+            call,
             antigravity::auth::export_antigravity_accounts,
             antigravity::auth::import_antigravity_accounts,
-            usage::commands::get_usage_state,
             usage::commands::export_usage_bill,
-            usage::commands::get_usage_dashboard,
-            usage::commands::get_antigravity_usage_stats,
-            usage::commands::get_claude_usage_stats,
-            usage::commands::get_claude_usage_quota,
-            usage::commands::get_usage_logs,
-            usage::commands::get_usage_detail,
-            usage::commands::set_usage_settings,
-            usage::commands::sync_usage,
-            usage::commands::get_pricing,
-            usage::commands::calculate_usage_cost,
-            usage::commands::get_usage_calculator_models,
-            usage::commands::get_claude_requested_models,
-            usage::commands::get_usage_calculator_totals,
-            usage::commands::search_pricing,
-            usage::commands::get_models_dev,
-            usage::commands::update_models_dev,
-            usage::commands::compare_model_prices,
-            usage::commands::configure_pricing,
-            usage::commands::update_pricing,
-            usage::commands::reload_pricing,
             usage::commands::open_pricing_directory,
-            provider_testing::commands::provider_test_state,
-            provider_testing::commands::provider_test_start,
-            provider_testing::commands::provider_test_save_prompt,
-            provider_testing::commands::provider_test_set_platform,
-            provider_testing::commands::provider_test_query,
-            provider_testing::commands::provider_test_cancel,
-            provider_testing::commands::provider_test_retry,
-            provider_testing::commands::provider_test_set_detection,
-            provider_testing::commands::provider_test_clear_mark,
-            provider_testing::commands::provider_test_models,
-            provider_testing::commands::provider_test_update_bank,
             links::get_provider_imports,
             links::confirm_provider_import,
             links::cancel_provider_import,
@@ -2363,13 +1638,6 @@ pub fn run() {
             commands::remove_power_helper,
             commands::force_quit_agent_clients,
             commands::get_startup_error,
-            commands::get_app_events,
-            commands::get_app_event,
-            commands::get_app_event_raw,
-            commands::clear_app_events,
-            claude_profile::commands::get_claude_profile,
-            claude_profile::commands::switch_claude_profile,
-            claude_profile::commands::recover_claude_profile,
             claude_profile::commands::claude_login_status,
             claude_profile::commands::start_claude_login,
             claude_profile::commands::cancel_claude_login,
@@ -2383,29 +1651,7 @@ pub fn run() {
             quick::set_quick,
             quick::quick_ready,
             quick::hide_quick,
-            get_gateway,
-            get_gateway_freeze,
-            set_gateway_frozen,
-            set_gateway_freeze_resume,
-            cancel_gateway_wait,
-            preview_grok_import,
-            get_gateway_models,
-            refresh_gateway_models,
-            update_codex_catalog,
-            search_models_dev,
-            edit_model_list,
-            dsh_official_models,
-            preview_dsh_profile,
-            attach_dsh_profiles,
-            read_dsh_file,
-            read_previous_dsh_file,
-            save_dsh_file,
-            restore_dsh_file,
-            cancel_grok_import,
-            commit_grok_import,
             reveal_provider_token,
-            probe_provider_endpoints,
-            update_gateway,
             commands::preview_account_import,
             commands::commit_account_import,
             commands::cancel_account_exchange,
@@ -2413,24 +1659,6 @@ pub fn run() {
             commands::prepare_account_template,
             commands::select_account_template,
             commands::export_accounts,
-            start_gateway,
-            stop_gateway,
-            query_provider_quota,
-            list_provider_models,
-            get_provider_seen_statuses,
-            get_state,
-            switch_account,
-            use_official_account,
-            disable_official_account,
-            import_current,
-            rename_account,
-            delete_account,
-            read_config,
-            read_previous_config,
-            validate_config,
-            save_config,
-            set_preferences,
-            set_quota_refresh,
             get_startup,
             set_startup,
             get_login,

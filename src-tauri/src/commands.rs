@@ -142,58 +142,6 @@ pub fn get_startup_error(window: tauri::WebviewWindow, r: R<'_>) -> Option<AppEr
 }
 
 #[tauri::command]
-pub async fn get_app_events(
-    r: R<'_>,
-    filter: crate::events::Filter,
-) -> Result<crate::events::Page> {
-    use crate::events::{ExternalClient, JournalClient, Origin};
-    let service = r.diagnostics.clone();
-    let claude_home = r.home(crate::gateway::ClientId::Claude);
-    tauri::async_runtime::spawn_blocking(move || {
-        // Each external source is read only when the page shows it.
-        let wanted = |origin, client| {
-            filter.origin.is_none_or(|o| o == origin)
-                && filter
-                    .client_id
-                    .is_none_or(|c| c == JournalClient::External(client))
-        };
-        if wanted(Origin::Antigravity, ExternalClient::Antigravity) {
-            if let Some(home) = dirs::home_dir() {
-                service.sync_antigravity_logs(&home);
-            }
-        }
-        if wanted(Origin::ClaudeCode, ExternalClient::ClaudeCode) {
-            if let Ok(home) = claude_home {
-                service.sync_claude_logs(&home);
-            }
-        }
-        service.query(filter)
-    })
-    .await
-    .map_err(|_| AppError::new(code::LOG_READ, "日志读取失败"))
-}
-#[tauri::command]
-pub fn get_app_event(r: R<'_>, id: String) -> Option<crate::events::ClassifiedRecord> {
-    r.diagnostics.detail(&id)
-}
-#[tauri::command]
-pub async fn get_app_event_raw(r: R<'_>, id: String) -> Result<Option<crate::event_raw::View>> {
-    let service = r.diagnostics.clone();
-    tauri::async_runtime::spawn_blocking(move || service.raw(&id))
-        .await
-        .map_err(|_| AppError::new(code::LOG_READ, "错误原文读取失败"))?
-}
-#[tauri::command]
-pub async fn clear_app_events(r: R<'_>) -> Result<()> {
-    r.diagnostics
-        .clear(
-            dirs::home_dir(),
-            r.home(crate::gateway::ClientId::Claude).ok(),
-        )
-        .await
-}
-
-#[tauri::command]
 pub async fn preview_account_import(
     app: tauri::AppHandle,
     r: R<'_>,
@@ -228,7 +176,6 @@ pub fn cancel_account_exchange(r: R<'_>, token: String) {
 }
 #[tauri::command]
 pub async fn commit_account_import(
-    app: tauri::AppHandle,
     r: R<'_>,
     token: String,
     selected: Vec<crate::core::exchange::Selection>,
@@ -238,7 +185,7 @@ pub async fn commit_account_import(
     r.core
         .lock()
         .exchange_commit(&token, &selected, &expected_revision)?;
-    crate::refresh(&app, &r)
+    r.refresh()
 }
 #[tauri::command]
 pub fn preview_account_export(r: R<'_>) -> crate::core::exchange::ExportPreview {

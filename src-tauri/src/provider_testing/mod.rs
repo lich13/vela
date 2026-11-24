@@ -1,7 +1,6 @@
 //! Direct provider diagnostics. Only summaries/configuration are persisted;
 //! connection prompts are shared globally; credentials and responses stay in this process.
 mod bank;
-#[cfg(feature = "desktop")]
 pub mod commands;
 mod compat;
 mod connection;
