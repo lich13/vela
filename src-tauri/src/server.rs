@@ -71,7 +71,11 @@ fn socket() -> PathBuf {
 }
 
 fn on_tokio(work: impl Future<Output = Outcome>) -> Outcome {
+    // A server mostly waits, and a thread for every core of a large machine
+    // would only be more threads asleep. Whatever takes long is on the
+    // blocking pool, which is left as it is.
     let tokio = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
         .map_err(|error| format!("无法启动运行时：{error}"))?;

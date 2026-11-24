@@ -296,6 +296,30 @@ async fn health_is_the_handshake_answered() {
     assert_eq!(health(mute).await.unwrap_err(), "服务器没有按约定应答");
 }
 
+/// On the runtime the binary builds for itself rather than the test's own.
+#[test]
+fn the_servers_own_runtime_serves_connections_and_answers_health() {
+    let outcome = on_tokio(async {
+        let fixture = fixture().await;
+        health(fixture.socket.clone()).await?;
+        let mut client = Client::connect(&fixture).await;
+        client.shake_hands().await;
+        // A request that waits leaves the runtime free for the next.
+        let held = fixture.server.runtime.official_tx.lock().await;
+        client.ask(1, "disable_official_account", json!({})).await;
+        client
+            .ask(2, "get_gateway", json!({"clientId": "claude"}))
+            .await;
+        let (first, gateway, _) = client.answer().await;
+        assert_eq!(first, 2, "{gateway:?}");
+        assert_eq!(gateway.unwrap()["running"], false);
+        drop(held);
+        assert_eq!(client.answer().await.0, 1);
+        health(fixture.socket.clone()).await
+    });
+    assert_eq!(outcome, Ok(()));
+}
+
 #[test]
 fn the_relay_carries_bytes_both_ways_until_one_way_ends() {
     let (near, mut far) = BlockingStream::pair().unwrap();
