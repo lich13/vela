@@ -16,6 +16,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+#[cfg(feature = "desktop")]
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
 const CREDENTIAL_LIMIT: u64 = 256 * 1024;
 /// The only account kind. Earlier versions also stored `adc` and `vertex_key`
@@ -1537,6 +1538,7 @@ pub(crate) fn with_usage_sync<T>(
     synchronize();
     Ok(state)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn get_antigravity_auth_state(
     app: tauri::AppHandle,
@@ -1551,6 +1553,7 @@ pub async fn get_antigravity_auth_state(
     crate::emit_antigravity_auth_state(&app, &state);
     Ok(state)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn switch_antigravity_account(
     r: R<'_>,
@@ -1579,6 +1582,7 @@ pub async fn switch_antigravity_account(
     .await
     .map_err(|_| err(code::PROCESS, "切换凭据任务异常中断"))?
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn rename_antigravity_account(
     r: R<'_>,
@@ -1588,6 +1592,7 @@ pub fn rename_antigravity_account(
 ) -> Result<AntigravityAuthState> {
     rename_account_at(&Paths::resolve(&r.data)?, &id, &name, &expected_revision)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn delete_antigravity_account(
     r: R<'_>,
@@ -1596,6 +1601,7 @@ pub fn delete_antigravity_account(
 ) -> Result<AntigravityAuthState> {
     delete_account_at(&Paths::resolve(&r.data)?, &id, &expected_revision)
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn export_antigravity_accounts(
     app: tauri::AppHandle,
@@ -1623,6 +1629,7 @@ pub async fn export_antigravity_accounts(
     .await
     .map_err(|_| err(code::EXPORT, "账号导出失败"))?
 }
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn import_antigravity_accounts(
     app: tauri::AppHandle,

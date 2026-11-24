@@ -968,6 +968,7 @@ fn credential_read_failure_keeps_the_saved_account_and_can_be_retried() {
     assert!(after.accounts[0].current);
 }
 
+#[cfg(feature = "desktop")]
 #[test]
 fn new_oauth_notice_survives_hidden_updates_and_is_drained_once() {
     let (_tmp, paths) = setup_paths();

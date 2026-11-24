@@ -301,7 +301,7 @@ impl Service {
             .gateway(ClientId::Codex)
             .freeze_gate()
             .subscribe_control();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last_wall = now();

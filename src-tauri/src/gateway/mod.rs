@@ -777,7 +777,7 @@ impl Gateway {
         }
         if !added.is_empty() {
             let gateway = self.clone();
-            tauri::async_runtime::spawn(async move {
+            tokio::spawn(async move {
                 if let Err(e) = gateway.backfill_models().await {
                     gateway.0.inner.lock().error = Some(e.message);
                     gateway.changed();
@@ -2388,7 +2388,7 @@ impl Gateway {
             return;
         }
         let gateway = self.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             let result = gateway.sync_catalog().await;
             let written = result.as_ref().is_ok_and(|written| *written);
             let error = result.err().map(|e| e.message);

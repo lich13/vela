@@ -13,6 +13,7 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "desktop")]
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
 
 const BOOL_SETTINGS: &[&str] = &[
@@ -160,11 +161,13 @@ fn previous_at(data: &Path) -> Result<String> {
     String::from_utf8(raw).map_err(|_| AppError::new(code::UTF8, "备份配置不是有效 UTF-8"))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn read_antigravity_cli_config(r: R<'_>) -> Result<Document> {
     read_at(&super::home()?, &r.data)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn save_antigravity_cli_config(
     r: R<'_>,
@@ -174,11 +177,13 @@ pub fn save_antigravity_cli_config(
     save_at(&super::home()?, &r.data, &text, &expected_revision)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn read_previous_antigravity_cli_config(r: R<'_>) -> Result<String> {
     previous_at(&r.data)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn validate_antigravity_cli_config(text: String) -> Result<()> {
     validate_text(&text)

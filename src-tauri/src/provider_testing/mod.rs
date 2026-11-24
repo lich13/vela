@@ -1,6 +1,7 @@
 //! Direct provider diagnostics. Only summaries/configuration are persisted;
 //! connection prompts are shared globally; credentials and responses stay in this process.
 mod bank;
+#[cfg(feature = "desktop")]
 pub mod commands;
 mod compat;
 mod connection;
@@ -620,7 +621,7 @@ impl Service {
     }
     fn launch(&self, id: String, mut cancel: watch::Receiver<bool>) {
         let service = self.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             let started = Instant::now();
             let work = async {
                 let _permit = service

@@ -14,11 +14,17 @@ fn main() {
         "cargo:rustc-env=VELA_REVISION={}",
         revision.as_deref().unwrap_or("unknown").trim()
     );
-    build_power();
-    build_quick();
-    tauri_build::build()
+    // The native panel, the power helper and the Tauri context belong to the
+    // desktop app alone.
+    #[cfg(feature = "desktop")]
+    {
+        build_power();
+        build_quick();
+        tauri_build::build()
+    }
 }
 
+#[cfg(feature = "desktop")]
 fn build_quick() {
     println!("cargo:rerun-if-changed=native/quick_panel.swift");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
@@ -91,6 +97,7 @@ fn build_quick() {
     println!("cargo:rustc-link-lib=framework=SwiftUI");
 }
 
+#[cfg(feature = "desktop")]
 fn build_power() {
     println!("cargo:rerun-if-changed=native/power_client.m");
     println!("cargo:rerun-if-changed=native/power_helper.m");

@@ -40,7 +40,7 @@ fn publish_power_result(
 #[tauri::command]
 pub async fn get_clamshell_state(r: R<'_>) -> Result<power::State> {
     let r = r.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || r.power.state())
+    tauri::async_runtime::spawn_blocking(move || r.shell.power.state())
         .await
         .map_err(|_| AppError::new(code::POWER, "电源状态读取失败"))?
 }
@@ -63,8 +63,8 @@ pub(crate) async fn set_clamshell(
 ) -> Result<power::State> {
     let (app, r) = (app.clone(), r.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        let result = r.power.set(enabled, &expected_revision);
-        publish_power_result(&app, &r.power, result)
+        let result = r.shell.power.set(enabled, &expected_revision);
+        publish_power_result(&app, &r.shell.power, result)
     })
     .await
     .map_err(|_| AppError::new(code::POWER, "电源设置失败"))?
@@ -73,8 +73,8 @@ pub(crate) async fn set_clamshell(
 pub async fn install_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<power::State> {
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let result = r.power.install();
-        publish_power_result(&app, &r.power, result)
+        let result = r.shell.power.install();
+        publish_power_result(&app, &r.shell.power, result)
     })
     .await
     .map_err(|_| AppError::new(code::POWER, "助手安装失败"))?
@@ -83,8 +83,8 @@ pub async fn install_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<pow
 pub async fn remove_power_helper(app: tauri::AppHandle, r: R<'_>) -> Result<power::State> {
     let r = r.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let result = r.power.remove();
-        publish_power_result(&app, &r.power, result)
+        let result = r.shell.power.remove();
+        publish_power_result(&app, &r.shell.power, result)
     })
     .await
     .map_err(|_| AppError::new(code::POWER, "助手移除失败"))?
@@ -101,13 +101,13 @@ pub(crate) async fn force_quit(
     r: &Arc<crate::Runtime>,
     target: process_control::Target,
 ) -> Result<process_control::Outcome> {
-    if r.force_quitting.swap(true, Ordering::AcqRel) {
+    if r.shell.force_quitting.swap(true, Ordering::AcqRel) {
         return Err(AppError::new(code::BUSY, "正在退出客户端"));
     }
     let result = tauri::async_runtime::spawn_blocking(move || process_control::force_quit(target))
         .await
         .map_err(|_| AppError::new(code::PROCESS, "退出客户端失败"));
-    r.force_quitting.store(false, Ordering::Release);
+    r.shell.force_quitting.store(false, Ordering::Release);
     result?
 }
 #[cfg(test)]
