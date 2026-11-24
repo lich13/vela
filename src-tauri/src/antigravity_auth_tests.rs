@@ -1267,15 +1267,17 @@ fn migration_skips_a_vault_without_retired_content() {
 #[test]
 fn exported_accounts_are_read_back_without_touching_those_already_saved() {
     let (tmp, paths) = setup_paths();
-    let (first, _, before) = two_accounts(&paths);
+    let (first, second, before) = two_accounts(&paths);
     let renamed = rename_account_at(&paths, &first, "工作账号", &before.revision).unwrap();
     let file = tmp.path().join("export").join("accounts.json");
+    let both = [second, first];
 
-    let stale = export_accounts_at(&paths, "stale-rev", &file).unwrap_err();
+    let stale = export_accounts_at(&paths, "stale-rev", &both, &file).unwrap_err();
     assert_eq!(stale.code, code::CONFLICT);
     assert!(!file.exists());
+    // The file follows the saved order, not the order they were chosen in.
     assert_eq!(
-        export_accounts_at(&paths, &renamed.revision, &file).unwrap(),
+        export_accounts_at(&paths, &renamed.revision, &both, &file).unwrap(),
         2
     );
     #[cfg(unix)]
@@ -1320,6 +1322,39 @@ fn exported_accounts_are_read_back_without_touching_those_already_saved() {
     let switched = switch_account_at(&other, &lifecycle, &id, &taken.state.revision).unwrap();
     assert_eq!(fs::read_to_string(other.oauth_file()).unwrap(), FIRST_LOGIN);
     assert_eq!(active_account_id(&switched), Some(id));
+}
+
+#[test]
+fn only_the_chosen_accounts_are_exported() {
+    let (tmp, paths) = setup_paths();
+    let (_, second, state) = two_accounts(&paths);
+    let file = tmp.path().join("accounts.json");
+    assert_eq!(
+        export_accounts_at(&paths, &state.revision, &[second], &file).unwrap(),
+        1
+    );
+    let (_other_tmp, other) = setup_paths();
+    let empty = state_at(&other).unwrap();
+    let taken = import_accounts_at(&other, &empty.revision, &file).unwrap();
+    let emails: Vec<_> = taken
+        .state
+        .accounts
+        .iter()
+        .map(|a| a.email.as_deref())
+        .collect();
+    assert_eq!(emails, [Some("u2@example.invalid")]);
+}
+
+#[test]
+fn an_empty_or_unknown_choice_exports_nothing() {
+    let (tmp, paths) = setup_paths();
+    let (first, _, state) = two_accounts(&paths);
+    let file = tmp.path().join("accounts.json");
+    for ids in [vec![], vec![first, "missing".to_owned()]] {
+        let refused = export_accounts_at(&paths, &state.revision, &ids, &file).unwrap_err();
+        assert_eq!(refused.code, code::ACCOUNT);
+        assert!(!file.exists());
+    }
 }
 
 #[test]
