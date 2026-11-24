@@ -1414,7 +1414,9 @@ mod retired {
     }
 }
 pub(crate) use retired::migrate as migrate_retired_accounts;
+#[cfg(any(feature = "desktop", test))]
 const EXCHANGE_SCHEMA: &str = "vela-antigravity-accounts";
+#[cfg(any(feature = "desktop", test))]
 /// The saved accounts as one file, logins included, that Vela reads back.
 #[derive(Serialize, Deserialize)]
 struct ExchangeFile {
@@ -1422,11 +1424,13 @@ struct ExchangeFile {
     version: u32,
     accounts: Vec<ExchangedAccount>,
 }
+#[cfg(any(feature = "desktop", test))]
 #[derive(Serialize, Deserialize)]
 struct ExchangedAccount {
     name: String,
     payload: String,
 }
+#[cfg(any(feature = "desktop", test))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AntigravityImport {
@@ -1435,6 +1439,7 @@ pub struct AntigravityImport {
     /// Accounts the file holds that were already saved.
     pub skipped: usize,
 }
+#[cfg(any(feature = "desktop", test))]
 /// Writes the chosen accounts, in the order they are saved.
 pub fn export_accounts_at(
     paths: &Paths,
@@ -1473,6 +1478,7 @@ pub fn export_accounts_at(
         Ok(file.accounts.len())
     })
 }
+#[cfg(any(feature = "desktop", test))]
 /// Adds the accounts of an exported file that are not saved yet. The login in
 /// use and the accounts already saved are left as they are.
 pub fn import_accounts_at(paths: &Paths, rev: &str, source: &Path) -> Result<AntigravityImport> {

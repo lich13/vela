@@ -14,7 +14,7 @@ mod account_identity;
 #[path = "account_exchange.rs"]
 pub mod exchange;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 #[path = "account_exchange_tests.rs"]
 mod account_exchange_tests;
 
@@ -134,6 +134,7 @@ fn account_subscription(raw: &str) -> Option<AccountSubscription> {
         stale,
     })
 }
+#[cfg(any(feature = "desktop", test))]
 /// A login may only replace the account and disk version explicitly selected
 /// when it started. This guard never crosses IPC or contains credentials.
 pub struct LoginTarget {
@@ -171,6 +172,7 @@ pub struct Core {
     auth_cache: crate::auth_cache::Cache<PolledAuth>,
     config_cache: crate::auth_cache::Cache<PolledConfig>,
     official_cache: crate::official::ViewCache,
+    #[cfg(feature = "desktop")]
     exchange: exchange::Service,
 }
 struct PolledConfig {
@@ -325,6 +327,7 @@ pub(crate) struct LoginPrincipal {
     user: Option<String>,
     subject: Option<String>,
 }
+#[cfg(any(feature = "desktop", test))]
 fn login_principal(raw: &str) -> Result<LoginPrincipal> {
     let value: Value =
         serde_json::from_str(raw).map_err(|_| AppError::new(code::AUTH, "凭据不是有效的 JSON"))?;
@@ -445,6 +448,7 @@ impl CredentialTimes {
 fn credential_times(raw: &str) -> (Option<i64>, Option<i64>) {
     CredentialTimes::parse(raw).current()
 }
+#[cfg(any(feature = "desktop", test))]
 fn older(incoming: &str, stored: &str) -> bool {
     older_times(credential_times(incoming), credential_times(stored))
 }
@@ -535,6 +539,7 @@ impl Core {
             auth_cache: Default::default(),
             config_cache: Default::default(),
             official_cache: Default::default(),
+            #[cfg(feature = "desktop")]
             exchange: exchange::Service::default(),
         };
         // Scan on every startup; revisions suppress duplicate imports and re-adding a deletion.
@@ -613,6 +618,7 @@ impl Core {
         }
         Ok(id)
     }
+    #[cfg(any(feature = "desktop", test))]
     /// Only called after our isolated official CLI reports a completed login.
     /// Refresh the active identity in place; signing in another identity only saves it.
     pub fn complete_login(&mut self, raw: &str) -> Result<bool> {
@@ -650,6 +656,7 @@ impl Core {
         }
         Ok(active)
     }
+    #[cfg(any(feature = "desktop", test))]
     pub fn login_target(&self, id: &str, expected: &str) -> Result<LoginTarget> {
         let profile = self
             .store
@@ -684,6 +691,7 @@ impl Core {
             current,
         })
     }
+    #[cfg(any(feature = "desktop", test))]
     pub fn complete_target_login(&mut self, raw: &str, target: &LoginTarget) -> Result<bool> {
         let info = auth_info(raw)?;
         if info.kind != "chatgpt" {

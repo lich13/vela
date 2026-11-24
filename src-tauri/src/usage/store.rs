@@ -577,6 +577,7 @@ impl Store {
         storage_v12::archive_selected(tx)?;
         query::changed(tx)
     }
+    #[cfg(feature = "desktop")]
     pub(super) fn clean_exported_bill_batch(
         &mut self,
         rows: &[(String, String)],
@@ -616,6 +617,7 @@ impl Store {
         db(tx.commit())?;
         Ok((verified_ids.len() as u64, retained))
     }
+    #[cfg(feature = "desktop")]
     pub(super) fn clean_exported_bill_daily(
         &mut self,
         request: &super::billing::Request,

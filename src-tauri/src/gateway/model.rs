@@ -647,6 +647,8 @@ impl Default for Store {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Edit {
+    /// Made from a link opened on the desktop, never from a request.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     #[serde(skip)]
     ImportLink {
         base_url: String,

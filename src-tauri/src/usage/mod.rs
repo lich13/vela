@@ -1,4 +1,6 @@
 pub(crate) mod antigravity;
+// Only the desktop app has somewhere to save a bill.
+#[cfg(feature = "desktop")]
 mod billing;
 mod bodies;
 mod body_wire;

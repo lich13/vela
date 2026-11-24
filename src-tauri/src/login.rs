@@ -1,16 +1,23 @@
-use crate::errors::code;
-use crate::storage::{self, AppError, Result};
-use serde::{Deserialize, Serialize};
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
+//! Signing in to Codex through its CLI, which only the desktop app does,
+//! and finding a client's CLI, which a server does too.
+#[cfg(feature = "desktop")]
+use crate::{
+    errors::code,
+    storage::{self, AppError, Result},
 };
+#[cfg(feature = "desktop")]
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+#[cfg(feature = "desktop")]
+use std::{path::Path, process::Stdio};
+#[cfg(feature = "desktop")]
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     sync::{mpsc, oneshot},
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "desktop")]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginState {
@@ -26,16 +33,19 @@ pub struct LoginState {
     #[serde(skip)]
     pub auth_url: Option<String>,
 }
+#[cfg(feature = "desktop")]
 pub struct Session {
     pub state: LoginState,
     pub cancel: Option<oneshot::Sender<()>>,
 }
+#[cfg(feature = "desktop")]
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CopyKind {
     Url,
     Code,
 }
+#[cfg(feature = "desktop")]
 impl Session {
     pub fn copy_value<E>(
         &self,
@@ -60,6 +70,7 @@ impl Session {
         write(value).map_err(|_| AppError::new(code::CLIPBOARD, "无法写入剪贴板，请重试"))
     }
 }
+#[cfg(feature = "desktop")]
 impl Default for Session {
     fn default() -> Self {
         Self {
@@ -71,6 +82,7 @@ impl Default for Session {
         }
     }
 }
+#[cfg(feature = "desktop")]
 pub fn resolve_cli(configured: &str) -> Result<PathBuf> {
     if !configured.is_empty() {
         let p = PathBuf::from(configured);
@@ -123,6 +135,7 @@ pub(crate) fn find_cli(names: &[&str]) -> Option<PathBuf> {
         .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
         .find(|p| p.is_file())
 }
+#[cfg(feature = "desktop")]
 fn command(path: &Path) -> Result<tokio::process::Command> {
     #[cfg(windows)]
     if path
@@ -150,6 +163,7 @@ fn command(path: &Path) -> Result<tokio::process::Command> {
     }
     Ok(tokio::process::Command::new(path))
 }
+#[cfg(feature = "desktop")]
 fn extract_url(line: &str) -> Option<String> {
     line.split_whitespace()
         .map(|s| s.trim_matches(|c: char| ['"', '\'', '(', ')', '\u{1b}'].contains(&c)))
@@ -160,6 +174,7 @@ fn extract_url(line: &str) -> Option<String> {
         })
         .map(str::to_owned)
 }
+#[cfg(feature = "desktop")]
 fn public_login_url(url: &str, browser: bool) -> String {
     if !browser {
         return url.to_owned();
@@ -175,6 +190,7 @@ fn public_login_url(url: &str, browser: bool) -> String {
     parsed.into()
 }
 
+#[cfg(feature = "desktop")]
 pub fn update_prompt(state: &mut LoginState, line: &str) {
     let line = strip_ansi(line);
     if let Some(url) = extract_url(&line) {
@@ -200,6 +216,7 @@ pub fn update_prompt(state: &mut LoginState, line: &str) {
         }
     }
 }
+#[cfg(feature = "desktop")]
 fn strip_ansi(line: &str) -> String {
     let mut clean = String::new();
     let mut chars = line.chars().peekable();
@@ -217,6 +234,7 @@ fn strip_ansi(line: &str) -> String {
     }
     clean
 }
+#[cfg(feature = "desktop")]
 async fn terminate(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         #[cfg(unix)]
@@ -237,6 +255,7 @@ async fn terminate(child: &mut tokio::process::Child) {
     let _ = child.kill().await;
     let _ = child.wait().await;
 }
+#[cfg(feature = "desktop")]
 pub async fn run(
     cli: &Path,
     mode: &str,
@@ -332,7 +351,7 @@ pub async fn run(
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
     #[test]
