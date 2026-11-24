@@ -138,7 +138,7 @@ async fn a_login_prompt_stops_further_runs_until_the_login_changes() {
     let agy = Fixture::new("1.1.11", vec![prompt, printed(&four_periods())]);
     let session = session();
     let first = agy.quota(&session, "account-a").await.unwrap_err();
-    assert!(first.message.contains("需要登录"), "{}", first.message);
+    assert!(first.message.contains("需要重新登录"), "{}", first.message);
     assert_eq!(agy.started.borrow().len(), 2);
 
     let second = agy.quota(&session, "account-a").await.unwrap_err();

@@ -49,7 +49,9 @@ enum Refusal {
 impl Refusal {
     fn error(self) -> AppError {
         failure(match self {
-            Self::SignedOut => "agy 需要登录，已暂停通过 agy 读取额度；登录后重启 Vela 恢复",
+            Self::SignedOut => {
+                "agy 需要重新登录，已暂停通过 agy 读取额度；登录后重启 Vela 或切换账号恢复"
+            }
             Self::ModelTurn => "agy 把 /usage 当成了提问，已停止通过 agy 读取额度",
         })
     }
