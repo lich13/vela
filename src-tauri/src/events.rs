@@ -15,7 +15,7 @@ pub use details::{
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     io::{BufRead, BufReader},
     path::Path,
     sync::{mpsc, Arc},
@@ -1066,10 +1066,18 @@ struct JournalSnapshot {
 struct JournalHeader {
     cleared: ClearMark,
 }
+/// Lines replaced by a later one of the same row that the file may carry
+/// before it is rewritten, or as many as there are rows when that is more.
+const SUPERSEDED_LINES: usize = 256;
+/// How long a row past retention may wait for the rewrite that removes it
+/// while rows are still being added; the idle timer runs as often.
+const EXPIRY_BATCH: u64 = 3600;
 #[derive(Default)]
 struct Journal {
     cleared: Option<Arc<ClearMark>>,
     records: VecDeque<Arc<Record>>,
+    /// Lines in the file that a later line with the same id replaces.
+    superseded: usize,
     // Runtime health can refer to a just-merged event. Keep bounded aliases for
     // those links; persisted terminal events use the canonical row ID.
     aliases: VecDeque<(String, String)>,
@@ -1077,13 +1085,20 @@ struct Journal {
     dirty: bool,
 }
 impl Journal {
+    fn has_older_than(&self, cutoff: u64) -> bool {
+        self.records.iter().any(|r| r.last_at < cutoff)
+    }
     fn needs_write(&self, path: &Path) -> bool {
+        self.dirty || !path.exists() || self.has_older_than(now().saturating_sub(RETENTION))
+    }
+    /// Whether changed rows can no longer be added to the end of the file.
+    /// Rows past retention leave in batches, so a steady stream of events
+    /// does not rewrite the file for each row that ages out.
+    fn needs_rewrite(&self, path: &Path) -> bool {
         self.dirty
             || !path.exists()
-            || self
-                .records
-                .iter()
-                .any(|r| r.last_at < now().saturating_sub(RETENTION))
+            || self.superseded > self.records.len().max(SUPERSEDED_LINES)
+            || self.has_older_than(now().saturating_sub(RETENTION + EXPIRY_BATCH))
     }
     fn retain_since(&mut self, cutoff: u64) -> bool {
         let before = self.records.len();
@@ -1100,6 +1115,7 @@ impl Journal {
         }
         self.retain_since(now().saturating_sub(RETENTION));
         self.dirty = false;
+        self.superseded = 0;
         Some(JournalSnapshot {
             cleared: self.cleared.clone(),
             records: self.records.iter().cloned().collect(),
@@ -1273,6 +1289,9 @@ fn load(path: &Path) -> Journal {
             let mut reader = BufReader::new(file);
             let mut line = Vec::new();
             let mut first_line = true;
+            // A row written again after a change replaces its earlier line
+            // where that one stood, so the order is the one kept in memory.
+            let mut rows: HashMap<String, usize> = HashMap::new();
             loop {
                 line.clear();
                 match reader.read_until(b'\n', &mut line) {
@@ -1292,21 +1311,33 @@ fn load(path: &Path) -> Journal {
                         continue;
                     }
                 }
+                // Only an interrupted write leaves the last line without its end.
+                let complete = line.ends_with(b"\n");
                 match serde_json::from_slice::<Record>(&line) {
                     Ok(mut r) => {
                         r.classify_stored();
-                        if r.last_at >= now().saturating_sub(RETENTION) {
-                            j.records.push_back(Arc::new(r))
-                        } else {
-                            j.dirty = true;
+                        // The next write must not continue an unfinished line.
+                        j.dirty |= !complete;
+                        match rows.entry(r.id.clone()) {
+                            Entry::Occupied(row) => {
+                                j.records[*row.get()] = Arc::new(r);
+                                j.superseded += 1;
+                            }
+                            Entry::Vacant(row) => {
+                                row.insert(j.records.len());
+                                j.records.push_back(Arc::new(r));
+                            }
                         }
                     }
+                    // The row of an interrupted write is lost; the rewrite drops its remains.
+                    Err(_) if !complete => j.dirty = true,
                     Err(_) => {
                         j.dirty = true;
                         j.error = Some("日志包含损坏记录，已跳过；其余记录仍可查看".into());
                     }
                 }
             }
+            j.dirty |= j.retain_since(now().saturating_sub(RETENTION));
         }
         Ok(None) => (),
         Err(_) => j.error = Some("日志读取失败，请检查文件权限与空间".into()),
@@ -1496,6 +1527,7 @@ impl Service {
                             current.records.clear();
                             current.aliases.clear();
                             current.dirty = false;
+                            current.superseded = 0;
                             current.error =
                                 raw_pruned.err().map(|_| "日志原文清理失败，请重试".into());
                         } else {
@@ -1528,7 +1560,8 @@ impl Service {
                         }
                     }
                 }
-                let mut append_only = append;
+                // Lines of this batch that replace one already in the file.
+                let mut superseded = 0;
                 let mut changes = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     let mut changed = None;
@@ -1568,7 +1601,7 @@ impl Service {
                                                 < r.merge_seconds()
                                     })
                                 {
-                                    append_only = false;
+                                    superseded += 1;
                                     let old = Arc::make_mut(old_arc);
                                     old.last_at = r.last_at;
                                     old.count = old.count.saturating_add(1);
@@ -1624,6 +1657,7 @@ impl Service {
                                 let r = Arc::make_mut(r_arc);
                                 r.notified_at = now();
                                 changed = Some(r.clone());
+                                superseded += 1;
                             }
                         }
                         Job::Clear(..) | Job::Prune => (),
@@ -1633,26 +1667,27 @@ impl Service {
                 let (snapshot, retained_raw_ids) = {
                     let mut journal = j.lock();
                     let before_retention = journal.records.len();
-                    append_only &= !journal.needs_write(&path);
-                    let snapshot = if append_only {
-                        None
+                    journal.superseded += superseded;
+                    let snapshot = if prune_only {
+                        journal.prepare_rewrite(&path, false)
+                    } else if journal.needs_rewrite(&path) {
+                        journal.prepare_rewrite(&path, true)
                     } else {
-                        journal.prepare_rewrite(&path, !prune_only)
+                        None
                     };
                     let retained_raw = (cleanup || journal.records.len() != before_retention)
                         .then(|| journal.retained_raw_ids());
                     (snapshot, retained_raw)
                 };
-                let result = if append_only {
-                    append_lines(
+                // A merged or acknowledged row is written again at the end;
+                // reading keeps the last line of each id.
+                let result = match &snapshot {
+                    Some(records) => write_records_stream(&path, records),
+                    None if prune_only => Ok(()),
+                    None => append_lines(
                         &path,
                         changes.iter().filter_map(|(record, _)| record.as_ref()),
-                    )
-                } else {
-                    match &snapshot {
-                        Some(records) => write_records_stream(&path, records),
-                        None => Ok(()),
-                    }
+                    ),
                 };
                 let raw_pruned = if result.is_ok() {
                     if let Some(retained) = &retained_raw_ids {
@@ -2464,7 +2499,7 @@ mod routing_visibility_tests {
     }
 
     #[tokio::test]
-    async fn incremental_append_adds_new_lines_and_merge_rewrites_without_duplicates() {
+    async fn incremental_append_adds_new_lines_and_a_merge_adds_the_changed_row_again() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("diagnostics.jsonl");
         let service = Service::new(dir.path());
@@ -2510,9 +2545,13 @@ mod routing_visibility_tests {
         service.emit(repeated);
         let merged = rx.recv().await.unwrap().record.unwrap();
         assert_eq!(merged.count, 2);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
         let reloaded = load(&path);
         assert!(reloaded.error.is_none());
+        assert!(!reloaded.dirty);
+        assert_eq!(reloaded.superseded, 1);
         assert_eq!(reloaded.records.len(), 2);
+        assert_eq!(reloaded.records[1].id, merged.id);
         assert_eq!(reloaded.records[1].count, 2);
     }
 

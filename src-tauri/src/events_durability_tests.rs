@@ -423,3 +423,251 @@ fn source_import_during_snapshot_write_remains_pending_until_next_write() {
         .finish_write(super::write_records_stream(&path, &snapshot), Ok(()));
     assert_eq!(super::load(&path).records.len(), 2);
 }
+
+fn fixture(model: &str) -> Record {
+    Record::new(
+        Some(ClientId::Codex),
+        Some(PROVIDER),
+        Some(model),
+        Reason::ProtocolError,
+        Action::Returned,
+        Some(502),
+        Some(1),
+    )
+}
+
+fn repeat(record: &Record) -> Record {
+    let mut repeated = record.clone();
+    repeated.id = uuid::Uuid::new_v4().to_string();
+    repeated
+}
+
+fn file_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(text.is_empty() || text.ends_with('\n'));
+    text.lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn rows(journal: &Journal) -> Vec<String> {
+    journal
+        .records
+        .iter()
+        .map(|r| serde_json::to_string(&**r).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn appended_merges_and_acknowledgments_reload_as_the_rows_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("diagnostics.jsonl");
+    let service = Service::new(dir.path());
+    let mut changes = service.subscribe();
+    let records: Vec<_> = ["fixture-a", "fixture-b", "fixture-c"]
+        .into_iter()
+        .map(fixture)
+        .collect();
+    for record in &records {
+        service.emit(record.clone());
+        changes.recv().await.unwrap();
+    }
+    for _ in 0..2 {
+        service.emit(repeat(&records[1]));
+        let merged = changes.recv().await.unwrap().record.unwrap();
+        assert_eq!(merged.id, records[1].id);
+    }
+    service
+        .sender
+        .send(super::Job::NotificationAccepted(records[0].id.clone()))
+        .unwrap();
+    assert!(changes.recv().await.unwrap().record.unwrap().notified_at > 0);
+
+    // Every change was added to the end; none replaced the file.
+    let lines = file_lines(&path);
+    assert_eq!(lines.len(), 6);
+    assert_eq!(lines[4]["count"], 3);
+    assert_eq!(lines[5]["id"], records[0].id.as_str());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let kept = rows(&service.journal.lock());
+    let page = serde_json::to_value(service.query(Filter::default()).items).unwrap();
+    assert_eq!(service.journal.lock().superseded, 3);
+    drop(service);
+
+    let loaded = super::load(&path);
+    assert!(loaded.error.is_none());
+    assert!(!loaded.dirty);
+    assert_eq!(loaded.superseded, 3);
+    assert_eq!(rows(&loaded), kept);
+    let reopened = Service::new(dir.path());
+    assert_eq!(
+        serde_json::to_value(reopened.query(Filter::default()).items).unwrap(),
+        page
+    );
+    assert_eq!(reopened.detail(&records[1].id).unwrap().count, 3);
+    assert!(reopened.detail(&records[0].id).unwrap().notified_at > 0);
+}
+
+#[tokio::test]
+async fn interrupted_append_is_skipped_and_the_next_start_repairs_the_file() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("diagnostics.jsonl");
+    let first = fixture("fixture-a");
+    let second = fixture("fixture-b");
+    let line = serde_json::to_string(&second).unwrap();
+    let half = &line[..line.len() / 2];
+    let whole = format!("{}\n", serde_json::to_string(&first).unwrap());
+
+    // The write stopped inside a row: the row is lost, the rest is read.
+    std::fs::write(&path, format!("{whole}{half}")).unwrap();
+    let cut = super::load(&path);
+    assert!(cut.error.is_none());
+    assert!(cut.dirty);
+    assert_eq!(rows(&cut), [serde_json::to_string(&first).unwrap()]);
+
+    // The write stopped before the line end: the row is kept, and the next
+    // write replaces the file instead of continuing that line.
+    std::fs::write(&path, format!("{whole}{line}")).unwrap();
+    let unfinished = super::load(&path);
+    assert!(unfinished.error.is_none());
+    assert!(unfinished.dirty);
+    assert_eq!(unfinished.records.len(), 2);
+
+    // A damaged line that is not the unfinished last one is still reported.
+    std::fs::write(&path, format!("{whole}{half}\n")).unwrap();
+    assert!(super::load(&path).error.is_some());
+
+    std::fs::write(&path, format!("{whole}{half}")).unwrap();
+    let service = Service::new(dir.path());
+    let mut changes = service.subscribe();
+    // A queued write observes completion of the startup rewrite without sleeps.
+    let third = fixture("fixture-c");
+    service.emit(third.clone());
+    assert!(changes.recv().await.unwrap().error.is_none());
+    let lines = file_lines(&path);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["id"], first.id.as_str());
+    assert_eq!(lines[1]["id"], third.id.as_str());
+    drop(service);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(half.as_bytes())
+        .unwrap();
+    let reopened = Service::new(dir.path());
+    let page = reopened.query(Filter::default());
+    assert!(page.error.is_none());
+    assert_eq!(page.total, 2);
+}
+
+#[tokio::test]
+async fn replaced_lines_past_the_limit_and_rows_long_expired_rewrite_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("diagnostics.jsonl");
+    let service = Service::new(dir.path());
+    let mut changes = service.subscribe();
+    let first = fixture("fixture-a");
+    let second = fixture("fixture-b");
+    for record in [&first, &second, &repeat(&second)] {
+        service.emit(record.clone());
+        changes.recv().await.unwrap();
+    }
+    assert_eq!(file_lines(&path).len(), 3);
+
+    service.journal.lock().superseded = super::SUPERSEDED_LINES;
+    service.emit(repeat(&second));
+    assert_eq!(changes.recv().await.unwrap().record.unwrap().count, 3);
+    let lines = file_lines(&path);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["id"], first.id.as_str());
+    assert_eq!(lines[1]["count"], 3);
+    assert_eq!(service.journal.lock().superseded, 0);
+
+    // A row just past retention is hidden at once and leaves the file with
+    // the next batch, not with the next event.
+    let expire = |seconds| {
+        let mut journal = service.journal.lock();
+        Arc::make_mut(&mut journal.records[0]).last_at = super::now() - seconds;
+    };
+    expire(super::RETENTION + 1);
+    service.emit(fixture("fixture-c"));
+    changes.recv().await.unwrap();
+    assert_eq!(file_lines(&path).len(), 3);
+    assert_eq!(service.query(Filter::default()).total, 2);
+    assert!(service.detail(&first.id).is_none());
+
+    expire(super::RETENTION + super::EXPIRY_BATCH + 1);
+    service.emit(fixture("fixture-d"));
+    changes.recv().await.unwrap();
+    let lines = file_lines(&path);
+    assert_eq!(lines.len(), 3);
+    assert!(lines.iter().all(|line| line["id"] != first.id.as_str()));
+    assert_eq!(service.journal.lock().records.len(), 3);
+    assert_eq!(service.query(Filter::default()).total, 3);
+}
+
+#[tokio::test]
+async fn clear_drops_appended_lines_and_restart_drops_expired_rows_with_their_replacements() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("diagnostics.jsonl");
+    let service = Service::new(dir.path());
+    let mut changes = service.subscribe();
+    let first = fixture("fixture-a");
+    for record in [&first, &repeat(&first)] {
+        service.emit(record.clone());
+        changes.recv().await.unwrap();
+    }
+    assert_eq!(file_lines(&path).len(), 2);
+    service.clear(None, None).await.unwrap();
+    assert!(changes.recv().await.unwrap().record.is_none());
+    let lines = file_lines(&path);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0]["cleared"]["at"].is_u64());
+    assert_eq!(service.journal.lock().superseded, 0);
+
+    // Rows after a clear follow the header, which later appends leave alone.
+    let second = fixture("fixture-b");
+    for record in [&second, &repeat(&second)] {
+        service.emit(record.clone());
+        changes.recv().await.unwrap();
+    }
+    let lines = file_lines(&path);
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0]["cleared"]["at"].is_u64());
+    let cleared_at = service.journal.lock().cleared.as_ref().unwrap().at;
+    drop(service);
+    let loaded = super::load(&path);
+    assert_eq!(loaded.cleared.as_ref().unwrap().at, cleared_at);
+    assert!(!loaded.dirty);
+    assert_eq!(loaded.records.len(), 1);
+    assert_eq!(loaded.records[0].count, 2);
+
+    // An expired row goes at startup whichever of its lines is read.
+    let mut expired = second.clone();
+    expired.last_at = super::now() - super::RETENTION - 1;
+    expired.first_at = expired.last_at;
+    let mut replaced = expired.clone();
+    replaced.count = 2;
+    let kept = fixture("fixture-c");
+    let text: String = [&expired, &kept, &replaced]
+        .into_iter()
+        .map(|record| format!("{}\n", serde_json::to_string(record).unwrap()))
+        .collect();
+    std::fs::write(&path, text).unwrap();
+    let reopened = Service::new(dir.path());
+    let mut changes = reopened.subscribe();
+    reopened.emit(fixture("fixture-d"));
+    changes.recv().await.unwrap();
+    let lines = file_lines(&path);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["id"], kept.id.as_str());
+    assert!(reopened.detail(&second.id).is_none());
+    assert_eq!(reopened.query(Filter::default()).total, 2);
+}
