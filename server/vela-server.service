@@ -1,0 +1,21 @@
+[Unit]
+Description=Vela gateway and account service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment=HOME=/root
+# Site settings, such as the Claude Code directory of another user.
+EnvironmentFile=-/etc/vela/server.env
+ExecStart=/usr/local/bin/vela-server serve
+RuntimeDirectory=vela
+RuntimeDirectoryMode=0700
+Restart=on-failure
+RestartSec=3
+# Stopping hands every client's settings back before the listener goes away.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
