@@ -88,7 +88,7 @@ fn zstd_observes_output_and_errors_before_the_compressed_frame_closes() {
 }
 
 #[tokio::test]
-async fn v02514_projected_usage_survives_json_compressed_sse_and_websocket() {
+async fn projected_usage_survives_json_compressed_sse_and_websocket() {
     let usage = json!({"prompt_tokens":100,"completion_tokens":40,"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40,
         "prompt_tokens_details":{"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":30},"speed":"standard"});
     for encoding in ["identity", "gzip", "deflate", "br", "zstd", "json", "ws"] {

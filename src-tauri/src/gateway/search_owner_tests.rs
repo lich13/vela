@@ -166,25 +166,24 @@ async fn seed_owner(
     gateway.set_usage(usage.clone());
     super::start(gateway, dir).await;
 
-    let seed =
-        super::thread_request(gateway, "/v1/responses", thread, super::v022_initial_body()).await;
+    let seed = super::thread_request(gateway, "/v1/responses", thread, super::initial_body()).await;
     assert_eq!(seed.status(), StatusCode::OK);
     assert_eq!(
         super::response_bytes(seed).await,
-        super::v022_seed_response().as_bytes()
+        super::seed_response().as_bytes()
     );
 
     let thread_hash = crate::storage::digest(thread.as_bytes());
     assert_eq!(gateway.0.compaction.owner(&thread_hash), Some(owner.into()));
     assert!(gateway.0.compaction.boundary_matches(
         &thread_hash,
-        Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
+        Some(&crate::storage::digest(super::WINDOW.as_bytes()))
     ));
     (usage, thread_hash)
 }
 
 #[tokio::test]
-async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
+async fn search_paths_follow_handoff_owner_and_charge_once() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let owner_bodies = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let owner_hit_count = owner_hits.clone();
@@ -200,7 +199,7 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
             if path.ends_with("/alpha/search") {
                 super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
             } else {
-                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
+                super::json_response(StatusCode::OK, super::seed_response(), None)
             }
         }
     })
@@ -252,7 +251,7 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
         assert!(
             gateway.0.compaction.boundary_matches(
                 &thread_hash,
-                Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
+                Some(&crate::storage::digest(super::WINDOW.as_bytes()))
             ),
             "{path}"
         );
@@ -283,7 +282,7 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
     assert_eq!(
         *owner_bodies.lock(),
         vec![
-            super::v022_initial_body(),
+            super::initial_body(),
             SEARCH_REQUEST.to_vec(),
             SEARCH_REQUEST.to_vec(),
         ]
@@ -292,7 +291,7 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
 }
 
 #[tokio::test]
-async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
+async fn search_owner_requests_never_exceed_max_concurrency() {
     let events = Arc::new(Mutex::new(Vec::<(&'static str, Vec<u8>)>::new()));
     let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<&'static str>();
     let release = Arc::new(Semaphore::new(0));
@@ -321,7 +320,7 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
                 owner_active.fetch_sub(1, Ordering::AcqRel);
                 super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
             } else {
-                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
+                super::json_response(StatusCode::OK, super::seed_response(), None)
             }
         }
     })
@@ -420,7 +419,7 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
 }
 
 #[tokio::test]
-async fn v02513_search_without_thread_or_with_conflicting_thread_does_not_borrow_reserved_owner() {
+async fn search_without_thread_or_with_conflicting_thread_does_not_borrow_reserved_owner() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let owner_hit_count = owner_hits.clone();
     let owner_port = super::serve(move |request| {
@@ -432,7 +431,7 @@ async fn v02513_search_without_thread_or_with_conflicting_thread_does_not_borrow
             if path.ends_with("/alpha/search") {
                 super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
             } else {
-                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
+                super::json_response(StatusCode::OK, super::seed_response(), None)
             }
         }
     })
@@ -486,7 +485,7 @@ async fn v02513_search_without_thread_or_with_conflicting_thread_does_not_borrow
     );
     assert!(gateway.0.compaction.boundary_matches(
         &thread_hash,
-        Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
+        Some(&crate::storage::digest(super::WINDOW.as_bytes()))
     ));
 
     let rows = wait_for_usage(&usage, 3).await;
@@ -507,7 +506,7 @@ async fn v02513_search_without_thread_or_with_conflicting_thread_does_not_borrow
 }
 
 #[tokio::test]
-async fn v02513_search_failure_falls_back_without_moving_owner_or_retaining_fallback() {
+async fn search_failure_falls_back_without_moving_owner_or_retaining_fallback() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let seen = owner_hits.clone();
     let owner_port = super::serve(move |request| {
@@ -523,7 +522,7 @@ async fn v02513_search_failure_falls_back_without_moving_owner_or_retaining_fall
                     None,
                 )
             } else {
-                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
+                super::json_response(StatusCode::OK, super::seed_response(), None)
             }
         }
     })
@@ -586,13 +585,13 @@ async fn v02513_search_failure_falls_back_without_moving_owner_or_retaining_fall
     assert_eq!(gateway.0.compaction.owner(&digest), Some(ids[1].clone()));
     assert!(gateway.0.compaction.boundary_matches(
         &digest,
-        Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
+        Some(&crate::storage::digest(super::WINDOW.as_bytes()))
     ));
     gateway.stop().await.unwrap();
 }
 
 #[tokio::test]
-async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata() {
+async fn metadata_only_search_follows_owner_and_preserves_wire_metadata() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let owner_bodies = Arc::new(Mutex::new(Vec::<(Vec<u8>, Vec<Vec<u8>>)>::new()));
     let owner_hit_count = owner_hits.clone();
@@ -614,7 +613,7 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
             if path.ends_with("/alpha/search") {
                 super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
             } else {
-                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
+                super::json_response(StatusCode::OK, super::seed_response(), None)
             }
         }
     })
@@ -657,7 +656,7 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
     );
     assert!(gateway.0.compaction.boundary_matches(
         &thread_hash,
-        Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
+        Some(&crate::storage::digest(super::WINDOW.as_bytes()))
     ));
 
     assert_eq!(ordinary_hits.load(Ordering::SeqCst), 0);
@@ -665,7 +664,7 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
     assert_eq!(
         *owner_bodies.lock(),
         vec![
-            (super::v022_initial_body(), Vec::new()),
+            (super::initial_body(), Vec::new()),
             (
                 METADATA_SEARCH_REQUEST.to_vec(),
                 vec![METADATA_HEADER.as_bytes().to_vec()]
@@ -703,7 +702,7 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
 }
 
 #[test]
-fn v02513_search_metadata_identity_rejects_unsafe_shapes() {
+fn search_metadata_identity_rejects_unsafe_shapes() {
     use crate::usage::model::ThreadIdentity;
 
     let mut cases = vec![
@@ -799,7 +798,7 @@ fn v02513_search_metadata_identity_rejects_unsafe_shapes() {
 }
 
 #[tokio::test]
-async fn v02513_invalid_search_metadata_and_body_id_never_borrow_owner() {
+async fn invalid_search_metadata_and_body_id_never_borrow_owner() {
     let owner_hits = Arc::new(AtomicUsize::new(0));
     let owner_hit_count = owner_hits.clone();
     let owner_port = super::serve(move |request| {
@@ -811,7 +810,7 @@ async fn v02513_invalid_search_metadata_and_body_id_never_borrow_owner() {
             if path.ends_with("/alpha/search") {
                 super::json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE), None)
             } else {
-                super::json_response(StatusCode::OK, super::v022_seed_response(), None)
+                super::json_response(StatusCode::OK, super::seed_response(), None)
             }
         }
     })
@@ -893,13 +892,13 @@ async fn v02513_invalid_search_metadata_and_body_id_never_borrow_owner() {
     assert_eq!(gateway.0.compaction.owner(&thread_hash), Some(owner));
     assert!(gateway.0.compaction.boundary_matches(
         &thread_hash,
-        Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
+        Some(&crate::storage::digest(super::WINDOW.as_bytes()))
     ));
     gateway.stop().await.unwrap();
 }
 
 #[tokio::test]
-async fn v02513_search_lease_is_readonly_and_rejects_changed_owner_before_send() {
+async fn search_lease_is_readonly_and_rejects_changed_owner_before_send() {
     let (_dir, gateway) = super::probing_fixture(vec![
         "https://owner.example.invalid/v1".into(),
         "https://receiver.example.invalid/v1".into(),
@@ -977,7 +976,7 @@ async fn a_search_taken_over_leaves_the_conversation_and_its_owner_alone() {
                 "the owner takes no searches"
             );
             let _ = request.into_body().collect().await.unwrap();
-            super::json_response(StatusCode::OK, super::v022_seed_response(), None)
+            super::json_response(StatusCode::OK, super::seed_response(), None)
         }
     })
     .await;
@@ -1035,7 +1034,7 @@ async fn a_search_taken_over_leaves_the_conversation_and_its_owner_alone() {
     assert_eq!(gateway.0.compaction.owner(&digest), Some(ids[0].clone()));
     assert!(gateway.0.compaction.boundary_matches(
         &digest,
-        Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
+        Some(&crate::storage::digest(super::WINDOW.as_bytes()))
     ));
     gateway.stop().await.unwrap();
 }
@@ -1044,7 +1043,7 @@ async fn a_search_taken_over_leaves_the_conversation_and_its_owner_alone() {
 async fn search_safety_rejection_is_not_sent_to_another_provider() {
     let owner = super::serve(|request| async move {
         if !request.uri().path().ends_with("/alpha/search") {
-            return super::json_response(StatusCode::OK, super::v022_seed_response(), None);
+            return super::json_response(StatusCode::OK, super::seed_response(), None);
         }
         super::json_response(
             StatusCode::FORBIDDEN,

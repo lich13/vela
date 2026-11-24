@@ -103,7 +103,7 @@ fn mask_base(text: &str) -> String {
 }
 
 #[test]
-fn v020_api_import_initial_detects_named_profile_without_mutating_sources_and_restart_persists() {
+fn api_import_initial_detects_named_profile_without_mutating_sources_and_restart_persists() {
     let config = config_for("https://api.first.example.invalid/v1", true, "", "");
     let auth = auth_for("fixture-api-key", "first");
     let (t, home) = home_with(&config, &auth);
@@ -147,7 +147,7 @@ fn v020_api_import_initial_detects_named_profile_without_mutating_sources_and_re
 }
 
 #[test]
-fn v020_existing_store_keeps_bearer_connection_and_bytes() {
+fn existing_store_keeps_bearer_connection_and_bytes() {
     let config = config_for("https://api.first.example.invalid/v1", true, "", "");
     let auth = auth_for("fixture-api-key", "existing");
     let (t, home) = home_with(&config, &auth);
@@ -181,7 +181,7 @@ fn v020_existing_store_keeps_bearer_connection_and_bytes() {
 }
 
 #[test]
-fn v020_api_explicit_binding_rejects_independent_auth_routes_but_preserves_env_key() {
+fn api_explicit_binding_rejects_independent_auth_routes_but_preserves_env_key() {
     let cases = [
         ("keyring", "cli_auth_credentials_store = 'keyring'\n", ""),
         ("auto", "cli_auth_credentials_store = 'auto'\n", ""),
@@ -283,7 +283,7 @@ fn v020_api_explicit_binding_rejects_independent_auth_routes_but_preserves_env_k
 }
 
 #[test]
-fn v020_api_connection_revision_includes_config_and_auth_bytes() {
+fn api_connection_revision_includes_config_and_auth_bytes() {
     let config = config_for("https://api.first.example.invalid/v1", true, "", "");
     let auth = auth_for("fixture-api-key", "revision-a");
     let (t, home) = home_with(&config, &auth);
@@ -316,7 +316,7 @@ fn v020_api_connection_revision_includes_config_and_auth_bytes() {
 }
 
 #[tokio::test]
-async fn v020_gateway_api_mode_owns_only_base_and_auth_through_select_start_switch_and_recovery() {
+async fn gateway_api_mode_owns_only_base_and_auth_through_select_start_switch_and_recovery() {
     let first_base = "https://api.first.example.invalid/v1";
     let second_base = "https://api.second.example.invalid/v1";
     let config = config_for(first_base, true, "", "");
@@ -422,7 +422,7 @@ async fn v020_gateway_api_mode_owns_only_base_and_auth_through_select_start_swit
 }
 
 #[test]
-fn v020_api_external_auth_edit_conflict_does_not_overwrite_external_bytes() {
+fn api_external_auth_edit_conflict_does_not_overwrite_external_bytes() {
     let config = config_for("https://api.first.example.invalid/v1", true, "", "");
     let auth = auth_for("fixture-api-key", "before-conflict");
     let (t, home) = home_with(&config, &auth);

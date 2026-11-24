@@ -22,7 +22,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use crate::usage::model::RoutingInput;
 
-async fn v0233_inspect_bytes(bytes: Vec<u8>, encoding: &str, dir: &Path) -> RequestHints {
+async fn inspect_bytes(bytes: Vec<u8>, encoding: &str, dir: &Path) -> RequestHints {
     let captured = replay::Replay::capture_progress(Full::new(Bytes::from(bytes)), dir, None)
         .await
         .unwrap();
@@ -32,7 +32,7 @@ async fn v0233_inspect_bytes(bytes: Vec<u8>, encoding: &str, dir: &Path) -> Requ
         .unwrap()
 }
 
-fn v0233_split_tool_declaration_body() -> Vec<u8> {
+fn split_tool_declaration_body() -> Vec<u8> {
     const READ_CHUNK: usize = 64 * 1024;
     let before_padding = br#"{"model":"fixture-model","padding":""#;
     let before_tool_type = br#"","input":[{"type":""#;
@@ -58,7 +58,7 @@ fn v0233_split_tool_declaration_body() -> Vec<u8> {
     body
 }
 
-fn v0233_sse_bytes(provider: &str) -> Bytes {
+fn sse_bytes(provider: &str) -> Bytes {
     let event = json!({
         "type": "response.completed",
         "response": {
@@ -73,7 +73,7 @@ fn v0233_sse_bytes(provider: &str) -> Bytes {
     Bytes::from(format!("event: response.completed\ndata: {event}\n\n"))
 }
 
-fn v0233_native_response(provider: &str) -> String {
+fn native_response(provider: &str) -> String {
     json!({
         "type": "response.completed",
         "response": {
@@ -87,10 +87,10 @@ fn v0233_native_response(provider: &str) -> String {
     .to_string()
 }
 
-async fn v0233_sse_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u8>>>>) -> u16 {
+async fn sse_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u8>>>>) -> u16 {
     serve(move |request| {
         let seen = seen.clone();
-        let response = v0233_sse_bytes(provider);
+        let response = sse_bytes(provider);
         async move {
             let method = request.method().clone();
             let is_models =
@@ -119,10 +119,10 @@ async fn v0233_sse_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u8>>
     .await
 }
 
-async fn v0233_native_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u8>>>>) -> u16 {
+async fn native_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u8>>>>) -> u16 {
     serve(move |mut request| {
         let seen = seen.clone();
-        let response_text = v0233_native_response(provider);
+        let response_text = native_response(provider);
         async move {
             let (handshake, upgrade) = yawc::WebSocket::upgrade(&mut request).unwrap();
             tokio::spawn(async move {
@@ -156,7 +156,7 @@ async fn v0233_native_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u
     .await
 }
 
-async fn v0233_ws_turn(peer: &mut yawc::TcpWebSocket, body: &str) -> Vec<u8> {
+async fn ws_turn(peer: &mut yawc::TcpWebSocket, body: &str) -> Vec<u8> {
     peer.send(yawc::Frame::text(body.to_owned())).await.unwrap();
     let frame = tokio::time::timeout(Duration::from_secs(5), peer.next())
         .await
@@ -167,7 +167,7 @@ async fn v0233_ws_turn(peer: &mut yawc::TcpWebSocket, body: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn v0233_http_additional_tools_and_initial_messages_route_to_new_thread_provider() {
+async fn http_additional_tools_and_initial_messages_route_to_new_thread_provider() {
     let ordinary_port =
         serve(|_| async { json_response(StatusCode::OK, r#"{"provider":"ordinary"}"#, None) })
             .await;
@@ -220,9 +220,9 @@ async fn v0233_http_additional_tools_and_initial_messages_route_to_new_thread_pr
 }
 
 #[tokio::test]
-async fn v0233_replay_projection_recognizes_tool_declaration_across_chunks_and_gzip() {
+async fn replay_projection_recognizes_tool_declaration_across_chunks_and_gzip() {
     let dir = tempfile::tempdir().unwrap();
-    let body = v0233_split_tool_declaration_body();
+    let body = split_tool_declaration_body();
     let marker_start = body
         .windows(b"additional_tools".len())
         .position(|window| window == b"additional_tools")
@@ -231,7 +231,7 @@ async fn v0233_replay_projection_recognizes_tool_declaration_across_chunks_and_g
     assert!(marker_start + b"additional_tools".len() > 64 * 1024);
 
     for (encoding, encoded) in [("", body.clone()), ("gzip", encoded("gzip", &body))] {
-        let hints = v0233_inspect_bytes(encoded, encoding, dir.path()).await;
+        let hints = inspect_bytes(encoded, encoding, dir.path()).await;
         assert!(hints.first_turn, "encoding={encoding}");
         assert_eq!(hints.turn, TurnEvidence::First, "encoding={encoding}");
         assert_eq!(
@@ -247,7 +247,7 @@ async fn v0233_replay_projection_recognizes_tool_declaration_across_chunks_and_g
 }
 
 #[tokio::test]
-async fn v0233_replay_projection_keeps_history_and_unknown_shapes_protected() {
+async fn replay_projection_keeps_history_and_unknown_shapes_protected() {
     let dir = tempfile::tempdir().unwrap();
     let cases = [
         (
@@ -343,7 +343,7 @@ async fn v0233_replay_projection_keeps_history_and_unknown_shapes_protected() {
     ];
 
     for (name, value, expected_input, has_tools) in cases {
-        let hints = v0233_inspect_bytes(serde_json::to_vec(&value).unwrap(), "", dir.path()).await;
+        let hints = inspect_bytes(serde_json::to_vec(&value).unwrap(), "", dir.path()).await;
         assert!(!hints.first_turn, "{name}");
         assert_ne!(hints.turn, TurnEvidence::First, "{name}");
         assert_eq!(hints.routing_evidence.input, expected_input, "{name}");
@@ -355,11 +355,11 @@ async fn v0233_replay_projection_keeps_history_and_unknown_shapes_protected() {
 }
 
 #[tokio::test]
-async fn v0233_http_sse_route_preserves_request_and_response_bytes() {
+async fn http_sse_route_preserves_request_and_response_bytes() {
     let ordinary_seen = Arc::new(Mutex::new(Vec::new()));
     let new_thread_seen = Arc::new(Mutex::new(Vec::new()));
-    let ordinary_port = v0233_sse_endpoint("ordinary", ordinary_seen.clone()).await;
-    let new_thread_port = v0233_sse_endpoint("new-thread", new_thread_seen.clone()).await;
+    let ordinary_port = sse_endpoint("ordinary", ordinary_seen.clone()).await;
+    let new_thread_port = sse_endpoint("new-thread", new_thread_seen.clone()).await;
     let (dir, gateway) = probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{new_thread_port}/v1"),
@@ -387,7 +387,7 @@ async fn v0233_http_sse_route_preserves_request_and_response_bytes() {
         "future_field": {"preserve": true}
     });
     let request_bytes = serde_json::to_vec(&request).unwrap();
-    let expected_response = v0233_sse_bytes("new-thread");
+    let expected_response = sse_bytes("new-thread");
     let response = thread_request(
         &gateway,
         "/v1/responses",
@@ -404,11 +404,11 @@ async fn v0233_http_sse_route_preserves_request_and_response_bytes() {
 }
 
 #[tokio::test]
-async fn v0233_native_ws_routes_new_thread_and_preserves_frame_bytes() {
+async fn native_ws_routes_new_thread_and_preserves_frame_bytes() {
     let ordinary_seen = Arc::new(Mutex::new(Vec::new()));
     let new_thread_seen = Arc::new(Mutex::new(Vec::new()));
-    let ordinary_port = v0233_native_endpoint("ordinary", ordinary_seen.clone()).await;
-    let new_thread_port = v0233_native_endpoint("new-thread", new_thread_seen.clone()).await;
+    let ordinary_port = native_endpoint("ordinary", ordinary_seen.clone()).await;
+    let new_thread_port = native_endpoint("new-thread", new_thread_seen.clone()).await;
     let (dir, gateway) = probing_fixture(vec![
         format!("http://127.0.0.1:{ordinary_port}/v1"),
         format!("http://127.0.0.1:{new_thread_port}/v1"),
@@ -444,13 +444,13 @@ async fn v0233_native_ws_routes_new_thread_and_preserves_frame_bytes() {
     .unwrap();
 
     let request = r#" { "type":"response.create", "model":"fixture-model", "input":[ {"type":"additional_tools","role":"developer","id":"synthetic","tools":[{"type":"function","name":"fixture_tool"}]}, {"type":"message","role":"developer","content":"fixture init"}, {"type":"message","role":"user","content":"fixture first turn"} ], "future_field":{"preserve":true} } "#;
-    let response = v0233_ws_turn(&mut peer, request).await;
+    let response = ws_turn(&mut peer, request).await;
     let response_value: Value = serde_json::from_slice(&response).unwrap();
     assert_eq!(response_value["type"], "response.completed");
     assert_eq!(response_value["response"]["provider"], "new-thread");
     assert_eq!(
         response.as_slice(),
-        v0233_native_response("new-thread").as_bytes()
+        native_response("new-thread").as_bytes()
     );
     assert_eq!(ordinary_seen.lock().len(), 0);
     assert_eq!(

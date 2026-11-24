@@ -191,7 +191,7 @@ fn assert_preview_has_no_credentials(preview: &Preview, auth: &Value) {
 }
 
 #[test]
-fn v023_account_three_formats_preview_then_single_transaction_preserves_token_bytes() {
+fn account_three_formats_preview_then_single_transaction_preserves_token_bytes() {
     let (temp, mut core) = setup();
     let values = [
         native("native", 0),
@@ -257,7 +257,7 @@ fn v023_account_three_formats_preview_then_single_transaction_preserves_token_by
 }
 
 #[test]
-fn v023_account_same_account_same_format_round_trip_preserves_all_metadata_and_wrapper() {
+fn account_same_account_same_format_round_trip_preserves_all_metadata_and_wrapper() {
     for wrapped in [false, true] {
         let (temp, mut core) = setup();
         let original = sub2(vec![sub2_account("roundtrip", 0)], wrapped);
@@ -283,7 +283,7 @@ fn v023_account_same_account_same_format_round_trip_preserves_all_metadata_and_w
 }
 
 #[test]
-fn v023_account_rejects_identity_client_and_incomplete_token_mismatches_in_preview() {
+fn account_rejects_identity_client_and_incomplete_token_mismatches_in_preview() {
     let (temp, mut core) = setup();
     let mut cases = Vec::new();
     let mut wrong_subject = native("subject", 0);
@@ -332,7 +332,7 @@ fn v023_account_rejects_identity_client_and_incomplete_token_mismatches_in_previ
 }
 
 #[test]
-fn v023_account_batch_duplicates_and_invalid_selection_do_not_partially_commit() {
+fn account_batch_duplicates_and_invalid_selection_do_not_partially_commit() {
     let (temp, mut core) = setup();
     let document = sub2(
         vec![
@@ -366,7 +366,7 @@ fn v023_account_batch_duplicates_and_invalid_selection_do_not_partially_commit()
 }
 
 #[test]
-fn v023_account_duplicates_require_explicit_update_and_keep_existing_id_and_name() {
+fn account_duplicates_require_explicit_update_and_keep_existing_id_and_name() {
     let (temp, mut core) = setup();
     let input = temp.path().join("account.json");
     let ids = import(&mut core, write(&input, &cpa("duplicate", 0)));
@@ -410,7 +410,7 @@ fn v023_account_duplicates_require_explicit_update_and_keep_existing_id_and_name
 }
 
 #[test]
-fn v023_account_subject_rotation_in_all_three_formats_requires_explicit_update() {
+fn account_subject_rotation_in_all_three_formats_requires_explicit_update() {
     let user = "fixture-rotating-user";
     let workspace = "fixture-rotating-workspace";
     for format in ["codex", "sub2api", "cliproxyapi"] {
@@ -514,7 +514,7 @@ fn v023_account_subject_rotation_in_all_three_formats_requires_explicit_update()
 }
 
 #[test]
-fn v023_account_can_skip_duplicate_and_commit_only_new_account() {
+fn account_can_skip_duplicate_and_commit_only_new_account() {
     let (temp, mut core) = setup();
     import(
         &mut core,
@@ -539,7 +539,7 @@ fn v023_account_can_skip_duplicate_and_commit_only_new_account() {
 }
 
 #[test]
-fn v023_account_import_keeps_valid_active_auth_bytes_and_does_not_revert_newer_vault() {
+fn account_import_keeps_valid_active_auth_bytes_and_does_not_revert_newer_vault() {
     let (temp, mut core) = setup();
     let active = format!(
         " \n{}\n",
@@ -569,7 +569,7 @@ fn v023_account_import_keeps_valid_active_auth_bytes_and_does_not_revert_newer_v
 }
 
 #[test]
-fn v023_account_conflict_cancel_and_replaced_preview_never_change_vault_or_auth() {
+fn account_conflict_cancel_and_replaced_preview_never_change_vault_or_auth() {
     let (temp, mut core) = setup();
     let ids = import(
         &mut core,
@@ -608,7 +608,7 @@ fn v023_account_conflict_cancel_and_replaced_preview_never_change_vault_or_auth(
 }
 
 #[test]
-fn v023_account_persist_failure_rolls_back_entire_import_and_allows_retry() {
+fn account_persist_failure_rolls_back_entire_import_and_allows_retry() {
     let (temp, mut core) = setup();
     let preview = core
         .exchange_preview(&[write(
@@ -638,7 +638,7 @@ fn v023_account_persist_failure_rolls_back_entire_import_and_allows_retry() {
 }
 
 #[test]
-fn v023_account_commit_detects_external_vault_write_without_overwriting_it() {
+fn account_commit_detects_external_vault_write_without_overwriting_it() {
     let (temp, mut core) = setup();
     import(
         &mut core,
@@ -665,7 +665,7 @@ fn v023_account_commit_detects_external_vault_write_without_overwriting_it() {
 }
 
 #[test]
-fn v023_account_expiry_seconds_and_rfc3339_export_to_expected_format() {
+fn account_expiry_seconds_and_rfc3339_export_to_expected_format() {
     for (index, expiry) in [
         json!(EXPIRES),
         json!(EXPIRES.to_string()),
@@ -709,7 +709,7 @@ fn v023_account_expiry_seconds_and_rfc3339_export_to_expected_format() {
 }
 
 #[test]
-fn v023_account_native_numeric_refresh_exports_as_rfc3339_without_changing_source() {
+fn account_native_numeric_refresh_exports_as_rfc3339_without_changing_source() {
     let seconds = chrono::DateTime::parse_from_rfc3339(REFRESH)
         .unwrap()
         .timestamp();
@@ -742,7 +742,7 @@ fn v023_account_native_numeric_refresh_exports_as_rfc3339_without_changing_sourc
 }
 
 #[test]
-fn v023_account_metadata_stays_with_its_owner_and_new_accounts_use_sanitized_template() {
+fn account_metadata_stays_with_its_owner_and_new_accounts_use_sanitized_template() {
     let (temp, mut core) = setup();
     let original = sub2(vec![sub2_account("owner", 0)], true);
     let source = write(&temp.path().join("owner.json"), &original);
@@ -786,7 +786,7 @@ fn v023_account_metadata_stays_with_its_owner_and_new_accounts_use_sanitized_tem
 }
 
 #[test]
-fn v023_account_mixed_sub2_sources_keep_private_roots_only_for_their_own_round_trip() {
+fn account_mixed_sub2_sources_keep_private_roots_only_for_their_own_round_trip() {
     let (temp, mut core) = setup();
     let mut first = sub2(vec![sub2_account("first-root-owner", 0)], true);
     first["unknown_wrapper"] = json!({"owner": "fixture-private-first-wrapper"});
@@ -849,7 +849,7 @@ fn v023_account_mixed_sub2_sources_keep_private_roots_only_for_their_own_round_t
 }
 
 #[test]
-fn v023_account_cpa_and_sub2_metadata_for_one_identity_remain_independent() {
+fn account_cpa_and_sub2_metadata_for_one_identity_remain_independent() {
     let (temp, mut core) = setup();
     let user = "fixture-shared-user";
     let workspace = "fixture-shared-workspace";
@@ -905,7 +905,7 @@ fn v023_account_cpa_and_sub2_metadata_for_one_identity_remain_independent() {
 }
 
 #[test]
-fn v023_account_export_checks_revision_and_stages_batch_before_publishing() {
+fn account_export_checks_revision_and_stages_batch_before_publishing() {
     let (temp, mut core) = setup();
     let ids = import(
         &mut core,
@@ -934,7 +934,7 @@ fn v023_account_export_checks_revision_and_stages_batch_before_publishing() {
 }
 
 #[test]
-fn v023_account_proxy_conflict_rejects_export_without_creating_output() {
+fn account_proxy_conflict_rejects_export_without_creating_output() {
     let (temp, mut core) = setup();
     import(
         &mut core,
@@ -956,7 +956,7 @@ fn v023_account_proxy_conflict_rejects_export_without_creating_output() {
 }
 
 #[test]
-fn v023_account_emits_rust_outputs_for_real_upstream_parsers() {
+fn account_emits_rust_outputs_for_real_upstream_parsers() {
     let (temp, mut core) = setup();
     let mut fixtures = Vec::new();
     for wrapped in [false, true] {

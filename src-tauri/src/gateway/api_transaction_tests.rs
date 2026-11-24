@@ -26,7 +26,7 @@ fn fixture() -> (tempfile::TempDir, Fixture) {
 
 #[cfg(unix)]
 #[test]
-fn v020_api_failed_auth_write_restores_config() {
+fn api_failed_auth_write_restores_config() {
     use std::os::unix::fs::PermissionsExt;
     let (_t, tx) = fixture();
     fs::write(tx.home.join("config.toml"), &tx.config_before).unwrap();
@@ -47,7 +47,7 @@ fn v020_api_failed_auth_write_restores_config() {
     );
 }
 #[test]
-fn v020_api_auth_revision_conflict_does_not_touch_config() {
+fn api_auth_revision_conflict_does_not_touch_config() {
     let (_t, tx) = fixture();
     fs::write(tx.home.join("config.toml"), &tx.config_before).unwrap();
     fs::write(tx.home.join("auth.json"), &tx.auth_before).unwrap();
@@ -69,7 +69,7 @@ fn v020_api_auth_revision_conflict_does_not_touch_config() {
     assert_eq!(fs::read(tx.home.join("auth.json")).unwrap(), tx.auth_after);
 }
 #[test]
-fn v020_api_missing_base_only_inserts_into_the_active_table() {
+fn api_missing_base_only_inserts_into_the_active_table() {
     for input in [
         "model_provider='relay'\r\n[model_providers.relay]\r\nrequires_openai_auth=true\r\n[next]\r\nkeep=1\r\n",
         "model_provider='relay'\nmodel_providers={relay={requires_openai_auth=true},spare={base_url='keep'}}\n",
@@ -84,7 +84,7 @@ fn v020_api_missing_base_only_inserts_into_the_active_table() {
     }
 }
 #[test]
-fn v020_api_auth_precedence_and_duplicates_do_not_guess_a_login() {
+fn api_auth_precedence_and_duplicates_do_not_guess_a_login() {
     for value in [
         r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":"fixture-stale"}"#,
         r#"{"bedrock_api_key":"fixture-cloud","OPENAI_API_KEY":"fixture-stale"}"#,

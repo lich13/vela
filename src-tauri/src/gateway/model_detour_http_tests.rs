@@ -19,35 +19,35 @@ use std::{
 };
 use tokio::sync::{mpsc, Notify, Semaphore};
 
-const V0255_MAIN_INITIAL: &[u8] = br#" { "model":"fixture-main", "stream":true,
+const MAIN_INITIAL: &[u8] = br#" { "model":"fixture-main", "stream":true,
   "input":[{"role":"user","content":"fixture-main-initial"}], "unknown":9007199254740993 } "#;
-const V0255_MAIN_DURING: &[u8] = br#" { "model":"fixture-main", "stream":true,
+const MAIN_DURING: &[u8] = br#" { "model":"fixture-main", "stream":true,
   "input":[{"role":"assistant","content":"fixture-main-initial"},{"role":"user","content":"fixture-main-during-side"}] } "#;
-const V0255_MAIN_FINAL: &[u8] = br#" { "model":"fixture-main", "stream":true,
+const MAIN_FINAL: &[u8] = br#" { "model":"fixture-main", "stream":true,
   "input":[{"role":"assistant","content":"fixture-main-during-side"},{"role":"user","content":"fixture-main-after-side"}] } "#;
-const V0255_SIDE_ONE: &[u8] = br#" { "model":"fixture-side", "stream":true,
+const SIDE_ONE: &[u8] = br#" { "model":"fixture-side", "stream":true,
   "input":[{"role":"assistant","content":"fixture-prior"},{"role":"user","content":"fixture-side-one"}] } "#;
-const V0255_SIDE_TWO: &[u8] = br#" { "model":"fixture-side", "stream":true,
+const SIDE_TWO: &[u8] = br#" { "model":"fixture-side", "stream":true,
   "input":[{"role":"assistant","content":"fixture-prior"},{"role":"user","content":"fixture-side-two"}] } "#;
-const V0255_FAIL_RETRY_REQUEST: &[u8] = br#" { "model":"fixture-side", "stream":true,
+const FAIL_RETRY_REQUEST: &[u8] = br#" { "model":"fixture-side", "stream":true,
   "input":[{"role":"assistant","content":"fixture-prior"},{"role":"user","content":"fixture-side-fail-then-retry"}] } "#;
-const V0255_INTERNAL_RETRY_REQUEST: &[u8] = br#" { "model":"fixture-side", "stream":true,
+const INTERNAL_RETRY_REQUEST: &[u8] = br#" { "model":"fixture-side", "stream":true,
   "input":[{"role":"assistant","content":"fixture-prior"},{"role":"user","content":"fixture-side-internal-retry"}] } "#;
-const V0255_CANCEL_REQUEST: &[u8] = br#" { "model":"fixture-side", "stream":true,
+const CANCEL_REQUEST: &[u8] = br#" { "model":"fixture-side", "stream":true,
   "input":[{"role":"assistant","content":"fixture-prior"},{"role":"user","content":"fixture-side-cancel"}] } "#;
 
-const V0255_MAIN_RESPONSE: &[u8] = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-main-response\"}}\r\n\r\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-main-response\",\"status\":\"completed\"}}\r\n\r\n";
-const V0255_SIDE_ONE_RESPONSE: &[u8] = b": fixture-side-one-heartbeat\r\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-side-one-response\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-side-one-response\",\"status\":\"completed\"}}\n\n";
-const V0255_SIDE_TWO_RESPONSE: &[u8] = b": fixture-side-two-heartbeat\r\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-side-two-response\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-side-two-response\",\"status\":\"completed\"}}\n\n";
-const V0255_SIDE_RESPONSE: &[u8] = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-side-response\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-side-response\",\"status\":\"completed\"}}\n\n";
-const V0255_FAILURE_RESPONSE: &[u8] =
+const MAIN_RESPONSE: &[u8] = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-main-response\"}}\r\n\r\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-main-response\",\"status\":\"completed\"}}\r\n\r\n";
+const SIDE_ONE_RESPONSE: &[u8] = b": fixture-side-one-heartbeat\r\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-side-one-response\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-side-one-response\",\"status\":\"completed\"}}\n\n";
+const SIDE_TWO_RESPONSE: &[u8] = b": fixture-side-two-heartbeat\r\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-side-two-response\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-side-two-response\",\"status\":\"completed\"}}\n\n";
+const SIDE_RESPONSE: &[u8] = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"fixture-side-response\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"fixture-side-response\",\"status\":\"completed\"}}\n\n";
+const FAILURE_RESPONSE: &[u8] =
     br#"{"error":{"code":"fixture_failure","message":"fixture upstream rejection"}}"#;
-const V0255_INTERNAL_RETRY_FAILURE_RESPONSE: &[u8] =
+const INTERNAL_RETRY_FAILURE_RESPONSE: &[u8] =
     br#"{"error":{"code":"fixture_transient","message":"fixture upstream unavailable"}}"#;
-const V0255_CANCEL_PREFIX: &[u8] =
+const CANCEL_PREFIX: &[u8] =
     b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{\"id\":\"fixture-cancel-response\"}}\n\n";
 
-async fn v0255_body(request: Request<Incoming>) -> Vec<u8> {
+async fn request_body(request: Request<Incoming>) -> Vec<u8> {
     request
         .into_body()
         .collect()
@@ -57,7 +57,7 @@ async fn v0255_body(request: Request<Incoming>) -> Vec<u8> {
         .to_vec()
 }
 
-async fn v0255_request(gateway: &Gateway, thread: &str, body: Vec<u8>) -> Response<Incoming> {
+async fn bounded_request(gateway: &Gateway, thread: &str, body: Vec<u8>) -> Response<Incoming> {
     tokio::time::timeout(
         Duration::from_secs(5),
         super::thread_request(gateway, "/v1/responses", thread, body),
@@ -66,13 +66,13 @@ async fn v0255_request(gateway: &Gateway, thread: &str, body: Vec<u8>) -> Respon
     .expect("fixture HTTP request timed out")
 }
 
-async fn v0255_response_body(response: Response<Incoming>) -> Bytes {
+async fn bounded_response_body(response: Response<Incoming>) -> Bytes {
     tokio::time::timeout(Duration::from_secs(5), super::response_bytes(response))
         .await
         .expect("fixture HTTP response body timed out")
 }
 
-async fn v0255_setup_ports(ports: &[u16]) -> (tempfile::TempDir, Gateway, Vec<String>) {
+async fn gateway_over_ports(ports: &[u16]) -> (tempfile::TempDir, Gateway, Vec<String>) {
     let urls = ports
         .iter()
         .map(|port| format!("http://127.0.0.1:{port}/v1"))
@@ -96,23 +96,26 @@ async fn v0255_setup_ports(ports: &[u16]) -> (tempfile::TempDir, Gateway, Vec<St
     (dir, gateway, ids)
 }
 
-async fn v0255_setup(main_port: u16, side_port: u16) -> (tempfile::TempDir, Gateway, Vec<String>) {
-    v0255_setup_ports(&[main_port, side_port]).await
+async fn main_and_side_gateway(
+    main_port: u16,
+    side_port: u16,
+) -> (tempfile::TempDir, Gateway, Vec<String>) {
+    gateway_over_ports(&[main_port, side_port]).await
 }
 
-fn v0255_usage_rows(usage: &crate::usage::Service) -> Vec<crate::usage::model::Record> {
+fn recorded_rows(usage: &crate::usage::Service) -> Vec<crate::usage::model::Record> {
     usage
         .query(|store| Ok(store.logs(&crate::usage::model::Filter::default())?.rows))
         .unwrap()
 }
 
-async fn v0255_wait_for_usage(
+async fn wait_for_usage(
     usage: &crate::usage::Service,
     count: usize,
 ) -> Vec<crate::usage::model::Record> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let rows = v0255_usage_rows(usage);
+            let rows = recorded_rows(usage);
             if rows.len() >= count {
                 break rows;
             }
@@ -123,7 +126,7 @@ async fn v0255_wait_for_usage(
     .expect("fixture usage rows were not persisted")
 }
 
-async fn v0255_wait_for_detour_usage(
+async fn wait_for_detour_usage(
     usage: &crate::usage::Service,
     provider: &str,
     model: &str,
@@ -131,7 +134,7 @@ async fn v0255_wait_for_detour_usage(
 ) -> Vec<crate::usage::model::Record> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let rows = v0255_usage_rows(usage);
+            let rows = recorded_rows(usage);
             let detours = rows
                 .iter()
                 .filter(|row| {
@@ -151,14 +154,11 @@ async fn v0255_wait_for_detour_usage(
     .expect("fixture detour usage rows were not persisted")
 }
 
-fn v0255_open_stream(
-    release: Arc<Notify>,
-    cancelled: Arc<Notify>,
-) -> super::super::replay::WireBody {
+fn open_stream(release: Arc<Notify>, cancelled: Arc<Notify>) -> super::super::replay::WireBody {
     let guard = NotifyOnDrop(cancelled);
     let chunks = async_stream::try_stream! {
         let _guard = guard;
-        yield Frame::data(Bytes::from_static(V0255_CANCEL_PREFIX));
+        yield Frame::data(Bytes::from_static(CANCEL_PREFIX));
         release.notified().await;
         loop {
             yield Frame::data(Bytes::from_static(
@@ -173,15 +173,15 @@ fn v0255_open_stream(
 }
 
 #[tokio::test]
-async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_completion() {
+async fn http_parallel_side_models_preserve_owner_during_and_after_completion() {
     let main_requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let main_seen = main_requests.clone();
     let main_port = super::serve(move |request| {
         let seen = main_seen.clone();
         async move {
-            let body = v0255_body(request).await;
+            let body = request_body(request).await;
             seen.lock().push(body);
-            super::v022_sse_response(Bytes::from_static(V0255_MAIN_RESPONSE))
+            super::sse_response(Bytes::from_static(MAIN_RESPONSE))
         }
     })
     .await;
@@ -196,40 +196,40 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         let arrived = arrived_tx.clone();
         let release = side_release.clone();
         async move {
-            let body = v0255_body(request).await;
+            let body = request_body(request).await;
             seen.lock().push(body.clone());
-            if body.as_slice() == V0255_SIDE_ONE || body.as_slice() == V0255_SIDE_TWO {
+            if body.as_slice() == SIDE_ONE || body.as_slice() == SIDE_TWO {
                 arrived.send(body.clone()).unwrap();
                 let _permit = release.acquire_owned().await.unwrap();
-                let response = if body.as_slice() == V0255_SIDE_ONE {
-                    V0255_SIDE_ONE_RESPONSE
+                let response = if body.as_slice() == SIDE_ONE {
+                    SIDE_ONE_RESPONSE
                 } else {
-                    V0255_SIDE_TWO_RESPONSE
+                    SIDE_TWO_RESPONSE
                 };
-                super::v022_sse_response(Bytes::from_static(response))
+                super::sse_response(Bytes::from_static(response))
             } else {
                 // If a regression routes the interleaved main request to B,
                 // answer it promptly so the assertion can show the wrong route.
-                super::v022_sse_response(Bytes::from_static(V0255_MAIN_RESPONSE))
+                super::sse_response(Bytes::from_static(MAIN_RESPONSE))
             }
         }
     })
     .await;
 
-    let (dir, gateway, ids) = v0255_setup(main_port, side_port).await;
+    let (dir, gateway, ids) = main_and_side_gateway(main_port, side_port).await;
     let usage = crate::usage::Service::new(dir.path());
     gateway.set_usage(usage.clone());
     let thread = "fixture-v0255-http-main-thread";
     let thread_hash = crate::storage::digest(thread.as_bytes());
 
-    let initial = v0255_request(&gateway, thread, V0255_MAIN_INITIAL.to_vec()).await;
+    let initial = bounded_request(&gateway, thread, MAIN_INITIAL.to_vec()).await;
     assert_eq!(initial.status(), StatusCode::OK);
     assert_eq!(
-        v0255_response_body(initial).await,
-        Bytes::from_static(V0255_MAIN_RESPONSE),
+        bounded_response_body(initial).await,
+        Bytes::from_static(MAIN_RESPONSE),
         "initial main SSE bytes must pass through unchanged"
     );
-    assert_eq!(*main_requests.lock(), vec![V0255_MAIN_INITIAL.to_vec()]);
+    assert_eq!(*main_requests.lock(), vec![MAIN_INITIAL.to_vec()]);
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
         Some(ids[0].clone())
@@ -238,12 +238,12 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
     let first_gateway = gateway.clone();
     let first_thread = thread.to_owned();
     let first_side = tokio::spawn(async move {
-        v0255_request(&first_gateway, &first_thread, V0255_SIDE_ONE.to_vec()).await
+        bounded_request(&first_gateway, &first_thread, SIDE_ONE.to_vec()).await
     });
     let second_gateway = gateway.clone();
     let second_thread = thread.to_owned();
     let second_side = tokio::spawn(async move {
-        v0255_request(&second_gateway, &second_thread, V0255_SIDE_TWO.to_vec()).await
+        bounded_request(&second_gateway, &second_thread, SIDE_TWO.to_vec()).await
     });
 
     let mut arrived = vec![
@@ -257,7 +257,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
             .expect("side fixture channel closed"),
     ];
     arrived.sort();
-    let mut expected_side_requests = vec![V0255_SIDE_ONE.to_vec(), V0255_SIDE_TWO.to_vec()];
+    let mut expected_side_requests = vec![SIDE_ONE.to_vec(), SIDE_TWO.to_vec()];
     expected_side_requests.sort();
     assert_eq!(arrived, expected_side_requests);
     assert!(
@@ -273,11 +273,11 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         Some(ids[0].clone())
     );
 
-    let during = v0255_request(&gateway, thread, V0255_MAIN_DURING.to_vec()).await;
+    let during = bounded_request(&gateway, thread, MAIN_DURING.to_vec()).await;
     assert_eq!(during.status(), StatusCode::OK);
     assert_eq!(
-        v0255_response_body(during).await,
-        Bytes::from_static(V0255_MAIN_RESPONSE),
+        bounded_response_body(during).await,
+        Bytes::from_static(MAIN_RESPONSE),
         "interleaved main SSE bytes must pass through unchanged"
     );
     assert_eq!(
@@ -297,16 +297,16 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         .unwrap();
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(second.status(), StatusCode::OK);
-    let first_bytes = v0255_response_body(first).await;
-    let second_bytes = v0255_response_body(second).await;
+    let first_bytes = bounded_response_body(first).await;
+    let second_bytes = bounded_response_body(second).await;
     assert_eq!(
         first_bytes,
-        Bytes::from_static(V0255_SIDE_ONE_RESPONSE),
+        Bytes::from_static(SIDE_ONE_RESPONSE),
         "the first delayed side SSE response must preserve its exact wire bytes"
     );
     assert_eq!(
         second_bytes,
-        Bytes::from_static(V0255_SIDE_TWO_RESPONSE),
+        Bytes::from_static(SIDE_TWO_RESPONSE),
         "the second delayed side SSE response must preserve its exact wire bytes"
     );
     assert_eq!(
@@ -314,11 +314,11 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         Some(ids[0].clone())
     );
 
-    let final_main = v0255_request(&gateway, thread, V0255_MAIN_FINAL.to_vec()).await;
+    let final_main = bounded_request(&gateway, thread, MAIN_FINAL.to_vec()).await;
     assert_eq!(final_main.status(), StatusCode::OK);
     assert_eq!(
-        v0255_response_body(final_main).await,
-        Bytes::from_static(V0255_MAIN_RESPONSE),
+        bounded_response_body(final_main).await,
+        Bytes::from_static(MAIN_RESPONSE),
         "the next main SSE bytes must pass through unchanged"
     );
     settled(&gateway).await;
@@ -330,9 +330,9 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
     assert_eq!(
         *main_requests.lock(),
         vec![
-            V0255_MAIN_INITIAL.to_vec(),
-            V0255_MAIN_DURING.to_vec(),
-            V0255_MAIN_FINAL.to_vec(),
+            MAIN_INITIAL.to_vec(),
+            MAIN_DURING.to_vec(),
+            MAIN_FINAL.to_vec(),
         ],
         "all main-model request bytes must stay on A"
     );
@@ -340,7 +340,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
     observed_side.sort();
     assert_eq!(observed_side, expected_side_requests);
 
-    let usage_rows = v0255_wait_for_detour_usage(&usage, &ids[1], "fixture-side", 2).await;
+    let usage_rows = wait_for_detour_usage(&usage, &ids[1], "fixture-side", 2).await;
     let detours = usage_rows
         .iter()
         .filter(|row| {
@@ -364,15 +364,15 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
 }
 
 #[tokio::test]
-async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unchanged() {
+async fn http_failure_client_retry_and_cancel_leave_owner_reservation_unchanged() {
     let main_requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let main_seen = main_requests.clone();
     let main_port = super::serve(move |request| {
         let seen = main_seen.clone();
         async move {
-            let body = v0255_body(request).await;
+            let body = request_body(request).await;
             seen.lock().push(body);
-            super::v022_sse_response(Bytes::from_static(V0255_MAIN_RESPONSE))
+            super::sse_response(Bytes::from_static(MAIN_RESPONSE))
         }
     })
     .await;
@@ -391,18 +391,18 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
         let release = release_upstream.clone();
         let cancelled = cancelled_signal.clone();
         async move {
-            let body = v0255_body(request).await;
+            let body = request_body(request).await;
             seen.lock().push(body.clone());
-            if body.as_slice() == V0255_FAIL_RETRY_REQUEST {
+            if body.as_slice() == FAIL_RETRY_REQUEST {
                 if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    super::json_response(StatusCode::BAD_REQUEST, V0255_FAILURE_RESPONSE, None)
+                    super::json_response(StatusCode::BAD_REQUEST, FAILURE_RESPONSE, None)
                 } else {
-                    super::v022_sse_response(Bytes::from_static(V0255_SIDE_RESPONSE))
+                    super::sse_response(Bytes::from_static(SIDE_RESPONSE))
                 }
-            } else if body.as_slice() == V0255_CANCEL_REQUEST {
+            } else if body.as_slice() == CANCEL_REQUEST {
                 Response::builder()
                     .header("content-type", "text/event-stream")
-                    .body(v0255_open_stream(release, cancelled))
+                    .body(open_stream(release, cancelled))
                     .unwrap()
             } else {
                 super::json_response(
@@ -416,25 +416,25 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
     })
     .await;
 
-    let (_dir, gateway, ids) = v0255_setup(main_port, side_port).await;
+    let (_dir, gateway, ids) = main_and_side_gateway(main_port, side_port).await;
     let thread = "fixture-v0255-http-failure-thread";
     let thread_hash = crate::storage::digest(thread.as_bytes());
-    let initial = v0255_request(&gateway, thread, V0255_MAIN_INITIAL.to_vec()).await;
+    let initial = bounded_request(&gateway, thread, MAIN_INITIAL.to_vec()).await;
     assert_eq!(initial.status(), StatusCode::OK);
     assert_eq!(
-        v0255_response_body(initial).await,
-        Bytes::from_static(V0255_MAIN_RESPONSE)
+        bounded_response_body(initial).await,
+        Bytes::from_static(MAIN_RESPONSE)
     );
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
         Some(ids[0].clone())
     );
 
-    let failed = v0255_request(&gateway, thread, V0255_FAIL_RETRY_REQUEST.to_vec()).await;
+    let failed = bounded_request(&gateway, thread, FAIL_RETRY_REQUEST.to_vec()).await;
     assert_eq!(failed.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        v0255_response_body(failed).await,
-        Bytes::from_static(V0255_FAILURE_RESPONSE),
+        bounded_response_body(failed).await,
+        Bytes::from_static(FAILURE_RESPONSE),
         "the failed side response bytes must pass through unchanged"
     );
     settled(&gateway).await;
@@ -444,11 +444,11 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
         Some(ids[0].clone())
     );
 
-    let retried = v0255_request(&gateway, thread, V0255_FAIL_RETRY_REQUEST.to_vec()).await;
+    let retried = bounded_request(&gateway, thread, FAIL_RETRY_REQUEST.to_vec()).await;
     assert_eq!(retried.status(), StatusCode::OK);
     assert_eq!(
-        v0255_response_body(retried).await,
-        Bytes::from_static(V0255_SIDE_RESPONSE),
+        bounded_response_body(retried).await,
+        Bytes::from_static(SIDE_RESPONSE),
         "a later retry must preserve the successful side SSE bytes"
     );
     settled(&gateway).await;
@@ -458,12 +458,12 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
         Some(ids[0].clone())
     );
 
-    let cancellation = v0255_request(&gateway, thread, V0255_CANCEL_REQUEST.to_vec()).await;
+    let cancellation = bounded_request(&gateway, thread, CANCEL_REQUEST.to_vec()).await;
     assert_eq!(cancellation.status(), StatusCode::OK);
     let mut body = cancellation.into_body();
     let prefix = tokio::time::timeout(Duration::from_secs(5), async {
         let mut bytes = Vec::new();
-        while bytes.len() < V0255_CANCEL_PREFIX.len() {
+        while bytes.len() < CANCEL_PREFIX.len() {
             let frame = body
                 .frame()
                 .await
@@ -477,7 +477,7 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
     })
     .await
     .expect("cancel fixture stream did not produce its first SSE event");
-    assert_eq!(prefix, V0255_CANCEL_PREFIX);
+    assert_eq!(prefix, CANCEL_PREFIX);
     let upstream_cancelled = cancelled_upstream.notified();
     drop(body);
     cancel_release.notify_one();
@@ -490,13 +490,13 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
         Some(ids[0].clone())
     );
 
-    assert_eq!(*main_requests.lock(), vec![V0255_MAIN_INITIAL.to_vec()]);
+    assert_eq!(*main_requests.lock(), vec![MAIN_INITIAL.to_vec()]);
     assert_eq!(
         *side_requests.lock(),
         vec![
-            V0255_FAIL_RETRY_REQUEST.to_vec(),
-            V0255_FAIL_RETRY_REQUEST.to_vec(),
-            V0255_CANCEL_REQUEST.to_vec(),
+            FAIL_RETRY_REQUEST.to_vec(),
+            FAIL_RETRY_REQUEST.to_vec(),
+            CANCEL_REQUEST.to_vec(),
         ],
         "failure, retry, and cancellation must use the exact side request bytes"
     );
@@ -504,15 +504,15 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
 }
 
 #[tokio::test]
-async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner() {
+async fn http_internal_retry_keeps_one_request_and_preserves_detour_owner() {
     let main_requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let main_seen = main_requests.clone();
     let main_port = super::serve(move |request| {
         let seen = main_seen.clone();
         async move {
-            let body = v0255_body(request).await;
+            let body = request_body(request).await;
             seen.lock().push(body);
-            super::v022_sse_response(Bytes::from_static(V0255_MAIN_RESPONSE))
+            super::sse_response(Bytes::from_static(MAIN_RESPONSE))
         }
     })
     .await;
@@ -522,11 +522,11 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
     let first_candidate_port = super::serve(move |request| {
         let seen = first_candidate_seen.clone();
         async move {
-            let body = v0255_body(request).await;
+            let body = request_body(request).await;
             seen.lock().push(body);
             super::json_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                V0255_INTERNAL_RETRY_FAILURE_RESPONSE,
+                INTERNAL_RETRY_FAILURE_RESPONSE,
                 None,
             )
         }
@@ -538,42 +538,42 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
     let fallback_port = super::serve(move |request| {
         let seen = fallback_seen.clone();
         async move {
-            let body = v0255_body(request).await;
+            let body = request_body(request).await;
             seen.lock().push(body);
-            super::v022_sse_response(Bytes::from_static(V0255_SIDE_RESPONSE))
+            super::sse_response(Bytes::from_static(SIDE_RESPONSE))
         }
     })
     .await;
 
     let (dir, gateway, ids) =
-        v0255_setup_ports(&[main_port, first_candidate_port, fallback_port]).await;
+        gateway_over_ports(&[main_port, first_candidate_port, fallback_port]).await;
     assert!(gateway.view().settings.max_retries > 0);
     let usage = crate::usage::Service::new(dir.path());
     gateway.set_usage(usage.clone());
     let thread = "fixture-v0255-http-internal-retry-thread";
     let thread_hash = crate::storage::digest(thread.as_bytes());
 
-    let initial = v0255_request(&gateway, thread, V0255_MAIN_INITIAL.to_vec()).await;
+    let initial = bounded_request(&gateway, thread, MAIN_INITIAL.to_vec()).await;
     assert_eq!(initial.status(), StatusCode::OK);
     assert_eq!(
-        v0255_response_body(initial).await,
-        Bytes::from_static(V0255_MAIN_RESPONSE)
+        bounded_response_body(initial).await,
+        Bytes::from_static(MAIN_RESPONSE)
     );
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
         Some(ids[0].clone())
     );
 
-    let response = v0255_request(&gateway, thread, V0255_INTERNAL_RETRY_REQUEST.to_vec()).await;
+    let response = bounded_request(&gateway, thread, INTERNAL_RETRY_REQUEST.to_vec()).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        v0255_response_body(response).await,
-        Bytes::from_static(V0255_SIDE_RESPONSE),
+        bounded_response_body(response).await,
+        Bytes::from_static(SIDE_RESPONSE),
         "the fallback provider response bytes must pass through unchanged"
     );
     settled(&gateway).await;
 
-    let rows = v0255_wait_for_usage(&usage, 2).await;
+    let rows = wait_for_usage(&usage, 2).await;
     let record = rows
         .iter()
         .find(|record| {
@@ -602,14 +602,14 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
     }
     assert_eq!(
         *first_candidate_requests.lock(),
-        vec![V0255_INTERNAL_RETRY_REQUEST.to_vec()]
+        vec![INTERNAL_RETRY_REQUEST.to_vec()]
     );
     assert_eq!(
         *fallback_requests.lock(),
-        vec![V0255_INTERNAL_RETRY_REQUEST.to_vec()],
+        vec![INTERNAL_RETRY_REQUEST.to_vec()],
         "both providers must receive the same original HTTP request bytes"
     );
-    assert_eq!(*main_requests.lock(), vec![V0255_MAIN_INITIAL.to_vec()]);
+    assert_eq!(*main_requests.lock(), vec![MAIN_INITIAL.to_vec()]);
 
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
