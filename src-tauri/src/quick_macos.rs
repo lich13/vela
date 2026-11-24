@@ -635,9 +635,12 @@ pub fn derive_long_waits(
                 .single()
                 .map(|dt| dt.format("%H:%M:%S").to_string())
                 .unwrap_or_default();
+            // The time of the attempt or wait in progress; the whole request
+            // only decides whether it is listed.
+            let attempt = r.attempt_seconds.saturating_add(delta);
             let timing_text = match r.remaining_seconds {
-                None => format!("已用 {elapsed} 秒"),
-                Some(rem) => format!("剩余 {} 秒", rem.saturating_sub(delta)),
+                None => format!("本次 {attempt} 秒"),
+                Some(rem) => format!("本次 {attempt} 秒 · 剩余 {} 秒", rem.saturating_sub(delta)),
             };
             let received_text = r
                 .received_bytes
@@ -2913,6 +2916,7 @@ mod tests {
                 model: Some("claude-sonnet-4-5".into()),
                 started_at: 1_700_000_000,
                 elapsed_seconds: 58,
+                attempt_seconds: 12,
                 remaining_seconds: None,
                 phase: "buffering".into(),
                 received_bytes: Some(735_846),
@@ -2925,6 +2929,7 @@ mod tests {
                 model: None,
                 started_at: 1_700_000_000,
                 elapsed_seconds: 59,
+                attempt_seconds: 59,
                 remaining_seconds: Some(120),
                 phase: "frozen".into(),
                 received_bytes: None,
@@ -2937,6 +2942,7 @@ mod tests {
                 model: None,
                 started_at: 1_700_000_000,
                 elapsed_seconds: 90,
+                attempt_seconds: 90,
                 remaining_seconds: None,
                 phase: "buffering".into(),
                 received_bytes: Some(512),
@@ -2949,6 +2955,7 @@ mod tests {
                 model: None,
                 started_at: 1_700_000_000,
                 elapsed_seconds: 90,
+                attempt_seconds: 20,
                 remaining_seconds: Some(30),
                 phase: "retry".into(),
                 received_bytes: None,
@@ -2974,6 +2981,7 @@ mod tests {
 
         // r-short reaches 58 + 3 = 61s (>= 60s) with buffering -> "缓冲响应";
         // r-frozen does not advance elapsed while frozen (stays 59s < 60s).
+        // The text counts the attempt in progress, not the whole request.
         let waits = &card.long_waits;
         assert_eq!(
             waits
@@ -2983,7 +2991,8 @@ mod tests {
             ["r-short", "r-silent", "r-retry"]
         );
         assert_eq!(waits[0].phase_text, "缓冲响应");
-        assert_eq!(waits[0].timing_text, "已用 61 秒");
+        assert_eq!(waits[0].timing_text, "本次 15 秒");
+        assert_eq!(waits[2].timing_text, "本次 23 秒 · 剩余 27 秒");
 
         // A transfer adds what it has received and its rate, or its silence
         // from five seconds on; a request that is not receiving adds nothing.
