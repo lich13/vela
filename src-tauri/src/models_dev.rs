@@ -445,13 +445,8 @@ impl Catalog {
     }
 }
 async fn download(source: &str) -> Result<Index> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .user_agent(concat!("vela/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|_| failure("models.dev 连接初始化失败"))?;
+    let client =
+        crate::download::catalog_client().map_err(|_| failure("models.dev 连接初始化失败"))?;
     let mut response = client
         .get(source)
         .header("accept-encoding", "identity")
@@ -467,17 +462,14 @@ async fn download(source: &str) -> Result<Index> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("identity")
         .to_owned();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| failure("models.dev 响应中断"))?
-    {
-        if bytes.len() + chunk.len() > DOWNLOAD_LIMIT {
-            return Err(failure("models.dev 下载超过 16 MiB"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+    let bytes = crate::download::body(
+        &mut response,
+        DOWNLOAD_LIMIT as u64,
+        "models.dev 响应中断",
+        "models.dev 下载超过 16 MiB",
+    )
+    .await
+    .map_err(failure)?;
     // The request asks for an identity body; anything else is not decoded.
     if !matches!(encoding.as_str(), "identity" | "") {
         return Err(failure("models.dev 压缩格式不支持"));

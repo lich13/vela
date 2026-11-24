@@ -9,6 +9,7 @@ mod cleanup_spool;
 mod commands;
 mod configuration;
 mod core;
+mod download;
 mod errors;
 mod event_raw;
 mod events;

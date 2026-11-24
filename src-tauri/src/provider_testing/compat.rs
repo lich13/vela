@@ -1,7 +1,4 @@
 use serde_json::Value;
-pub fn sha256(raw: impl AsRef<[u8]>) -> String {
-    crate::storage::digest(raw.as_ref())
-}
 pub fn string(value: &Value) -> &str {
     value.as_str().unwrap_or("")
 }

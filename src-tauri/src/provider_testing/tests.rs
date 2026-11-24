@@ -3642,7 +3642,10 @@ fn modeltrace_accepts_verified_compatible_cache_and_rejects_unknown_algorithms()
     assert_eq!(data["models"].as_array().unwrap().len(), 37);
     assert_eq!(manifest["builtAt"], data["built_at"]);
     let raw = include_bytes!("../../resources/modeltrace/unified_bank.json");
-    assert_eq!(compat::sha256(raw), manifest["files"]["bank"]["sha256"]);
+    assert_eq!(
+        crate::storage::digest(raw),
+        manifest["files"]["bank"]["sha256"]
+    );
     assert_eq!(
         bank::git_blob_digest(raw),
         manifest["files"]["bank"]["gitBlob"]
