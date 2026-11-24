@@ -2,6 +2,7 @@ import { preferredDshProfile, rememberDshProfile } from "./dsh-profile";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Save, RotateCcw, History } from "lucide-react";
 import { command } from "./bridge";
+import { useDirtyReport } from "./draft-report";
 import type { DshFileKey, DshFileView } from "./bridge-contracts";
 import ClientSelection from "./ClientSelection";
 import { configClients, dshFields } from "./config-fields";
@@ -84,10 +85,7 @@ export default function DshConfigEditor({
       }
     setVisual(next);
   }
-  useEffect(() => {
-    onDirty(dirty);
-    return () => onDirty(false);
-  }, [dirty, onDirty]);
+  useDirtyReport(dirty, onDirty);
   useEffect(() => {
     const normalized = normalizedSelection.current;
     normalizedSelection.current = null;

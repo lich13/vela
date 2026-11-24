@@ -2,6 +2,7 @@ import { flushTestPrompt, useTestPrompt } from "./provider-test-prompt";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Copy, RefreshCw } from "lucide-react";
 import { command } from "./bridge";
+import { useDirtyReport } from "./draft-report";
 import { confirmAction } from "./confirmation";
 import { subscriptions } from "./subscriptions";
 import { useVisible } from "./visibility";
@@ -149,10 +150,7 @@ export default function ProviderTesting({
   ).filter((item) => !item.name.includes("/"));
   const model = chosen[kind];
   const dirty = !!detection && JSON.stringify(detection) !== detectionSaved;
-  useEffect(() => {
-    onDirtyChange?.(dirty);
-  }, [dirty, onDirtyChange]);
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+  useDirtyReport(dirty, onDirtyChange);
   const catalogEndpoint =
     tab === "detection" ? (detection?.endpoint ?? provider.baseUrl) : endpoint;
   const models = catalog?.endpoint === catalogEndpoint ? catalog.value : null;

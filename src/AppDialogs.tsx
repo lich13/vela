@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import { command, local } from "./bridge";
+import { useDirtyReport } from "./draft-report";
 import { useInstance } from "./instance";
 import { useDialogFocus } from "./Modal";
 import NotificationPermission from "./NotificationPermission";
@@ -330,10 +331,7 @@ export function SettingsForm({
   const isDirty =
     prefs.theme !== preferences.theme ||
     prefs.systemNotifications !== preferences.systemNotifications;
-  useEffect(() => {
-    onDirtyChange?.(isDirty);
-  }, [isDirty, onDirtyChange]);
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+  useDirtyReport(isDirty, onDirtyChange);
   useEffect(() => () => onThemePreview(null), [onThemePreview]);
   const checkForUpdates = () => {
     setChecking(true);
@@ -462,10 +460,7 @@ export function AccountEdit({
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   const isDirty = dialog.action === "rename" && name !== dialog.account.name;
-  useEffect(() => {
-    onDirtyChange?.(isDirty);
-  }, [isDirty, onDirtyChange]);
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+  useDirtyReport(isDirty, onDirtyChange);
   return (
     <form
       className="modal-content"

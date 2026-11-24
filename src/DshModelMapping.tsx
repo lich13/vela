@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { command } from "./bridge";
+import { useBusyReport, useDirtyReport } from "./draft-report";
 import type { GatewayEdit } from "./bridge-contracts";
 import type { EditRevision } from "./gateway-edit";
 import { errorOf, type Provider } from "./types";
@@ -60,13 +61,8 @@ export default function DshModelMapping({
       generation.current++;
     };
   }, [provider.id]);
-  useEffect(() => {
-    onDirtyChange?.(dirty);
-    return () => onDirtyChange?.(false);
-  }, [dirty, onDirtyChange]);
-  useEffect(() => {
-    onBusyChange?.(busy);
-  }, [busy, onBusyChange]);
+  useDirtyReport(dirty, onDirtyChange);
+  useBusyReport(busy, onBusyChange);
   const leave = async () => {
     if (!dirty || (await confirmAction("放弃未保存的模型映射？"))) close();
   };
