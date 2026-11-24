@@ -1300,21 +1300,20 @@ pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> Provide
     ProviderTimeline { spans }
 }
 pub fn poll_state(
-    data_dir: &Path,
+    paths: &Paths,
     last_stamp: &mut Option<String>,
 ) -> Result<Option<AntigravityAuthState>> {
     with_lock(|| {
-        let paths = Paths::resolve(data_dir)?;
-        let oauth = read_oauth(&paths, false)?;
+        let oauth = read_oauth(paths, false)?;
         let oauth_revision = storage::revision(oauth.as_deref().map(str::as_bytes));
-        let stamp = auth_stamp(&paths, &oauth_revision);
+        let stamp = auth_stamp(paths, &oauth_revision);
         if last_stamp.as_ref() == Some(&stamp) {
             return Ok(None);
         }
-        let (state, clean) = state_with_oauth(&paths, oauth)?;
+        let (state, clean) = state_with_oauth(paths, oauth)?;
         if clean {
             // State observation may have saved a new account or activation.
-            *last_stamp = Some(auth_stamp(&paths, &oauth_revision));
+            *last_stamp = Some(auth_stamp(paths, &oauth_revision));
         }
         Ok(Some(state))
     })
@@ -1538,40 +1537,29 @@ pub(crate) fn with_usage_sync<T>(
     synchronize();
     Ok(state)
 }
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub async fn get_antigravity_auth_state(
-    app: tauri::AppHandle,
-    r: R<'_>,
-) -> Result<AntigravityAuthState> {
-    let data = r.data.clone();
-    let state = tauri::async_runtime::spawn_blocking(move || {
-        with_lock(|| state_at(&Paths::resolve(&data)?))
-    })
-    .await
-    .map_err(|_| err(code::PROCESS, "读取 Antigravity 账号任务异常中断"))??;
-    crate::emit_antigravity_auth_state(&app, &state);
+pub async fn get_antigravity_auth_state(r: &Runtime) -> Result<AntigravityAuthState> {
+    let paths = r.antigravity_paths();
+    let state = tokio::task::spawn_blocking(move || with_lock(|| state_at(&paths)))
+        .await
+        .map_err(|_| err(code::PROCESS, "读取 Antigravity 账号任务异常中断"))??;
+    r.emit(crate::runtime::Event::AntigravityAuth(&state));
     Ok(state)
 }
-#[cfg(feature = "desktop")]
-#[tauri::command]
 pub async fn switch_antigravity_account(
-    r: R<'_>,
+    r: &Arc<Runtime>,
     id: String,
     expected_revision: String,
 ) -> Result<AntigravityAuthState> {
-    let rt = r.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let rt = r.clone();
+    tokio::task::spawn_blocking(move || {
         with_usage_sync(
             || {
-                if let Ok(home) = crate::antigravity::home() {
-                    let roots = vec![("antigravity".into(), Ok(home))];
-                    let _ = rt.usage.sync_roots(roots, None);
-                }
+                let roots = vec![("antigravity".into(), Ok(rt.antigravity_home()))];
+                let _ = rt.usage.sync_roots(roots, None);
             },
             || {
                 switch_account_at(
-                    &Paths::resolve(&rt.data)?,
+                    &rt.antigravity_paths(),
                     &SystemAppLifecycle::default(),
                     &id,
                     &expected_revision,
@@ -1582,24 +1570,20 @@ pub async fn switch_antigravity_account(
     .await
     .map_err(|_| err(code::PROCESS, "切换凭据任务异常中断"))?
 }
-#[cfg(feature = "desktop")]
-#[tauri::command]
 pub fn rename_antigravity_account(
-    r: R<'_>,
+    r: &Runtime,
     id: String,
     name: String,
     expected_revision: String,
 ) -> Result<AntigravityAuthState> {
-    rename_account_at(&Paths::resolve(&r.data)?, &id, &name, &expected_revision)
+    rename_account_at(&r.antigravity_paths(), &id, &name, &expected_revision)
 }
-#[cfg(feature = "desktop")]
-#[tauri::command]
 pub fn delete_antigravity_account(
-    r: R<'_>,
+    r: &Runtime,
     id: String,
     expected_revision: String,
 ) -> Result<AntigravityAuthState> {
-    delete_account_at(&Paths::resolve(&r.data)?, &id, &expected_revision)
+    delete_account_at(&r.antigravity_paths(), &id, &expected_revision)
 }
 #[cfg(feature = "desktop")]
 #[tauri::command]
@@ -1610,7 +1594,7 @@ pub async fn export_antigravity_accounts(
     expected_revision: String,
 ) -> Result<Option<usize>> {
     use tauri_plugin_dialog::DialogExt;
-    let data = r.data.clone();
+    let paths = r.antigravity_paths();
     tauri::async_runtime::spawn_blocking(move || {
         let Some(file) = app
             .dialog()
@@ -1624,7 +1608,7 @@ pub async fn export_antigravity_accounts(
         let path = file
             .into_path()
             .map_err(|_| err(code::PATH, "请选择本地路径"))?;
-        export_accounts_at(&Paths::resolve(&data)?, &expected_revision, &ids, &path).map(Some)
+        export_accounts_at(&paths, &expected_revision, &ids, &path).map(Some)
     })
     .await
     .map_err(|_| err(code::EXPORT, "账号导出失败"))?
@@ -1637,7 +1621,7 @@ pub async fn import_antigravity_accounts(
     expected_revision: String,
 ) -> Result<Option<AntigravityImport>> {
     use tauri_plugin_dialog::DialogExt;
-    let data = r.data.clone();
+    let paths = r.antigravity_paths();
     let handle = app.clone();
     let imported = tauri::async_runtime::spawn_blocking(move || {
         let Some(file) = handle
@@ -1652,12 +1636,12 @@ pub async fn import_antigravity_accounts(
         let path = file
             .into_path()
             .map_err(|_| err(code::PATH, "请选择本地 JSON 文件"))?;
-        import_accounts_at(&Paths::resolve(&data)?, &expected_revision, &path).map(Some)
+        import_accounts_at(&paths, &expected_revision, &path).map(Some)
     })
     .await
     .map_err(|_| err(code::IMPORT, "账号导入失败"))??;
     if let Some(imported) = &imported {
-        crate::emit_antigravity_auth_state(&app, &imported.state);
+        r.emit(crate::runtime::Event::AntigravityAuth(&imported.state));
     }
     Ok(imported)
 }

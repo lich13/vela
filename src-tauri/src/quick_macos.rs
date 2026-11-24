@@ -1570,7 +1570,7 @@ impl Host {
             .or_else(|| visible_clients.first().copied());
         let client_visible = selected_client.is_some();
 
-        let accounts: Option<ViewState> = crate::state_for(&r).ok();
+        let accounts: Option<ViewState> = r.state().ok();
         let pref_theme = accounts
             .as_ref()
             .map(|a| a.preferences.theme.as_str())
@@ -1879,9 +1879,10 @@ impl Host {
                     host.render_if_visible();
                     let config = view.config_revision.as_deref();
                     let outcome = if view.running || view.recovery_pending {
-                        crate::stop_gateway_for(&host.app, &r, cid, config).await
+                        crate::rpc::handlers::stop_gateway_for(&r, cid, config).await
                     } else {
-                        crate::start_gateway_for(&host.app, &r, cid, &view.revision, config).await
+                        crate::rpc::handlers::start_gateway_for(&r, cid, &view.revision, config)
+                            .await
                     };
                     host.state.lock().busy = false;
                     match outcome {
@@ -2264,7 +2265,7 @@ impl Host {
         self.state.lock().busy = false;
         match outcome {
             Ok(_) => {
-                let _ = crate::refresh(&self.app, &r);
+                let _ = r.refresh();
                 self.bump_wake();
                 self.render_if_visible();
                 true
