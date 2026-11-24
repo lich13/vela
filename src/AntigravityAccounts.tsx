@@ -124,7 +124,9 @@ export default function AntigravityAccounts({
           <Info size={14} />
           <span>
             有 {state.cliSessions} 个 agy 会话正在运行。agy 与 Antigravity app
-            共用同一份登录，每个会话沿用启动时的账号，并在刷新令牌时（约每小时）把它写回，切换或重新登录后会被改回原账号。请退出这些会话后再切换，或切换后重新打开它们。
+            共用同一份登录，每个会话沿用启动时的账号，并在刷新令牌时（约每小时）把它写回。切换账号时
+            Vela 会一并关闭这些会话，切换后请重新打开；在 Antigravity
+            里重新登录前请先自行退出它们。
           </span>
         </div>
       )}
@@ -187,8 +189,8 @@ export default function AntigravityAccounts({
                             (next.appRestarted
                               ? `已切换到 ${item.name} 并自动重启 Antigravity`
                               : `已切换到 ${item.name}`) +
-                            (next.cliSessions
-                              ? `；仍有 ${next.cliSessions} 个 agy 会话在用原账号，请退出后重新打开`
+                            (next.cliClosed
+                              ? `；已关闭 ${next.cliClosed} 个 agy 会话`
                               : ""),
                         )
                       }

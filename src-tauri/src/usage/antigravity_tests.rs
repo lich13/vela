@@ -1945,6 +1945,9 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
         fn launch(&self) -> Result<()> {
             Ok(())
         }
+        fn quit_cli(&self) -> Result<usize> {
+            Ok(0)
+        }
     }
     let fixture = fixture(false).await;
     let dir = tempfile::tempdir().unwrap();

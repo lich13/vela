@@ -313,3 +313,31 @@ fn platform_targets_exclude_the_other_platform_and_its_subtree() {
             .all(|pid| fake.calls.iter().any(|(p, _)| p == pid)));
     }
 }
+
+#[test]
+fn quitting_agy_ends_its_sessions_and_their_children_and_nothing_else() {
+    let mut claude = entry(6, Some(2), "/fixture/.local/bin/claude", false);
+    claude.claude_code = true;
+    let mut fake = Fake {
+        items: vec![
+            entry(1, None, "/app/switch", false),
+            entry(2, None, "/fixture/.local/bin/agy", false),
+            entry(3, Some(2), "/bin/helper", false),
+            entry(4, None, "/usr/bin/agy-helper", false),
+            entry(5, None, "/bin/codex", false),
+            claude,
+            entry(7, Some(1), "/fixture/bin/agy", false),
+            entry(8, None, "/fixture/bin/agy", false),
+        ],
+        stuck: HashSet::from([8]),
+        ..Fake::default()
+    };
+    let out = run(&mut fake, 1, Target::Agy).unwrap();
+    let mut ended: Vec<_> = fake.gone.iter().copied().collect();
+    ended.sort_unstable();
+    // Our own child, another client started inside a session and anything
+    // merely named alike are left running.
+    assert_eq!(ended, [2, 3]);
+    assert_eq!((out.terminated, out.sessions, out.failed), (2, 1, 1));
+    assert!(serde_json::from_str::<Target>("\"agy\"").is_err());
+}

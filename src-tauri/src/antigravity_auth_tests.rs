@@ -7,6 +7,8 @@ struct MockLifecycle {
     events: Mutex<Vec<&'static str>>,
     fail_quit: bool,
     fail_launch: bool,
+    cli: usize,
+    fail_quit_cli: bool,
 }
 
 impl MockLifecycle {
@@ -16,6 +18,8 @@ impl MockLifecycle {
             events: Mutex::new(Vec::new()),
             fail_quit: false,
             fail_launch: false,
+            cli: 0,
+            fail_quit_cli: false,
         }
     }
 
@@ -47,6 +51,15 @@ impl AppLifecycle for MockLifecycle {
         }
         *self.running.lock() = true;
         Ok(())
+    }
+
+    fn quit_cli(&self) -> Result<usize> {
+        drop(AUTH_LOCK.lock());
+        self.events.lock().push("quit_cli");
+        if self.fail_quit_cli {
+            return Err(AppError::new(code::PROCESS, "模拟关闭 agy 失败"));
+        }
+        Ok(self.cli)
     }
 }
 
@@ -371,6 +384,7 @@ fn auth_state_serializes_exactly_the_frontend_fields() {
         [
             "accounts",
             "appRestarted",
+            "cliClosed",
             "cliSessions",
             "oauthAuthMethod",
             "oauthEmail",
@@ -398,10 +412,14 @@ fn switch_account_writes_the_saved_login_and_restarts_a_running_app() {
     let (_tmp, paths) = setup_paths();
     let (first, second, before) = two_accounts(&paths);
 
-    let lifecycle = MockLifecycle::new(true);
+    let mut lifecycle = MockLifecycle::new(true);
+    lifecycle.cli = 2;
     let switched = switch_account_at(&paths, &lifecycle, &first, &before.revision).unwrap();
     assert!(switched.app_restarted && !switched.relaunch_failed);
-    assert_eq!(lifecycle.events(), vec!["quit", "launch"]);
+    // The app and the terminal sessions are both closed before the login is
+    // written; only the app is opened again.
+    assert_eq!(lifecycle.events(), vec!["quit", "quit_cli", "launch"]);
+    assert_eq!(switched.cli_closed, 2);
     assert_eq!(fs::read_to_string(paths.oauth_file()).unwrap(), FIRST_LOGIN);
     assert_eq!(switched.oauth_email.as_deref(), Some("u1@example.invalid"));
     assert_eq!(active_account_id(&switched), Some(first.clone()));
@@ -415,7 +433,8 @@ fn switch_account_writes_the_saved_login_and_restarts_a_running_app() {
     let closed = MockLifecycle::new(false);
     let back = switch_account_at(&paths, &closed, &second, &switched.revision).unwrap();
     assert!(!back.app_restarted && !back.relaunch_failed);
-    assert!(closed.events().is_empty());
+    assert_eq!(closed.events(), vec!["quit_cli"]);
+    assert_eq!(back.cli_closed, 0);
     assert_eq!(
         fs::read_to_string(paths.oauth_file()).unwrap(),
         SECOND_LOGIN
@@ -427,12 +446,12 @@ fn switch_account_writes_the_saved_login_and_restarts_a_running_app() {
     stuck.fail_launch = true;
     let kept = switch_account_at(&paths, &stuck, &first, &back.revision).unwrap();
     assert!(kept.relaunch_failed && !kept.app_restarted);
-    assert_eq!(stuck.events(), vec!["quit", "launch"]);
+    assert_eq!(stuck.events(), vec!["quit", "quit_cli", "launch"]);
     assert_eq!(active_account_id(&kept), Some(first));
 
     let unknown = switch_account_at(&paths, &closed, "missing", &kept.revision).unwrap_err();
     assert_eq!(unknown.code, code::ACCOUNT);
-    assert!(closed.events().is_empty());
+    assert_eq!(closed.events(), vec!["quit_cli"]);
 }
 
 #[test]
@@ -457,7 +476,7 @@ fn a_failed_switch_restores_the_login_and_the_vault() {
     assert_eq!(fs::read(paths.vault_file()).unwrap(), vault);
     assert_eq!(state_at(&paths).unwrap().revision, before.revision);
     // The app that was closed for the switch is opened again.
-    assert_eq!(lifecycle.events(), vec!["quit", "launch"]);
+    assert_eq!(lifecycle.events(), vec!["quit", "quit_cli", "launch"]);
 }
 
 #[test]
@@ -521,12 +540,27 @@ fn revision_conflict_and_quit_failure_preserve_disk_files() {
     let closed = MockLifecycle::new(false);
     let conflict = switch_account_at(&paths, &closed, &first, "stale-rev").unwrap_err();
     assert_eq!(conflict.code, code::CONFLICT);
+    // A stale request ends nothing.
+    assert!(closed.events().is_empty());
 
     let mut failing = MockLifecycle::new(true);
     failing.fail_quit = true;
     let res = switch_account_at(&paths, &failing, &first, &s1.revision);
     assert_eq!(res.unwrap_err().code, code::PROCESS);
     assert_eq!(failing.events(), vec!["quit"]);
+    assert_eq!(
+        fs::read_to_string(paths.oauth_file()).unwrap(),
+        SECOND_LOGIN
+    );
+    assert_eq!(fs::read(paths.vault_file()).unwrap(), vault);
+
+    // A terminal session that will not end leaves the login alone, and the
+    // app that was closed for the switch is opened again.
+    let mut held = MockLifecycle::new(true);
+    held.fail_quit_cli = true;
+    let res = switch_account_at(&paths, &held, &first, &s1.revision);
+    assert_eq!(res.unwrap_err().code, code::PROCESS);
+    assert_eq!(held.events(), vec!["quit", "quit_cli", "launch"]);
     assert_eq!(
         fs::read_to_string(paths.oauth_file()).unwrap(),
         SECOND_LOGIN

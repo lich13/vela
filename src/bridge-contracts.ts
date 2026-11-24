@@ -102,6 +102,7 @@ export type AntigravityAuthState = {
   oauthAuthMethod: string | null;
   /** Running `agy` sessions; each writes its own login back at a token refresh. */
   cliSessions?: number;
+  cliClosed?: number;
   appRestarted?: boolean;
   relaunchFailed?: boolean;
   revision: string;

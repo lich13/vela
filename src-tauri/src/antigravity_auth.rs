@@ -51,6 +51,9 @@ pub struct AntigravityAuthState {
     /// it back over the shared one whenever its token is refreshed.
     #[serde(default)]
     pub cli_sessions: usize,
+    /// How many of them the switch that produced this state ended.
+    #[serde(default)]
+    pub cli_closed: usize,
     #[serde(default)]
     pub app_restarted: bool,
     /// The switch succeeded but the application could not be reopened.
@@ -145,6 +148,9 @@ pub trait AppLifecycle {
     fn is_running(&self) -> Result<bool>;
     fn quit(&self) -> Result<()>;
     fn launch(&self) -> Result<()>;
+    /// Ends the running `agy` sessions and says how many there were. A
+    /// session left running would write its own login back over the new one.
+    fn quit_cli(&self) -> Result<usize>;
 }
 #[derive(Default)]
 pub struct SystemAppLifecycle {
@@ -268,6 +274,21 @@ impl AppLifecycle for SystemAppLifecycle {
             }
         }
         Ok(())
+    }
+    fn quit_cli(&self) -> Result<usize> {
+        #[cfg(target_os = "macos")]
+        {
+            let ended = crate::process_control::force_quit(crate::process_control::Target::Agy)?;
+            if ended.failed > 0 {
+                return Err(err(
+                    code::PROCESS,
+                    "仍有 agy 会话未能关闭，未修改任何凭据文件，请手动退出后重试",
+                ));
+            }
+            Ok(ended.sessions)
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ok(0)
     }
 }
 fn epoch_dur(t: SystemTime) -> Duration {
@@ -959,6 +980,7 @@ fn state_with_oauth(
         oauth_email,
         oauth_auth_method,
         cli_sessions: cli_sessions(paths),
+        cli_closed: 0,
         app_restarted: false,
         relaunch_failed: false,
         revision: String::new(),
@@ -1004,10 +1026,16 @@ fn with_lifecycle(
     mutate: impl FnOnce() -> Result<()>,
 ) -> Result<AntigravityAuthState> {
     let was_running = lc.is_running()?;
+    with_lock(|| verify_revision(paths, rev).map(|_| ()))?;
     if was_running {
-        with_lock(|| verify_revision(paths, rev).map(|_| ()))?;
         lc.quit()?;
     }
+    // The app goes first: nothing has been ended yet if it will not quit.
+    let closed = lc.quit_cli().inspect_err(|_| {
+        if was_running {
+            let _ = lc.launch();
+        }
+    })?;
     let next = with_lock(|| {
         verify_revision(paths, rev)?;
         let snapshots: Vec<_> = paths
@@ -1075,6 +1103,7 @@ fn with_lifecycle(
     next.map(|mut s| {
         s.app_restarted = relaunched == Some(true);
         s.relaunch_failed = relaunched == Some(false);
+        s.cli_closed = closed;
         s
     })
 }

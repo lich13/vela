@@ -55,6 +55,10 @@ trait Processes {
 pub struct Outcome {
     pub terminated: usize,
     pub failed: usize,
+    /// How many of the ended processes were the target itself rather than
+    /// something it had started.
+    #[serde(skip)]
+    pub sessions: usize,
     #[serde(skip_serializing_if = "is_zero")]
     pub terminal_cleanup_failed: usize,
 }
@@ -66,6 +70,9 @@ fn is_zero(value: &usize) -> bool {
 pub enum Target {
     Codex,
     Claude,
+    /// Antigravity's terminal client. The interface never names it.
+    #[serde(skip)]
+    Agy,
 }
 fn root(entry: &Entry, target: Target) -> bool {
     let filename = entry
@@ -78,6 +85,7 @@ fn root(entry: &Entry, target: Target) -> bool {
             !entry.claude_code && (matches!(filename, "codex" | "codex.exe") || entry.official_app)
         }
         Target::Claude => entry.claude_code,
+        Target::Agy => matches!(filename, "agy" | "agy.exe"),
     }
 }
 
@@ -136,9 +144,10 @@ fn run(backend: &mut dyn Processes, own_pid: u32, target: Target) -> Result<Outc
         .map(|p| (p.pid, p))
         .collect();
     // Protect ourselves and our child processes even if a filename happens to match.
-    let other = match target {
-        Target::Codex => Target::Claude,
-        Target::Claude => Target::Codex,
+    let others: &[Target] = match target {
+        Target::Codex => &[Target::Claude],
+        Target::Claude => &[Target::Codex],
+        Target::Agy => &[Target::Codex, Target::Claude],
     };
     let mut protected = HashSet::from([own_pid]);
     let mut chosen: HashSet<u32> = eligible
@@ -152,7 +161,9 @@ fn run(backend: &mut dyn Processes, own_pid: u32, target: Target) -> Result<Outc
             if p.parent.is_some_and(|id| protected.contains(&id)) {
                 changed |= protected.insert(p.pid);
             }
-            if !root(p, other) && p.parent.is_some_and(|id| chosen.contains(&id)) {
+            if !others.iter().any(|other| root(p, *other))
+                && p.parent.is_some_and(|id| chosen.contains(&id))
+            {
                 changed |= chosen.insert(p.pid);
             }
         }
@@ -195,11 +206,15 @@ fn run(backend: &mut dyn Processes, own_pid: u32, target: Target) -> Result<Outc
     let mut result = Outcome {
         terminated: 0,
         failed: 0,
+        sessions: 0,
         terminal_cleanup_failed: 0,
     };
     for p in targets {
         match backend.state(p) {
-            State::Gone => result.terminated += 1,
+            State::Gone => {
+                result.terminated += 1;
+                result.sessions += usize::from(root(p, target));
+            }
             State::Running | State::Changed => result.failed += 1,
         }
     }

@@ -147,23 +147,24 @@ describe("AntigravityAccounts", () => {
     ).toBe(true);
   });
 
-  it("说明运行中的 agy 会话会把登录改回原账号", async () => {
+  it("说明切换会关闭运行中的 agy 会话，并报告关闭了几个", async () => {
     const notify = vi.fn();
     mockCommand.mockImplementation(async (name: string) =>
       name === "switch_antigravity_account"
-        ? { ...initialState, revision: "rev-2", cliSessions: 2 }
+        ? { ...initialState, revision: "rev-2", cliClosed: 2 }
         : { ...initialState, cliSessions: 2 },
     );
     render(<AntigravityAccounts notify={notify} setError={vi.fn()} />);
     expect(await screen.findByRole("note")).toHaveTextContent(
-      "有 2 个 agy 会话正在运行",
+      /有 2 个 agy 会话正在运行.*切换账号时\s*Vela 会一并关闭这些会话/,
     );
     fireEvent.click(screen.getByRole("button", { name: "切换到 OAuth 备号" }));
     await waitFor(() =>
       expect(notify).toHaveBeenCalledWith(
-        "已切换到 OAuth 备号；仍有 2 个 agy 会话在用原账号，请退出后重新打开",
+        "已切换到 OAuth 备号；已关闭 2 个 agy 会话",
       ),
     );
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
   it("switches, renames and deletes against the latest revision", async () => {

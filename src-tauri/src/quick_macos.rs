@@ -2162,6 +2162,8 @@ impl Host {
                 let label = match target {
                     process_control::Target::Codex => "codex",
                     process_control::Target::Claude => "claude",
+                    // The panel has no control for it.
+                    process_control::Target::Agy => return,
                 };
                 {
                     let mut st = self.state.lock();
