@@ -20,6 +20,7 @@ import type {
   AntigravityAuthState,
 } from "./bridge-contracts";
 import { AppModal } from "./AppDialogs";
+import Modal from "./Modal";
 import { errorOf } from "./types";
 
 type Props = {
@@ -53,6 +54,12 @@ export default function AntigravityAccounts({
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const closeDialog = () => {
     setDialog(null);
+    setDialogError("");
+  };
+  /** Checked account ids while the export picker is open, otherwise null. */
+  const [exportIds, setExportIds] = useState<string[] | null>(null);
+  const closeExport = () => {
+    setExportIds(null);
     setDialogError("");
   };
 
@@ -104,7 +111,7 @@ export default function AntigravityAccounts({
     }
   };
 
-  /** Runs an import or export; `run` resolves to nothing when its dialog was dismissed. */
+  /** Runs an import; `run` resolves to nothing when its dialog was dismissed. */
   const transfer = async (run: () => Promise<string | null>) => {
     setBusy(true);
     setError("");
@@ -113,6 +120,32 @@ export default function AntigravityAccounts({
       if (msg) notify(msg);
     } catch (e) {
       setError(errorOf(e).message);
+      void load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Accounts removed while the picker is open drop out of the selection.
+  const exportable = (state?.accounts ?? [])
+    .map((a) => a.id)
+    .filter((id) => exportIds?.includes(id));
+  const exportSelected = async () => {
+    if (!state || !exportable.length) return;
+    setBusy(true);
+    setError("");
+    setDialogError("");
+    try {
+      const count = await command("export_antigravity_accounts", {
+        ids: exportable,
+        expectedRevision: state.revision,
+      });
+      // The save dialog was dismissed: keep the picker open.
+      if (count == null) return;
+      notify(`已导出 ${count} 个账号；文件包含登录凭据，请妥善保管`);
+      closeExport();
+    } catch (e) {
+      setDialogError(errorOf(e).message);
       void load();
     } finally {
       setBusy(false);
@@ -155,18 +188,12 @@ export default function AntigravityAccounts({
             type="button"
             className="icon-button"
             aria-label="导出 Antigravity 账号"
-            title="把全部账号导出为一个文件"
+            title="选择账号并导出为一个文件"
             disabled={busy || !state?.accounts.length}
-            onClick={() =>
-              void transfer(async () => {
-                const count = await command("export_antigravity_accounts", {
-                  expectedRevision: state!.revision,
-                });
-                return count == null
-                  ? null
-                  : `已导出 ${count} 个账号；文件包含登录凭据，请妥善保管`;
-              })
-            }
+            onClick={() => {
+              setError("");
+              setExportIds(state!.accounts.map((a) => a.id));
+            }}
           >
             <Download size={14} />
           </button>
@@ -381,6 +408,67 @@ export default function AntigravityAccounts({
             </div>
           )}
         </AppModal>
+      )}
+
+      {exportIds && state && (
+        <Modal title="导出账号" close={closeExport} busy={busy}>
+          {dialogError && (
+            <div className="inline-error" role="alert">
+              {dialogError}
+            </div>
+          )}
+          <label className="exchange-select-all">
+            <input
+              type="checkbox"
+              disabled={busy || !state.accounts.length}
+              checked={
+                state.accounts.length > 0 &&
+                exportable.length === state.accounts.length
+              }
+              onChange={(e) =>
+                setExportIds(
+                  e.target.checked ? state.accounts.map((a) => a.id) : [],
+                )
+              }
+            />
+            全选<span>已选 {exportable.length}</span>
+          </label>
+          <div className="exchange-list">
+            {state.accounts.map((item) => (
+              <label key={item.id} className="exchange-row">
+                <input
+                  type="checkbox"
+                  disabled={busy}
+                  checked={exportable.includes(item.id)}
+                  onChange={(e) =>
+                    setExportIds(
+                      e.target.checked
+                        ? [...exportable, item.id]
+                        : exportable.filter((id) => id !== item.id),
+                    )
+                  }
+                />
+                <span>
+                  <strong title={item.name}>{item.name}</strong>
+                  {item.email && <span title={item.email}>{item.email}</span>}
+                </span>
+              </label>
+            ))}
+          </div>
+          <div className="form-actions exchange-actions">
+            <button type="button" disabled={busy} onClick={closeExport}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || !exportable.length}
+              onClick={() => void exportSelected()}
+            >
+              导出所选
+            </button>
+          </div>
+        </Modal>
       )}
     </>
   );
