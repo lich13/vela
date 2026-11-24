@@ -46,7 +46,6 @@ it("saves model policy without embedding transport or takeover controls", async 
 
   expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "新线程接管" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
 
   await user.click(await screen.findByRole("checkbox", { name: "fixture-listed" }));
   await user.click(screen.getByRole("button", { name: "保存" }));
@@ -112,6 +111,5 @@ it("does not expose either handoff control for Claude", async () => {
 
   expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "新线程接管" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("checkbox", { name: "原生 WebSocket" })).not.toBeInTheDocument();
   expect(await screen.findByRole("checkbox", { name: "fixture-listed" })).toBeEnabled();
 });

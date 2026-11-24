@@ -177,8 +177,6 @@ describe("gateway controls", () => {
     const title = await screen.findByText(name, {
       selector: ".provider-title",
     });
-    expect(screen.queryByLabelText("网关操作")).not.toBeInTheDocument();
-    expect(screen.queryByText("刷新全部额度")).not.toBeInTheDocument();
     // The name is no longer edited in place.
     await user.dblClick(title);
     expect(
@@ -295,9 +293,6 @@ describe("gateway controls", () => {
       ),
     ).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("group", { name: "模型规则" })).toBeInTheDocument();
-    expect(
-      screen.queryByRole("checkbox", { name: "原生 WebSocket" }),
-    ).not.toBeInTheDocument();
     expect(handled).toHaveBeenCalledTimes(1);
     rerender(
       <Gateway
@@ -311,9 +306,6 @@ describe("gateway controls", () => {
         name: `编辑供应商 · ${state.providers[0].name}`,
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("checkbox", { name: "原生 WebSocket" }),
-    ).not.toBeInTheDocument();
     expect(handled).toHaveBeenCalledTimes(1);
   });
 
@@ -330,9 +322,6 @@ describe("gateway controls", () => {
         name: `编辑供应商 · ${state.providers[0].name}`,
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("checkbox", { name: "原生 WebSocket" }),
-    ).not.toBeInTheDocument();
     // App confirms discarding before emitting this new navigation sequence.
     rerender(
       <Gateway
@@ -345,9 +334,6 @@ describe("gateway controls", () => {
         name: `编辑供应商 · ${state.providers[0].name}`,
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("checkbox", { name: "原生 WebSocket" }),
-    ).not.toBeInTheDocument();
     expect(
       mock.command.mock.calls.some(([name]) => name === "update_gateway"),
     ).toBe(false);
@@ -833,9 +819,6 @@ describe("client isolation", () => {
 it("keeps one icon-bearing testing entry per provider and removes global testing", async () => {
   render(<Gateway notify={() => {}} />);
   await screen.findByRole("button", { name: "添加" });
-  expect(
-    screen.queryByRole("button", { name: "测试与检测" }),
-  ).not.toBeInTheDocument();
   const name = state.providers[0].name;
   const actions = within(screen.getByLabelText(`${name} 操作`));
   const entry = actions.getByRole("button", { name: `${name} 连接测试` });

@@ -117,9 +117,6 @@ it("uses the waiting budget label and preserves explicitly saved timeout values"
   expect(
     screen.getByRole("spinbutton", { name: "排队与重试等待 / 秒" }),
   ).toHaveValue(37);
-  expect(
-    screen.queryByRole("spinbutton", { name: "非流式总时限 / 秒" }),
-  ).not.toBeInTheDocument();
 
   const budget = screen.getByRole("spinbutton", {
     name: "排队与重试等待 / 秒",

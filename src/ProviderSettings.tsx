@@ -5,7 +5,6 @@ import { RefreshCw, Search } from "lucide-react";
 import type { EditRevision } from "./gateway-edit";
 import { confirmAction } from "./confirmation";
 import { command } from "./bridge";
-import Modal from "./Modal";
 import { errorOf, sortEfforts } from "./types";
 import type { ClientId, ModelCatalog, Provider } from "./types";
 function StandardProviderSettings({
@@ -17,7 +16,6 @@ function StandardProviderSettings({
   save,
   close,
   onDirtyChange,
-  embedded = false,
   onBusyChange,
 }: {
   provider: Provider;
@@ -28,8 +26,6 @@ function StandardProviderSettings({
   save: (edit: GatewayEdit, revision: EditRevision) => Promise<void>;
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
-  /** Renders the form alone, for a dialog that hosts it as one of its tabs. */
-  embedded?: boolean;
   onBusyChange?: (busy: boolean) => void;
 }) {
   const [limited, setLimited] = useState(provider.allowedModels != null);
@@ -114,7 +110,7 @@ function StandardProviderSettings({
   const models = [...new Set([...selected, ...(catalog?.models ?? [])])].filter(
     (v) => v.toLowerCase().includes(query.toLowerCase()),
   );
-  const form = (
+  return (
     <form
       className="gateway-form provider-settings"
       onSubmit={(e) => {
@@ -282,17 +278,6 @@ function StandardProviderSettings({
         </button>
       </div>
     </form>
-  );
-  return embedded ? (
-    form
-  ) : (
-    <Modal
-      title={`${provider.name} · 白名单`}
-      close={() => void leave()}
-      busy={saving}
-    >
-      {form}
-    </Modal>
   );
 }
 

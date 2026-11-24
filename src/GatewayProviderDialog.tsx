@@ -1319,7 +1319,6 @@ export default function GatewayDialog({
         runtime &&
         (tab === "whitelist" || (tab === "modelMap" && clientId === "dsh")) && (
           <ProviderSettings
-            embedded
             provider={item}
             runtime={runtime}
             clientId={clientId}
@@ -1335,7 +1334,6 @@ export default function GatewayDialog({
         )}
       {item && tab === "modelMap" && clientId === "claude" && (
         <ClaudeModelMapping
-          embedded
           provider={item}
           revision={revision}
           close={finish}
@@ -1346,7 +1344,6 @@ export default function GatewayDialog({
       )}
       {item && runtime && tab === "endpoints" && (
         <ProviderEndpoints
-          embedded
           provider={item}
           runtime={runtime}
           clientId={clientId}

@@ -3,7 +3,6 @@ import { command } from "./bridge";
 import type { GatewayEdit } from "./bridge-contracts";
 import type { EditRevision } from "./gateway-edit";
 import { errorOf, type Provider } from "./types";
-import Modal from "./Modal";
 import { confirmAction } from "./confirmation";
 import { useDshCatalog } from "./dsh-catalog";
 
@@ -14,7 +13,6 @@ export default function DshModelMapping({
   save,
   close,
   onDirtyChange,
-  embedded = false,
   onBusyChange,
 }: {
   provider: Provider;
@@ -22,8 +20,6 @@ export default function DshModelMapping({
   save: (edit: GatewayEdit, revision: EditRevision) => Promise<void>;
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
-  /** Renders the form alone, for a dialog that hosts it as one of its tabs. */
-  embedded?: boolean;
   onBusyChange?: (busy: boolean) => void;
 }) {
   const catalog = useDshCatalog();
@@ -79,7 +75,7 @@ export default function DshModelMapping({
     if (!rows.some((m) => m.id === id)) rows.push({ id, name: id });
   const update = (id: string, value: string) =>
     setMapping((old) => ({ ...old, [id]: value || null }));
-  const form = (
+  return (
     <form
       className="gateway-form dsh-model-mapping"
       onSubmit={(e) => {
@@ -184,17 +180,5 @@ export default function DshModelMapping({
         </button>
       </footer>
     </form>
-  );
-  return embedded ? (
-    form
-  ) : (
-    <Modal
-      title={`${provider.name} 模型映射`}
-      close={() => void leave()}
-      busy={busy}
-      compact
-    >
-      {form}
-    </Modal>
   );
 }

@@ -35,9 +35,6 @@ it("names the provider policy editor and its mode as a whitelist", async () => {
     />,
   );
 
-  expect(
-    await screen.findByRole("dialog", { name: `${provider.name} · 白名单` }),
-  ).toBeInTheDocument();
   expect(screen.queryByText("供应商设置")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "白名单" })).toHaveAttribute(
     "aria-pressed",

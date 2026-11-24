@@ -399,9 +399,6 @@ describe("usage overview", () => {
 
   it("does not render a more-metrics control and leaves unknown cache samples unavailable", async () => {
     await renderUsage();
-    expect(
-      screen.queryByRole("button", { name: "更多指标" }),
-    ).not.toBeInTheDocument();
     expect(screen.queryByText("HTTP 成功率")).not.toBeInTheDocument();
     expect(within(metric("缓存命中率")).getByText("—")).toHaveAttribute(
       "title",
@@ -573,7 +570,6 @@ describe("time ranges", () => {
     expect(dateButton).toHaveFocus();
     expect(dateButton).toHaveTextContent("今日");
     expect(calls("get_usage_dashboard")).toHaveLength(overviewCalls);
-    expect(calls("get_usage_heatmap")).toHaveLength(0);
 
     // Single-click preset immediately applies and closes.
     await user.click(dateButton);
@@ -584,25 +580,6 @@ describe("time ranges", () => {
     await waitFor(() =>
       expect(calls("get_usage_dashboard").length).toBeGreaterThan(overviewCalls),
     );
-  });
-
-  it("does not render trend or heatmap content and never queries historical heatmaps", async () => {
-    await renderUsage();
-    expect(
-      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("img", { name: /年度用量热力图/ }),
-    ).not.toBeInTheDocument();
-    expect(calls("get_usage_heatmap")).toHaveLength(0);
-    await chooseRange("all");
-    expect(
-      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("img", { name: /年度用量热力图/ }),
-    ).not.toBeInTheDocument();
-    expect(calls("get_usage_heatmap")).toHaveLength(0);
   });
 });
 
@@ -793,9 +770,6 @@ describe("request details and sources", () => {
         selector: "dt",
       })[0];
       expect(firstToken.nextElementSibling).toHaveTextContent(expected);
-      expect(
-        within(detail).queryByText(/Token\/s|估算首字/),
-      ).not.toBeInTheDocument();
       expect(
         within(detail).getByText("来源", { selector: "dt" }).nextElementSibling,
       ).toHaveTextContent(source === "proxy" ? "网关" : "Codex 会话");

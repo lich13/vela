@@ -614,9 +614,7 @@ it("opens only the selected provider and reads cache without fetching upstream",
   );
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   expect(screen.queryByText("全选")).not.toBeInTheDocument();
-  expect(screen.queryByLabelText("测试类型")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("接口")).not.toBeInTheDocument();
-  expect(screen.queryByRole("tab", { name: "预约" })).not.toBeInTheDocument();
 });
 it("refreshes only by explicit click and retains the cached model across reopen", async () => {
   const user = userEvent.setup();

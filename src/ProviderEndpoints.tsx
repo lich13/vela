@@ -4,7 +4,6 @@ import { ArrowUpDown, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { command } from "./bridge";
 import { confirmAction } from "./confirmation";
 import type { EditRevision } from "./gateway-edit";
-import Modal from "./Modal";
 import {
   errorOf,
   type ClientId,
@@ -21,7 +20,6 @@ export default function ProviderEndpoints({
   update,
   close,
   onDirtyChange,
-  embedded = false,
   onBusyChange,
 }: {
   provider: Provider;
@@ -32,8 +30,6 @@ export default function ProviderEndpoints({
   update: (state: GatewayState) => void;
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
-  /** Renders the form alone, for a dialog that hosts it as one of its tabs. */
-  embedded?: boolean;
   onBusyChange?: (busy: boolean) => void;
 }) {
   const [urls, setUrls] = useState(provider.extraBaseUrls);
@@ -137,7 +133,7 @@ export default function ProviderEndpoints({
       </span>
     );
   };
-  const form = (
+  return (
     <form
       className="gateway-form endpoint-form"
       data-provider-draft={dirty || undefined}
@@ -276,17 +272,5 @@ export default function ProviderEndpoints({
         </button>
       </div>
     </form>
-  );
-  return embedded ? (
-    form
-  ) : (
-    <Modal
-      compact
-      title={`${provider.name} · 端点`}
-      close={() => void leave()}
-      busy={busy}
-    >
-      {form}
-    </Modal>
   );
 }

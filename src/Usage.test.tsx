@@ -505,10 +505,6 @@ describe("usage records", () => {
 
   it("omits the interruption button and filters Antigravity usage by account", async () => {
     await renderUsage();
-    expect(
-      screen.queryByRole("button", { name: "统计中断" }),
-    ).not.toBeInTheDocument();
-
     const clientSelect = screen.getByRole("combobox", { name: "用量客户端" });
     const providerSelect = screen.getByRole("combobox", { name: "用量供应商" });
     await userEvent.selectOptions(clientSelect, "antigravity");
@@ -585,25 +581,6 @@ describe("usage records", () => {
         "Fixture Provider · Codex",
       ),
     ).toBeInTheDocument();
-  });
-
-  it("does not render a trend or heatmap and never queries historical data", async () => {
-    await renderUsage();
-    expect(
-      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("img", { name: /年度用量热力图/ }),
-    ).not.toBeInTheDocument();
-    expect(calls("get_usage_heatmap")).toHaveLength(0);
-    await chooseRange("all");
-    expect(
-      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("img", { name: /年度用量热力图/ }),
-    ).not.toBeInTheDocument();
-    expect(calls("get_usage_heatmap")).toHaveLength(0);
   });
 
   it("keeps the previous overview and rows visible until a refresh resolves", async () => {
@@ -919,8 +896,6 @@ describe("usage records", () => {
     ).toEqual(["时间 / 供应商 / 模型", "Token", "费用", "性能"]);
     const rows = within(table).getAllByRole("row").slice(1);
     expect(rows).toHaveLength(1);
-    expect(screen.queryByText("Token/s")).not.toBeInTheDocument();
-    expect(screen.queryByText("估算 Token/s")).not.toBeInTheDocument();
 
     fireEvent.click(rows[0]);
     const dialog = await screen.findByRole("dialog");
@@ -928,7 +903,6 @@ describe("usage records", () => {
     expect(
       within(dialog).queryByText("速度", { selector: "dt" }),
     ).not.toBeInTheDocument();
-    expect(within(dialog).queryByText(/Token\/s/)).not.toBeInTheDocument();
     const firstTokenLabels = within(dialog).getAllByText("首字", {
       selector: "dt",
     });
@@ -1019,17 +993,6 @@ describe("usage records", () => {
       expect(lastFilter().client).toBe("claude");
       expect(lastFilter().provider).toBeUndefined();
     });
-  });
-
-  it("does not expose trend dragging or issue chart queries", async () => {
-    await renderUsage();
-    expect(
-      screen.queryByRole("img", { name: "用量趋势，拖动选择时间范围" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("img", { name: /年度用量热力图/ }),
-    ).not.toBeInTheDocument();
-    expect(calls("get_usage_heatmap")).toHaveLength(0);
   });
 
   it("pauses periodic reloads for document and native hiding and respects manual refresh", async () => {

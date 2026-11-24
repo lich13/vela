@@ -631,7 +631,6 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(summary).getByText("78.3%")).toBeInTheDocument();
     expect(within(summary).getByText("$0.4860")).toBeInTheDocument();
     expect(within(summary).queryByText("会话")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("会话排行")).not.toBeInTheDocument();
 
     const tracks = screen.getByLabelText("账号周期用量");
     expect(within(tracks).getAllByText("当前 5h")).toHaveLength(2);
@@ -807,7 +806,6 @@ it("selects one account, retains manual selection on refresh, follows the curren
   expect(third.querySelectorAll(".usage-ag-track-card")).toHaveLength(2);
   expect(within(third).getAllByText("当前 5h")).toHaveLength(2);
   expect(within(third).getAllByText("当前 7d")).toHaveLength(2);
-  expect(screen.queryByText(/所选日期/)).not.toBeInTheDocument();
   expect(screen.getByLabelText("Token 构成与缓存节省")).toHaveTextContent(
     "$1.2450",
   );

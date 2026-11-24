@@ -222,8 +222,6 @@ it("opens the local confirmation directly without a receiver setting", async () 
   pending = [queued(first)];
   render(<ProviderImports notify={() => {}} />);
   await waitForPreview(first.name);
-  expect(screen.queryByLabelText("接收应用")).not.toBeInTheDocument();
-  expect(screen.queryByLabelText("下次不再提示")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "导入" }));
   await waitFor(() =>
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),

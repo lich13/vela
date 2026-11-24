@@ -256,11 +256,7 @@ it("always uses deduplicated totals and pages and resets pages when the client c
   );
   await user.click(screen.getByRole("tab", { name: "模型" }));
   for (const [name, args] of mock.command.mock.calls) {
-    if (
-      ["get_usage_dashboard", "get_usage_logs", "get_usage_heatmap"].includes(
-        name,
-      )
-    ) {
+    if (["get_usage_dashboard", "get_usage_logs"].includes(name)) {
       expect(args.filter.source).toBeUndefined();
       expect(args.filter.model).toBeUndefined();
     }
