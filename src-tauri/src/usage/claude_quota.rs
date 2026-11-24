@@ -133,10 +133,7 @@ async fn read_credentials(home: &Path) -> Result<Credentials> {
 }
 
 fn account_label(home: &Path) -> Option<String> {
-    let global = match dirs::home_dir() {
-        Some(user) if home == user.join(".claude") => user.join(".claude.json"),
-        _ => home.join(".claude.json"),
-    };
+    let global = crate::claude_profile::global_file(home, dirs::home_dir().as_deref());
     let raw = storage::read_optional(&global).ok()??;
     let value: Value = serde_json::from_slice(&raw).ok()?;
     let email = value.pointer("/oauthAccount/emailAddress")?.as_str()?;

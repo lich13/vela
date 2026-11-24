@@ -510,3 +510,37 @@ fn journal_recovery_preserves_an_external_edit_and_keeps_the_recovery_record() {
         );
     }
 }
+
+#[test]
+fn the_global_file_is_beside_a_default_directory_and_inside_any_other() {
+    let root = tempfile::tempdir().unwrap();
+    let user = root.path().join("user");
+    let other = root.path().join("other");
+    for dir in [
+        user.join(".claude"),
+        other.join(".claude"),
+        other.join("custom"),
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let file = |home: &Path| super::global_file(home, Some(&user));
+    assert_eq!(file(&user.join(".claude")), user.join(".claude.json"));
+    assert_eq!(
+        file(&other.join("custom")),
+        other.join("custom/.claude.json")
+    );
+    // Another user's directory with nothing to tell where its file is.
+    assert_eq!(
+        file(&other.join(".claude")),
+        other.join(".claude/.claude.json")
+    );
+    // That user runs Claude Code without naming the directory.
+    std::fs::write(other.join(".claude.json"), "{}").unwrap();
+    assert_eq!(file(&other.join(".claude")), other.join(".claude.json"));
+    // And with it named, which moves the file inside.
+    std::fs::write(other.join(".claude/.claude.json"), "{}").unwrap();
+    assert_eq!(
+        file(&other.join(".claude")),
+        other.join(".claude/.claude.json")
+    );
+}

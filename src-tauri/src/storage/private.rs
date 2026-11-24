@@ -9,7 +9,26 @@ use std::{
 #[cfg(unix)]
 fn create_directory(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
-    fs::DirBuilder::new().mode(0o700).create(path)
+    fs::DirBuilder::new().mode(0o700).create(path)?;
+    match path.parent().map(heir).transpose()?.flatten() {
+        Some((uid, gid)) => std::os::unix::fs::lchown(path, Some(uid), Some(gid)),
+        None => Ok(()),
+    }
+}
+
+/// Who a file root creates in `directory` is handed to: the directory's owner
+/// when that is somebody else. A server running as root manages the client
+/// settings of the user that runs the client, who must still read what is
+/// written there. `None` for everyone but root, and in root's own directories.
+#[cfg(unix)]
+fn heir(directory: &Path) -> io::Result<Option<(u32, u32)>> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(None);
+    }
+    let owner = fs::metadata(directory)?;
+    Ok((owner.uid() != 0).then(|| (owner.uid(), owner.gid())))
 }
 
 #[cfg(windows)]
@@ -32,7 +51,12 @@ pub(super) fn create_tree(path: &Path) -> io::Result<()> {
 
 pub fn private_tempfile(parent: &Path) -> Result<tempfile::NamedTempFile> {
     #[cfg(unix)]
-    let file = tempfile::NamedTempFile::new_in(parent);
+    let file = tempfile::NamedTempFile::new_in(parent).and_then(|file| {
+        if let Some((uid, gid)) = heir(parent)? {
+            std::os::unix::fs::fchown(file.as_file(), Some(uid), Some(gid))?;
+        }
+        Ok(file)
+    });
     #[cfg(windows)]
     let file = tempfile::Builder::new().make_in(parent, windows::create_file);
     file.map_err(io_error)

@@ -100,14 +100,25 @@ fn path(home: &Path, user_home: &Path, role: Role) -> PathBuf {
         Role::Settings => home.join("settings.json"),
         Role::Legacy => home.join("claude.json"),
         Role::Plugin => home.join("config.json"),
-        Role::Global => {
-            if home == user_home.join(".claude") {
-                user_home.join(".claude.json")
-            } else {
-                home.join(".claude.json")
-            }
-        }
+        Role::Global => global_file(home, Some(user_home)),
     }
+}
+/// Claude Code's global file for the settings directory `home`: beside the
+/// default directory, inside any other. A directory named `.claude` that has
+/// no such file while its parent does is the default directory of another
+/// user, as a server finds it when it manages the client that user runs.
+pub(crate) fn global_file(home: &Path, user_home: Option<&Path>) -> PathBuf {
+    let beside = |home: &Path| home.parent().map(|parent| parent.join(".claude.json"));
+    if user_home.is_some_and(|user| home == user.join(".claude")) {
+        return beside(home).unwrap_or_else(|| home.join(".claude.json"));
+    }
+    let inside = home.join(".claude.json");
+    if inside.exists() || home.file_name() != Some(std::ffi::OsStr::new(".claude")) {
+        return inside;
+    }
+    beside(home)
+        .filter(|beside| beside.is_file())
+        .unwrap_or(inside)
 }
 fn read_text(path: &Path) -> Result<Option<String>> {
     storage::read_user_optional(path)?
