@@ -175,10 +175,9 @@ it("the quick panel of a server offers the instances and drops the controls of t
   await screen.findByRole("button", { name: "启用网关" });
   expect(screen.getByRole("button", { name: "启用网关" })).toBeDisabled();
   expect(
-    within(screen.getByRole("navigation", { name: "实例" })).getByRole(
-      "button",
-      { name: "东京" },
-    ),
+    within(
+      screen.getByLabelText("当前实例：东京").closest("details")!,
+    ).getByRole("button", { name: "东京", hidden: true }),
   ).toHaveAttribute("aria-pressed", "true");
   expect(screen.queryByRole("button", { name: /^退出 / })).not.toBeInTheDocument();
   expect(screen.queryByLabelText("合盖不休眠")).not.toBeInTheDocument();

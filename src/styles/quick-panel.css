@@ -237,14 +237,17 @@
   flex-shrink: 0;
 }
 
-.quick-instances .segmented {
-  max-width: 100%;
-  overflow-x: auto;
+.quick-instances .instance-menu {
+  flex: 1;
+  min-width: 0;
 }
 
-.quick-instances .segmented button {
-  padding: 5px 14px;
-  white-space: nowrap;
+.quick-instances .instance-menu summary {
+  height: 30px;
+}
+
+.quick-instances .instance-menu .menu-popover {
+  top: 34px;
 }
 
 .quick-instance-status {

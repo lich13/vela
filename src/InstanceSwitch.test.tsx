@@ -165,7 +165,9 @@ it("edits a server in place", async () => {
   const user = userEvent.setup();
   const dialog = await manage(user);
   await user.click(dialog.getByRole("button", { name: "编辑 东京" }));
-  expect(dialog.getByRole("heading", { name: "编辑服务器" })).toBeInTheDocument();
+  expect(
+    dialog.getByRole("heading", { name: "编辑服务器" }),
+  ).toBeInTheDocument();
   expect(dialog.getByLabelText("名称")).toHaveValue("东京");
   expect(dialog.getByLabelText(/^SSH 主机别名/)).toHaveValue("tokyo");
   await user.type(dialog.getByLabelText("备用别名"), "tokyo-lan");
@@ -231,12 +233,18 @@ it("reads the list again when it changed elsewhere", async () => {
     "实例列表已更新，请重试",
   );
   expect(calls("get_instances")).toHaveLength(2);
-  await user.click(await dialog.findByRole("button", { name: "删除 东京二号" }));
+  await user.click(
+    await dialog.findByRole("button", { name: "删除 东京二号" }),
+  );
   await waitFor(() => expect(instanceState().machines).toEqual([]));
 });
 
 it("asks before it deletes the server in use", async () => {
-  serve({ active: "m1", machines: [tokyo], connection: connection("connected") });
+  serve({
+    active: "m1",
+    machines: [tokyo],
+    connection: connection("connected"),
+  });
   const user = userEvent.setup();
   const dialog = await manage(user);
   mock.confirm.mockResolvedValueOnce(false);
@@ -342,7 +350,9 @@ it("retries an offline server", async () => {
   // Retrying the instance already shown leaves no draft behind to ask about.
   expect(confirm).not.toHaveBeenCalled();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "重试" }),
+  ).not.toBeInTheDocument();
 });
 
 it("the quick panel offers instances only once a server exists", async () => {
@@ -353,21 +363,45 @@ it("the quick panel offers instances only once a server exists", async () => {
 
   serve({ machines: [tokyo] });
   render(<QuickInstances />);
-  const segments = within(screen.getByRole("navigation", { name: "实例" }));
-  expect(segments.getByRole("button", { name: "本机" })).toHaveAttribute(
+  // Closed, the menu names the instance shown.
+  const menu = screen.getByLabelText("当前实例：本机").closest("details")!;
+  expect(menu).not.toHaveAttribute("open");
+  await openMenu(user);
+  expect(menu).toHaveAttribute("open");
+  expect(screen.getByRole("button", { name: "本机" })).toHaveAttribute(
     "aria-pressed",
     "true",
   );
-  await user.click(segments.getByRole("button", { name: "东京" }));
-  await waitFor(() =>
-    expect(segments.getByRole("button", { name: "东京" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    ),
-  );
+  expect(
+    screen.queryByRole("button", { name: "管理实例" }),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "东京" }));
+  // Choosing closes the menu, and the summary follows the choice.
+  expect(menu).not.toHaveAttribute("open");
+  await screen.findByLabelText("当前实例：东京");
   expect(calls("select_instance")).toEqual([
     ["select_instance", { id: "m1", expectedRevision: "r1" }],
   ]);
+});
+
+it("the instance menu closes on Escape, which it keeps from the panel, and on a press outside", async () => {
+  serve({ machines: [tokyo] });
+  const user = userEvent.setup();
+  const escaped = vi.fn((event: KeyboardEvent) => event.defaultPrevented);
+  document.addEventListener("keydown", escaped);
+  render(<QuickInstances />);
+  const menu = screen.getByLabelText(/^当前实例/).closest("details")!;
+  await openMenu(user);
+  await user.keyboard("{Escape}");
+  expect(menu).not.toHaveAttribute("open");
+  expect(escaped).toHaveLastReturnedWith(true);
+  // Closed, Escape is the panel's again.
+  await user.keyboard("{Escape}");
+  expect(escaped).toHaveLastReturnedWith(false);
+  await openMenu(user);
+  await user.click(document.body);
+  expect(menu).not.toHaveAttribute("open");
+  document.removeEventListener("keydown", escaped);
 });
 
 it("the quick panel reports an offline server and retries it", async () => {

@@ -534,6 +534,66 @@ kbd {
   background: var(--hover);
 }
 
+/* Instance menu — which Vela a window shows; the main window and the quick panel share it */
+.instance-menu {
+  position: relative;
+}
+
+.instance-menu summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 34px;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 560;
+}
+
+.instance-menu summary span,
+.instance-menu .menu-popover button span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instance-menu summary svg:last-child {
+  color: var(--muted);
+}
+
+.instance-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.instance-menu[open] summary,
+.instance-menu summary:hover {
+  background: var(--elevated);
+}
+
+.instance-menu .menu-popover {
+  left: 0;
+  top: 38px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.instance-menu .menu-popover button[aria-pressed="true"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.instance-menu .instance-manage {
+  color: var(--muted);
+}
+
 /* Client Selection — five-client multi-tone identity */
 .client-selection {
   flex-shrink: 0;

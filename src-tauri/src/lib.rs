@@ -186,11 +186,11 @@ impl MainWindowState {
         Some(self.generation)
     }
 
+    /// What to do with the window its frontend first reports ready. The pages
+    /// report again each time they are rebuilt, as on a change of instance,
+    /// which must not bring the window forward.
     pub(crate) fn finish_ready(&mut self) -> Option<(bool, Option<MainTarget>)> {
-        if !matches!(
-            self.phase,
-            MainWindowPhase::Creating | MainWindowPhase::Ready
-        ) {
+        if self.phase != MainWindowPhase::Creating {
             return None;
         }
         self.phase = MainWindowPhase::Ready;
@@ -2055,6 +2055,9 @@ mod page_whitelist_tests {
             Some((true, Some(target))),
             "frontend_ready must receive preserved ProviderSettings target"
         );
+        assert_eq!(st.phase, MainWindowPhase::Ready);
+        // The pages rebuilt in a window already shown do not present it again.
+        assert_eq!(st.finish_ready(), None);
         assert_eq!(st.phase, MainWindowPhase::Ready);
 
         // Destroy and request reopen before WindowEvent::Destroyed completes.

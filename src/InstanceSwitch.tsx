@@ -1,4 +1,5 @@
-import { Suspense, lazy, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import {
   Check,
   ChevronsUpDown,
@@ -71,6 +72,73 @@ const statusLabel = {
   local: "",
 };
 
+type Select = ReturnType<typeof useInstanceSelect>;
+
+/**
+ * The instances as a menu under the current one. It closes itself, as the
+ * quick panel has none of the main window's menu handling.
+ */
+function InstanceMenu({
+  state,
+  remote,
+  pending,
+  select,
+  options,
+  children,
+}: Pick<Select, "state" | "remote" | "pending" | "select" | "options"> & {
+  /** What follows the instances in the menu; `close` shuts it. */
+  children?: (close: () => void) => ReactNode;
+}) {
+  const menu = useRef<HTMLDetailsElement>(null);
+  const close = () => menu.current?.removeAttribute("open");
+  useEffect(() => {
+    const outside = (event: PointerEvent) => {
+      if (!menu.current?.contains(event.target as Node)) close();
+    };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, []);
+  const current =
+    options.find((o) => o.id === state.active)?.name ?? state.active;
+  return (
+    <details
+      ref={menu}
+      className="instance-menu"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !menu.current?.open) return;
+        // The quick panel hides on an Escape nobody took.
+        event.preventDefault();
+        close();
+        menu.current.querySelector<HTMLElement>("summary")?.focus();
+      }}
+    >
+      <summary aria-label={`当前实例：${current}`}>
+        {remote ? <Server size={15} /> : <Monitor size={15} />}
+        <span>{current}</span>
+        <ChevronsUpDown size={13} />
+      </summary>
+      <div className="menu-popover">
+        {options.map(({ id, name }) => (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={id === state.active}
+            disabled={pending !== null}
+            onClick={() => {
+              close();
+              void select(id);
+            }}
+          >
+            <span>{name}</span>
+            {id === state.active && <Check size={13} />}
+          </button>
+        ))}
+        {children?.(close)}
+      </div>
+    </details>
+  );
+}
+
 /** Sidebar: which Vela the pages show, the connection to it and the machine list. */
 export default function InstanceSwitch({
   confirm,
@@ -78,49 +146,26 @@ export default function InstanceSwitch({
   /** Asked before another instance replaces the pages and their drafts. */
   confirm: () => Promise<boolean>;
 }) {
-  const { state, remote, pending, select, options, status, error } =
-    useInstanceSelect(confirm);
+  const instances = useInstanceSelect(confirm);
+  const { state, select, status, error } = instances;
   const [managing, setManaging] = useState(false);
-  const current =
-    options.find((o) => o.id === state.active)?.name ?? state.active;
-  const closeMenu = (element: HTMLElement) =>
-    element.closest("details")?.removeAttribute("open");
   return (
     <div className="instance-switch">
-      <details className="account-menu instance-menu">
-        <summary aria-label={`当前实例：${current}`}>
-          {remote ? <Server size={15} /> : <Monitor size={15} />}
-          <span>{current}</span>
-          <ChevronsUpDown size={13} />
-        </summary>
-        <div className="menu-popover">
-          {options.map(({ id, name }) => (
-            <button
-              key={id}
-              type="button"
-              aria-pressed={id === state.active}
-              disabled={pending !== null}
-              onClick={(e) => {
-                closeMenu(e.currentTarget);
-                void select(id);
-              }}
-            >
-              <span>{name}</span>
-              {id === state.active && <Check size={13} />}
-            </button>
-          ))}
+      <InstanceMenu {...instances}>
+        {(close) => (
           <button
             type="button"
-            onClick={(e) => {
-              closeMenu(e.currentTarget);
+            className="instance-manage"
+            onClick={() => {
+              close();
               setManaging(true);
             }}
           >
             <Settings2 size={14} />
             管理实例
           </button>
-        </div>
-      </details>
+        )}
+      </InstanceMenu>
       {status !== "local" && (
         <div className="instance-status">
           <span
@@ -155,26 +200,14 @@ export default function InstanceSwitch({
   );
 }
 
-/** Quick panel: the same choice as a row of segments, shown once a server exists. */
+/** Quick panel: the same menu in a row of its own, shown once a server exists. */
 export function QuickInstances() {
-  const { state, pending, select, options, status, error } =
-    useInstanceSelect();
+  const instances = useInstanceSelect();
+  const { state, select, status, error } = instances;
   if (!state.machines.length) return null;
   return (
     <div className="quick-instances">
-      <nav className="segmented" aria-label="实例">
-        {options.map(({ id, name }) => (
-          <button
-            key={id}
-            type="button"
-            disabled={pending !== null}
-            aria-pressed={id === state.active}
-            onClick={() => void select(id)}
-          >
-            {name}
-          </button>
-        ))}
-      </nav>
+      <InstanceMenu {...instances} />
       {status === "connecting" && (
         <span className="quick-instance-status" role="status">
           {statusLabel.connecting}…

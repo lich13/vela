@@ -587,28 +587,36 @@ struct QuickInstanceRowView: View {
     let onSelect: (String) -> Void
 
     var body: some View {
+        let active = instances.first(where: { $0.selected })
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 2) {
-                ForEach(instances) { tab in
-                    Button(action: { onSelect(tab.id) }) {
-                        Text(tab.label)
-                            .font(.system(size: 12, weight: tab.selected ? .semibold : .medium))
-                            .foregroundColor(tab.selected ? palette.ink : palette.muted)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 4)
-                            .padding(.horizontal, 6)
-                            .background(Capsule().fill(tab.selected ? palette.surface : Color.clear))
-                            .overlay(Capsule().strokeBorder(tab.selected ? palette.line : Color.clear, lineWidth: 1))
-                            .contentShape(Rectangle())
+            HStack(spacing: 0) {
+                Menu {
+                    ForEach(instances) { tab in
+                        Button(action: { onSelect(tab.id) }) {
+                            if tab.selected {
+                                Label(tab.label, systemImage: "checkmark")
+                            } else {
+                                Text(tab.label)
+                            }
+                        }
+                        .disabled(tab.selected)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(busy || tab.selected)
+                } label: {
+                    Label(
+                        active?.label ?? "",
+                        systemImage: active?.id == "local" ? "desktopcomputer" : "server.rack"
+                    )
+                    .font(.system(size: 12, weight: .medium))
                 }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(busy)
+                .accessibilityLabel("当前实例：\(active?.label ?? "")")
+                Spacer(minLength: 0)
             }
-            .padding(2)
-            .background(Capsule().fill(palette.surfaceSubtle))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 8).fill(palette.surfaceSubtle))
 
             if let status = status, !status.isEmpty {
                 HStack(spacing: 6) {
