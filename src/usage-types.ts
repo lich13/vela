@@ -392,14 +392,7 @@ export type CalculatorModel = {
   rates: [string, string, string, string, string] | null;
 };
 export type CostCalculatorInput = {
-  basePrice: string;
-  modelRatio: string;
-  outputRatio: string;
-  cacheReadRatio: string;
-  cacheWrite5mRatio: string;
-  cacheWrite1hRatio: string;
-  groupRatio: string;
-  rates?: [string, string, string, string, string] | null;
+  rates: [string, string, string, string, string];
   tokens: [string, string, string, string, string];
 };
 export type CostCalculation = {

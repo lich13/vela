@@ -492,36 +492,19 @@ export function usagePreview(
   }
   if (name === "calculate_usage_cost") {
     const input = args.input as CostCalculatorInput;
-    const nums = [
-      input.basePrice,
-      input.modelRatio,
-      input.outputRatio,
-      input.cacheReadRatio,
-      input.cacheWrite5mRatio,
-      input.cacheWrite1hRatio,
-      input.groupRatio,
-      ...(input.rates ?? []),
-    ];
-    if (nums.some((v) => !String(v).trim() || Number(v) < 0 || !Number.isFinite(Number(v))))
-      throw { code: "USAGE", message: "价格和倍率须为非负数" };
+    if (
+      input.rates.some(
+        (v) => !String(v).trim() || Number(v) < 0 || !Number.isFinite(Number(v)),
+      )
+    )
+      throw { code: "USAGE", message: "单价须为非负数" };
     const counts = input.tokens.map((t) => {
       const s = String(t).trim();
       if (!/^\d+$/.test(s)) throw { code: "USAGE", message: "Token 数须为有效的非负整数" };
       return Number(s);
     });
-    const base = Number(input.basePrice) * Number(input.modelRatio);
-    const rates = input.rates
-      ? input.rates.map(Number)
-      : [
-          1,
-          input.outputRatio,
-          input.cacheReadRatio,
-          input.cacheWrite5mRatio,
-          input.cacheWrite1hRatio,
-        ].map((n) => base * Number(n));
-    const costs = rates.map(
-      (rate, i) => ((rate * counts[i]) / 1e6) * Number(input.groupRatio),
-    );
+    const rates = input.rates.map(Number);
+    const costs = rates.map((rate, i) => (rate * counts[i]) / 1e6);
     const format = (n: number) => String(Number(n.toFixed(12)));
     return {
       rates: rates.map(format),

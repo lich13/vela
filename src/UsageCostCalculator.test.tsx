@@ -45,26 +45,22 @@ beforeEach(() => {
   });
 });
 
-it("selects a used model, syncs 5 unit prices and ratios bidirectionally, and imports 5m/1h cache usage", async () => {
-  const user = userEvent.setup();
-  render(
-    <UsageCostCalculator
-      filter={{ start: 1000, end: 2000, client: "claude" }}
-      close={() => {}}
-    />,
-  );
-  await screen.findByRole("option", { name: "Fixture provider" });
-  await waitFor(() =>
+const ready = () =>
+  waitFor(() =>
     expect(
       document.querySelector('datalist option[value="claude-fable-5-2"]'),
     ).not.toBeNull(),
   );
+const called = (name: string) =>
+  vi.mocked(command).mock.calls.filter(([n]) => n === name);
 
-  // Rule 1: selecting a priced model fills all 5 unit prices and ratios.
+it("brings the five unit prices along with a used model that has a price", async () => {
+  render(<UsageCostCalculator filter={{ client: "claude" }} close={() => {}} />);
+  await ready();
+  expect(screen.getByLabelText("供应商")).toHaveDisplayValue("全部供应商");
   fireEvent.change(screen.getByLabelText("模型"), {
     target: { value: "claude-fable-5-2" },
   });
-  expect(screen.getByLabelText("模型")).toHaveValue("claude-fable-5-2");
   expect(screen.getByLabelText("输入单价 / 美元每百万")).toHaveValue(8);
   expect(screen.getByLabelText("输出单价 / 美元每百万")).toHaveValue(40);
   expect(screen.getByLabelText("缓存读取单价 / 美元每百万")).toHaveValue(0.2);
@@ -74,102 +70,85 @@ it("selects a used model, syncs 5 unit prices and ratios bidirectionally, and im
   expect(
     screen.getByLabelText("创建 1 小时缓存单价 / 美元每百万"),
   ).toHaveValue(16);
-  expect(screen.getByLabelText("模型倍率")).toHaveValue(4);
-  expect(screen.getByLabelText("输出倍率")).toHaveValue(5);
-  expect(screen.getByLabelText("缓存读取倍率")).toHaveValue(0.025);
-  expect(screen.getByLabelText("创建 5 分钟缓存倍率")).toHaveValue(1.25);
-  expect(screen.getByLabelText("创建 1 小时缓存倍率")).toHaveValue(2);
 
-  // Unpriced model only updates model text, keeping existing prices & ratios.
+  // A model without a price keeps the prices already entered.
+  fireEvent.change(screen.getByLabelText("输出单价 / 美元每百万"), {
+    target: { value: "24" },
+  });
   fireEvent.change(screen.getByLabelText("模型"), {
     target: { value: "claude-unpriced" },
   });
   expect(screen.getByLabelText("模型")).toHaveValue("claude-unpriced");
   expect(screen.getByLabelText("输入单价 / 美元每百万")).toHaveValue(8);
-  expect(screen.getByLabelText("创建 1 小时缓存单价 / 美元每百万")).toHaveValue(
-    16,
+  expect(screen.getByLabelText("输出单价 / 美元每百万")).toHaveValue(24);
+  expect(screen.queryByLabelText(/倍率$|基准价格|Tokens$/)).toBeNull();
+  expect(screen.queryByRole("button", { name: /填入/ })).toBeNull();
+});
+
+it("costs the usage of the chosen period at the prices entered", async () => {
+  const user = userEvent.setup();
+  render(
+    <UsageCostCalculator
+      filter={{
+        start: new Date(2026, 0, 1, 0, 0, 0).getTime(),
+        end: new Date(2026, 0, 1, 23, 59, 59).getTime(),
+        client: "claude",
+        operation: "fixture-operation",
+      }}
+      close={() => {}}
+    />,
   );
-
-  // Rule 3 & Rule 5: editing 1h unit price updates 1h ratio; editing 1h ratio updates 1h unit price.
-  fireEvent.change(
-    screen.getByLabelText("创建 1 小时缓存单价 / 美元每百万"),
-    { target: { value: "10" } },
-  );
-  expect(screen.getByLabelText("创建 1 小时缓存倍率")).toHaveValue(1.25);
-  fireEvent.change(screen.getByLabelText("创建 1 小时缓存倍率"), {
-    target: { value: "2" },
-  });
-  expect(
-    screen.getByLabelText("创建 1 小时缓存单价 / 美元每百万"),
-  ).toHaveValue(16);
-
-  // Rule 2: editing input unit price preserves the other 4 unit prices and recomputes modelRatio & sub-ratios.
-  fireEvent.change(screen.getByLabelText("输入单价 / 美元每百万"), {
-    target: { value: "4" },
-  });
-  expect(screen.getByLabelText("输出单价 / 美元每百万")).toHaveValue(40);
-  expect(screen.getByLabelText("模型倍率")).toHaveValue(2);
-  expect(screen.getByLabelText("输出倍率")).toHaveValue(10);
-
-  // Rule 4: editing modelRatio recomputes all 5 unit prices while preserving sub-ratios.
-  fireEvent.change(screen.getByLabelText("输出倍率"), {
-    target: { value: "5" },
-  });
-  fireEvent.change(screen.getByLabelText("缓存读取倍率"), {
-    target: { value: "0.025" },
-  });
-  fireEvent.change(screen.getByLabelText("创建 5 分钟缓存倍率"), {
-    target: { value: "1.25" },
-  });
-  fireEvent.change(screen.getByLabelText("创建 1 小时缓存倍率"), {
-    target: { value: "2" },
-  });
-  fireEvent.change(screen.getByLabelText("模型倍率"), {
-    target: { value: "4" },
-  });
-  expect(screen.getByLabelText("输入单价 / 美元每百万")).toHaveValue(8);
-  expect(screen.getByLabelText("输出单价 / 美元每百万")).toHaveValue(40);
-  expect(
-    screen.getByLabelText("创建 1 小时缓存单价 / 美元每百万"),
-  ).toHaveValue(16);
-
+  await screen.findByRole("option", { name: "Fixture provider" });
+  await ready();
   await user.selectOptions(screen.getByLabelText("供应商"), "fixture-provider");
   fireEvent.change(screen.getByLabelText("模型"), {
-    target: { value: "claude-fixture" },
+    target: { value: "claude-fable-5-2" },
   });
-  await user.click(screen.getByRole("button", { name: "填入当前范围用量" }));
-  await waitFor(() =>
-    expect(screen.getByLabelText("创建 1 小时缓存 Tokens")).toHaveValue(241416),
-  );
-  expect(screen.getByLabelText("创建 5 分钟缓存 Tokens")).toHaveValue(176000);
-  expect(command).toHaveBeenCalledWith("get_usage_calculator_totals", {
-    filter: {
-      start: 1000,
-      end: 2000,
-      client: "claude",
-      provider: "fixture-provider",
-      model: "claude-fixture",
-      source: "proxy",
-    },
+  fireEvent.change(screen.getByLabelText("开始"), {
+    target: { value: "2026-01-02T03:04" },
   });
-
+  fireEvent.change(screen.getByLabelText("结束"), {
+    target: { value: "2026-01-03T06:07" },
+  });
   await user.click(screen.getByRole("button", { name: "计算" }));
   await screen.findByText("$5.685872");
-  expect(command).toHaveBeenCalledWith("calculate_usage_cost", {
-    input: {
-      basePrice: "2",
-      modelRatio: "4",
-      outputRatio: "5",
-      cacheReadRatio: "0.025",
-      cacheWrite5mRatio: "1.25",
-      cacheWrite1hRatio: "2",
-      groupRatio: "1",
-      tokens: ["2", "1500", "16000", "176000", "241416"],
-    },
-  });
-  expect(screen.getByText("3.862656")).toBeVisible();
-  fireEvent.change(screen.getByLabelText("分组倍率"), {
-    target: { value: "0.5" },
+  expect(called("get_usage_calculator_totals")).toEqual([
+    [
+      "get_usage_calculator_totals",
+      {
+        filter: {
+          start: new Date(2026, 0, 2, 3, 4, 0).getTime(),
+          end: new Date(2026, 0, 3, 6, 7, 59).getTime(),
+          client: "claude",
+          provider: "fixture-provider",
+          model: "claude-fable-5-2",
+          source: "proxy",
+        },
+      },
+    ],
+  ]);
+  expect(called("calculate_usage_cost")).toEqual([
+    [
+      "calculate_usage_cost",
+      {
+        input: {
+          rates: ["8", "40", "0.2", "10", "16"],
+          tokens: ["2", "1500", "16000", "176000", "241416"],
+        },
+      },
+    ],
+  ]);
+  const cells = [...document.querySelectorAll("tbody tr")].map((row) =>
+    [...row.children].map((cell) => cell.textContent),
+  );
+  expect(cells[4]).toEqual(["创建 1 小时缓存", "241,416", "16", "3.862656"]);
+  expect(
+    [...document.querySelectorAll("thead th")].map((cell) => cell.textContent),
+  ).toEqual(["项目", "Tokens", "美元 / 百万", "费用 / 美元"]);
+
+  // Any edit drops the result it no longer describes.
+  fireEvent.change(screen.getByLabelText("输入单价 / 美元每百万"), {
+    target: { value: "4" },
   });
   expect(screen.queryByText("$5.685872")).not.toBeInTheDocument();
   expect(
@@ -186,52 +165,97 @@ it("selects a used model, syncs 5 unit prices and ratios bidirectionally, and im
   ).toBe(true);
 });
 
-it("keeps manual inputs after a calculation failure and permits retry", async () => {
+it("defaults to today for every supplier and prices untimed cache writes at 5 minutes", async () => {
+  const user = userEvent.setup();
+  vi.mocked(command).mockImplementation(async (name) => {
+    if (name === "get_usage_calculator_totals")
+      return {
+        attempts: 2,
+        tokens: { input: 7, cacheWrite: 10, cacheWrite5m: 3, cacheWrite1h: 5 },
+      } as never;
+    if (name === "calculate_usage_cost") return result as never;
+    return (name === "get_gateway" ? { providers: [] } : []) as never;
+  });
+  const before = Math.floor(Date.now() / 1000) * 1000;
+  render(<UsageCostCalculator filter={{}} close={() => {}} />);
+  await user.click(screen.getByRole("button", { name: "计算" }));
+  await screen.findByText("$5.685872");
+  const [{ filter }] = called("get_usage_calculator_totals").map(
+    ([, args]) => args as { filter: Record<string, unknown> },
+  );
+  expect(filter).toMatchObject({ client: "claude", provider: "" });
+  expect(filter.model).toBeUndefined();
+  expect(filter.start).toBe(new Date(before).setHours(0, 0, 0, 0));
+  expect(filter.end).toBeGreaterThanOrEqual(before);
+  expect(filter.end).toBeLessThanOrEqual(Date.now());
+  expect(command).toHaveBeenCalledWith("calculate_usage_cost", {
+    input: {
+      rates: ["2", "2", "2", "2", "2"],
+      tokens: ["7", "0", "0", "5", "5"],
+    },
+  });
+});
+
+it("reports a period without matching gateway usage and calculates nothing", async () => {
+  const user = userEvent.setup();
+  vi.mocked(command).mockImplementation(async (name) =>
+    name === "get_usage_calculator_totals"
+      ? ({ attempts: 0, tokens: {} } as never)
+      : name === "get_gateway"
+        ? ({ providers: [] } as never)
+        : ([] as never),
+  );
+  render(<UsageCostCalculator filter={{}} close={() => {}} />);
+  await user.click(screen.getByRole("button", { name: "计算" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "所选周期没有符合条件的网关用量",
+  );
+  expect(called("calculate_usage_cost")).toEqual([]);
+});
+
+it("rejects a period that starts after it ends before asking for usage", async () => {
   const user = userEvent.setup();
   render(<UsageCostCalculator filter={{}} close={() => {}} />);
-  await screen.findByRole("option", { name: "Fixture provider" });
-  fireEvent.change(screen.getByLabelText("输入 Tokens"), {
-    target: { value: "100" },
+  await ready();
+  fireEvent.change(screen.getByLabelText("开始"), {
+    target: { value: "2026-01-03T00:00:00" },
   });
-  vi.mocked(command).mockRejectedValueOnce(
-    new Error("fixture calculation failed"),
+  fireEvent.change(screen.getByLabelText("结束"), {
+    target: { value: "2026-01-02T00:00:00" },
+  });
+  await user.click(screen.getByRole("button", { name: "计算" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "开始时间不能晚于结束时间",
   );
+  expect(called("get_usage_calculator_totals")).toEqual([]);
+
+  fireEvent.change(screen.getByLabelText("结束"), {
+    target: { value: "2026-01-04T00:00:00" },
+  });
+  await user.click(screen.getByRole("button", { name: "计算" }));
+  await screen.findByText("$5.685872");
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("keeps the inputs after a calculation failure and permits retry", async () => {
+  const user = userEvent.setup();
+  render(<UsageCostCalculator filter={{}} close={() => {}} />);
+  await ready();
+  fireEvent.change(screen.getByLabelText("输入单价 / 美元每百万"), {
+    target: { value: "3" },
+  });
+  const usual = vi.mocked(command).getMockImplementation()!;
+  vi.mocked(command).mockImplementation(async (name, ...rest) => {
+    if (name === "calculate_usage_cost")
+      throw new Error("fixture calculation failed");
+    return usual(name, ...rest) as never;
+  });
   await user.click(screen.getByRole("button", { name: "计算" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "fixture calculation failed",
   );
-  expect(screen.getByLabelText("输入 Tokens")).toHaveValue(100);
+  expect(screen.getByLabelText("输入单价 / 美元每百万")).toHaveValue(3);
+  vi.mocked(command).mockImplementation(usual);
   await user.click(screen.getByRole("button", { name: "计算" }));
   await screen.findByText("$5.685872");
-  expect(command).not.toHaveBeenCalledWith(
-    "get_usage_calculator_totals",
-    expect.anything(),
-  );
-});
-
-it("sends the prices on screen once an emptied ratio is valid again", async () => {
-  const user = userEvent.setup();
-  render(<UsageCostCalculator filter={{ client: "claude" }} close={() => {}} />);
-  await waitFor(() =>
-    expect(
-      document.querySelector('datalist option[value="claude-fable-5-2"]'),
-    ).not.toBeNull(),
-  );
-  fireEvent.change(screen.getByLabelText("模型"), {
-    target: { value: "claude-fable-5-2" },
-  });
-  fireEvent.change(screen.getByLabelText("输出倍率"), { target: { value: "" } });
-  fireEvent.change(screen.getByLabelText("输出倍率"), {
-    target: { value: "3" },
-  });
-  expect(screen.getByLabelText("输出单价 / 美元每百万")).toHaveValue(24);
-  await user.click(screen.getByRole("button", { name: "计算" }));
-  await waitFor(() =>
-    expect(command).toHaveBeenCalledWith("calculate_usage_cost", {
-      input: expect.objectContaining({
-        outputRatio: "3",
-        rates: ["8", "24", "0.2", "10", "16"],
-      }),
-    }),
-  );
 });
