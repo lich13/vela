@@ -274,6 +274,8 @@ export type GatewayState = {
     model: string | null;
     startedAt: number;
     elapsedSeconds: number;
+    /** Seconds since the current upstream attempt, or the current wait, began. */
+    attemptSeconds: number;
     remainingSeconds: number | null;
     phase: string;
     receivedBytes?: number | null;

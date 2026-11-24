@@ -810,6 +810,46 @@ it("keeps one icon-bearing testing entry per provider and removes global testing
 });
 
 it.each([
+  [
+    { profiles: [], command: null },
+    "未找到 PowerShell 配置文件，agy 仍直连；创建 Microsoft.PowerShell_profile.ps1 后重新启用",
+    "未找到 PowerShell 配置文件，agy 仍直连；创建 Microsoft.PowerShell_profile.ps1 后重新启用",
+  ],
+  [
+    { profiles: [], command: "source ~/.vela/antigravity/agy.env" },
+    "未能写入 shell 启动文件，可手动运行",
+    "已接入，请打开新的终端运行 agy",
+  ],
+  [
+    { profiles: ["~/.zshrc"], command: null },
+    "agy 函数已写入 ~/.zshrc",
+    "已接入，请打开新的终端运行 agy",
+  ],
+])(
+  "agy reports what enabling wrote to the shell: %o",
+  async (agyShell, status, notice) => {
+    localStorage.setItem("vela.main.client", "agy");
+    state = { ...state, clientId: "agy", running: false, agyShell: null };
+    mock.command.mockImplementation(async (name) =>
+      name === "get_gateway"
+        ? structuredClone(state)
+        : name === "start_gateway"
+          ? { ...structuredClone(state), running: true, agyShell }
+          : null,
+    );
+    const notify = vi.fn();
+    const user = userEvent.setup();
+    render(<Gateway notify={notify} quotaRefreshSeconds={0} />);
+    expect(
+      await screen.findByText("仅终端里的 agy 经过网关"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "启用" }));
+    await waitFor(() => expect(notify).toHaveBeenCalledWith(notice));
+    expect(screen.getByText(status)).toBeInTheDocument();
+  },
+);
+
+it.each([
   ["codex", ["API", "白名单", "端点"]],
   ["claude", ["API", "白名单", "模型映射", "端点"]],
   ["grok", ["API", "白名单", "端点"]],

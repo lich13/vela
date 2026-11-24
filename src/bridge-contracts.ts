@@ -601,7 +601,10 @@ export type CommandMap = {
     AntigravityAuthState
   >;
   /** How many accounts were written; null when the dialog was dismissed. */
-  export_antigravity_accounts: Call<Revision, number | null>;
+  export_antigravity_accounts: Call<
+    Revision & { ids: string[] },
+    number | null
+  >;
   import_antigravity_accounts: Call<
     Revision,
     { state: AntigravityAuthState; added: number; skipped: number } | null

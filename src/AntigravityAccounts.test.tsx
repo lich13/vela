@@ -183,7 +183,7 @@ describe("AntigravityAccounts", () => {
       ],
     };
     const results: Record<string, unknown[]> = {
-      export_antigravity_accounts: [null, 2],
+      export_antigravity_accounts: [null, 1, 2],
       import_antigravity_accounts: [
         { state: imported, added: 1, skipped: 2 },
         { state: imported, added: 0, skipped: 3 },
@@ -198,9 +198,46 @@ describe("AntigravityAccounts", () => {
     });
     await waitFor(() => expect(exporting).toBeEnabled());
     fireEvent.click(exporting);
-    await waitFor(() => expect(exporting).toBeEnabled());
+    let picker = screen.getByRole("dialog", { name: "导出账号" });
+    const all = () => within(picker).getByRole("checkbox", { name: /全选/ });
+    const submit = () =>
+      within(picker).getByRole("button", { name: "导出所选" });
+    expect(all()).toBeChecked();
+    expect(within(picker).getByText("已选 2")).toBeInTheDocument();
+    expect(
+      within(picker).getByText("user2@example.invalid"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(picker).getByRole("checkbox", { name: /OAuth 备号/ }),
+    );
+    expect(all()).not.toBeChecked();
+    expect(within(picker).getByText("已选 1")).toBeInTheDocument();
+
+    // Dismissing the save dialog keeps the picker and its selection.
+    fireEvent.click(submit());
+    await waitFor(() => expect(submit()).toBeEnabled());
     expect(notify).not.toHaveBeenCalled();
+    expect(mockCommand).toHaveBeenLastCalledWith(
+      "export_antigravity_accounts",
+      { ids: ["oauth-1"], expectedRevision: initialState.revision },
+    );
+    fireEvent.click(submit());
+    await waitFor(() =>
+      expect(notify).toHaveBeenLastCalledWith(
+        "已导出 1 个账号；文件包含登录凭据，请妥善保管",
+      ),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    // Reopening starts from everything selected again.
     fireEvent.click(exporting);
+    picker = screen.getByRole("dialog", { name: "导出账号" });
+    expect(all()).toBeChecked();
+    fireEvent.click(all());
+    expect(within(picker).getByText("已选 0")).toBeInTheDocument();
+    expect(submit()).toBeDisabled();
+    fireEvent.click(all());
+    fireEvent.click(submit());
     await waitFor(() =>
       expect(notify).toHaveBeenLastCalledWith(
         "已导出 2 个账号；文件包含登录凭据，请妥善保管",
@@ -208,8 +245,12 @@ describe("AntigravityAccounts", () => {
     );
     expect(mockCommand).toHaveBeenLastCalledWith(
       "export_antigravity_accounts",
-      { expectedRevision: initialState.revision },
+      {
+        ids: ["oauth-1", "oauth-2"],
+        expectedRevision: initialState.revision,
+      },
     );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     const importing = screen.getByRole("button", {
       name: "导入 Antigravity 账号",
@@ -231,6 +272,29 @@ describe("AntigravityAccounts", () => {
       "import_antigravity_accounts",
       { expectedRevision: "rev-2" },
     );
+  });
+
+  it("导出失败时错误留在勾选窗口内，并重新读取账号状态", async () => {
+    const setError = vi.fn();
+    mockCommand.mockImplementation(async (name: string) => {
+      if (name === "export_antigravity_accounts")
+        throw { code: "CONFLICT", message: "Antigravity 凭据状态已变更" };
+      return initialState;
+    });
+    render(<AntigravityAccounts notify={vi.fn()} setError={setError} />);
+    await screen.findByText("OAuth 主号");
+    fireEvent.click(
+      screen.getByRole("button", { name: "导出 Antigravity 账号" }),
+    );
+    const picker = screen.getByRole("dialog", { name: "导出账号" });
+    fireEvent.click(within(picker).getByRole("button", { name: "导出所选" }));
+    expect(await within(picker).findByRole("alert")).toHaveTextContent(
+      "Antigravity 凭据状态已变更",
+    );
+    expect(setError).not.toHaveBeenCalledWith("Antigravity 凭据状态已变更");
+    expect(mockCommand).toHaveBeenLastCalledWith("get_antigravity_auth_state");
+    fireEvent.click(within(picker).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("switches, renames and deletes against the latest revision", async () => {

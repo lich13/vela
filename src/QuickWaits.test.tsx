@@ -19,7 +19,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
-it("keeps long compaction cancellable and shows elapsed time without a countdown", async () => {
+it("keeps long compaction cancellable and shows this attempt's time without a countdown", async () => {
   const start = Math.floor(Date.now() / 1000);
   mock.command.mockResolvedValueOnce("resent");
   render(
@@ -33,6 +33,7 @@ it("keeps long compaction cancellable and shows elapsed time without a countdown
             model: "fixture-model",
             startedAt: start - 601,
             elapsedSeconds: 601,
+            attemptSeconds: 45,
             remainingSeconds: null,
             phase: "compaction",
           },
@@ -45,8 +46,8 @@ it("keeps long compaction cancellable and shows elapsed time without a countdown
     />,
   );
   expect(screen.getByText("压缩中")).toBeInTheDocument();
-  expect(screen.getByText("已用 601 秒")).toBeInTheDocument();
-  expect(screen.queryByText(/剩余/)).not.toBeInTheDocument();
+  expect(screen.getByText("本次 45 秒")).toBeInTheDocument();
+  expect(screen.queryByText(/剩余|已用|601/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "重发" }));
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("cancel_gateway_wait", {
@@ -65,6 +66,8 @@ it("shows only long waits and cancels the selected request on its platform", asy
       model: `model-${i}`,
       startedAt: start - seconds,
       elapsedSeconds: seconds,
+      // The total decides what is listed, however young the attempt is.
+      attemptSeconds: 5,
       remainingSeconds: 300 - seconds,
       phase: i === 1 ? "ws_wait" : "headers",
     })),
@@ -123,6 +126,7 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
     model: "fixture-model",
     startedAt: 1,
     elapsedSeconds: 61,
+    attemptSeconds: 20,
     remainingSeconds: 239 as number | null,
     phase: "admission",
   };
@@ -139,12 +143,12 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
     />,
   );
   expect(screen.getByText("等待准入")).toBeInTheDocument();
-  expect(screen.getByText("剩余 239 秒")).toBeInTheDocument();
+  expect(screen.getByText("本次 20 秒 · 剩余 239 秒")).toBeInTheDocument();
   act(() => {
     now += 10_000;
     vi.advanceTimersByTime(10_000);
   });
-  expect(screen.getByText("剩余 229 秒")).toBeInTheDocument();
+  expect(screen.getByText("本次 30 秒 · 剩余 229 秒")).toBeInTheDocument();
   view.rerender(
     <QuickWaits
       {...props}
@@ -155,6 +159,7 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
             ...pending,
             phase: "frozen",
             elapsedSeconds: 71,
+            attemptSeconds: 30,
             remainingSeconds: null,
           },
         ],
@@ -165,7 +170,7 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
     now += 600_000;
     vi.advanceTimersByTime(600_000);
   });
-  expect(screen.getByText("已用 71 秒")).toBeInTheDocument();
+  expect(screen.getByText("本次 30 秒")).toBeInTheDocument();
   view.rerender(
     <QuickWaits
       {...props}
@@ -184,20 +189,25 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
       gateway={{
         ...gatewayDemo,
         pendingRequests: [
-          { ...pending, elapsedSeconds: 71, remainingSeconds: 229 },
+          {
+            ...pending,
+            elapsedSeconds: 71,
+            attemptSeconds: 30,
+            remainingSeconds: 229,
+          },
         ],
       }}
     />,
   );
-  expect(screen.getByText("剩余 229 秒")).toBeInTheDocument();
+  expect(screen.getByText("本次 30 秒 · 剩余 229 秒")).toBeInTheDocument();
   act(() => {
     now += 1_000;
     vi.advanceTimersByTime(1_000);
   });
-  expect(screen.getByText("剩余 228 秒")).toBeInTheDocument();
+  expect(screen.getByText("本次 31 秒 · 剩余 228 秒")).toBeInTheDocument();
 });
 
-it("maps buffering phase to 缓冲响应 with elapsed seconds and cancellation", async () => {
+it("maps buffering phase to 缓冲响应 with this attempt's seconds and cancellation", async () => {
   const start = Math.floor(Date.now() / 1000);
   mock.command.mockResolvedValueOnce("resent");
   render(
@@ -211,6 +221,7 @@ it("maps buffering phase to 缓冲响应 with elapsed seconds and cancellation",
             model: "claude-opus-4-6",
             startedAt: start - 75,
             elapsedSeconds: 75,
+            attemptSeconds: 12,
             remainingSeconds: null,
             phase: "buffering",
           },
@@ -223,7 +234,7 @@ it("maps buffering phase to 缓冲响应 with elapsed seconds and cancellation",
     />,
   );
   expect(screen.getByText("缓冲响应")).toBeInTheDocument();
-  expect(screen.getByText("已用 75 秒")).toBeInTheDocument();
+  expect(screen.getByText("本次 12 秒")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "重发" }));
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("cancel_gateway_wait", {
@@ -240,6 +251,7 @@ it("adds what a receiving request has taken in, with its rate or its silence", (
     model: null,
     startedAt: start - 90,
     elapsedSeconds: 90,
+    attemptSeconds: 90,
     remainingSeconds: null,
     phase: "buffering",
   };

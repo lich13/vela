@@ -89,13 +89,9 @@ export default function QuickWaits({
             </time>
             <span>{phases[r.phase] ?? r.phase}</span>
             <span>
-              {r.remainingSeconds == null ? (
-                `已用 ${r.elapsedSeconds + elapsed(r.phase)} 秒`
-              ) : (
-                <>
-                  剩余 {Math.max(0, r.remainingSeconds - elapsed(r.phase))} 秒
-                </>
-              )}
+              本次 {r.attemptSeconds + elapsed(r.phase)} 秒
+              {r.remainingSeconds != null &&
+                ` · 剩余 ${Math.max(0, r.remainingSeconds - elapsed(r.phase))} 秒`}
             </span>
           </div>
           {r.receivedBytes != null && (

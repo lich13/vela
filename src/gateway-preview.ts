@@ -949,6 +949,7 @@ if (densePreview) {
     model: "fixture-model-long-context-preview",
     startedAt: Math.floor(Date.now() / 1000) - 90 - i * 12,
     elapsedSeconds: 90 + i * 12,
+    attemptSeconds: 40 + i * 12,
     remainingSeconds: i === 0 ? null : 210 - i * 12,
     phase: ["compaction", "capacity", "retry", "ws_wait"][i],
   }));

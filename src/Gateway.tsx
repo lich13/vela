@@ -289,6 +289,12 @@ function GatewayContent({
       }
       notify("Grok 已接入");
     });
+  // Windows without a PowerShell profile: no agy function was written and
+  // there is no command to run by hand, so agy still bypasses the gateway.
+  const agyUnwired = (shell: GatewayState["agyShell"]) =>
+    !!shell && !shell.profiles.length && !shell.command;
+  const agyUnwiredText =
+    "未找到 PowerShell 配置文件，agy 仍直连；创建 Microsoft.PowerShell_profile.ps1 后重新启用";
   const toggle = () => {
     if (
       clientId === "grok" &&
@@ -323,9 +329,11 @@ function GatewayContent({
       notify(
         clientId !== "agy"
           ? `配置已切换，请重新打开 ${clientName(clientId)}`
-          : next.running
-            ? "已接入，请打开新的终端运行 agy"
-            : "已停用，新运行的 agy 恢复直连",
+          : !next.running
+            ? "已停用，新运行的 agy 恢复直连"
+            : agyUnwired(next.agyShell)
+              ? agyUnwiredText
+              : "已接入，请打开新的终端运行 agy",
       );
     });
   };
@@ -381,7 +389,9 @@ function GatewayContent({
                 ? "仅终端里的 agy 经过网关"
                 : state.agyShell.profiles.length
                   ? `agy 函数已写入 ${state.agyShell.profiles.join("、")}`
-                  : "未能写入 shell 启动文件，可手动运行"}
+                  : agyUnwired(state.agyShell)
+                    ? agyUnwiredText
+                    : "未能写入 shell 启动文件，可手动运行"}
             </span>
           )}
           {clientId === "grok" && !state.running && (
