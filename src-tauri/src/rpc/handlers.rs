@@ -258,6 +258,14 @@ pub(crate) fn get_gateway(r: &Runtime, client_id: ClientId) -> Result<gateway::V
     }
     r.gateway(client_id).try_view()
 }
+pub(crate) fn quick_snapshot(
+    r: &Runtime,
+    client_id: ClientId,
+    cancelling: Option<Vec<String>>,
+) -> Result<crate::quick_model::Snapshot> {
+    let cancelling = cancelling.unwrap_or_default().into_iter().collect();
+    Ok(crate::quick_model::snapshot(r, client_id, &cancelling))
+}
 pub(crate) fn cancel_gateway_wait(
     r: &Runtime,
     client_id: ClientId,

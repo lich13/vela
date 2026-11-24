@@ -62,7 +62,6 @@ pub(crate) fn unsupported() -> AppError {
 /// `plain` ones run there without it.
 macro_rules! commands {
     ($($mode:ident $name:ident($($arg:ident),*);)*) => {
-        #[cfg(any(unix, test))]
         const NAMES: &[&str] = &[$(stringify!($name)),*];
         async fn dispatch(rt: &Arc<Runtime>, name: &str, mut args: Args) -> Result<Value> {
             match name {
@@ -116,6 +115,7 @@ commands! {
     blocking set_quota_refresh(seconds, expected_seconds);
     blocking cancel_gateway_wait(client_id, request_id);
     blocking get_gateway(client_id);
+    blocking quick_snapshot(client_id, cancelling);
     blocking get_gateway_freeze();
     blocking set_gateway_frozen(frozen, client_id);
     blocking set_gateway_freeze_resume(client_id, resume_at);

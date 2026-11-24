@@ -753,6 +753,8 @@ export type SharedCommands = {
     "resent" | "ended" | "gone"
   >;
   get_gateway: Call<Client, GatewayState>;
+  /** What the native macOS quick panel draws of a client; no page calls it. */
+  quick_snapshot: Call<Client & { cancelling?: string[] }, unknown>;
   get_gateway_freeze: Call<None, GatewayFreeze>;
   set_gateway_frozen: Call<
     { frozen: boolean; clientId?: ClientId },
@@ -1011,6 +1013,7 @@ export const sharedCommands = names<SharedCommands>()([
   "set_quota_refresh",
   "cancel_gateway_wait",
   "get_gateway",
+  "quick_snapshot",
   "get_gateway_freeze",
   "set_gateway_frozen",
   "set_gateway_freeze_resume",

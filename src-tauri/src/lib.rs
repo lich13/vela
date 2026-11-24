@@ -45,6 +45,7 @@ mod quick;
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 mod quick_macos;
+mod quick_model;
 #[cfg(feature = "desktop")]
 mod remote;
 mod rpc;
