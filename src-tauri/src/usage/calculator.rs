@@ -4,17 +4,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Input {
-    pub base_price: String,
-    pub model_ratio: String,
-    pub output_ratio: String,
-    pub cache_read_ratio: String,
-    pub cache_write_5m_ratio: String,
-    pub cache_write_1h_ratio: String,
-    pub group_ratio: String,
-    #[serde(default)]
-    pub rates: Option<[String; 5]>,
+    pub rates: [String; 5],
     pub tokens: [String; 5],
 }
 
@@ -26,51 +17,21 @@ pub struct Calculation {
 }
 
 pub fn calculate(input: Input) -> Result<Calculation> {
-    let parse = |value: &str| decimal(value).ok_or_else(|| failure("价格和倍率须为非负数"));
     let invalid = || failure("换算数值超过可计算范围");
-    let parse_tokens = |value: &str| -> Result<u64> {
-        let trimmed = value.trim();
-        if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(failure("Token 数须为有效的非负整数"));
-        }
-        trimmed
-            .parse::<u64>()
-            .map_err(|_| failure("Token 数须为有效的非负整数"))
-    };
-    let base = parse(&input.base_price)?
-        .checked_mul(parse(&input.model_ratio)?)
-        .ok_or_else(invalid)?;
-    let ratios = [
-        Decimal::ONE,
-        parse(&input.output_ratio)?,
-        parse(&input.cache_read_ratio)?,
-        parse(&input.cache_write_5m_ratio)?,
-        parse(&input.cache_write_1h_ratio)?,
-    ];
-    let group = parse(&input.group_ratio)?;
-    let explicit_rates = match &input.rates {
-        Some(raw) => Some([
-            parse(&raw[0])?,
-            parse(&raw[1])?,
-            parse(&raw[2])?,
-            parse(&raw[3])?,
-            parse(&raw[4])?,
-        ]),
-        None => None,
-    };
     let mut rates = std::array::from_fn(|_| String::new());
     let mut costs = rates.clone();
     let mut total = Decimal::ZERO;
-    for (index, ratio) in ratios.into_iter().enumerate() {
-        let count = parse_tokens(&input.tokens[index])?;
-        let rate = match explicit_rates {
-            Some(explicit) => explicit[index],
-            None => base.checked_mul(ratio).ok_or_else(invalid)?,
-        };
+    for index in 0..5 {
+        let rate = decimal(&input.rates[index]).ok_or_else(|| failure("单价须为非负数"))?;
+        let tokens = input.tokens[index].trim();
+        let count = tokens
+            .parse::<u64>()
+            .ok()
+            .filter(|_| tokens.bytes().all(|b| b.is_ascii_digit()))
+            .ok_or_else(|| failure("Token 数须为有效的非负整数"))?;
         let cost = rate
             .checked_mul(Decimal::from(count))
             .and_then(|v| v.checked_div(Decimal::from(1_000_000)))
-            .and_then(|v| v.checked_mul(group))
             .ok_or_else(invalid)?;
         rates[index] = rate.normalize().to_string();
         costs[index] = cost.normalize().to_string();
@@ -89,26 +50,13 @@ mod tests {
 
     fn input() -> Input {
         Input {
-            base_price: "2".into(),
-            model_ratio: "4".into(),
-            output_ratio: "5".into(),
-            cache_read_ratio: "0.025".into(),
-            cache_write_5m_ratio: "1.25".into(),
-            cache_write_1h_ratio: "2".into(),
-            group_ratio: "1".into(),
-            rates: None,
-            tokens: [
-                "2".into(),
-                "1500".into(),
-                "16000".into(),
-                "176000".into(),
-                "241416".into(),
-            ],
+            rates: ["8", "40", "0.2", "10", "16"].map(String::from),
+            tokens: ["2", "1500", "16000", "176000", "241416"].map(String::from),
         }
     }
 
     #[test]
-    fn provider_ratios_and_explicit_rates_match_five_token_charges_exactly() {
+    fn unit_prices_match_five_token_charges_exactly() {
         let result = calculate(input()).unwrap();
         assert_eq!(result.rates, ["8", "40", "0.2", "10", "16"]);
         assert_eq!(
@@ -116,41 +64,23 @@ mod tests {
             ["0.000016", "0.06", "0.0032", "1.76", "3.862656"]
         );
         assert_eq!(result.total, "5.685872");
-        let mut discounted = input();
-        discounted.group_ratio = "0.5".into();
-        assert_eq!(calculate(discounted).unwrap().total, "2.842936");
 
-        // Explicit unit prices avoid repeating-decimal truncation (e.g. $1 / $3 = 0.33333333...).
-        let mut exact = input();
-        exact.base_price = "3".into();
-        exact.model_ratio = "1".into();
-        exact.cache_read_ratio = "0.33333333".into();
-        exact.rates = Some([
-            "3".into(),
-            "15".into(),
-            "1".into(),
-            "3.75".into(),
-            "6".into(),
-        ]);
-        exact.tokens = [
-            "0".into(),
-            "0".into(),
-            "3000000".into(),
-            "0".into(),
-            "0".into(),
-        ];
+        let exact = Input {
+            rates: ["3", "15", "1", "3.75", "6"].map(String::from),
+            tokens: ["0", "0", "3000000", "0", "0"].map(String::from),
+        };
         assert_eq!(calculate(exact).unwrap().total, "3");
     }
 
     #[test]
-    fn zero_is_allowed_and_invalid_tokens_or_overflowing_input_is_rejected() {
+    fn zero_is_allowed_and_invalid_prices_tokens_or_overflowing_input_are_rejected() {
         let mut value = input();
-        value.group_ratio = "0".into();
+        value.rates = ["0", "0", "0", "0", "0"].map(String::from);
         assert_eq!(calculate(value).unwrap().total, "0");
-        for ratio in ["", "-1", "NaN", "999999999999999999999999999999"] {
+        for rate in ["", "-1", "NaN", "999999999999999999999999999999"] {
             let mut value = input();
-            value.model_ratio = ratio.into();
-            assert!(calculate(value).is_err());
+            value.rates[1] = rate.into();
+            assert_eq!(calculate(value).unwrap_err().message, "单价须为非负数");
         }
         for bad_token in ["", "-1", "1.5", "abc", "999999999999999999999999999"] {
             let mut value = input();
@@ -158,6 +88,13 @@ mod tests {
             let err = calculate(value).unwrap_err();
             assert_eq!(err.message, "Token 数须为有效的非负整数");
         }
+        let mut value = input();
+        value.rates[0] = "79228162514264337593543950335".into();
+        value.tokens[0] = "18446744073709551615".into();
+        assert_eq!(
+            calculate(value).unwrap_err().message,
+            "换算数值超过可计算范围"
+        );
     }
 
     #[test]

@@ -57,7 +57,7 @@ export type DshOfficialModel = {
   maxTokens?: number;
   input?: string[];
 };
-export type DshOfficialCatalog = {
+type DshOfficialCatalog = {
   models: DshOfficialModel[];
   error: string | null;
 };
@@ -164,7 +164,7 @@ export type FingerprintReport = {
   }[];
   bank_version: Record<string, unknown>;
 };
-export type ProviderTestGroup = {
+type ProviderTestGroup = {
   index: number;
   expected: number;
   status: string;
@@ -249,7 +249,7 @@ export type ProviderDetection = {
   model: string;
   endpoint: string | null;
 };
-export type ProviderDegradation = {
+type ProviderDegradation = {
   providerId: string;
   requestedModel: string;
   predictedModel: string;
@@ -331,7 +331,7 @@ export type AccountExportPreview = {
   revision: string;
   rows: { id: string; name: string; error: string | null }[];
 };
-export type DshOptions = {
+type DshOptions = {
   profile: string;
   protocol: GrokProtocol;
   model: string | null;
@@ -424,7 +424,7 @@ export type DshFileView = {
   readOnly: boolean;
   canRestore: boolean;
 };
-export type DshBatch = {
+type DshBatch = {
   state: GatewayState;
   results: {
     profile: string;
@@ -578,7 +578,7 @@ const names =
   ): T =>
     list;
 /** Commands of the desktop app itself: they always run on this machine. */
-export type DesktopCommands = {
+type DesktopCommands = {
   open_main: Call<
     {
       page?: string | null;
@@ -1097,13 +1097,13 @@ export const sharedCommands = names<SharedCommands>()([
   "update_pricing",
   "reload_pricing",
 ]);
-export type CommandMap = DesktopCommands & SharedCommands;
+type CommandMap = DesktopCommands & SharedCommands;
 export type CommandName = keyof CommandMap;
-export type CommandArgs<K extends CommandName> = CommandMap[K]["args"];
+type CommandArgs<K extends CommandName> = CommandMap[K]["args"];
 export type CommandResult<K extends CommandName> = CommandMap[K]["result"];
 export type CommandParams<K extends CommandName> =
   {} extends CommandArgs<K> ? [args?: CommandArgs<K>] : [args: CommandArgs<K>];
-export type FreezeStatus = {
+type FreezeStatus = {
   frozen: boolean;
   draining: number;
   receiving: number;
@@ -1122,7 +1122,7 @@ export type GatewayFreeze = FreezeStatus & {
   clients: ClientFreeze[];
 };
 /** Events a server instance also emits: delivered from the current instance. */
-export type SharedEvents = {
+type SharedEvents = {
   "switch-state": ViewState;
   "switch-error": AppError;
   "switch-notice": string;
@@ -1143,7 +1143,7 @@ export type SharedEvents = {
   "app-event": unknown;
 };
 /** Events of the desktop app itself. */
-export type DesktopEvents = {
+type DesktopEvents = {
   "instance-state": InstanceState;
   "login-state": LoginState;
   "clamshell-state": PowerState;
