@@ -201,7 +201,30 @@ pub(super) fn register(c: &Connection) -> Result<()> {
         let b: Option<Vec<u8>> = ctx.get(0)?;
         b.map(|b| text(&b).ok_or(rusqlite::Error::InvalidQuery))
             .transpose()
+    }))?;
+    // A cursor is kept compressed; these two are its way in and out.
+    db(c.create_scalar_function("usage_compress", 1, flags, |ctx| {
+        ctx.get::<Option<String>>(0)?
+            .map(|s| zstd::encode_all(s.as_bytes(), zstd::DEFAULT_COMPRESSION_LEVEL))
+            .transpose()
+            .map_err(|_| rusqlite::Error::InvalidQuery)
+    }))?;
+    db(c.create_scalar_function("usage_expand", 1, flags, |ctx| {
+        let b: Option<Vec<u8>> = ctx.get(0)?;
+        b.map(|b| expand(&b).ok_or(rusqlite::Error::InvalidQuery))
+            .transpose()
     }))
+}
+fn expand(bytes: &[u8]) -> Option<String> {
+    let mut plain = Vec::new();
+    zstd::stream::read::Decoder::new(bytes)
+        .ok()?
+        .take((LIMIT + 1) as u64)
+        .read_to_end(&mut plain)
+        .ok()?;
+    (plain.len() <= LIMIT)
+        .then(|| String::from_utf8(plain).ok())
+        .flatten()
 }
 fn pack(v: &Value) -> Result<Vec<u8>> {
     let bytes = wire::encode_v13(v);
@@ -763,7 +786,25 @@ pub(super) fn initialize(c: &Connection) -> Result<()> {
     create_views(c)?;
     db(c.execute_batch("CREATE INDEX v12_daily_unpacked ON daily(id) WHERE json_extract(body,'$._usageArchive') IS NULL;
       INSERT INTO metadata VALUES('storage_v12','ready'),('record_sequence','0');
-      PRAGMA user_version=13;"))
+      PRAGMA user_version=14;"))
+}
+/// Version 13 kept the identifiers of a receipt and the cursors as text.
+/// The same rows are written again with identifiers as keys and cursors
+/// compressed; nothing else of the database changes.
+pub(super) fn upgrade_v13(c: &Connection) -> Result<()> {
+    db(c.execute_batch(
+        "DROP INDEX receipt_response; DROP INDEX receipt_signature;
+         ALTER TABLE receipts RENAME TO receipts_v13;
+         ALTER TABLE cursors RENAME TO cursors_v13;",
+    ))?;
+    super::store::common_schema(c)?;
+    db(c.execute_batch(
+        "INSERT INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation)
+           SELECT usage_key(id),client,source,time,usage_key(provider),usage_key(response),usage_key(signature),ended,effective,operation FROM receipts_v13;
+         INSERT INTO cursors(id,body) SELECT id,usage_compress(body) FROM cursors_v13;
+         DROP TABLE receipts_v13; DROP TABLE cursors_v13;
+         PRAGMA user_version=14;",
+    ))
 }
 
 fn record_state(c: &Connection, values: &[rusqlite::types::Value]) -> Result<i64> {
@@ -1382,8 +1423,8 @@ pub(super) fn set_state(c: &Connection, r: &Record, effective: i64) -> Result<()
 // archive_ids is a bounded, connection-local selection owned by Store::archive_batch.
 pub(super) fn archive_selected(c: &Connection) -> Result<()> {
     db(c.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation)
-      SELECT usage_text(r.key),usage_label(r.client),usage_label(r.source),r.time,usage_value(p.value),usage_text(r.response),
-        usage_signature(r.client,s.value,coalesce(a.input,b.input),coalesce(a.output,b.output),coalesce(a.cache_read,b.cache_read),coalesce(a.cache_write,b.cache_write),coalesce(a.operation,b.operation)),
+      SELECT r.key,usage_label(r.client),usage_label(r.source),r.time,usage_key(usage_value(p.value)),r.response,
+        usage_key(usage_signature(r.client,s.value,coalesce(a.input,b.input),coalesce(a.output,b.output),coalesce(a.cache_read,b.cache_read),coalesce(a.cache_write,b.cache_write),coalesce(a.operation,b.operation))),
         r.time+r.ended,r.effective,CASE coalesce(a.operation,b.operation) WHEN 1 THEN 'compaction' WHEN 2 THEN 'web_search' ELSE 'model' END
       FROM v12_records r
       LEFT JOIN v12_attempts a ON a.owner=r.rid AND a.ordinal=r.last

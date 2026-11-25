@@ -205,24 +205,24 @@ fn v13_rejects_invalid_numbers_unknown_tags_and_excessive_depth() {
 }
 
 #[test]
-fn empty_database_installs_and_reenters_v13_without_downgrade() {
+fn empty_database_installs_and_reenters_its_version_without_downgrade() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path()).unwrap();
-    assert_eq!(user_version(dir.path()), 13);
+    assert_eq!(user_version(dir.path()), 14);
     migrate_to_ready(&mut store);
     drop(store);
-    assert_eq!(user_version(dir.path()), 13);
+    assert_eq!(user_version(dir.path()), 14);
     assert_eq!(storage_state(dir.path()).as_deref(), Some("ready"));
 
     let mut reopened = Store::open(dir.path()).unwrap();
-    assert_eq!(user_version(dir.path()), 13);
+    assert_eq!(user_version(dir.path()), 14);
     assert!(!reopened.compact_storage_batch().unwrap());
     drop(reopened);
-    assert_eq!(user_version(dir.path()), 13);
+    assert_eq!(user_version(dir.path()), 14);
 }
 
 #[test]
-fn ready_v12_snapshots_survive_v13_guard_and_reentry() {
+fn ready_v12_snapshots_survive_the_version_guard_and_reentry() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path()).unwrap();
     let source = priced_record("fixture-v13-migration");
@@ -233,7 +233,7 @@ fn ready_v12_snapshots_survive_v13_guard_and_reentry() {
     drop(store);
 
     let reopened = Store::open(dir.path()).unwrap();
-    assert_eq!(user_version(dir.path()), 13);
+    assert_eq!(user_version(dir.path()), 14);
     assert_eq!(
         serde_json::to_value(reopened.detail(&source.id).unwrap()).unwrap(),
         before
@@ -319,7 +319,7 @@ fn active_v12_reader_accepts_legacy_tag5_shared_value_with_valid_checksum() {
         loaded.attempts[0].price.as_ref().unwrap().cost,
         source.attempts[0].price.as_ref().unwrap().cost
     );
-    assert_eq!(user_version(dir.path()), 13);
+    assert_eq!(user_version(dir.path()), 14);
 }
 
 #[test]
@@ -328,8 +328,8 @@ fn future_database_versions_remain_rejected() {
     let store = Store::open(dir.path()).unwrap();
     drop(store);
     let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    c.pragma_update(None, "user_version", 14).unwrap();
+    c.pragma_update(None, "user_version", 15).unwrap();
     drop(c);
     assert!(Store::open(dir.path()).is_err());
-    assert_eq!(user_version(dir.path()), 14);
+    assert_eq!(user_version(dir.path()), 15);
 }

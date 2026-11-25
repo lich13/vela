@@ -1658,7 +1658,7 @@ fn native_archive_preserves_all_scopes_operations_and_receipts() {
     assert_eq!(totals(&store), before);
     let receipts: Vec<(String, String, Option<String>, String)> = store
         .connection
-        .prepare("SELECT id,operation,signature,source FROM receipts ORDER BY id")
+        .prepare("SELECT usage_text(id),operation,usage_text(signature),source FROM receipts ORDER BY usage_text(id)")
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
         .unwrap()

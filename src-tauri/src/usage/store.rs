@@ -61,13 +61,15 @@ struct Daily {
     totals: Totals,
     example: Record,
 }
-fn common_schema(c: &Connection) -> Result<()> {
+/// A cursor's body is compressed (`usage_compress`); the identifiers of a
+/// receipt are keys (`usage_key`), as those of a stored record are.
+pub(super) fn common_schema(c: &Connection) -> Result<()> {
     db(c.execute_batch(
-        "CREATE TABLE IF NOT EXISTS cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL);
+        "CREATE TABLE IF NOT EXISTS cursors(id TEXT PRIMARY KEY,body BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS daily(id TEXT PRIMARY KEY,day INTEGER NOT NULL,body TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS price_bases(hash TEXT PRIMARY KEY,body TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,response TEXT,signature TEXT,ended INTEGER NOT NULL,effective INTEGER NOT NULL,operation TEXT NOT NULL DEFAULT 'model');
+         CREATE TABLE IF NOT EXISTS receipts(id BLOB PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider BLOB,response BLOB,signature BLOB,ended INTEGER NOT NULL,effective INTEGER NOT NULL,operation TEXT NOT NULL DEFAULT 'model');
          CREATE INDEX IF NOT EXISTS receipt_response ON receipts(client,response);
          CREATE INDEX IF NOT EXISTS receipt_signature ON receipts(client,signature,ended);
          CREATE INDEX IF NOT EXISTS daily_time ON daily(day);",
@@ -97,12 +99,17 @@ impl Store {
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
         query::register(&connection)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 13 {
+        if version > 14 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         if version != 0 {
-            if version != 13 || !storage_v12::ready(&connection)? {
+            if version < 13 || !storage_v12::ready(&connection)? {
                 return Err(failure("用量数据库版本过旧或未就绪，已保留原文件"));
+            }
+            if version == 13 {
+                let tx = db(connection.transaction())?;
+                storage_v12::upgrade_v13(&tx)?;
+                db(tx.commit())?;
             }
             return Ok(Self {
                 connection,
@@ -221,7 +228,11 @@ impl Store {
     pub fn cursor(&self, id: &str) -> Result<Option<String>> {
         db(self
             .connection
-            .query_row("SELECT body FROM cursors WHERE id=?1", [id], |r| r.get(0))
+            .query_row(
+                "SELECT usage_expand(body) FROM cursors WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
             .optional())
     }
     pub fn source_generation(&self, source: &str) -> Result<u64> {
@@ -254,7 +265,7 @@ impl Store {
         }
         changed |= Self::remove_superseded_in_tx(&tx, superseded_ids)?;
         if let Some((id, body)) = cursor {
-            db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE cursors.body<>excluded.body",params![id,body]))?;
+            db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,usage_compress(?2)) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE cursors.body<>excluded.body",params![id,body]))?;
         }
         if changed {
             query::changed(&tx)?;
@@ -845,10 +856,10 @@ impl Store {
         // Older cursors have no source tag. The generation invalidates those
         // safely if a missing file returns, without touching another source.
         db(tx.execute(
-            "DELETE FROM cursors WHERE CASE WHEN json_valid(body) THEN json_extract(body,'$.source') END=?1",
+            "DELETE FROM cursors WHERE CASE WHEN json_valid(usage_expand(body)) THEN json_extract(usage_expand(body),'$.source') END=?1",
             [source],
         ))?;
-        db(tx.execute("INSERT INTO cursors SELECT id,body FROM source_stage_cursors WHERE source=?1 ON CONFLICT(id) DO UPDATE SET body=excluded.body",[source]))?;
+        db(tx.execute("INSERT INTO cursors SELECT id,usage_compress(body) FROM source_stage_cursors WHERE source=?1 ON CONFLICT(id) DO UPDATE SET body=excluded.body",[source]))?;
         db(tx.execute("INSERT INTO metadata VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=cast(value AS INTEGER)+1",[format!("source_generation_{source}")]))?;
         db(tx.execute("DELETE FROM source_stage WHERE source=?1", [source]))?;
         db(tx.execute("DELETE FROM source_stage_cursors WHERE source=?1", [source]))?;
@@ -865,7 +876,7 @@ impl Store {
 }
 fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<bool> {
     if db(tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM receipts WHERE id=?1)",
+        "SELECT EXISTS(SELECT 1 FROM receipts WHERE id=usage_key(?1))",
         [&incoming.id],
         |row| row.get::<_, bool>(0),
     ))? {

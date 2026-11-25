@@ -534,13 +534,210 @@ fn cache_alias_keeps_known_conflicts_identity_guards_and_bidirectional_uniquenes
 fn archived_cache_alias_prevents_double_billing_without_guessing_a_pair() {
     let (_dir, mut store, _) = fixture();
     let (proxy, session) = cache_pair();
-    store.connection.execute("INSERT INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) VALUES(?1,'codex','proxy',?2,?3,NULL,?4,?5,1,'model')",
+    store.connection.execute("INSERT INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation) VALUES(usage_key(?1),'codex','proxy',?2,usage_key(?3),NULL,usage_key(?4),?5,1,'model')",
         rusqlite::params![proxy.id, BASE, proxy.attempts[0].provider, proxy.signature(), BASE + 1_234]).unwrap();
     store.write_batch(&[session], None).unwrap();
     let row = store.detail("fixture-cache-session").unwrap();
     assert_eq!(row.deduplication, "ambiguous");
     assert!(row.duplicate_of.is_none());
     assert_eq!(store.dashboard(&all_time()).unwrap().totals.requests, 0);
+}
+
+/// Puts the receipts and cursors of a database back into the tables that
+/// version 13 kept them in: identifiers and cursor bodies as text.
+fn into_version_13(dir: &Path) {
+    let c = rusqlite::Connection::open(dir.join("usage.sqlite")).unwrap();
+    super::query::register(&c).unwrap();
+    c.execute_batch(
+        "BEGIN;
+         DROP INDEX receipt_response; DROP INDEX receipt_signature;
+         ALTER TABLE receipts RENAME TO receipts_now; ALTER TABLE cursors RENAME TO cursors_now;
+         CREATE TABLE cursors(id TEXT PRIMARY KEY,body TEXT NOT NULL);
+         CREATE TABLE receipts(id TEXT PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider TEXT,response TEXT,signature TEXT,ended INTEGER NOT NULL,effective INTEGER NOT NULL,operation TEXT NOT NULL DEFAULT 'model');
+         CREATE INDEX receipt_response ON receipts(client,response);
+         CREATE INDEX receipt_signature ON receipts(client,signature,ended);
+         INSERT INTO receipts SELECT usage_text(id),client,source,time,usage_text(provider),usage_text(response),usage_text(signature),ended,effective,operation FROM receipts_now;
+         INSERT INTO cursors SELECT id,usage_expand(body) FROM cursors_now;
+         DROP TABLE receipts_now; DROP TABLE cursors_now;
+         PRAGMA user_version=13;
+         COMMIT;",
+    )
+    .unwrap();
+}
+
+#[test]
+fn receipts_and_cursors_of_version_13_are_taken_over_and_still_match() {
+    let (dir, mut store, _pricing) = fixture();
+    let gateway = |id: &str, at: i64, tokens: Tokens| {
+        record(
+            id,
+            "codex",
+            "proxy",
+            at,
+            Some("00000000-0000-4000-8000-0000000000a1"),
+            Some("fixture-model"),
+            tokens,
+            Some(200),
+        )
+    };
+    let session = |id: &str, at: i64, tokens: Tokens| {
+        record(
+            id,
+            "codex",
+            "codex",
+            at,
+            None,
+            Some("fixture-model"),
+            tokens,
+            None,
+        )
+    };
+    // Three archived gateway requests: one a later session names by its
+    // response, one a session can only resemble, one that arrives again.
+    let mut named = gateway("fixture-v13-named", BASE, usage(100, 20));
+    named.attempts[0].response_id = Some(safe_id("fixture-v13-response"));
+    let alike = gateway("fixture-v13-alike", BASE + DAY, usage(300, 40));
+    let again = gateway(
+        "00000000-0000-4000-8000-000000000013",
+        BASE + 2 * DAY,
+        usage(7, 9),
+    );
+    let codex_cursor = r#"{"source":"codex","offset":13}"#;
+    let claude_cursor = r#"{"source":"claude","offset":14}"#;
+    store
+        .write_batch(
+            &[named.clone(), alike.clone(), again.clone()],
+            Some(("fixture-cursor-codex", codex_cursor)),
+        )
+        .unwrap();
+    store
+        .write_batch(&[], Some(("fixture-cursor-claude", claude_cursor)))
+        .unwrap();
+    store
+        .archive_batch(&[named.id.clone(), alike.id.clone(), again.id.clone()])
+        .unwrap();
+    let receipts = |store: &Store| -> Vec<String> {
+        let mut stmt = store
+            .connection
+            .prepare("SELECT concat_ws('|',usage_text(id),client,source,time,usage_text(provider),usage_text(response),usage_text(signature),ended,effective,operation) FROM receipts ORDER BY 1")
+            .unwrap();
+        let rows = stmt.query_map([], |row| row.get(0)).unwrap();
+        rows.map(Result::unwrap).collect()
+    };
+    let tables = |store: &Store| -> Vec<(String, Option<String>)> {
+        let mut stmt = store
+            .connection
+            .prepare("SELECT name,sql FROM sqlite_master WHERE tbl_name IN ('receipts','cursors') ORDER BY name")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    };
+    let kinds = |store: &Store| -> (String, String) {
+        store
+            .connection
+            .query_row(
+                "SELECT (SELECT group_concat(DISTINCT typeof(id)||typeof(provider)||typeof(response)||typeof(signature)) FROM receipts WHERE response IS NOT NULL),(SELECT group_concat(DISTINCT typeof(body)) FROM cursors)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    let (kept, made) = (receipts(&store), tables(&store));
+    assert_eq!(kept.len(), 3);
+    assert!(kept[2].starts_with("fixture-v13-named|codex|proxy|"));
+    assert!(kept[2].contains("|00000000-0000-4000-8000-0000000000a1|"));
+    assert!(kept[2].contains(&safe_id("fixture-v13-response")));
+    assert_eq!(kinds(&store), ("blobblobblobblob".into(), "blob".into()));
+    let requests = store.dashboard(&all_time()).unwrap().totals.requests;
+    assert_eq!(requests, 3);
+    drop(store);
+
+    into_version_13(dir.path());
+    let old = rusqlite::Connection::open(dir.path().join("usage.sqlite")).unwrap();
+    let texts: (String, String) = old
+        .query_row(
+            "SELECT (SELECT group_concat(DISTINCT typeof(id)||typeof(provider)||typeof(response)||typeof(signature)) FROM receipts WHERE response IS NOT NULL),(SELECT group_concat(DISTINCT typeof(body)) FROM cursors)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(texts, ("texttexttexttext".into(), "text".into()));
+    drop(old);
+
+    let mut store = Store::open(dir.path()).unwrap();
+    let version: i64 = store
+        .connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 14);
+    assert_eq!(receipts(&store), kept);
+    assert_eq!(tables(&store), made);
+    assert_eq!(kinds(&store), ("blobblobblobblob".into(), "blob".into()));
+    assert_eq!(
+        store.cursor("fixture-cursor-codex").unwrap().as_deref(),
+        Some(codex_cursor)
+    );
+    assert_eq!(store.dashboard(&all_time()).unwrap().totals.requests, 3);
+
+    // An archived request that arrives again is not stored or counted again.
+    store
+        .write_batch(std::slice::from_ref(&again), None)
+        .unwrap();
+    assert!(store.detail(&again.id).is_err());
+    // A session that names an archived response is that request; one that
+    // only resembles an archived request waits for review. Neither is billed.
+    let mut naming = session("fixture-v13-session-naming", BASE + 1_000, usage(100, 20));
+    naming.attempts[0].response_id = Some(safe_id("fixture-v13-response"));
+    let resembling = session(
+        "fixture-v13-session-resembling",
+        BASE + DAY + 1_000,
+        usage(300, 40),
+    );
+    store.write_batch(&[naming, resembling], None).unwrap();
+    let naming = store.detail("fixture-v13-session-naming").unwrap();
+    assert_eq!(
+        (
+            naming.deduplication.as_str(),
+            naming.duplicate_of.as_deref()
+        ),
+        ("archived_match", Some("fixture-v13-named"))
+    );
+    assert_eq!(
+        store
+            .detail("fixture-v13-session-resembling")
+            .unwrap()
+            .deduplication,
+        "ambiguous"
+    );
+    assert_eq!(store.dashboard(&all_time()).unwrap().totals.requests, 3);
+    // The session view counts the one that stands for a gateway request.
+    let sessions = Filter {
+        source: Some("sessions".into()),
+        ..all_time()
+    };
+    assert_eq!(store.dashboard(&sessions).unwrap().totals.requests, 1);
+
+    // Rebuilding a source replaces its cursors and leaves the others.
+    let rebuilt = r#"{"source":"codex","offset":15}"#;
+    store
+        .rebuild(
+            "codex",
+            &[],
+            &[("fixture-cursor-rebuilt".into(), rebuilt.into())],
+        )
+        .unwrap();
+    assert_eq!(store.cursor("fixture-cursor-codex").unwrap(), None);
+    assert_eq!(
+        store.cursor("fixture-cursor-rebuilt").unwrap().as_deref(),
+        Some(rebuilt)
+    );
+    assert_eq!(
+        store.cursor("fixture-cursor-claude").unwrap().as_deref(),
+        Some(claude_cursor)
+    );
+    assert_eq!(receipts(&store), kept);
 }
 
 #[test]
@@ -880,7 +1077,7 @@ fn v2_migration_and_codex_rebuild_preserve_gateway_price_snapshots() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     assert_eq!(
         migrated.detail(&gateway.id).unwrap().attempts[0]
             .price
