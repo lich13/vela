@@ -563,7 +563,7 @@ export type InstanceState = {
     status: "local" | "connecting" | "connected" | "offline";
     version: string | null;
     error: string | null;
-    /** Shared command names the remote server does not implement. */
+    /** Shared and internal command names the remote server does not implement. */
     unsupported: string[];
   };
 };
@@ -643,16 +643,6 @@ type DesktopCommands = {
   claude_login_status: Call<None, ClaudeLoginState>;
   start_claude_login: Call<None, ClaudeLoginState>;
   cancel_claude_login: Call<None, void>;
-  /** How many accounts were written; null when the dialog was dismissed. */
-  /** How many accounts were written; null when the dialog was dismissed. */
-  export_antigravity_accounts: Call<
-    Revision & { ids: string[] },
-    number | null
-  >;
-  import_antigravity_accounts: Call<
-    Revision,
-    { state: AntigravityAuthState; added: number; skipped: number } | null
-  >;
   export_usage_bill: Call<{ request: BillRequest }, BillExport | null>;
   /**
    * Account files are picked, read and written on this machine for
@@ -671,6 +661,15 @@ type DesktopCommands = {
   export_accounts: Call<
     Revision & { instance: string; ids: string[]; format: string },
     boolean
+  >;
+  /** How many accounts were written. */
+  export_antigravity_accounts: Call<
+    Revision & { instance: string; ids: string[] },
+    number | null
+  >;
+  import_antigravity_accounts: Call<
+    Revision & { instance: string },
+    { state: AntigravityAuthState; added: number; skipped: number } | null
   >;
   check_for_updates: Call<None, UpdateInfo>;
   open_github: Call<None, void>;
@@ -1122,6 +1121,21 @@ export const sharedCommands = names<SharedCommands>()([
   "update_pricing",
   "reload_pricing",
 ]);
+/**
+ * What only this app's Rust asks of an instance: these carry tokens or
+ * logins, and no window can call one. A window names one to learn whether the
+ * instance shown answers it.
+ */
+export const internalCommands = [
+  "export_provider_copy",
+  "import_provider_copy",
+  "preview_account_documents",
+  "prepare_account_template_document",
+  "export_account_documents",
+  "export_antigravity_account_document",
+  "import_antigravity_account_document",
+] as const;
+export type InternalCommand = (typeof internalCommands)[number];
 type CommandMap = DesktopCommands & SharedCommands;
 export type CommandName = keyof CommandMap;
 type CommandArgs<K extends CommandName> = CommandMap[K]["args"];

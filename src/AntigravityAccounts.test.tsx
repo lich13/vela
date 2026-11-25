@@ -285,7 +285,11 @@ describe("AntigravityAccounts", () => {
     expect(notify).not.toHaveBeenCalled();
     expect(mockCommand).toHaveBeenLastCalledWith(
       "export_antigravity_accounts",
-      { ids: ["oauth-1"], expectedRevision: initialState.revision },
+      {
+        instance: "local",
+        ids: ["oauth-1"],
+        expectedRevision: initialState.revision,
+      },
     );
     fireEvent.click(submit());
     await waitFor(() =>
@@ -312,6 +316,7 @@ describe("AntigravityAccounts", () => {
     expect(mockCommand).toHaveBeenLastCalledWith(
       "export_antigravity_accounts",
       {
+        instance: "local",
         ids: ["oauth-1", "oauth-2"],
         expectedRevision: initialState.revision,
       },
@@ -336,7 +341,7 @@ describe("AntigravityAccounts", () => {
     );
     expect(mockCommand).toHaveBeenLastCalledWith(
       "import_antigravity_accounts",
-      { expectedRevision: "rev-2" },
+      { instance: "local", expectedRevision: "rev-2" },
     );
   });
 

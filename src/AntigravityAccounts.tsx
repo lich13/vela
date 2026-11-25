@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { command } from "./bridge";
 import { useDirtyReport } from "./draft-report";
-import { useInstance } from "./instance";
+import { currentInstance, useInstance } from "./instance";
 import { subscriptions } from "./subscriptions";
 import type {
   AntigravityAccountItem,
@@ -142,6 +142,7 @@ export default function AntigravityAccounts({
     setDialogError("");
     try {
       const count = await command("export_antigravity_accounts", {
+        instance: currentInstance(),
         ids: exportable,
         expectedRevision: state.revision,
       });
@@ -185,7 +186,10 @@ export default function AntigravityAccounts({
                   void transfer(async () => {
                     const result = await command(
                       "import_antigravity_accounts",
-                      { expectedRevision: state!.revision },
+                      {
+                        instance: currentInstance(),
+                        expectedRevision: state!.revision,
+                      },
                     );
                     if (!result) return null;
                     setState(result.state);

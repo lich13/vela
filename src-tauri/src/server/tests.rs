@@ -403,6 +403,57 @@ async fn account_documents_cross_only_in_requests_that_say_they_are_internal() {
 }
 
 #[tokio::test]
+async fn antigravity_account_documents_cross_only_in_requests_that_say_they_are_internal() {
+    let fixture = fixture().await;
+    let mut client = Client::connect(&fixture).await;
+    let secret = "fixture-antigravity-token";
+    let login = json!({"email": "fixture@example.invalid", "access_token": secret});
+    let exported = json!({
+        "schema": "vela-antigravity-accounts",
+        "version": 1,
+        "accounts": [{"name": "Fixture", "payload": login.to_string()}],
+    });
+
+    // The document of an import comes in from another Vela's Rust. Its
+    // answer, and what every connection is told, lists the account without
+    // its login.
+    let empty = client.call("get_antigravity_auth_state", json!({})).await;
+    let read = json!({"document": exported, "expectedRevision": empty.unwrap()["revision"]});
+    let name = "import_antigravity_account_document";
+    let refused = client.call(name, read.clone()).await;
+    assert_eq!(refused.unwrap_err().code, code::UNSUPPORTED);
+    client.shake_hands().await;
+    client.send(2, name, read, true).await;
+    // The event and the answer come in either order.
+    let (mut imported, mut told) = (None, None);
+    while imported.is_none() || told.is_none() {
+        match client.next().await.unwrap() {
+            Reply::Answer { result, error, .. } => {
+                assert!(error.is_none(), "{error:?}");
+                imported = result;
+            }
+            Reply::Event { event, payload } => {
+                assert_eq!(event, "antigravity-auth-state");
+                told = Some(payload);
+            }
+        }
+    }
+    let (imported, told) = (imported.unwrap(), told.unwrap());
+    assert_eq!(imported["added"], 1, "{imported}");
+    assert_eq!(imported["state"], told);
+    assert_eq!(told["accounts"][0]["email"], "fixture@example.invalid");
+    assert!(!imported.to_string().contains(secret));
+
+    // The document of an export goes out to nothing else.
+    let named = json!({"ids": [told["accounts"][0]["id"]], "expectedRevision": told["revision"]});
+    let name = "export_antigravity_account_document";
+    let refused = client.call(name, named.clone()).await.unwrap_err();
+    assert_eq!(refused.code, code::UNSUPPORTED);
+    assert!(!refused.message.contains(secret));
+    assert_eq!(client.own(name, named).await.unwrap(), exported);
+}
+
+#[tokio::test]
 async fn what_no_window_may_ask_is_answered_only_to_a_request_that_says_it_is_internal() {
     let fixture = fixture().await;
     let mut client = Client::connect(&fixture).await;

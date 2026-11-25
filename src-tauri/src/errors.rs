@@ -66,7 +66,7 @@ local_codes! {
     EndpointRemoved => ENDPOINT_REMOVED = "ENDPOINT_REMOVED",
     Event => #[cfg(feature = "desktop")] EVENT = "EVENT",
     ExchangeTemplate => EXCHANGE_TEMPLATE = "EXCHANGE_TEMPLATE",
-    Export => #[cfg(any(feature = "desktop", test))] EXPORT = "EXPORT",
+    Export => EXPORT = "EXPORT",
     Failover = "FAILOVER",
     FailoverExhausted = "FAILOVER_EXHAUSTED",
     FileSize => FILE_SIZE = "FILE_SIZE",

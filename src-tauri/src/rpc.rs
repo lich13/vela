@@ -4,8 +4,9 @@
 use crate::{
     antigravity::{
         auth::{
-            delete_antigravity_account, get_antigravity_auth_state, rename_antigravity_account,
-            switch_antigravity_account,
+            delete_antigravity_account, export_antigravity_account_document,
+            get_antigravity_auth_state, import_antigravity_account_document,
+            rename_antigravity_account, switch_antigravity_account,
         },
         cli::{
             read_antigravity_cli_config, read_previous_antigravity_cli_config,
@@ -63,6 +64,8 @@ const INTERNAL: &[&str] = &[
     "preview_account_documents",
     "prepare_account_template_document",
     "export_account_documents",
+    "export_antigravity_account_document",
+    "import_antigravity_account_document",
 ];
 
 pub(crate) fn internal(name: &str) -> bool {
@@ -133,6 +136,8 @@ commands! {
     async switch_antigravity_account(id, expected_revision);
     blocking rename_antigravity_account(id, name, expected_revision);
     blocking delete_antigravity_account(id, expected_revision);
+    blocking export_antigravity_account_document(ids, expected_revision);
+    blocking import_antigravity_account_document(document, expected_revision);
     blocking read_config(client_id);
     blocking read_previous_config(client_id);
     plain validate_config(client_id, text);

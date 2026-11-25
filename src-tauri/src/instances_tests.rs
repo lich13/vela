@@ -218,11 +218,16 @@ impl Bench {
 
     /// The app as it starts over a data folder.
     fn over(folder: TempDir) -> Self {
+        Self::knowing(folder, COMMANDS)
+    }
+
+    /// An app whose own table holds `commands`.
+    fn knowing(folder: TempDir, commands: &'static [&'static str]) -> Self {
         let fleet = Fleet::new();
         let seen = Arc::new(Seen::default());
         let service = Service::new(
             folder.path().to_path_buf(),
-            COMMANDS,
+            commands,
             fleet.dialer(),
             seen.clone(),
         );
@@ -899,6 +904,42 @@ async fn the_apps_own_rust_asks_this_machines_table_or_another_machine_as_intern
     let near = on(&bench.service, &runtime, LOCAL, name, read).await;
     assert_eq!(near.unwrap()["rows"].as_array().unwrap().len(), 1);
     assert_eq!(bench.fleet.asked(), [format!("{HOST} {name}")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_server_from_before_the_account_documents_is_asked_for_none_of_them() {
+    // The app knows its whole table; the servers answer what they always did.
+    let bench = Bench::knowing(tempdir().unwrap(), crate::rpc::names());
+    let tokyo = bench.add("Tokyo", HOST).await;
+    let osaka = bench.add("Osaka", OTHER).await;
+    let state = bench.select(&tokyo).await.unwrap();
+    for name in [
+        "preview_account_documents",
+        "prepare_account_template_document",
+        "export_account_documents",
+        "export_antigravity_account_document",
+        "import_antigravity_account_document",
+    ] {
+        assert!(crate::rpc::internal(name), "{name}");
+        // The windows read this and offer no import or export.
+        let lacking = &state.connection.unsupported;
+        assert!(lacking.iter().any(|lacked| lacked == name), "{name}");
+        // Asked for all the same, the selected machine and any other refuse
+        // before anything is sent.
+        for machine in [&tokyo, &osaka] {
+            let refused = bench.service.ask(machine, name, json!({})).await;
+            let refused = refused.unwrap_err();
+            assert_eq!(
+                (refused.code.as_str(), refused.message.as_str()),
+                (
+                    code::UNSUPPORTED,
+                    "服务器版本不支持此操作，请升级服务器上的 Vela"
+                ),
+                "{name}"
+            );
+        }
+    }
+    assert!(bench.fleet.asked().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

@@ -1322,38 +1322,38 @@ fn migration_skips_a_vault_without_retired_content() {
 
 #[test]
 fn exported_accounts_are_read_back_without_touching_those_already_saved() {
-    let (tmp, paths) = setup_paths();
+    let (_tmp, paths) = setup_paths();
     let (first, second, before) = two_accounts(&paths);
     let renamed = rename_account_at(&paths, &first, "工作账号", &before.revision).unwrap();
-    let file = tmp.path().join("export").join("accounts.json");
     let both = [second, first];
 
-    let stale = export_accounts_at(&paths, "stale-rev", &both, &file).unwrap_err();
+    let stale = export_accounts_document(&paths, "stale-rev", &both).unwrap_err();
     assert_eq!(stale.code, code::CONFLICT);
-    assert!(!file.exists());
-    // The file follows the saved order, not the order they were chosen in.
+    // The document follows the saved order, not the order they were chosen in.
+    let document = export_accounts_document(&paths, &renamed.revision, &both).unwrap();
+    let logins: Vec<_> = document["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| (a["name"].as_str().unwrap(), a["payload"].as_str().unwrap()))
+        .collect();
     assert_eq!(
-        export_accounts_at(&paths, &renamed.revision, &both, &file).unwrap(),
-        2
+        logins,
+        [
+            ("工作账号", FIRST_LOGIN),
+            ("u2@example.invalid", SECOND_LOGIN)
+        ]
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
 
-    // Everything the file holds is already saved here.
-    let same = import_accounts_at(&paths, &renamed.revision, &file).unwrap();
+    // Everything the document holds is already saved here.
+    let same = import_accounts_document(&paths, &renamed.revision, document.clone()).unwrap();
     assert_eq!((same.added, same.skipped), (0, 2));
     assert_eq!(same.state.revision, renamed.revision);
 
     // Another machine takes both, names included, and signs in to neither.
     let (_other_tmp, other) = setup_paths();
     let empty = state_at(&other).unwrap();
-    let taken = import_accounts_at(&other, &empty.revision, &file).unwrap();
+    let taken = import_accounts_document(&other, &empty.revision, document.clone()).unwrap();
     assert_eq!((taken.added, taken.skipped), (2, 0));
     let names: Vec<_> = taken
         .state
@@ -1369,7 +1369,7 @@ fn exported_accounts_are_read_back_without_touching_those_already_saved() {
         ]
     );
     assert!(!other.oauth_file().exists());
-    let stale = import_accounts_at(&other, &empty.revision, &file).unwrap_err();
+    let stale = import_accounts_document(&other, &empty.revision, document).unwrap_err();
     assert_eq!(stale.code, code::CONFLICT);
 
     // An imported account can be switched to.
@@ -1382,16 +1382,13 @@ fn exported_accounts_are_read_back_without_touching_those_already_saved() {
 
 #[test]
 fn only_the_chosen_accounts_are_exported() {
-    let (tmp, paths) = setup_paths();
+    let (_tmp, paths) = setup_paths();
     let (_, second, state) = two_accounts(&paths);
-    let file = tmp.path().join("accounts.json");
-    assert_eq!(
-        export_accounts_at(&paths, &state.revision, &[second], &file).unwrap(),
-        1
-    );
+    let document = export_accounts_document(&paths, &state.revision, &[second]).unwrap();
+    assert_eq!(document["accounts"].as_array().unwrap().len(), 1);
     let (_other_tmp, other) = setup_paths();
     let empty = state_at(&other).unwrap();
-    let taken = import_accounts_at(&other, &empty.revision, &file).unwrap();
+    let taken = import_accounts_document(&other, &empty.revision, document).unwrap();
     let emails: Vec<_> = taken
         .state
         .accounts
@@ -1403,22 +1400,56 @@ fn only_the_chosen_accounts_are_exported() {
 
 #[test]
 fn an_empty_or_unknown_choice_exports_nothing() {
-    let (tmp, paths) = setup_paths();
+    let (_tmp, paths) = setup_paths();
     let (first, _, state) = two_accounts(&paths);
-    let file = tmp.path().join("accounts.json");
     for ids in [vec![], vec![first, "missing".to_owned()]] {
-        let refused = export_accounts_at(&paths, &state.revision, &ids, &file).unwrap_err();
+        let refused = export_accounts_document(&paths, &state.revision, &ids).unwrap_err();
         assert_eq!(refused.code, code::ACCOUNT);
-        assert!(!file.exists());
+    }
+}
+
+/// What only the desktop app does with a document: keep it as the file the
+/// user chose, and read the file the user picked.
+#[test]
+fn an_exported_document_is_kept_as_a_private_file_and_read_back_whole() {
+    let (tmp, paths) = setup_paths();
+    let (first, second, state) = two_accounts(&paths);
+    let document = export_accounts_document(&paths, &state.revision, &[first, second]).unwrap();
+    let file = tmp.path().join("export").join("accounts.json");
+    assert_eq!(write_accounts_file(document.clone(), &file).unwrap(), 2);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(read_accounts_file(&file).unwrap(), document);
+
+    // An answer that is no such document leaves the chosen file as it was.
+    let kept = fs::read(&file).unwrap();
+    let refused = write_accounts_file(serde_json::json!({"accounts": 1}), &file).unwrap_err();
+    assert_eq!(refused.code, code::EXPORT);
+    assert_eq!(fs::read(&file).unwrap(), kept);
+
+    // A picked file that is missing or is not JSON gives no document.
+    let unreadable = tmp.path().join("unreadable.json");
+    for write in [false, true] {
+        if write {
+            fs::write(&unreadable, "{ not json").unwrap();
+        }
+        let refused = read_accounts_file(&unreadable).unwrap_err();
+        assert_eq!(refused.code, code::IMPORT);
+        assert!(refused.message.contains("不是 Vela 导出"));
     }
 }
 
 #[test]
-fn a_file_vela_did_not_export_imports_nothing() {
-    let (tmp, paths) = setup_paths();
+fn a_document_vela_did_not_export_imports_nothing() {
+    let (_tmp, paths) = setup_paths();
     let (_, _, state) = two_accounts(&paths);
     let vault = fs::read(paths.vault_file()).unwrap();
-    let file = tmp.path().join("accounts.json");
     let account = |payload: &str| serde_json::json!({"name": "fixture", "payload": payload});
     for (body, message) in [
         (serde_json::json!([]), "不是 Vela 导出"),
@@ -1439,8 +1470,7 @@ fn a_file_vela_did_not_export_imports_nothing() {
             "不是 Vela 导出",
         ),
     ] {
-        fs::write(&file, serde_json::to_vec(&body).unwrap()).unwrap();
-        let refused = import_accounts_at(&paths, &state.revision, &file).unwrap_err();
+        let refused = import_accounts_document(&paths, &state.revision, body).unwrap_err();
         assert_eq!(refused.code, code::IMPORT);
         assert!(refused.message.contains(message), "{}", refused.message);
         assert_eq!(fs::read(paths.vault_file()).unwrap(), vault);
