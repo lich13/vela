@@ -219,6 +219,7 @@ async fn health(path: PathBuf) -> Outcome {
             id: 1,
             command: wire::CAPABILITIES.into(),
             args: Value::Null,
+            internal: false,
         };
         wire::write(&mut stream, &handshake)
             .await
@@ -472,7 +473,8 @@ impl Server {
     }
 
     async fn reply(&self, request: Request) -> Reply {
-        let (result, error) = match self.answer(&request.command, request.args).await {
+        let answer = self.answer(&request.command, request.args, request.internal);
+        let (result, error) = match answer.await {
             Ok(result) => (Some(result), None),
             Err(error) => (None, Some(error)),
         };
@@ -483,10 +485,16 @@ impl Server {
         }
     }
 
-    async fn answer(&self, command: &str, args: Value) -> Result<Value> {
+    async fn answer(&self, command: &str, args: Value, internal: bool) -> Result<Value> {
         if command == wire::CAPABILITIES {
             return serde_json::to_value(capabilities())
                 .map_err(|_| AppError::new(code::JSON, "结果无法编码"));
+        }
+        // What hands credentials to another Vela is answered to its Rust
+        // alone. A window's request never says it is internal, not even
+        // through an app from before these commands were kept from windows.
+        if rpc::internal(command) && !internal {
+            return Err(rpc::unsupported());
         }
         if self.runtime.quit_pending.load(Ordering::Relaxed) {
             return Err(AppError::new(code::BUSY, "服务器正在停止"));

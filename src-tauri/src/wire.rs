@@ -19,6 +19,12 @@ pub(crate) struct Request {
     pub command: String,
     #[serde(default)]
     pub args: Value,
+    /// Set where the Rust of another Vela asks on its own account. A window's
+    /// request never carries it, and the commands that hand credentials from
+    /// one Vela to another are answered to nothing else. A Vela from before
+    /// there was one neither sends it nor minds it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub internal: bool,
 }
 
 /// A message from the server: the answer to the request `id` names, or an
@@ -99,6 +105,7 @@ mod tests {
                 id: 7,
                 command: "get_gateway".into(),
                 args: json!({"clientId": "codex"}),
+                internal: false,
             };
             write(&mut near, &ask).await.unwrap();
             let event = Reply::Event {
@@ -119,6 +126,31 @@ mod tests {
         );
         sent.await.unwrap();
         assert!(read::<Reply>(&mut far).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn a_request_says_it_is_internal_only_where_it_is() {
+        let request = |internal| Request {
+            id: 1,
+            command: "get_state".into(),
+            args: json!({}),
+            internal,
+        };
+        // A window's request is the message it always was.
+        assert_eq!(
+            serde_json::to_value(request(false)).unwrap(),
+            json!({"id": 1, "command": "get_state", "args": {}})
+        );
+        assert_eq!(
+            serde_json::to_value(request(true)).unwrap(),
+            json!({"id": 1, "command": "get_state", "args": {}, "internal": true})
+        );
+        // One from a Vela that never heard of the word is a window's.
+        let old: Request = serde_json::from_str(r#"{"id":1,"command":"get_state"}"#).unwrap();
+        assert!(!old.internal);
+        let marked: Request =
+            serde_json::from_str(r#"{"id":1,"command":"get_state","internal":true}"#).unwrap();
+        assert!(marked.internal);
     }
 
     #[tokio::test]

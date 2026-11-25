@@ -266,7 +266,14 @@ impl Link {
 
     /// Sends one request and waits for its answer. The request is written
     /// once: when the connection goes after that, the answer is the error.
-    async fn request(&self, command: &str, args: Value, limit: Duration) -> Result<Value> {
+    /// `internal` marks it as asked by this app's Rust and by no window.
+    async fn request(
+        &self,
+        command: &str,
+        args: Value,
+        internal: bool,
+        limit: Duration,
+    ) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (answer, answered) = oneshot::channel();
         match &mut *self.waiting.lock() {
@@ -278,6 +285,7 @@ impl Link {
             id,
             command: command.to_string(),
             args,
+            internal,
         });
         match tokio::time::timeout(limit, answered).await {
             Ok(Ok(answer)) => answer,
@@ -454,9 +462,11 @@ impl Channel {
 
     /// Runs a command on the server. An offline channel reconnects once
     /// before it sends; a request that was sent is never sent again.
-    pub(crate) async fn call(&self, name: &str, args: Value) -> Result<Value> {
+    /// `internal` is true only where this app's Rust asks for itself: what a
+    /// window asked for is sent without it, whatever the command.
+    pub(crate) async fn call(&self, name: &str, args: Value, internal: bool) -> Result<Value> {
         let (link, _) = self.link().await?;
-        link.request(name, args, CALL).await
+        link.request(name, args, internal, CALL).await
     }
 
     /// Ends the connection for good and without telling the listener.
@@ -554,6 +564,7 @@ impl Channel {
             .request(
                 wire::CAPABILITIES,
                 Value::Object(Default::default()),
+                false,
                 HANDSHAKE,
             )
             .await;

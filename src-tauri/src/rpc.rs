@@ -53,12 +53,11 @@ pub(crate) fn names() -> &'static [&'static str] {
 }
 
 /// What one instance's Rust asks of another's and no window may ask: these
-/// carry a provider with its tokens. A server lists them like the rest; the
-/// two commands a window reaches the table through refuse them.
-#[cfg(any(feature = "desktop", test))]
+/// carry a provider with its tokens. A server lists them like the rest and
+/// answers them only to a request that says it is internal; the two commands
+/// a window reaches the table through refuse them.
 const INTERNAL: &[&str] = &["export_provider_copy", "import_provider_copy"];
 
-#[cfg(feature = "desktop")]
 pub(crate) fn internal(name: &str) -> bool {
     INTERNAL.contains(&name)
 }
