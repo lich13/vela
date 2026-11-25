@@ -2,9 +2,9 @@
 //! preferences, the clients' configuration files, the gateways and the journal.
 use crate::{
     claude_profile, configuration,
-    core::{Preferences, ViewState},
+    core::{exchange, Preferences, ViewState},
     errors::code,
-    events, gateway,
+    events, exchange_template, gateway,
     gateway::ClientId,
     models_dev, official,
     runtime::Runtime,
@@ -131,6 +131,64 @@ pub(crate) fn delete_account(r: &Runtime, id: String) -> Result<ViewState> {
     }
     r.core.lock().delete(&id)?;
     r.refresh()
+}
+/// Lists the accounts of the documents a desktop app read from the files of
+/// an import and keeps them for the commit. The documents hold logins; the
+/// list holds none.
+pub(crate) fn preview_account_documents(
+    r: &Runtime,
+    documents: Vec<serde_json::Value>,
+) -> Result<exchange::Preview> {
+    r.core.lock().exchange_preview_docs(documents)
+}
+pub(crate) async fn commit_account_import(
+    r: &Runtime,
+    token: String,
+    selected: Vec<exchange::Selection>,
+    expected_revision: String,
+) -> Result<ViewState> {
+    let _guard = r.official_tx.lock().await;
+    r.core
+        .lock()
+        .exchange_commit(&token, &selected, &expected_revision)?;
+    r.refresh()
+}
+pub(crate) fn cancel_account_exchange(r: &Runtime, token: String) -> Result<()> {
+    r.core.lock().exchange_cancel(&token);
+    Ok(())
+}
+pub(crate) fn preview_account_export(r: &Runtime) -> Result<exchange::ExportPreview> {
+    let mut core = r.core.lock();
+    core.exchange_prune();
+    Ok(core.exchange_export_preview())
+}
+/// Whether the accounts `ids` name can be exported for Sub2API without a
+/// template being chosen first.
+pub(crate) fn account_template_ready(r: &Runtime, ids: Vec<String>) -> Result<bool> {
+    Ok(r.core.lock().exchange_template_ready(&ids))
+}
+/// Takes the OAuth template out of the document a desktop app read from a
+/// Sub2API file, which holds that file's logins.
+pub(crate) fn prepare_account_template_document(
+    r: &Runtime,
+    document: serde_json::Value,
+) -> Result<exchange_template::Prepared> {
+    r.core.lock().exchange_prepare_template_doc(document)
+}
+pub(crate) fn select_account_template(r: &Runtime, token: String, id: usize) -> Result<()> {
+    r.core.lock().exchange_select_template(&token, id)
+}
+/// The chosen accounts as documents with their logins, for a desktop app to
+/// write into the files of an export.
+pub(crate) fn export_account_documents(
+    r: &Runtime,
+    ids: Vec<String>,
+    expected_revision: String,
+    format: String,
+) -> Result<Vec<serde_json::Value>> {
+    r.core
+        .lock()
+        .exchange_export_documents(&ids, &expected_revision, &format)
 }
 pub(crate) fn read_config(r: &Runtime, client_id: ClientId) -> Result<configuration::Document> {
     r.gateway(client_id).read_config(&r.home(client_id)?)

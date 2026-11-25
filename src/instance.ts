@@ -1,5 +1,9 @@
 import { useSyncExternalStore } from "react";
-import type { InstanceState, SharedCommands } from "./bridge-contracts";
+import type {
+  InstanceState,
+  InternalCommand,
+  SharedCommands,
+} from "./bridge-contracts";
 import type { ClientId } from "./types";
 
 // Which Vela the pages show and operate: this machine or a server reached over
@@ -36,7 +40,9 @@ export function setInstanceState(state: InstanceState) {
 export function useInstance() {
   const { state, epoch } = useSyncExternalStore(watch, () => snapshot);
   const remote = state.active !== "local";
-  const supports = (name: keyof SharedCommands) =>
+  // An internal command is one the desktop commands ask of the instance for
+  // the window: it is named here to tell whether those can be offered.
+  const supports = (name: keyof SharedCommands | InternalCommand) =>
     !remote || !state.connection.unsupported.includes(name);
   return {
     state,

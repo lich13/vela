@@ -1,15 +1,15 @@
 use super::*;
 use std::collections::BTreeSet;
 
-/// The names in `export const <array> = names<...>()([...])` of the
-/// frontend's contract.
+/// The names in the array `export const <array> = ...[...]` of the frontend's
+/// contract.
 fn contract(array: &str) -> BTreeSet<String> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../src/bridge-contracts.ts");
     let source = std::fs::read_to_string(path).expect("read the frontend contract");
     let declaration = format!("export const {array} = ");
     let from = source.find(&declaration).expect("the array is declared");
-    let open = from + source[from..].find("([").expect("the array opens") + 2;
-    let close = open + source[open..].find("])").expect("the array closes");
+    let open = from + source[from..].find('[').expect("the array opens") + 1;
+    let close = open + source[open..].find(']').expect("the array closes");
     let names: Vec<_> = source[open..close]
         .split(',')
         .map(|name| name.trim().trim_matches('"').to_owned())
@@ -30,14 +30,22 @@ fn assert_same(what: &str, ours: &BTreeSet<String>, theirs: &BTreeSet<String>) {
 }
 
 #[test]
-fn the_table_holds_exactly_the_shared_commands_of_the_contract() {
+fn the_table_holds_exactly_the_shared_and_internal_commands_of_the_contract() {
     let mut table: BTreeSet<_> = names().iter().map(|name| name.to_string()).collect();
     assert_eq!(table.len(), names().len(), "the table repeats a name");
-    // What no window may ask is in no contract of the windows.
+    // What no window may ask is not among the commands a window calls. The
+    // contract names it apart, for asking whether an instance answers it.
+    let mut internal = BTreeSet::new();
     for name in INTERNAL {
         assert!(table.remove(*name), "{name} is answered");
+        internal.insert(name.to_string());
     }
     assert_same("shared commands", &table, &contract("sharedCommands"));
+    assert_same(
+        "internal commands",
+        &internal,
+        &contract("internalCommands"),
+    );
 }
 
 #[cfg(feature = "desktop")]

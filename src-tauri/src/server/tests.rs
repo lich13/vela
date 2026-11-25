@@ -310,6 +310,149 @@ async fn a_provider_is_handed_over_whole_and_taken_in_as_a_copy() {
     assert_eq!(error.unwrap_err().code, code::PROVIDER);
 }
 
+/// A ChatGPT login as Codex keeps it: unsigned tokens of a made-up account.
+fn login() -> Value {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let token = |claims: Value| {
+        let claims = URL_SAFE_NO_PAD.encode(claims.to_string());
+        format!("e30.{claims}.fixture-signature")
+    };
+    let auth = "https://api.openai.com/auth";
+    let account =
+        json!({"chatgpt_account_id": "fixture-workspace", "chatgpt_user_id": "fixture-user"});
+    json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "id_token": token(json!({"sub": "fixture-subject", "email": "fixture@example.invalid", auth: account})),
+            "access_token": token(json!({"sub": "fixture-subject", "exp": 1_900_000_000, auth: account})),
+            "refresh_token": "fixture-refresh-token",
+            "account_id": "fixture-workspace",
+        },
+    })
+}
+
+#[tokio::test]
+async fn account_documents_cross_only_in_requests_that_say_they_are_internal() {
+    let fixture = fixture().await;
+    let mut client = Client::connect(&fixture).await;
+    let secret = "fixture-refresh-token";
+
+    // The documents of an import come in from another Vela's Rust. A window
+    // gets the list of them and commits it, and sees no login either time.
+    let read = json!({"documents": [login()]});
+    let refused = client.call("preview_account_documents", read.clone()).await;
+    assert_eq!(refused.unwrap_err().code, code::UNSUPPORTED);
+    let preview = client.own("preview_account_documents", read).await.unwrap();
+    assert_eq!(preview["rows"][0]["error"], Value::Null, "{preview}");
+    assert!(!preview.to_string().contains(secret));
+    let chosen = json!({
+        "token": preview["token"],
+        "selected": [{"id": 0, "update": false}],
+        "expectedRevision": preview["revision"],
+    });
+    let state = client.call("commit_account_import", chosen).await.unwrap();
+    let ids = json!([state["accounts"][0]["id"]]);
+    assert!(!state.to_string().contains(secret));
+
+    // The documents of an export go out to nothing else. An app from before
+    // these commands sends their names as a window's request: it is refused.
+    let listed = client.call("preview_account_export", json!({})).await;
+    let listed = listed.unwrap();
+    assert_eq!(listed["rows"][0]["error"], Value::Null, "{listed}");
+    assert!(!listed.to_string().contains(secret));
+    let revision = &listed["revision"];
+    let export = |format: &str| json!({"ids": ids, "expectedRevision": revision, "format": format});
+    let refused = client
+        .call("export_account_documents", export("cliproxyapi"))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, code::UNSUPPORTED);
+    assert!(!refused.message.contains(secret));
+    let files = client
+        .own("export_account_documents", export("cliproxyapi"))
+        .await
+        .unwrap();
+    assert_eq!(files[0]["refresh_token"], secret);
+
+    // Sub2API needs a template first, taken out of a document as well.
+    let named = json!({"ids": ids});
+    let ready = client.call("account_template_ready", named.clone()).await;
+    assert_eq!(ready.unwrap(), false);
+    let template = json!({"document": {
+        "accounts": [{"name": "Fixture", "platform": "openai", "type": "oauth", "credentials": {}}],
+    }});
+    let refused = client
+        .call("prepare_account_template_document", template.clone())
+        .await;
+    assert_eq!(refused.unwrap_err().code, code::UNSUPPORTED);
+    let prepared = client
+        .own("prepare_account_template_document", template)
+        .await
+        .unwrap();
+    assert_eq!(prepared["ready"], true);
+    let ready = client.call("account_template_ready", named).await;
+    assert_eq!(ready.unwrap(), true);
+    let file = client
+        .own("export_account_documents", export("sub2api"))
+        .await
+        .unwrap();
+    assert_eq!(
+        file[0]["accounts"][0]["credentials"]["refresh_token"],
+        secret
+    );
+}
+
+#[tokio::test]
+async fn antigravity_account_documents_cross_only_in_requests_that_say_they_are_internal() {
+    let fixture = fixture().await;
+    let mut client = Client::connect(&fixture).await;
+    let secret = "fixture-antigravity-token";
+    let login = json!({"email": "fixture@example.invalid", "access_token": secret});
+    let exported = json!({
+        "schema": "vela-antigravity-accounts",
+        "version": 1,
+        "accounts": [{"name": "Fixture", "payload": login.to_string()}],
+    });
+
+    // The document of an import comes in from another Vela's Rust. Its
+    // answer, and what every connection is told, lists the account without
+    // its login.
+    let empty = client.call("get_antigravity_auth_state", json!({})).await;
+    let read = json!({"document": exported, "expectedRevision": empty.unwrap()["revision"]});
+    let name = "import_antigravity_account_document";
+    let refused = client.call(name, read.clone()).await;
+    assert_eq!(refused.unwrap_err().code, code::UNSUPPORTED);
+    client.shake_hands().await;
+    client.send(2, name, read, true).await;
+    // The event and the answer come in either order.
+    let (mut imported, mut told) = (None, None);
+    while imported.is_none() || told.is_none() {
+        match client.next().await.unwrap() {
+            Reply::Answer { result, error, .. } => {
+                assert!(error.is_none(), "{error:?}");
+                imported = result;
+            }
+            Reply::Event { event, payload } => {
+                assert_eq!(event, "antigravity-auth-state");
+                told = Some(payload);
+            }
+        }
+    }
+    let (imported, told) = (imported.unwrap(), told.unwrap());
+    assert_eq!(imported["added"], 1, "{imported}");
+    assert_eq!(imported["state"], told);
+    assert_eq!(told["accounts"][0]["email"], "fixture@example.invalid");
+    assert!(!imported.to_string().contains(secret));
+
+    // The document of an export goes out to nothing else.
+    let named = json!({"ids": [told["accounts"][0]["id"]], "expectedRevision": told["revision"]});
+    let name = "export_antigravity_account_document";
+    let refused = client.call(name, named.clone()).await.unwrap_err();
+    assert_eq!(refused.code, code::UNSUPPORTED);
+    assert!(!refused.message.contains(secret));
+    assert_eq!(client.own(name, named).await.unwrap(), exported);
+}
+
 #[tokio::test]
 async fn what_no_window_may_ask_is_answered_only_to_a_request_that_says_it_is_internal() {
     let fixture = fixture().await;

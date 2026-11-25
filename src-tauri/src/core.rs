@@ -14,7 +14,7 @@ mod account_identity;
 #[path = "account_exchange.rs"]
 pub mod exchange;
 
-#[cfg(all(test, feature = "desktop"))]
+#[cfg(test)]
 #[path = "account_exchange_tests.rs"]
 mod account_exchange_tests;
 
@@ -175,7 +175,6 @@ pub struct Core {
     auth_cache: crate::auth_cache::Cache<PolledAuth>,
     config_cache: crate::auth_cache::Cache<PolledConfig>,
     official_cache: crate::official::ViewCache,
-    #[cfg(feature = "desktop")]
     exchange: exchange::Service,
 }
 struct PolledConfig {
@@ -451,7 +450,6 @@ impl CredentialTimes {
 fn credential_times(raw: &str) -> (Option<i64>, Option<i64>) {
     CredentialTimes::parse(raw).current()
 }
-#[cfg(any(feature = "desktop", test))]
 fn older(incoming: &str, stored: &str) -> bool {
     older_times(credential_times(incoming), credential_times(stored))
 }
@@ -543,7 +541,6 @@ impl Core {
             auth_cache: Default::default(),
             config_cache: Default::default(),
             official_cache: Default::default(),
-            #[cfg(feature = "desktop")]
             exchange: exchange::Service::default(),
         };
         // Scan on every startup; revisions suppress duplicate imports and re-adding a deletion.

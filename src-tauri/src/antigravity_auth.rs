@@ -1441,39 +1441,39 @@ mod retired {
     }
 }
 pub(crate) use retired::migrate as migrate_retired_accounts;
-#[cfg(any(feature = "desktop", test))]
 const EXCHANGE_SCHEMA: &str = "vela-antigravity-accounts";
-#[cfg(any(feature = "desktop", test))]
-/// The saved accounts as one file, logins included, that Vela reads back.
+/// The saved accounts as one document, logins included, that Vela reads back.
+/// The desktop app keeps it as a file; a server reads and writes no such file.
 #[derive(Serialize, Deserialize)]
 struct ExchangeFile {
     schema: String,
     version: u32,
     accounts: Vec<ExchangedAccount>,
 }
-#[cfg(any(feature = "desktop", test))]
 #[derive(Serialize, Deserialize)]
 struct ExchangedAccount {
     name: String,
     payload: String,
 }
-#[cfg(any(feature = "desktop", test))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AntigravityImport {
     pub state: AntigravityAuthState,
     pub added: usize,
-    /// Accounts the file holds that were already saved.
+    /// Accounts the document holds that were already saved.
     pub skipped: usize,
 }
-#[cfg(any(feature = "desktop", test))]
-/// Writes the chosen accounts, in the order they are saved.
-pub fn export_accounts_at(
-    paths: &Paths,
-    rev: &str,
-    ids: &[String],
-    target: &Path,
-) -> Result<usize> {
+fn not_exported() -> AppError {
+    err(
+        code::IMPORT,
+        "所选文件不是 Vela 导出的 Antigravity 账号文件",
+    )
+}
+fn unwritable() -> AppError {
+    err(code::EXPORT, "无法序列化 Antigravity 账号")
+}
+/// The chosen accounts as one document, in the order they are saved.
+pub fn export_accounts_document(paths: &Paths, rev: &str, ids: &[String]) -> Result<Value> {
     with_lock(|| {
         verify_revision(paths, rev)?;
         let (vault, _) = load_vault(paths)?;
@@ -1499,26 +1499,19 @@ pub fn export_accounts_at(
                 })
                 .collect(),
         };
-        let bytes = serde_json::to_vec_pretty(&file)
-            .map_err(|_| err(code::EXPORT, "无法序列化 Antigravity 账号"))?;
-        storage::atomic_write(target, &bytes, None)?;
-        Ok(file.accounts.len())
+        serde_json::to_value(&file).map_err(|_| unwritable())
     })
 }
-#[cfg(any(feature = "desktop", test))]
-/// Adds the accounts of an exported file that are not saved yet. The login in
-/// use and the accounts already saved are left as they are.
-pub fn import_accounts_at(paths: &Paths, rev: &str, source: &Path) -> Result<AntigravityImport> {
-    let unknown = || {
-        err(
-            code::IMPORT,
-            "所选文件不是 Vela 导出的 Antigravity 账号文件",
-        )
-    };
-    let bytes = storage::read_optional(source)?.ok_or_else(unknown)?;
-    let file: ExchangeFile = serde_json::from_slice(&bytes).map_err(|_| unknown())?;
+/// Adds the accounts of an exported document that are not saved yet. The
+/// login in use and the accounts already saved are left as they are.
+pub fn import_accounts_document(
+    paths: &Paths,
+    rev: &str,
+    document: Value,
+) -> Result<AntigravityImport> {
+    let file: ExchangeFile = serde_json::from_value(document).map_err(|_| not_exported())?;
     if file.schema != EXCHANGE_SCHEMA {
-        return Err(unknown());
+        return Err(not_exported());
     }
     if file.version != 1 {
         return Err(err(code::IMPORT, "账号文件版本较新，请更新 Vela"));
@@ -1528,9 +1521,10 @@ pub fn import_accounts_at(paths: &Paths, rev: &str, source: &Path) -> Result<Ant
         .into_iter()
         .map(|account| {
             if account.payload.len() as u64 > CREDENTIAL_LIMIT {
-                return Err(unknown());
+                return Err(not_exported());
             }
-            let (method, email) = parse_oauth_metadata(&account.payload).map_err(|_| unknown())?;
+            let (method, email) =
+                parse_oauth_metadata(&account.payload).map_err(|_| not_exported())?;
             let name = clean_label(Some(&account.name), email.as_deref().unwrap_or(UNNAMED))?;
             Ok((name, method, email, account.payload))
         })
@@ -1618,17 +1612,60 @@ pub fn delete_antigravity_account(
 ) -> Result<AntigravityAuthState> {
     delete_account_at(&r.antigravity_paths(), &id, &expected_revision)
 }
+/// The chosen accounts as one document with their logins, for a desktop app
+/// to write into the file of an export.
+pub fn export_antigravity_account_document(
+    r: &Runtime,
+    ids: Vec<String>,
+    expected_revision: String,
+) -> Result<Value> {
+    export_accounts_document(&r.antigravity_paths(), &expected_revision, &ids)
+}
+/// Takes in the accounts of the document a desktop app read from an exported
+/// file, and tells whoever watches what is saved now.
+pub fn import_antigravity_account_document(
+    r: &Runtime,
+    document: Value,
+    expected_revision: String,
+) -> Result<AntigravityImport> {
+    let imported = import_accounts_document(&r.antigravity_paths(), &expected_revision, document)?;
+    r.emit(crate::runtime::Event::AntigravityAuth(&imported.state));
+    Ok(imported)
+}
+/// Writes the document of an export as the file the user chose and answers
+/// how many accounts it holds. Only the desktop app writes one.
+#[cfg(any(feature = "desktop", test))]
+fn write_accounts_file(document: Value, target: &Path) -> Result<usize> {
+    // Written in Vela's own shape and order, whatever else was answered.
+    let file: ExchangeFile = serde_json::from_value(document).map_err(|_| unwritable())?;
+    let bytes = serde_json::to_vec_pretty(&file).map_err(|_| unwritable())?;
+    storage::atomic_write(target, &bytes, None)?;
+    Ok(file.accounts.len())
+}
+/// The document of the file the user picked for an import. Only the desktop
+/// app reads one.
+#[cfg(any(feature = "desktop", test))]
+fn read_accounts_file(source: &Path) -> Result<Value> {
+    let bytes = storage::read_optional(source)?.ok_or_else(not_exported)?;
+    serde_json::from_slice(&bytes).map_err(|_| not_exported())
+}
+/// Writes the chosen accounts of `instance` to the file the user chooses
+/// here. The document with their logins comes from that instance's Rust to
+/// this app's and reaches no window. It is asked for once; after a failure
+/// the user exports again.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn export_antigravity_accounts(
     app: tauri::AppHandle,
     r: R<'_>,
+    instances: tauri::State<'_, Arc<crate::instances::Service>>,
+    instance: String,
     ids: Vec<String>,
     expected_revision: String,
 ) -> Result<Option<usize>> {
     use tauri_plugin_dialog::DialogExt;
-    let paths = r.antigravity_paths();
-    tauri::async_runtime::spawn_blocking(move || {
+    let failed = || err(code::EXPORT, "账号导出失败");
+    let path = tauri::async_runtime::spawn_blocking(move || {
         let Some(file) = app
             .dialog()
             .file()
@@ -1638,26 +1675,37 @@ pub async fn export_antigravity_accounts(
         else {
             return Ok(None);
         };
-        let path = file
-            .into_path()
-            .map_err(|_| err(code::PATH, "请选择本地路径"))?;
-        export_accounts_at(&paths, &expected_revision, &ids, &path).map(Some)
+        file.into_path()
+            .map(Some)
+            .map_err(|_| err(code::PATH, "请选择本地路径"))
     })
     .await
-    .map_err(|_| err(code::EXPORT, "账号导出失败"))?
+    .map_err(|_| failed())??;
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let args = serde_json::json!({ "ids": ids, "expectedRevision": expected_revision });
+    let name = "export_antigravity_account_document";
+    let document = crate::instances::on(&instances, &r, &instance, name, args).await?;
+    tauri::async_runtime::spawn_blocking(move || write_accounts_file(document, &path).map(Some))
+        .await
+        .map_err(|_| failed())?
 }
+/// Has `instance` take in the accounts of the file the user picks here. The
+/// document goes from this app's Rust to that instance's, once: after a
+/// failure the user looks at the accounts before importing again.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn import_antigravity_accounts(
     app: tauri::AppHandle,
     r: R<'_>,
+    instances: tauri::State<'_, Arc<crate::instances::Service>>,
+    instance: String,
     expected_revision: String,
-) -> Result<Option<AntigravityImport>> {
+) -> Result<Option<Value>> {
     use tauri_plugin_dialog::DialogExt;
-    let paths = r.antigravity_paths();
-    let handle = app.clone();
-    let imported = tauri::async_runtime::spawn_blocking(move || {
-        let Some(file) = handle
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
             .dialog()
             .file()
             .set_title("选择 Vela 导出的 Antigravity 账号文件")
@@ -1669,14 +1717,18 @@ pub async fn import_antigravity_accounts(
         let path = file
             .into_path()
             .map_err(|_| err(code::PATH, "请选择本地 JSON 文件"))?;
-        import_accounts_at(&paths, &expected_revision, &path).map(Some)
+        read_accounts_file(&path).map(Some)
     })
     .await
     .map_err(|_| err(code::IMPORT, "账号导入失败"))??;
-    if let Some(imported) = &imported {
-        r.emit(crate::runtime::Event::AntigravityAuth(&imported.state));
-    }
-    Ok(imported)
+    let Some(document) = picked else {
+        return Ok(None);
+    };
+    let args = serde_json::json!({ "document": document, "expectedRevision": expected_revision });
+    let name = "import_antigravity_account_document";
+    crate::instances::on(&instances, &r, &instance, name, args)
+        .await
+        .map(Some)
 }
 #[cfg(test)]
 #[path = "antigravity_auth_tests.rs"]

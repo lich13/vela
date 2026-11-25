@@ -3,6 +3,7 @@ import Modal from "./Modal";
 import TemplateChoice, { type PreparedTemplate } from "./TemplateChoice";
 import { command } from "./bridge";
 import { useDirtyReport } from "./draft-report";
+import { currentInstance } from "./instance";
 import { errorOf, type ViewState } from "./types";
 
 import type { AccountImportPreview as Preview, AccountExportPreview as ExportPreview } from "./bridge-contracts";
@@ -36,7 +37,8 @@ export default function AccountExchange({ mode, close, update, notify, onDirtyCh
   };
   const choose = () => perform(async () => {
     if (mode === "import") {
-      const next = await command("preview_account_import");
+      // The files are picked and read here; the instance shown takes them in.
+      const next = await command("preview_account_import", { instance: currentInstance() });
       if (!next) return;
       if (!mounted.current) { void command("cancel_account_exchange", { token: next.token }).catch((e) => { if (mounted.current) setError(errorOf(e).message); }); return; }
       token.current = next.token;
@@ -65,7 +67,7 @@ export default function AccountExchange({ mode, close, update, notify, onDirtyCh
     : (exportPreview?.rows ?? []).map(r => ({ ...r, duplicate: false, description: r.error ?? "ChatGPT / Codex" }));
   const available = rows.filter(r => !r.error && !r.duplicate).map(r => r.id);
   const prepare = async (replaceTemplate = false) => {
-    const next = await command("prepare_account_template", { ids: selected, replaceTemplate });
+    const next = await command("prepare_account_template", { instance: currentInstance(), ids: selected, replaceTemplate });
     if (!mounted.current) {
       if (next?.token) void command("cancel_account_exchange", { token: next.token }).catch((e) => { if (mounted.current) setError(errorOf(e).message); });
       return false;
@@ -81,7 +83,7 @@ export default function AccountExchange({ mode, close, update, notify, onDirtyCh
       token.current = null; update(next); notify(`已保存 ${selected.length} 个账号`); close();
     } else if (exportPreview) {
       if (format === "sub2api" && !(await prepare())) return;
-      if (await command("export_accounts", { ids: selected, expectedRevision: exportPreview.revision, format })) {
+      if (await command("export_accounts", { instance: currentInstance(), ids: selected, expectedRevision: exportPreview.revision, format })) {
         notify(`已导出 ${selected.length} 个账号`); close();
       }
     }

@@ -78,8 +78,13 @@ export default function App() {
   return <Shell key={useInstance().key} />;
 }
 function Shell() {
-  // Importing, exporting and signing in act on this machine's files only.
-  const { remote } = useInstance();
+  // Signing in acts on this machine only. Account files are picked, read and
+  // written here for the instance shown, which takes in and hands out their
+  // documents; a server too old to do so gets no import or export.
+  const { remote, supports } = useInstance();
+  const exchanges =
+    supports("preview_account_documents") &&
+    supports("export_account_documents");
   const [exchangeMode, setExchangeMode] = useState<"import" | "export" | null>(
     null,
   );
@@ -577,38 +582,42 @@ function Shell() {
               <>
             <div className="page-heading">
               {accountHeading}
-              {!remote && (
+              {(exchanges || !remote) && (
                 <div className="account-actions">
-                  <div
-                    className="exchange-button-group"
-                    role="group"
-                    aria-label="账号导入导出"
-                  >
+                  {exchanges && (
+                    <div
+                      className="exchange-button-group"
+                      role="group"
+                      aria-label="账号导入导出"
+                    >
+                      <button
+                        className="exchange-button"
+                        disabled={!state}
+                        onClick={() => setExchangeMode("import")}
+                      >
+                        <FileInput size={16} />
+                        导入
+                      </button>
+                      <button
+                        className="exchange-button"
+                        disabled={!state?.accounts.length}
+                        onClick={() => setExchangeMode("export")}
+                      >
+                        <FileOutput size={16} />
+                        导出
+                      </button>
+                    </div>
+                  )}
+                  {!remote && (
                     <button
-                      className="exchange-button"
+                      className="primary"
+                      onClick={() => setDialog("add")}
                       disabled={!state}
-                      onClick={() => setExchangeMode("import")}
                     >
-                      <FileInput size={16} />
-                      导入
+                      <Plus size={16} />
+                      添加账号
                     </button>
-                    <button
-                      className="exchange-button"
-                      disabled={!state?.accounts.length}
-                      onClick={() => setExchangeMode("export")}
-                    >
-                      <FileOutput size={16} />
-                      导出
-                    </button>
-                  </div>
-                  <button
-                    className="primary"
-                    onClick={() => setDialog("add")}
-                    disabled={!state}
-                  >
-                    <Plus size={16} />
-                    添加账号
-                  </button>
+                  )}
                 </div>
               )}
             </div>

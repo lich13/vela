@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { command } from "./bridge";
 import { useDirtyReport } from "./draft-report";
-import { useInstance } from "./instance";
+import { currentInstance, useInstance } from "./instance";
 import { subscriptions } from "./subscriptions";
 import type {
   AntigravityAccountItem,
@@ -45,7 +45,13 @@ export default function AntigravityAccounts({
   setError,
   onDirtyChange,
 }: Props) {
-  const { remote } = useInstance();
+  const { remote, supports } = useInstance();
+  // The account file is picked, read and written on this machine for the
+  // instance shown, which takes in and hands out its document; a server too
+  // old to do so gets no import or export.
+  const exchanges =
+    supports("import_antigravity_account_document") &&
+    supports("export_antigravity_account_document");
   const [state, setState] = useState<AntigravityAuthState | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -142,6 +148,7 @@ export default function AntigravityAccounts({
     setDialogError("");
     try {
       const count = await command("export_antigravity_accounts", {
+        instance: currentInstance(),
         ids: exportable,
         expectedRevision: state.revision,
       });
@@ -168,8 +175,7 @@ export default function AntigravityAccounts({
       <div className="page-heading">
         {heading}
         <div className="account-actions">
-          {/* Account files are read and written on this machine only. */}
-          {!remote && (
+          {exchanges && (
             <div
               className="exchange-button-group"
               role="group"
@@ -185,7 +191,10 @@ export default function AntigravityAccounts({
                   void transfer(async () => {
                     const result = await command(
                       "import_antigravity_accounts",
-                      { expectedRevision: state!.revision },
+                      {
+                        instance: currentInstance(),
+                        expectedRevision: state!.revision,
+                      },
                     );
                     if (!result) return null;
                     setState(result.state);

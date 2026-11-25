@@ -563,7 +563,7 @@ export type InstanceState = {
     status: "local" | "connecting" | "connected" | "offline";
     version: string | null;
     error: string | null;
-    /** Shared command names the remote server does not implement. */
+    /** Shared and internal command names the remote server does not implement. */
     unsupported: string[];
   };
 };
@@ -643,30 +643,34 @@ type DesktopCommands = {
   claude_login_status: Call<None, ClaudeLoginState>;
   start_claude_login: Call<None, ClaudeLoginState>;
   cancel_claude_login: Call<None, void>;
-  /** How many accounts were written; null when the dialog was dismissed. */
-  /** How many accounts were written; null when the dialog was dismissed. */
+  export_usage_bill: Call<{ request: BillRequest }, BillExport | null>;
+  /**
+   * Account files are picked, read and written on this machine for
+   * `instance`, "local" or a machine id. What they hold goes between this
+   * app's Rust and that instance's and never reaches a window; a dismissed
+   * dialog answers null or false.
+   */
+  preview_account_import: Call<
+    { instance: string },
+    AccountImportPreview | null
+  >;
+  prepare_account_template: Call<
+    { instance: string; ids: string[]; replaceTemplate?: boolean },
+    PreparedTemplate | null
+  >;
+  export_accounts: Call<
+    Revision & { instance: string; ids: string[]; format: string },
+    boolean
+  >;
+  /** How many accounts were written. */
   export_antigravity_accounts: Call<
-    Revision & { ids: string[] },
+    Revision & { instance: string; ids: string[] },
     number | null
   >;
   import_antigravity_accounts: Call<
-    Revision,
+    Revision & { instance: string },
     { state: AntigravityAuthState; added: number; skipped: number } | null
   >;
-  export_usage_bill: Call<{ request: BillRequest }, BillExport | null>;
-  preview_account_import: Call<None, AccountImportPreview | null>;
-  commit_account_import: Call<
-    Revision & { token: string; selected: { id: number; update: boolean }[] },
-    ViewState
-  >;
-  cancel_account_exchange: Call<{ token: string }, void>;
-  preview_account_export: Call<None, AccountExportPreview>;
-  prepare_account_template: Call<
-    { ids: string[]; replaceTemplate?: boolean },
-    PreparedTemplate | null
-  >;
-  select_account_template: Call<{ token: string; id: number }, void>;
-  export_accounts: Call<Revision & { ids: string[]; format: string }, boolean>;
   check_for_updates: Call<None, UpdateInfo>;
   open_github: Call<None, void>;
   open_update_release: Call<None, void>;
@@ -713,6 +717,15 @@ export type SharedCommands = {
   import_current: Call<None, ViewState>;
   rename_account: Call<{ id: string; name: string }, ViewState>;
   delete_account: Call<{ id: string }, ViewState>;
+  commit_account_import: Call<
+    Revision & { token: string; selected: { id: number; update: boolean }[] },
+    ViewState
+  >;
+  cancel_account_exchange: Call<{ token: string }, void>;
+  preview_account_export: Call<None, AccountExportPreview>;
+  /** Whether a Sub2API export of these accounts needs no template chosen first. */
+  account_template_ready: Call<{ ids: string[] }, boolean>;
+  select_account_template: Call<{ token: string; id: number }, void>;
   read_antigravity_config: Call<None, ConfigDocument>;
   save_antigravity_config: Call<{ text: string } & Revision, ConfigDocument>;
   read_previous_antigravity_config: Call<None, string>;
@@ -991,11 +1004,7 @@ export const desktopCommands = names<DesktopCommands>()([
   "import_antigravity_accounts",
   "export_usage_bill",
   "preview_account_import",
-  "commit_account_import",
-  "cancel_account_exchange",
-  "preview_account_export",
   "prepare_account_template",
-  "select_account_template",
   "export_accounts",
   "check_for_updates",
   "open_github",
@@ -1018,6 +1027,11 @@ export const sharedCommands = names<SharedCommands>()([
   "import_current",
   "rename_account",
   "delete_account",
+  "commit_account_import",
+  "cancel_account_exchange",
+  "preview_account_export",
+  "account_template_ready",
+  "select_account_template",
   "read_antigravity_config",
   "save_antigravity_config",
   "read_previous_antigravity_config",
@@ -1107,6 +1121,21 @@ export const sharedCommands = names<SharedCommands>()([
   "update_pricing",
   "reload_pricing",
 ]);
+/**
+ * What only this app's Rust asks of an instance: these carry tokens or
+ * logins, and no window can call one. A window names one to learn whether the
+ * instance shown answers it.
+ */
+export const internalCommands = [
+  "export_provider_copy",
+  "import_provider_copy",
+  "preview_account_documents",
+  "prepare_account_template_document",
+  "export_account_documents",
+  "export_antigravity_account_document",
+  "import_antigravity_account_document",
+] as const;
+export type InternalCommand = (typeof internalCommands)[number];
 type CommandMap = DesktopCommands & SharedCommands;
 export type CommandName = keyof CommandMap;
 type CommandArgs<K extends CommandName> = CommandMap[K]["args"];

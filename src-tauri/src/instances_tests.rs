@@ -218,11 +218,16 @@ impl Bench {
 
     /// The app as it starts over a data folder.
     fn over(folder: TempDir) -> Self {
+        Self::knowing(folder, COMMANDS)
+    }
+
+    /// An app whose own table holds `commands`.
+    fn knowing(folder: TempDir, commands: &'static [&'static str]) -> Self {
         let fleet = Fleet::new();
         let seen = Arc::new(Seen::default());
         let service = Service::new(
             folder.path().to_path_buf(),
-            COMMANDS,
+            commands,
             fleet.dialer(),
             seen.clone(),
         );
@@ -827,8 +832,14 @@ async fn a_call_goes_to_the_selected_server_and_nowhere_else() {
 #[tokio::test(start_paused = true)]
 async fn only_what_the_apps_own_rust_asks_says_it_is_internal() {
     let bench = Bench::new();
-    // The servers answer one of the commands no window may ask.
-    bench.fleet.commands.lock().push("export_provider_copy");
+    // The servers answer every command no window may ask.
+    let internal: Vec<_> = crate::rpc::names()
+        .iter()
+        .copied()
+        .filter(|name| crate::rpc::internal(name))
+        .collect();
+    assert!(internal.contains(&"export_account_documents"));
+    bench.fleet.commands.lock().extend(&internal);
     let tokyo = bench.add("Tokyo", HOST).await;
     let osaka = bench.add("Osaka", OTHER).await;
     bench.select(&tokyo).await.unwrap();
@@ -839,30 +850,96 @@ async fn only_what_the_apps_own_rust_asks_says_it_is_internal() {
         window.await.unwrap(),
         json!({"host": HOST, "args": {"n": 1}})
     );
-    // What only Rust may ask is refused to it before anything is sent.
-    let refused = bench
-        .service
-        .call(&tokyo, "export_provider_copy", json!({}))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        (refused.code.as_str(), refused.message.as_str()),
-        (code::UNSUPPORTED, "此实例不支持该操作")
-    );
-    assert_eq!(bench.fleet.asked(), [format!("{HOST} get_state")]);
-
-    // The app's own Rust says so to the selected machine and to any other.
-    for (machine, host) in [(&tokyo, HOST), (&osaka, OTHER)] {
-        let args = json!({"clientId": "claude", "providerId": "fixture"});
-        let own = bench
+    for name in internal {
+        // What only Rust may ask is refused to it before anything is sent.
+        let refused = bench
             .service
-            .ask(machine, "export_provider_copy", args.clone())
-            .await;
+            .call(&tokyo, name, json!({}))
+            .await
+            .unwrap_err();
         assert_eq!(
-            own.unwrap(),
-            json!({"host": host, "args": args, "internal": true})
+            (refused.code.as_str(), refused.message.as_str()),
+            (code::UNSUPPORTED, "此实例不支持该操作"),
+            "{name}"
         );
+        assert_eq!(bench.fleet.asked(), [format!("{HOST} get_state")]);
+
+        // The app's own Rust says so to the selected machine and to any other.
+        for (machine, host) in [(&tokyo, HOST), (&osaka, OTHER)] {
+            let args = json!({"documents": [{"fixture": name}]});
+            let own = bench.service.ask(machine, name, args.clone()).await;
+            assert_eq!(
+                own.unwrap(),
+                json!({"host": host, "args": args, "internal": true}),
+                "{name}"
+            );
+        }
+        bench.fleet.asked.lock().truncate(1);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_apps_own_rust_asks_this_machines_table_or_another_machine_as_internal() {
+    let bench = Bench::new();
+    let name = "preview_account_documents";
+    bench.fleet.commands.lock().push(name);
+    let tokyo = bench.add("Tokyo", HOST).await;
+    bench.select(&tokyo).await.unwrap();
+    let home = tempdir().unwrap();
+    let runtime = crate::runtime::Runtime::at(
+        Arc::new(crate::runtime::Silent),
+        home.path().to_path_buf(),
+        home.path().join(".codex"),
+    )
+    .unwrap();
+    let read = json!({"documents": [{"fixture": "document"}]});
+
+    // What was read from files here goes to another machine as a request
+    // that says it is internal, and to this machine's own table as it is.
+    let far = on(&bench.service, &runtime, &tokyo, name, read.clone()).await;
+    assert_eq!(
+        far.unwrap(),
+        json!({"host": HOST, "args": read, "internal": true})
+    );
+    let near = on(&bench.service, &runtime, LOCAL, name, read).await;
+    assert_eq!(near.unwrap()["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(bench.fleet.asked(), [format!("{HOST} {name}")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_server_from_before_the_account_documents_is_asked_for_none_of_them() {
+    // The app knows its whole table; the servers answer what they always did.
+    let bench = Bench::knowing(tempdir().unwrap(), crate::rpc::names());
+    let tokyo = bench.add("Tokyo", HOST).await;
+    let osaka = bench.add("Osaka", OTHER).await;
+    let state = bench.select(&tokyo).await.unwrap();
+    for name in [
+        "preview_account_documents",
+        "prepare_account_template_document",
+        "export_account_documents",
+        "export_antigravity_account_document",
+        "import_antigravity_account_document",
+    ] {
+        assert!(crate::rpc::internal(name), "{name}");
+        // The windows read this and offer no import or export.
+        let lacking = &state.connection.unsupported;
+        assert!(lacking.iter().any(|lacked| lacked == name), "{name}");
+        // Asked for all the same, the selected machine and any other refuse
+        // before anything is sent.
+        for machine in [&tokyo, &osaka] {
+            let refused = bench.service.ask(machine, name, json!({})).await;
+            let refused = refused.unwrap_err();
+            assert_eq!(
+                (refused.code.as_str(), refused.message.as_str()),
+                (
+                    code::UNSUPPORTED,
+                    "服务器版本不支持此操作，请升级服务器上的 Vela"
+                ),
+                "{name}"
+            );
+        }
+    }
+    assert!(bench.fleet.asked().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
