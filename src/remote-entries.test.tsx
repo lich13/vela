@@ -27,6 +27,23 @@ const instances = (active: "local" | "m1"): InstanceState => ({
       ? { status: "local", version: null, error: null, unsupported: [] }
       : { status: "connected", version: "0.41.0", error: null, unsupported: [] },
 });
+/** A server from before account files could be handed to another instance. */
+const older = (): InstanceState => {
+  const state = instances("m1");
+  state.connection.unsupported = [
+    "preview_account_documents",
+    "commit_account_import",
+    "cancel_account_exchange",
+    "preview_account_export",
+    "account_template_ready",
+    "prepare_account_template_document",
+    "select_account_template",
+    "export_account_documents",
+    "export_antigravity_account_document",
+    "import_antigravity_account_document",
+  ];
+  return state;
+};
 const calls = (name: string) =>
   mock.command.mock.calls.filter(([called]) => called === name);
 beforeEach(() => {
@@ -79,7 +96,19 @@ beforeEach(() => {
 });
 afterEach(() => localStorage.clear());
 
-it("the Codex account page of a server has no import, export or sign-in entries", async () => {
+it("the Codex account page of a server keeps import and export and has no sign-in entries", async () => {
+  render(<App />);
+  await screen.findAllByRole("button", { name: /^切换到 / });
+  const exchange = within(screen.getByRole("group", { name: "账号导入导出" }));
+  for (const name of ["导入", "导出"])
+    expect(exchange.getByRole("button", { name })).toBeEnabled();
+  for (const name of ["添加账号", "设备码刷新"])
+    expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+  expect(screen.getByLabelText("当前实例：东京")).toBeInTheDocument();
+});
+
+it("a server that cannot be handed account files has no import or export entries", async () => {
+  setInstanceState(older());
   render(<App />);
   await screen.findAllByRole("button", { name: /^切换到 / });
   expect(
@@ -87,7 +116,6 @@ it("the Codex account page of a server has no import, export or sign-in entries"
   ).not.toBeInTheDocument();
   for (const name of ["导入", "导出", "添加账号", "设备码刷新"])
     expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
-  expect(screen.getByLabelText("当前实例：东京")).toBeInTheDocument();
 });
 
 it("this machine keeps them, and switching instances reads the pages again", async () => {
@@ -124,15 +152,20 @@ it("a server that comes back is read again, one that drops keeps the page", asyn
   await waitFor(() => expect(calls("get_state")).toHaveLength(2));
 });
 
-it("Antigravity accounts of a server cannot be imported or exported", async () => {
+it("Antigravity accounts of a server are imported and exported unless it cannot be handed their file", async () => {
+  const { unmount } = render(
+    <AntigravityAccounts notify={() => {}} setError={() => {}} />,
+  );
+  await screen.findByRole("button", { name: "刷新 Antigravity 认证状态" });
+  for (const name of ["导入 Antigravity 账号", "导出 Antigravity 账号"])
+    expect(screen.getByRole("button", { name })).toBeInTheDocument();
+  unmount();
+
+  setInstanceState(older());
   render(<AntigravityAccounts notify={() => {}} setError={() => {}} />);
   await screen.findByRole("button", { name: "刷新 Antigravity 认证状态" });
-  expect(
-    screen.queryByRole("button", { name: "导入 Antigravity 账号" }),
-  ).not.toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: "导出 Antigravity 账号" }),
-  ).not.toBeInTheDocument();
+  for (const name of ["导入 Antigravity 账号", "导出 Antigravity 账号"])
+    expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
 });
 
 it("the official Claude sign-in is left to the server", async () => {

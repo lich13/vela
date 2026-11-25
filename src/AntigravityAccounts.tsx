@@ -45,7 +45,13 @@ export default function AntigravityAccounts({
   setError,
   onDirtyChange,
 }: Props) {
-  const { remote } = useInstance();
+  const { remote, supports } = useInstance();
+  // The account file is picked, read and written on this machine for the
+  // instance shown, which takes in and hands out its document; a server too
+  // old to do so gets no import or export.
+  const exchanges =
+    supports("import_antigravity_account_document") &&
+    supports("export_antigravity_account_document");
   const [state, setState] = useState<AntigravityAuthState | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -169,8 +175,7 @@ export default function AntigravityAccounts({
       <div className="page-heading">
         {heading}
         <div className="account-actions">
-          {/* Account files are read and written on this machine only. */}
-          {!remote && (
+          {exchanges && (
             <div
               className="exchange-button-group"
               role="group"

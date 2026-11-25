@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import AntigravityAccounts from "./AntigravityAccounts";
 import { subscribe } from "./bridge";
 import type { AntigravityAuthState } from "./bridge-contracts";
+import { instanceState, setInstanceState } from "./instance";
 
 const mockCommand = vi.fn();
 const listeners = new Map<string, (payload: unknown) => void>();
@@ -61,6 +62,7 @@ describe("AntigravityAccounts", () => {
     cleanup();
     mockCommand.mockReset();
     listeners.clear();
+    setInstanceState({ ...instanceState(), active: "local" });
   });
 
   it("keeps account state on credential read failure and retries manually", async () => {
@@ -342,6 +344,44 @@ describe("AntigravityAccounts", () => {
     expect(mockCommand).toHaveBeenLastCalledWith(
       "import_antigravity_accounts",
       { instance: "local", expectedRevision: "rev-2" },
+    );
+  });
+
+  it("names the instance that is shown to what picks, reads and writes the file here", async () => {
+    setInstanceState({ ...instanceState(), active: "fixture-machine" });
+    mockCommand.mockImplementation(async (name: string) =>
+      name === "get_antigravity_auth_state" ? initialState : null,
+    );
+    render(<AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />);
+    const importing = await screen.findByRole("button", {
+      name: "导入 Antigravity 账号",
+    });
+    await waitFor(() => expect(importing).toBeEnabled());
+    fireEvent.click(importing);
+    await waitFor(() =>
+      expect(mockCommand).toHaveBeenLastCalledWith(
+        "import_antigravity_accounts",
+        {
+          instance: "fixture-machine",
+          expectedRevision: initialState.revision,
+        },
+      ),
+    );
+    await waitFor(() => expect(importing).toBeEnabled());
+    fireEvent.click(
+      screen.getByRole("button", { name: "导出 Antigravity 账号" }),
+    );
+    const picker = screen.getByRole("dialog", { name: "导出账号" });
+    fireEvent.click(within(picker).getByRole("button", { name: "导出所选" }));
+    await waitFor(() =>
+      expect(mockCommand).toHaveBeenLastCalledWith(
+        "export_antigravity_accounts",
+        {
+          instance: "fixture-machine",
+          ids: ["oauth-1", "oauth-2"],
+          expectedRevision: initialState.revision,
+        },
+      ),
     );
   });
 
