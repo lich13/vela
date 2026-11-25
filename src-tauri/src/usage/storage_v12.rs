@@ -1472,56 +1472,68 @@ pub(super) fn reshape_pending(c: &Connection) -> Result<bool> {
     ))
 }
 /// Attempt shapes interned while `rawInputTokens` was part of them differ by
-/// that counter alone. Each call saves again at most `limit` of the records
-/// still using one, with their state and order unchanged; the shapes left
-/// without a record go with the next prune. False once none is left.
+/// that counter alone. Each call moves the counter of at most `limit` attempts
+/// out of the shape and into the attempt's own diagnostics, where it is kept
+/// now; nothing else of a request is written, so it loads and counts exactly
+/// as before. The shapes left without an attempt go with the next prune.
+/// False once none is left.
 pub(super) fn reshape_batch(c: &Connection, limit: usize) -> Result<bool> {
     if !reshape_pending(c)? {
         return Ok(false);
     }
     let tx = db(c.unchecked_transaction())?;
-    // The dictionary is decoded once for this connection. A saved record no
-    // longer points at any of these shapes, so the selection below only shrinks.
+    // The attempts to convert are listed once for this connection. Nothing is
+    // saved with such a shape any more, so the list only shrinks.
     let listed: bool = db(tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE name='v12_legacy_shapes')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE name='v12_legacy_attempts')",
         [],
         |r| r.get(0),
     ))?;
     if !listed {
-        db(tx.execute_batch("CREATE TEMP TABLE v12_legacy_shapes(id INTEGER PRIMARY KEY)"))?;
-        let mut read = db(tx.prepare("SELECT id,value FROM v12_dictionary"))?;
-        let mut list = db(tx.prepare("INSERT INTO v12_legacy_shapes VALUES(?1)"))?;
-        let mut rows = db(read.query([]))?;
-        while let Some(row) = db(rows.next())? {
-            let legacy = db(row.get_ref(1))?
-                .as_blob()
-                .ok()
-                .and_then(shared_value)
-                .is_some_and(|shape| shape.get("rawInputTokens").is_some());
-            if legacy {
-                db(list.execute([db(row.get::<_, i64>(0))?]))?;
+        db(tx.execute_batch(
+            "CREATE TEMP TABLE v12_legacy_shapes(id INTEGER PRIMARY KEY);
+             CREATE TEMP TABLE v12_legacy_attempts(owner INTEGER NOT NULL,ordinal INTEGER NOT NULL,PRIMARY KEY(owner,ordinal)) WITHOUT ROWID;",
+        ))?;
+        {
+            let mut read = db(tx.prepare("SELECT id,value FROM v12_dictionary"))?;
+            let mut list = db(tx.prepare("INSERT INTO v12_legacy_shapes VALUES(?1)"))?;
+            let mut rows = db(read.query([]))?;
+            while let Some(row) = db(rows.next())? {
+                let legacy = db(row.get_ref(1))?
+                    .as_blob()
+                    .ok()
+                    .and_then(shared_value)
+                    .is_some_and(|shape| shape.get("rawInputTokens").is_some());
+                if legacy {
+                    db(list.execute([db(row.get::<_, i64>(0))?]))?;
+                }
             }
         }
-    }
-    let mut owners = std::collections::BTreeSet::new();
-    for table in ["v12_attempt_rows", "v12_session_rows", "v12_original"] {
-        if owners.len() >= limit {
-            break;
+        for table in ["v12_attempt_rows", "v12_session_rows", "v12_original"] {
+            db(tx.execute(
+                &format!("INSERT OR IGNORE INTO v12_legacy_attempts SELECT owner,ordinal FROM {table} WHERE shape IN (SELECT id FROM v12_legacy_shapes)"),
+                [],
+            ))?;
         }
-        let mut stmt = db(tx.prepare(&format!(
-            "SELECT DISTINCT owner FROM {table} WHERE shape IN (SELECT id FROM v12_legacy_shapes) LIMIT ?1"
-        )))?;
-        let rows = db(stmt.query_map([(limit - owners.len()) as i64], |r| r.get::<_, i64>(0)))?;
-        for owner in rows {
-            owners.insert(db(owner)?);
-        }
+        db(tx.execute_batch("DROP TABLE v12_legacy_shapes"))?;
     }
-    for owner in &owners {
-        update(&tx, &load_record(&tx, *owner)?)?;
+    let attempts: Vec<(i64, i64)> = {
+        let mut stmt = db(tx.prepare(
+            "SELECT owner,ordinal FROM v12_legacy_attempts ORDER BY owner,ordinal LIMIT ?1",
+        ))?;
+        let rows = db(stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        db(rows.collect::<rusqlite::Result<_>>())?
+    };
+    for (owner, ordinal) in &attempts {
+        move_raw_input(&tx, *owner, *ordinal)?;
+        db(tx.execute(
+            "DELETE FROM v12_legacy_attempts WHERE owner=?1 AND ordinal=?2",
+            params![owner, ordinal],
+        ))?;
     }
-    if owners.is_empty() {
+    if attempts.is_empty() {
         db(tx.execute_batch(
-            "DROP TABLE v12_legacy_shapes; INSERT OR REPLACE INTO metadata VALUES('storage_shapes','ready');",
+            "DROP TABLE v12_legacy_attempts; INSERT OR REPLACE INTO metadata VALUES('storage_shapes','ready');",
         ))?;
     } else {
         db(tx.execute(
@@ -1530,7 +1542,146 @@ pub(super) fn reshape_batch(c: &Connection, limit: usize) -> Result<bool> {
         ))?;
     }
     db(tx.commit())?;
-    Ok(!owners.is_empty())
+    Ok(!attempts.is_empty())
+}
+/// Takes `rawInputTokens` out of a shape and puts it with the diagnostics it
+/// is loaded together with. False where the shape did not hold it.
+fn take_raw_input(shape: &mut Value, diagnostic: &mut Value) -> Result<bool> {
+    let Some(raw) = shape
+        .as_object_mut()
+        .and_then(|shape| shape.remove("rawInputTokens"))
+    else {
+        return Ok(false);
+    };
+    diagnostic
+        .as_object_mut()
+        .ok_or_else(|| failure("用量诊断无效"))?
+        .entry("rawInputTokens")
+        .or_insert(raw);
+    Ok(true)
+}
+/// Converts one attempt of a request and what the gateway reported for it.
+/// The reported values are kept as their differences from the attempt, so
+/// they are worked out as they load now and written against the attempt as
+/// it is afterwards.
+fn move_raw_input(c: &Connection, owner: i64, ordinal: i64) -> Result<()> {
+    use rusqlite::types::Value as Sql;
+    let Some(anchor) = db(c
+        .query_row(
+            "SELECT time+started FROM v12_records WHERE rid=?1",
+            [owner],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional())?
+    else {
+        return Ok(());
+    };
+    let mut attempt = None;
+    for table in ["v12_attempt_rows", "v12_session_rows"] {
+        attempt = db(c
+            .query_row(
+                &format!("SELECT shape,body FROM {table} WHERE owner=?1 AND ordinal=?2"),
+                params![owner, ordinal],
+                |r| Ok((table, r.get::<_, i64>(0)?, r.get::<_, Sql>(1)?)),
+            )
+            .optional())?;
+        if attempt.is_some() {
+            break;
+        }
+    }
+    let Some((table, shape_id, body)) = attempt else {
+        return Ok(());
+    };
+    let mut shape = dictionary(c, shape_id)?;
+    let mut diagnostic = unpack_diagnostic(c, body, anchor)?;
+    let reported = db(c
+        .query_row(
+            "SELECT shape,body,mask FROM v12_original WHERE owner=?1 AND ordinal=?2",
+            params![owner, ordinal],
+            |r| {
+                Ok((
+                    r.get::<_, Option<i64>>(0)?,
+                    r.get::<_, Sql>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional())?
+    .map(|(own_shape, own_body, mask)| -> Result<_> {
+        let reported_shape = match own_shape.filter(|_| mask & 4 != 0) {
+            Some(id) => dictionary(c, id)?,
+            None => shape.clone(),
+        };
+        let reported_diagnostic = if mask & 8 != 0 {
+            unpack_diagnostic(c, own_body.clone(), anchor)?
+        } else {
+            diagnostic.clone()
+        };
+        Ok((
+            reported_shape,
+            reported_diagnostic,
+            own_shape,
+            own_body,
+            mask,
+        ))
+    })
+    .transpose()?;
+    let moved = take_raw_input(&mut shape, &mut diagnostic)?;
+    if moved {
+        let converted = intern(c, &shape)?;
+        db(c.execute(
+            "INSERT OR IGNORE INTO v12_dimensions SELECT ?1,provider,model,status,stream,operation FROM v12_dimensions WHERE shape=?2",
+            params![converted, shape_id],
+        ))?;
+        db(c.execute(
+            &format!("UPDATE {table} SET shape=?3,body=?4 WHERE owner=?1 AND ordinal=?2"),
+            params![
+                owner,
+                ordinal,
+                converted,
+                pack_diagnostic(c, diagnostic.clone(), anchor)?
+            ],
+        ))?;
+    }
+    let Some((mut reported_shape, mut reported_diagnostic, own_shape, own_body, mask)) = reported
+    else {
+        return Ok(());
+    };
+    let taken = take_raw_input(&mut reported_shape, &mut reported_diagnostic)?;
+    if !moved && !taken {
+        return Ok(());
+    }
+    // What still differs from the attempt stays the original's own; what was
+    // its own and did not change is left as stored.
+    let own_shape = if reported_shape == shape {
+        None
+    } else if mask & 4 != 0 && !taken {
+        own_shape
+    } else {
+        Some(intern(c, &reported_shape)?)
+    };
+    let own_body = if reported_diagnostic == diagnostic {
+        None
+    } else if mask & 8 != 0 && !taken {
+        Some(own_body)
+    } else {
+        Some(pack_diagnostic(c, reported_diagnostic, anchor)?)
+    };
+    let mask = mask & !12
+        | if own_shape.is_some() { 4 } else { 0 }
+        | if own_body.is_some() { 8 } else { 0 };
+    if mask == 0 {
+        db(c.execute(
+            "DELETE FROM v12_original WHERE owner=?1 AND ordinal=?2",
+            params![owner, ordinal],
+        ))?;
+    } else {
+        db(c.execute(
+            "UPDATE v12_original SET shape=?3,body=?4,mask=?5 WHERE owner=?1 AND ordinal=?2",
+            params![owner, ordinal, own_shape, own_body, mask],
+        ))?;
+    }
+    Ok(())
 }
 pub(super) fn save_archive(c: &Connection, value: &Value) -> Result<i64> {
     let body = pack_diagnostic(c, value.clone(), 0)?;

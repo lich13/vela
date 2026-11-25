@@ -1790,6 +1790,42 @@ fn shapes_holding_raw_input(store: &Store) -> usize {
         .count()
 }
 
+/// Every request as storage holds it apart from where a shape or a diagnostic
+/// is kept: the loaded value, the row of the request, and the measures and
+/// first token of each attempt.
+fn stored_requests(store: &Store) -> Value {
+    let c = &store.connection;
+    let texts = |sql: &str| -> Vec<String> {
+        let mut stmt = c.prepare(sql).unwrap();
+        let width = stmt.column_count();
+        let rows = stmt
+            .query_map([], |r| {
+                (0..width)
+                    .map(|i| {
+                        r.get::<_, rusqlite::types::Value>(i)
+                            .map(|v| format!("{v:?}"))
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        rows.map(|row| row.unwrap().join("|")).collect()
+    };
+    let rids: Vec<i64> = c
+        .prepare("SELECT rid FROM v12_rows ORDER BY rid")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    json!({
+        "loaded": rids.iter().map(|rid| super::storage_v12::load(c, *rid).unwrap()).collect::<Vec<_>>(),
+        "rows": texts("SELECT rid,key,client,source,time,response,signature,effective,duplicate,archived_duplicate,sequence,shape,session,state FROM v12_rows ORDER BY rid"),
+        "attempts": texts("SELECT owner,ordinal,measure,first_token FROM v12_attempt_rows UNION ALL SELECT owner,ordinal,measure,first_token FROM v12_session_rows ORDER BY 1,2"),
+        "measures": texts("SELECT * FROM v12_measures ORDER BY id"),
+        "reported": texts("SELECT owner,ordinal,inclusive_input,input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,cost,unpriced,duration,first_token,repeat_count,provider,model,status,stream,operation,mask & ~12,metrics_changed FROM v12_original ORDER BY 1,2"),
+    })
+}
+
 /// Stores every attempt the way releases before the counter moved did: the
 /// counter inside the shape, a shape per row, and absent from the diagnostic.
 fn move_raw_input_into_shapes(connection: &Connection) -> usize {
@@ -1975,6 +2011,21 @@ fn shapes_saved_with_the_raw_input_counter_are_converted_in_resumable_batches() 
         20,
     ));
     store.write_batch(&rows, None).unwrap();
+    // An Antigravity request stored before cache reads nobody reported were
+    // written as zero: it loads with zero and is counted with none.
+    let mut app = record(
+        "fixture-legacy-shape-app",
+        "antigravity",
+        BASE + 8_000,
+        None,
+        100,
+        20,
+    );
+    app.client = "antigravity".into();
+    let tx = store.connection.transaction().unwrap();
+    super::storage_v12::save(&tx, &app, 1, 1_000).unwrap();
+    tx.commit().unwrap();
+    rows.push(app);
     assert!(store
         .detail("fixture-legacy-shape-gateway")
         .unwrap()
@@ -1985,7 +2036,7 @@ fn shapes_saved_with_the_raw_input_counter_are_converted_in_resumable_batches() 
     let current_shapes = attempt_shapes(&store);
 
     let moved = move_raw_input_into_shapes(&store.connection);
-    assert_eq!(moved, 10);
+    assert_eq!(moved, 11);
     assert_eq!(shapes_holding_raw_input(&store), moved);
     store
         .connection
@@ -2004,9 +2055,21 @@ fn shapes_saved_with_the_raw_input_counter_are_converted_in_resumable_batches() 
             "dashboard": dashboard_value(store, &all_time()),
             "proxyDashboard": dashboard_value(store, &scope("proxy")),
             "sessionsDashboard": dashboard_value(store, &scope("sessions")),
+            "appDashboard": dashboard_value(store, &Filter {
+                client: Some("antigravity".into()),
+                ..all_time()
+            }),
+            "stored": stored_requests(store),
         })
     };
     let before = snapshot(&store);
+    let app = serde_json::to_value(store.detail("fixture-legacy-shape-app").unwrap()).unwrap();
+    assert_eq!(app["attempts"][0]["tokens"]["cacheRead"], 0);
+    assert_eq!(
+        before["appDashboard"]["totals"]["tokens"]["cacheRead"],
+        Value::Null,
+        "cache reads nobody reported are not a count of zero"
+    );
     let counters: Vec<_> = before["details"]
         .as_array()
         .unwrap()
