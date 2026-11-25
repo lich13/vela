@@ -518,9 +518,10 @@ fn daily_rollup_stores_sum_and_count_and_keeps_unknown_samples_out_of_the_diviso
         .unwrap();
     assert_eq!(count, 1);
     let daily = super::bodies::unpack(&database, &body).unwrap();
-    assert_eq!(daily["totals"]["requests"], 3);
-    assert_eq!(daily["totals"]["firstTokenSumMs"], 30);
-    assert_eq!(daily["totals"]["firstTokenSamples"], 2);
+    let sums = &daily["sums"][0]["totals"];
+    assert_eq!(sums["requests"], 3);
+    assert_eq!(sums["firstTokenSumMs"], 30);
+    assert_eq!(sums["firstTokenSamples"], 2);
     assert!(daily["example"]["attempts"][0]["firstTokenMs"].is_null());
     drop(database);
 

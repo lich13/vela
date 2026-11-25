@@ -16,10 +16,15 @@ fn projection(value: &Value) -> Value {
             }
         }
         projected.insert("example".into(), projection(example));
-        projected.insert(
-            "totals".into(),
-            serde_json::json!({"unpriced": value.pointer("/totals/unpriced")}),
-        );
+        if value.get("sums").is_some() {
+            // Requests that differ in usage share this rollup, all of them priced.
+            projected.insert("merged".into(), true.into());
+        } else {
+            projected.insert(
+                "totals".into(),
+                serde_json::json!({"unpriced": value.pointer("/totals/unpriced")}),
+            );
+        }
     } else {
         if let Some(attempts) = value.get("attempts").and_then(Value::as_array) {
             projected.insert(
@@ -133,7 +138,14 @@ pub(super) fn encode(connection: &Connection, value: &impl Serialize) -> Result<
             }
         }
     }
-    prices(&mut value, &mut |price| {
+    detach_bases(connection, &mut value)?;
+    pack(connection, &value)
+}
+
+/// Keeps each price basis once; the price refers to it by its hash. A value
+/// already holding references is left as it is.
+pub(super) fn detach_bases(connection: &Connection, value: &mut Value) -> Result<()> {
+    prices(value, &mut |price| {
         let Some(basis) = price.get("basis").filter(|v| !v.is_null()) else {
             return Ok(());
         };
@@ -149,8 +161,19 @@ pub(super) fn encode(connection: &Connection, value: &impl Serialize) -> Result<
         object.remove("basis");
         object.insert("basisRef".into(), Value::String(hash));
         Ok(())
-    })?;
-    pack(connection, &value)
+    })
+}
+
+/// Deletes the archived payload of a stored daily body that is going away.
+pub(super) fn retire(connection: &Connection, body: &str) -> Result<()> {
+    let value: Value = serde_json::from_str(body).map_err(|_| failure("用量元数据无效"))?;
+    if let Some(id) = value.get("_usageArchive").and_then(Value::as_i64) {
+        connection
+            .prepare_cached("DELETE FROM v12_archives WHERE rid=?1")
+            .and_then(|mut statement| statement.execute([id]))
+            .map_err(|_| failure("用量归档清理失败"))?;
+    }
+    Ok(())
 }
 
 pub(super) fn decode<T: DeserializeOwned>(connection: &Connection, body: &str) -> Result<T> {

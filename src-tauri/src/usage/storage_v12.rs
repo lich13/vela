@@ -783,6 +783,8 @@ fn create_tables(c: &Connection) -> Result<()> {
 pub(super) fn initialize(c: &Connection) -> Result<()> {
     // A new database holds nothing written before the current shapes.
     db(c.execute("INSERT INTO metadata VALUES('storage_shapes','ready')", []))?;
+    // Nor a rollup written before the shared ones.
+    db(c.execute("INSERT INTO metadata VALUES('storage_daily','ready')", []))?;
     create_tables(c)?;
     query::metrics_schema(c, "usage_daily_metrics")?;
     create_views(c)?;

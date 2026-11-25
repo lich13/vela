@@ -12,6 +12,7 @@ use rusqlite::{
     Connection, Row,
 };
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 const DAY: i64 = 86_400_000;
 fn db<T>(value: rusqlite::Result<T>) -> Result<T> {
@@ -102,9 +103,76 @@ pub(super) fn metrics_schema(c: &Connection, table: &str) -> Result<()> {
       PRIMARY KEY(kind,owner,ordinal)) WITHOUT ROWID;")))
 }
 
-/// Project one daily rollup. Its stored totals are authoritative for the
-/// final attempt; earlier attempts contribute tokens and cost only.
-pub fn project(c: &Connection, owner: &str, r: &Record, count: u64, totals: &Totals) -> Result<()> {
+/// What a daily rollup projects for one attempt: who served it and the value
+/// of every summed column.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Sum {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub totals: Totals,
+}
+
+/// The rows of a rollup that stands for `count` requests like `r`. Its stored
+/// totals are authoritative for the final attempt; earlier attempts contribute
+/// tokens and cost only.
+pub(super) fn rows(r: &Record, count: u64, totals: &Totals) -> Vec<Sum> {
+    r.attempts
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let final_record = i + 1 == r.attempts.len();
+            let known = final_record && r.known_success().is_some();
+            let success = final_record && r.known_success() == Some(true);
+            let last = |n: u64| if final_record { n } else { 0 };
+            let mul = |n: Option<u64>| n.map(|n| n.saturating_mul(count));
+            let tokens = &a.tokens;
+            let cost = (a
+                .price
+                .as_ref()
+                .and_then(|p| decimal(&p.cost))
+                .unwrap_or_default()
+                * Decimal::from(count))
+            .to_string();
+            Sum {
+                provider: a.provider.clone(),
+                model: a.grouping_model().map(str::to_owned),
+                totals: Totals {
+                    requests: last(count),
+                    attempts: count.saturating_mul(a.repeat_count),
+                    success: if success { count } else { 0 },
+                    status_known: if known { count } else { 0 },
+                    sessions: if r.source != "proxy" { last(count) } else { 0 },
+                    tokens: Tokens {
+                        input: mul(tokens.input),
+                        output: mul(tokens.output),
+                        cache_read: mul(tokens.cache_read),
+                        cache_write: mul(tokens.cache_write),
+                        cache_write_5m: mul(tokens.cache_write_5m),
+                        cache_write_1h: mul(tokens.cache_write_1h),
+                        image_input: mul(tokens.image_input),
+                        image_output: mul(tokens.image_output),
+                        audio_input: mul(tokens.audio_input),
+                        audio_output: mul(tokens.audio_output),
+                        ..Tokens::default()
+                    },
+                    cost,
+                    unpriced: count.saturating_mul(a.unpriced_count()),
+                    duration_ms: last(totals.duration_ms),
+                    measured_outputs: last(totals.measured_outputs),
+                    generation_ms: last(totals.generation_ms),
+                    first_token_sum_ms: last(totals.first_token_sum_ms),
+                    first_token_samples: last(totals.first_token_samples),
+                    cache_read_eligible: last(totals.cache_read_eligible),
+                    cache_input_eligible: last(totals.cache_input_eligible),
+                },
+            }
+        })
+        .collect()
+}
+
+/// Replaces what the rollup `owner` projects: one row for each attempt.
+pub(super) fn write(c: &Connection, owner: &str, rows: &[Sum]) -> Result<()> {
     let kind = 1i64;
     let table = "usage_daily_metrics";
     db(c.execute(
@@ -112,75 +180,74 @@ pub fn project(c: &Connection, owner: &str, r: &Record, count: u64, totals: &Tot
         params![kind, owner],
     ))?;
     let mut stmt=db(c.prepare_cached(&format!("INSERT INTO {table} VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)")))?;
-    for (i, a) in r.attempts.iter().enumerate() {
-        let final_record = i + 1 == r.attempts.len();
-        let known = final_record && r.known_success().is_some();
-        let success = final_record && r.known_success() == Some(true);
-        let (duration, measured, generation) = if final_record {
-            (
-                totals.duration_ms,
-                totals.measured_outputs,
-                totals.generation_ms,
-            )
-        } else {
-            (0, 0, 0)
-        };
-        let (first_token_sum, first_token_samples) = if final_record {
-            (totals.first_token_sum_ms, totals.first_token_samples)
-        } else {
-            (0, 0)
-        };
-        let tokens = &a.tokens;
-        let (cache_read, cache_input) = if final_record {
-            (totals.cache_read_eligible, totals.cache_input_eligible)
-        } else {
-            (0, 0)
-        };
-        let mul = |n: Option<u64>| n.map(|n| n.saturating_mul(count).min(i64::MAX as u64) as i64);
-        let cost = (a
-            .price
-            .as_ref()
-            .and_then(|p| decimal(&p.cost))
-            .unwrap_or_default()
-            * Decimal::from(count))
-        .to_string();
+    for (i, row) in rows.iter().enumerate() {
+        let t = &row.totals;
+        let int = |n: Option<u64>| n.map(|n| n.min(i64::MAX as u64) as i64);
         db(stmt.execute(params![
             kind,
             owner,
             i as i64,
-            a.provider,
-            a.grouping_model(),
-            if final_record { count } else { 0 },
-            count.saturating_mul(a.repeat_count),
-            if success { count } else { 0 },
-            if known { count } else { 0 },
-            if final_record && r.source != "proxy" {
-                count
-            } else {
-                0
-            },
-            mul(tokens.input),
-            mul(tokens.output),
-            mul(tokens.cache_read),
-            mul(tokens.cache_write),
-            mul(tokens.cache_write_5m),
-            mul(tokens.cache_write_1h),
-            mul(tokens.image_input),
-            mul(tokens.image_output),
-            mul(tokens.audio_input),
-            mul(tokens.audio_output),
-            cost,
-            count.saturating_mul(a.unpriced_count()),
-            duration,
-            measured,
-            generation,
-            first_token_sum,
-            first_token_samples,
-            cache_read,
-            cache_input
+            row.provider,
+            row.model,
+            t.requests,
+            t.attempts,
+            t.success,
+            t.status_known,
+            t.sessions,
+            int(t.tokens.input),
+            int(t.tokens.output),
+            int(t.tokens.cache_read),
+            int(t.tokens.cache_write),
+            int(t.tokens.cache_write_5m),
+            int(t.tokens.cache_write_1h),
+            int(t.tokens.image_input),
+            int(t.tokens.image_output),
+            int(t.tokens.audio_input),
+            int(t.tokens.audio_output),
+            t.cost,
+            t.unpriced,
+            t.duration_ms,
+            t.measured_outputs,
+            t.generation_ms,
+            t.first_token_sum_ms,
+            t.first_token_samples,
+            t.cache_read_eligible,
+            t.cache_input_eligible
         ]))?;
     }
     Ok(())
+}
+
+/// Project one daily rollup of `count` requests like its example.
+pub fn project(c: &Connection, owner: &str, r: &Record, count: u64, totals: &Totals) -> Result<()> {
+    write(c, owner, &rows(r, count, totals))
+}
+
+/// What the rollup `owner` projects now, in the order of its attempts; nothing
+/// unless its rows are numbered from zero without a gap.
+pub(super) fn projected(c: &Connection, owner: &str) -> Result<Vec<Sum>> {
+    let mut stmt = db(c.prepare_cached(
+        "SELECT ordinal,provider,model,requests,attempts,success,status_known,sessions,input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,cost,unpriced,duration_ms,measured_outputs,generation_ms,first_token_sum_ms,first_token_samples,cache_read_eligible,cache_input_eligible FROM usage_daily_metrics WHERE kind=1 AND owner=?1 ORDER BY ordinal",
+    ))?;
+    let rows = db(stmt.query_map([owner], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            Sum {
+                provider: r.get(1)?,
+                model: r.get(2)?,
+                totals: totals(r, 3)?,
+            },
+        ))
+    }))?;
+    let mut sums = Vec::new();
+    for row in rows {
+        let (ordinal, sum) = db(row)?;
+        if ordinal != sums.len() as i64 {
+            return Ok(Vec::new());
+        }
+        sums.push(sum);
+    }
+    Ok(sums)
 }
 
 fn gateway_kind(alias: &str) -> String {
