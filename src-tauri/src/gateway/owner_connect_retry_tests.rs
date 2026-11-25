@@ -326,3 +326,37 @@ async fn newly_admitted_owner_gets_connection_retries_before_backup() {
     assert_eq!(backup.load(Ordering::SeqCst), 0);
     gateway.stop().await.unwrap();
 }
+
+/// Sets the queue switch of the provider at `index`.
+fn queue(gateway: &Gateway, dir: &tempfile::TempDir, index: usize, queued: bool) {
+    let id = gateway.view().providers[index].id.clone();
+    update(gateway, dir, Edit::QueueProvider { id, queued });
+}
+
+#[tokio::test]
+async fn an_owner_taken_out_of_the_queue_during_its_retry_wait_leaves_the_request_to_the_queue() {
+    let (dir, gateway, _port, backup) = setup().await;
+    // The owner is the whole queue when the request comes.
+    queue(&gateway, &dir, 1, false);
+    let g = gateway.clone();
+    let pending = tokio::spawn(async move { followup(&g).await });
+    waiting(&gateway).await;
+    // The backup enters the queue during the owner's wait, and the owner
+    // leaves it.
+    queue(&gateway, &dir, 1, true);
+    queue(&gateway, &dir, 0, false);
+    assert_eq!(pending.await.unwrap()["provider"], "backup");
+    assert_eq!(backup.load(Ordering::SeqCst), 1);
+    assert_eq!(gateway.view().providers[0].rpm_used, 2);
+    gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_thread_whose_owner_left_the_queue_sends_its_next_request_to_the_queue() {
+    let (dir, gateway, _port, backup) = setup().await;
+    queue(&gateway, &dir, 0, false);
+    assert_eq!(followup(&gateway).await["provider"], "backup");
+    assert_eq!(backup.load(Ordering::SeqCst), 1);
+    assert_eq!(gateway.view().providers[0].rpm_used, 1);
+    gateway.stop().await.unwrap();
+}

@@ -1,6 +1,7 @@
 // 覆盖原生 WebSocket 重连和输出后的重放保护。
 use super::*;
 use crate::gateway::failure_policy;
+use crate::gateway::test_support::until;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -476,6 +477,259 @@ async fn native_websocket_reconnects_on_the_next_turn_after_idle_upstream_close(
         .unwrap();
     drop(client);
     g.stop().await.unwrap();
+}
+
+/// A provider that drops every turn before it answers.
+async fn dropping() -> (u16, Arc<NativeState>) {
+    native_server(|_connection, mut ws, state| async move {
+        if let Some(frame) =
+            native_next("dropping fixture waiting for response.create", &mut ws).await
+        {
+            record_native_request(&state, &frame);
+            let _ = ws
+                .send(yawc::Frame::close(1011.into(), "fixture disconnect"))
+                .await;
+        }
+    })
+    .await
+}
+
+/// A provider that answers every turn in full.
+async fn answering() -> (u16, Arc<NativeState>) {
+    native_server(|_connection, mut ws, state| async move {
+        while let Some(frame) = ws.next().await {
+            if frame.opcode() == yawc::OpCode::Close {
+                break;
+            }
+            if frame.opcode().is_control() {
+                continue;
+            }
+            record_native_request(&state, &frame);
+            for event in [NATIVE_CREATED, NATIVE_COMPLETED] {
+                if ws.send(yawc::Frame::text(event.to_owned())).await.is_err() {
+                    return;
+                }
+            }
+        }
+    })
+    .await
+}
+
+/// Sends the turn and leaves the client waiting for its answer.
+async fn turn(client: &mut yawc::TcpWebSocket) {
+    client
+        .send(yawc::Frame::text(NATIVE_CREATE.to_owned()))
+        .await
+        .unwrap();
+}
+
+/// The turn's whole answer reached the client.
+async fn answered(client: &mut yawc::TcpWebSocket) {
+    for event in ["response.created", "response.completed"] {
+        let frame = native_next("client waiting for the turn's answer", client)
+            .await
+            .unwrap();
+        assert!(frame.as_str().contains(event), "{}", frame.as_str());
+    }
+}
+
+/// Takes the fixture's first provider out of the queue, after `backup` has
+/// entered it when there is one.
+fn dequeue(g: &Gateway, t: &tempfile::TempDir, backup: Option<u16>) {
+    let id = g.view().providers[0].id.clone();
+    if let Some(port) = backup {
+        update(
+            g,
+            t,
+            form(json!({
+                "baseUrl": format!("http://127.0.0.1:{port}"),
+                "token": "upstream-fixture-token",
+            })),
+        );
+    }
+    update(g, t, Edit::QueueProvider { id, queued: false });
+}
+
+#[tokio::test]
+async fn a_turn_waiting_to_reconnect_leaves_a_provider_taken_out_of_the_queue() {
+    // Taken out during the wait between the connections, and during the wait
+    // for the minute's next send that follows it.
+    for max_rpm in [600, 1] {
+        let (port, state) = dropping().await;
+        let (backup, backup_state) = answering().await;
+        let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
+        native_retry_settings(&g, &t, 1, max_rpm);
+        start(&g, &t).await;
+        let mut client = concurrency::responses_client(&g).await;
+        turn(&mut client).await;
+        wait_native_request(&state).await;
+        wait_for_websocket_retry(&g, "the turn did not wait to reconnect").await;
+        if max_rpm == 1 {
+            until(|| {
+                g.0.admission.websocket_retries().is_empty() && g.view().waiting_requests == 1
+            })
+            .await;
+        }
+        // The provider that gets the turn enters the queue only now.
+        dequeue(&g, &t, Some(backup));
+        answered(&mut client).await;
+        assert_eq!(state.connections.load(Ordering::SeqCst), 1, "{max_rpm}");
+        assert_eq!(
+            state.requests.lock().as_slice(),
+            &[NATIVE_CREATE.as_bytes()],
+            "{max_rpm}"
+        );
+        assert_eq!(
+            backup_state.requests.lock().as_slice(),
+            &[NATIVE_CREATE.as_bytes()],
+            "{max_rpm}"
+        );
+        client
+            .send(yawc::Frame::close(1000.into(), "fixture done"))
+            .await
+            .unwrap();
+        drop(client);
+        g.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_turn_waiting_to_reconnect_ends_when_its_provider_leaves_the_queue_empty() {
+    let (port, state) = dropping().await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
+    native_retry_settings(&g, &t, 1, 600);
+    start(&g, &t).await;
+    let mut client = concurrency::responses_client(&g).await;
+    turn(&mut client).await;
+    wait_native_request(&state).await;
+    wait_for_websocket_retry(&g, "the turn did not wait to reconnect").await;
+    dequeue(&g, &t, None);
+    let closed = native_next("client waiting for close", &mut client)
+        .await
+        .unwrap();
+    assert_eq!(closed.opcode(), yawc::OpCode::Close);
+    assert_eq!(closed.close_code().map(u16::from), Some(1013));
+    assert_eq!(
+        closed.close_reason().unwrap(),
+        Some("all eligible providers failed")
+    );
+    assert_eq!(state.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(state.requests.lock().len(), 1);
+    drop(client);
+    g.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_turn_following_a_response_reconnects_to_that_responses_provider_out_of_the_queue() {
+    let (port, state) = native_server(|connection, mut ws, state| async move {
+        if let Some(frame) =
+            native_next("cursor fixture waiting for response.create", &mut ws).await
+        {
+            record_native_request(&state, &frame);
+            if connection == 1 {
+                let _ = ws
+                    .send(yawc::Frame::close(1011.into(), "fixture disconnect"))
+                    .await;
+                return;
+            }
+            for event in [NATIVE_CREATED, NATIVE_COMPLETED] {
+                ws.send(yawc::Frame::text(event.to_owned())).await.unwrap();
+            }
+            while let Some(frame) = ws.next().await {
+                if frame.opcode() == yawc::OpCode::Close {
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+    let (backup, backup_state) = answering().await;
+    let (t, g) = fixture(vec![
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{backup}"),
+    ])
+    .await;
+    native_retry_settings(&g, &t, 1, 600);
+    start(&g, &t).await;
+    // The response the turn continues was the first provider's.
+    g.remember("resp_fixture_previous", &g.view().providers[0].id);
+    let mut client = concurrency::responses_client(&g).await;
+    client
+        .send(yawc::Frame::text(
+            r#"{"type":"response.create","model":"fixture-model","previous_response_id":"resp_fixture_previous","input":"fixture"}"#
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+    wait_native_request(&state).await;
+    wait_for_websocket_retry(&g, "the turn did not wait to reconnect").await;
+    dequeue(&g, &t, None);
+    answered(&mut client).await;
+    assert_eq!(state.connections.load(Ordering::SeqCst), 2);
+    assert_eq!(state.requests.lock().len(), 2);
+    assert!(backup_state.requests.lock().is_empty());
+    client
+        .send(yawc::Frame::close(1000.into(), "fixture done"))
+        .await
+        .unwrap();
+    drop(client);
+    g.stop().await.unwrap();
+}
+
+/// A client connection in the name of `thread`, or of none.
+async fn connected(g: &Gateway, thread: Option<&str>) -> yawc::TcpWebSocket {
+    match thread {
+        Some(thread) => crate::gateway::test_support::loopback::ws_client(g, thread).await,
+        None => concurrency::responses_client(g).await,
+    }
+}
+
+#[tokio::test]
+async fn a_new_turn_is_not_sent_over_a_connection_whose_provider_left_the_queue() {
+    // On a connection of no thread, and on one of a thread the provider owns.
+    const THREAD: &str = "fixture-ws-thread";
+    for thread in [None, Some(THREAD)] {
+        let (port, state) = answering().await;
+        let (backup, backup_state) = answering().await;
+        let (t, g) = fixture(vec![
+            format!("http://127.0.0.1:{port}"),
+            format!("http://127.0.0.1:{backup}"),
+        ])
+        .await;
+        native_retry_settings(&g, &t, 1, 600);
+        start(&g, &t).await;
+        let mut client = connected(&g, thread).await;
+        turn(&mut client).await;
+        answered(&mut client).await;
+        dequeue(&g, &t, None);
+        // The connection is closed for the client to open another, which
+        // the queue routes as it is now.
+        turn(&mut client).await;
+        let closed = native_next("client waiting for close", &mut client)
+            .await
+            .unwrap();
+        assert_eq!(closed.opcode(), yawc::OpCode::Close, "{thread:?}");
+        assert_eq!(closed.close_code().map(u16::from), Some(1013));
+        assert!(backup_state.requests.lock().is_empty(), "{thread:?}");
+        drop(client);
+        let mut client = connected(&g, thread).await;
+        turn(&mut client).await;
+        answered(&mut client).await;
+        assert_eq!(state.requests.lock().len(), 1, "{thread:?}");
+        assert_eq!(backup_state.requests.lock().len(), 1, "{thread:?}");
+        if thread.is_some() {
+            // The thread is the second provider's from here on.
+            let session = crate::gateway::test_support::digest(THREAD);
+            let second = g.view().providers[1].id.clone();
+            until(|| g.0.compaction.owner(&session).as_deref() == Some(second.as_str())).await;
+        }
+        client
+            .send(yawc::Frame::close(1000.into(), "fixture done"))
+            .await
+            .unwrap();
+        drop(client);
+        g.stop().await.unwrap();
+    }
 }
 
 fn auto_retry(g: &Gateway, t: &tempfile::TempDir) {

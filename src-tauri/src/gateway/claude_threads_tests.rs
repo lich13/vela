@@ -103,6 +103,33 @@ async fn a_new_conversation_goes_to_the_provider_asking_for_new_ones_and_stays_t
 }
 
 #[tokio::test]
+async fn a_conversation_leaves_the_provider_that_was_taken_out_of_the_queue() {
+    // With no other provider asking for conversations, and with one whose
+    // asking keeps every conversation with its provider.
+    for kept in [false, true] {
+        let (f, _upstreams, seen) = pair().await;
+        asks(&f, 1, false, true);
+        if kept {
+            f.edit(form(json!({
+                "name": "fixture-P3",
+                "baseUrl": "https://three.example.invalid/v1",
+                "token": FIXTURE_KEY,
+            })));
+            asks(&f, 2, true, false);
+        }
+        f.start().await;
+        let session = [(SESSION, "fixture-left")];
+        assert_eq!(asked(&f, &seen, &session, FIRST).await, Ok(1), "{kept}");
+        assert_eq!(asked(&f, &seen, &session, LATER).await, Ok(1), "{kept}");
+        let id = f.gateway.view().providers[1].id.clone();
+        f.edit(Edit::QueueProvider { id, queued: false });
+        assert_eq!(asked(&f, &seen, &session, LATER).await, Ok(0), "{kept}");
+        assert_eq!(asked(&f, &seen, &session, LATER).await, Ok(0), "{kept}");
+        f.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn a_compacted_conversation_moves_to_the_provider_ahead_that_asks_for_compacted_ones() {
     let (f, _upstreams, seen) = pair().await;
     asks(&f, 0, true, false);

@@ -316,10 +316,8 @@ async fn a_provider_taken_out_of_the_queue_before_its_retry_leaves_it_to_the_que
     let (f, hits, _upstreams) = pair().await;
     f.start().await;
     let pending = sent(&f);
-    until(|| {
-        hits[0].load(Ordering::SeqCst) == 1 && !f.gateway.view().transient_retries.is_empty()
-    })
-    .await;
+    until(|| hits[0].load(Ordering::SeqCst) == 1 && !f.gateway.view().transient_retries.is_empty())
+        .await;
     dequeue(&f);
     moved_once(&pending.await.unwrap(), &hits);
     f.stop().await;
