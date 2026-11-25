@@ -535,13 +535,13 @@ pub fn derive_long_waits(
                 .single()
                 .map(|dt| dt.format("%H:%M:%S").to_string())
                 .unwrap_or_default();
-            // The time of the attempt or wait in progress; the whole request
-            // only decides whether it is listed.
+            // The attempt or wait in progress first, then the whole request,
+            // which a resend or a retry does not start over.
             let attempt = r.attempt_seconds.saturating_add(delta);
-            let timing_text = match r.remaining_seconds {
-                None => format!("本次 {attempt} 秒"),
-                Some(rem) => format!("本次 {attempt} 秒 · 剩余 {} 秒", rem.saturating_sub(delta)),
-            };
+            let mut timing_text = format!("本次 {attempt} 秒 · 总计 {elapsed} 秒");
+            if let Some(rem) = r.remaining_seconds {
+                timing_text.push_str(&format!(" · 剩余 {} 秒", rem.saturating_sub(delta)));
+            }
             let received_text = r
                 .received_bytes
                 .map(|bytes| format!("已收 {}", format_bytes(bytes)));

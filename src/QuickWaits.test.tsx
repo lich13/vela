@@ -19,7 +19,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
-it("keeps long compaction cancellable and shows this attempt's time without a countdown", async () => {
+it("keeps long compaction cancellable and shows this attempt's time and the total without a countdown", async () => {
   const start = Math.floor(Date.now() / 1000);
   mock.command.mockResolvedValueOnce("resent");
   render(
@@ -46,8 +46,8 @@ it("keeps long compaction cancellable and shows this attempt's time without a co
     />,
   );
   expect(screen.getByText("压缩中")).toBeInTheDocument();
-  expect(screen.getByText("本次 45 秒")).toBeInTheDocument();
-  expect(screen.queryByText(/剩余|已用|601/)).not.toBeInTheDocument();
+  expect(screen.getByText("本次 45 秒 · 总计 601 秒")).toBeInTheDocument();
+  expect(screen.queryByText(/剩余|已用/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "重发" }));
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("cancel_gateway_wait", {
@@ -143,12 +143,16 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
     />,
   );
   expect(screen.getByText("等待准入")).toBeInTheDocument();
-  expect(screen.getByText("本次 20 秒 · 剩余 239 秒")).toBeInTheDocument();
+  expect(
+    screen.getByText("本次 20 秒 · 总计 61 秒 · 剩余 239 秒"),
+  ).toBeInTheDocument();
   act(() => {
     now += 10_000;
     vi.advanceTimersByTime(10_000);
   });
-  expect(screen.getByText("本次 30 秒 · 剩余 229 秒")).toBeInTheDocument();
+  expect(
+    screen.getByText("本次 30 秒 · 总计 71 秒 · 剩余 229 秒"),
+  ).toBeInTheDocument();
   view.rerender(
     <QuickWaits
       {...props}
@@ -170,7 +174,7 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
     now += 600_000;
     vi.advanceTimersByTime(600_000);
   });
-  expect(screen.getByText("本次 30 秒")).toBeInTheDocument();
+  expect(screen.getByText("本次 30 秒 · 总计 71 秒")).toBeInTheDocument();
   view.rerender(
     <QuickWaits
       {...props}
@@ -199,12 +203,16 @@ it("anchors the countdown to the received budget and excludes frozen time", () =
       }}
     />,
   );
-  expect(screen.getByText("本次 30 秒 · 剩余 229 秒")).toBeInTheDocument();
+  expect(
+    screen.getByText("本次 30 秒 · 总计 71 秒 · 剩余 229 秒"),
+  ).toBeInTheDocument();
   act(() => {
     now += 1_000;
     vi.advanceTimersByTime(1_000);
   });
-  expect(screen.getByText("本次 31 秒 · 剩余 228 秒")).toBeInTheDocument();
+  expect(
+    screen.getByText("本次 31 秒 · 总计 72 秒 · 剩余 228 秒"),
+  ).toBeInTheDocument();
 });
 
 it("maps buffering phase to 缓冲响应 with this attempt's seconds and cancellation", async () => {
@@ -234,7 +242,7 @@ it("maps buffering phase to 缓冲响应 with this attempt's seconds and cancell
     />,
   );
   expect(screen.getByText("缓冲响应")).toBeInTheDocument();
-  expect(screen.getByText("本次 12 秒")).toBeInTheDocument();
+  expect(screen.getByText("本次 12 秒 · 总计 75 秒")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "重发" }));
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("cancel_gateway_wait", {

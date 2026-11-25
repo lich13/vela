@@ -825,11 +825,14 @@ struct QuickLongWaitsView: View {
                         Spacer(minLength: 4)
                         Text(item.phaseText)
                             .font(.system(size: 12))
-                        Spacer(minLength: 4)
-                        Text(item.timingText)
-                            .font(.system(size: 12).monospacedDigit())
                     }
                     .foregroundColor(palette.muted)
+                    // This attempt, the whole request and what is left of its
+                    // budget have a line to themselves.
+                    Text(item.timingText)
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundColor(palette.muted)
+                        .lineLimit(1)
                     if let received = item.receivedText, let rate = item.rateText {
                         HStack(spacing: 8) {
                             Text(received)

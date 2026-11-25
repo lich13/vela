@@ -625,7 +625,9 @@ it("refreshes a frozen wait when the panel first observes thaw", async () => {
     mock.command.mock.calls.filter(([name]) => name === "get_gateway"),
   ).toHaveLength(before + 1);
   expect(screen.getByText("容量等待")).toBeInTheDocument();
-  expect(screen.getByText("本次 30 秒 · 剩余 60 秒")).toBeInTheDocument();
+  expect(
+    screen.getByText("本次 30 秒 · 总计 90 秒 · 剩余 60 秒"),
+  ).toBeInTheDocument();
 });
 
 it("signals quick_ready once on top-level mount without repeating on client tab switches", async () => {

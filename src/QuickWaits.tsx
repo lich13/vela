@@ -88,8 +88,11 @@ export default function QuickWaits({
               })}
             </time>
             <span>{phases[r.phase] ?? r.phase}</span>
+          </div>
+          <div className="quick-wait-timing">
             <span>
-              本次 {r.attemptSeconds + elapsed(r.phase)} 秒
+              本次 {r.attemptSeconds + elapsed(r.phase)} 秒 · 总计{" "}
+              {r.elapsedSeconds + elapsed(r.phase)} 秒
               {r.remainingSeconds != null &&
                 ` · 剩余 ${Math.max(0, r.remainingSeconds - elapsed(r.phase))} 秒`}
             </span>

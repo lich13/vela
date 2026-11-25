@@ -2387,7 +2387,7 @@ mod tests {
 
         // r-short reaches 58 + 3 = 61s (>= 60s) with buffering -> "缓冲响应";
         // r-frozen does not advance elapsed while frozen (stays 59s < 60s).
-        // The text counts the attempt in progress, not the whole request.
+        // The text counts the attempt in progress and the whole request.
         let waits = &card.long_waits;
         assert_eq!(
             waits
@@ -2397,8 +2397,8 @@ mod tests {
             ["r-short", "r-silent", "r-retry"]
         );
         assert_eq!(waits[0].phase_text, "缓冲响应");
-        assert_eq!(waits[0].timing_text, "本次 15 秒");
-        assert_eq!(waits[2].timing_text, "本次 23 秒 · 剩余 27 秒");
+        assert_eq!(waits[0].timing_text, "本次 15 秒 · 总计 61 秒");
+        assert_eq!(waits[2].timing_text, "本次 23 秒 · 总计 93 秒 · 剩余 27 秒");
 
         // A transfer adds what it has received and its rate, or its silence
         // from five seconds on; a request that is not receiving adds nothing.
