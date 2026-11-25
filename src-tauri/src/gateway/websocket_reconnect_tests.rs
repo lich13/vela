@@ -732,6 +732,53 @@ async fn a_new_turn_is_not_sent_over_a_connection_whose_provider_left_the_queue(
     }
 }
 
+#[tokio::test]
+async fn a_first_turn_waiting_for_a_slot_leaves_a_provider_taken_out_of_the_queue() {
+    let (port, state) = answering().await;
+    let (backup, backup_state) = answering().await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}")]).await;
+    native_retry_settings(&g, &t, 1, 600);
+    let id = g.view().providers[0].id.clone();
+    update(
+        &g,
+        &t,
+        Edit::ConcurrencyProvider {
+            id: id.clone(),
+            max_concurrency: 1,
+        },
+    );
+    start(&g, &t).await;
+    // The provider's one slot is taken before the turn comes for it.
+    let slot =
+        g.0.admission
+            .acquire(
+                &[g.route(&id).unwrap()],
+                false,
+                100,
+                &mut crate::gateway::admission::Budget::new(1),
+            )
+            .await
+            .unwrap();
+    let mut client = concurrency::responses_client(&g).await;
+    turn(&mut client).await;
+    until(|| g.view().waiting_requests == 1).await;
+    // The provider that gets the turn enters the queue only now.
+    dequeue(&g, &t, Some(backup));
+    answered(&mut client).await;
+    assert_eq!(state.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        backup_state.requests.lock().as_slice(),
+        &[NATIVE_CREATE.as_bytes()]
+    );
+    drop(slot);
+    client
+        .send(yawc::Frame::close(1000.into(), "fixture done"))
+        .await
+        .unwrap();
+    drop(client);
+    g.stop().await.unwrap();
+}
+
 fn auto_retry(g: &Gateway, t: &tempfile::TempDir) {
     update(
         g,

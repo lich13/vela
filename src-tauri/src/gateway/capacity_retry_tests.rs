@@ -672,6 +672,80 @@ async fn capacity_retries_wait_at_the_rpm_limit_without_an_extra_upstream_attemp
     g.stop().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_capacity_wait_leaves_a_provider_taken_out_of_the_queue() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let upstream = server(move |_| {
+        count.fetch_add(1, Ordering::SeqCst);
+        async { capacity_response() }
+    })
+    .await;
+    let backup_hits = Arc::new(AtomicUsize::new(0));
+    let backup_count = backup_hits.clone();
+    let backup = server(move |_| {
+        backup_count.fetch_add(1, Ordering::SeqCst);
+        async { Response::new(full("fixture-recovered")) }
+    })
+    .await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{upstream}/v1")]).await;
+    configure(&g, &t, 0);
+    update(
+        &g,
+        &t,
+        Edit::Settings {
+            settings: Settings {
+                capacity_retry_seconds: 60,
+                ..g.view().settings
+            },
+        },
+    );
+    start(&g, &t).await;
+    let pending = {
+        let g = g.clone();
+        tokio::spawn(async move {
+            request(
+                &g,
+                "/v1/responses",
+                br#"{"model":"fixture-model"}"#.to_vec(),
+                vec![("content-type", "application/json")],
+            )
+            .await
+        })
+    };
+    until(|| !g.view().capacity_retries.is_empty()).await;
+    // The provider that gets the request enters the queue only now.
+    update(
+        &g,
+        &t,
+        form(serde_json::json!({
+            "baseUrl": format!("http://127.0.0.1:{backup}/v1"),
+            "token": "upstream-fixture-token",
+        })),
+    );
+    update(
+        &g,
+        &t,
+        Edit::QueueProvider {
+            id: g.view().providers[0].id.clone(),
+            queued: false,
+        },
+    );
+    let response = tokio::time::timeout(Duration::from_secs(4), pending)
+        .await
+        .expect("the request stayed in its provider's capacity wait")
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        "fixture-recovered"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(backup_hits.load(Ordering::SeqCst), 1);
+    assert!(g.view().capacity_retries.is_empty());
+    g.stop().await.unwrap();
+}
+
 struct NativeSeen {
     connections: AtomicUsize,
     frames: Mutex<Vec<Vec<u8>>>,
@@ -1173,6 +1247,72 @@ async fn websocket_capacity_wait_obeys_response_cancel_and_gateway_stop_with_zer
             g.stop().await.unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn a_websocket_capacity_wait_leaves_a_provider_taken_out_of_the_queue() {
+    let (port, seen) = native_server(0, |_connection, mut socket, seen| async move {
+        capture_request(&mut socket, &seen).await;
+        let _ = socket
+            .send(yawc::Frame::text(CAPACITY_EVENT.to_owned()))
+            .await;
+    })
+    .await;
+    let (backup, backup_seen) = native_server(0, |_connection, mut socket, seen| async move {
+        capture_request(&mut socket, &seen).await;
+        complete_native(socket).await;
+    })
+    .await;
+    let (t, g) = fixture(vec![format!("http://127.0.0.1:{port}/v1")]).await;
+    configure(&g, &t, 0);
+    update(
+        &g,
+        &t,
+        Edit::Settings {
+            settings: Settings {
+                capacity_retry_seconds: 60,
+                ..g.view().settings
+            },
+        },
+    );
+    start(&g, &t).await;
+    let mut client = concurrency::responses_client(&g).await;
+    client
+        .send(yawc::Frame::text(CREATE.to_owned()))
+        .await
+        .unwrap();
+    until(|| g.view().waiting_requests == 1 && g.view().providers[0].active_requests == 0).await;
+    // The provider that gets the turn enters the queue only now.
+    update(
+        &g,
+        &t,
+        form(serde_json::json!({
+            "baseUrl": format!("http://127.0.0.1:{backup}/v1"),
+            "token": "upstream-fixture-token",
+        })),
+    );
+    update(
+        &g,
+        &t,
+        Edit::QueueProvider {
+            id: g.view().providers[0].id.clone(),
+            queued: false,
+        },
+    );
+    assert_eq!(next_ws(&mut client).await.unwrap().as_str(), CREATED);
+    assert_eq!(next_ws(&mut client).await.unwrap().as_str(), COMPLETED);
+    assert_eq!(seen.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(seen.frames.lock().len(), 1);
+    assert_eq!(
+        backup_seen.frames.lock().as_slice(),
+        &[CREATE.as_bytes().to_vec()]
+    );
+    client
+        .send(yawc::Frame::close(1000.into(), "fixture done"))
+        .await
+        .unwrap();
+    drop(client);
+    g.stop().await.unwrap();
 }
 
 #[tokio::test]

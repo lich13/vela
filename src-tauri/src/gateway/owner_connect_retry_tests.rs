@@ -328,7 +328,7 @@ async fn newly_admitted_owner_gets_connection_retries_before_backup() {
 }
 
 /// Sets the queue switch of the provider at `index`.
-fn queue(gateway: &Gateway, dir: &tempfile::TempDir, index: usize, queued: bool) {
+pub(super) fn queue(gateway: &Gateway, dir: &tempfile::TempDir, index: usize, queued: bool) {
     let id = gateway.view().providers[index].id.clone();
     update(gateway, dir, Edit::QueueProvider { id, queued });
 }

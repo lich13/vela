@@ -1027,6 +1027,93 @@ async fn filtered_dsh_provider_retries_interrupted_prebuffer_and_honors_retry_af
     }
 }
 
+/// Sets the queue switch of the fixture's provider at `index`.
+fn queue(fixture: &Fixture, index: usize, queued: bool) {
+    let view = fixture.gateway.view();
+    let id = view.providers[index].id.clone();
+    fixture
+        .gateway
+        .edit(
+            Edit::QueueProvider { id, queued },
+            &view.revision,
+            fixture.home.path(),
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_fixed_provider_taken_out_of_the_queue_leaves_its_short_retry_to_the_queue() {
+    // After a stream cut before any output, a service error told by the
+    // status, and one framed at the start of the stream.
+    for failure in ["cut", "status", "framed"] {
+        let calls = Arc::new(Mutex::new(0));
+        let seen = calls.clone();
+        let first = server(move |_| {
+            let seen = seen.clone();
+            async move {
+                *seen.lock() += 1;
+                if failure == "status" {
+                    return Response::builder()
+                        .status(502)
+                        .body(replay::full("fixture bad gateway"))
+                        .unwrap();
+                }
+                if failure == "framed" {
+                    return Response::builder().header("content-type", "text/event-stream")
+                        .body(replay::full("data: {\"error\":{\"type\":\"server_error\",\"message\":\"fixture service failure\"}}\n\n")).unwrap();
+                }
+                let frames = async_stream::try_stream! {
+                    yield hyper::body::Frame::data(bytes::Bytes::from_static(b": waiting\n\n"));
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Err::<(), crate::gateway::connector::BoxError>(std::io::Error::other("fixture stream interrupted").into())?;
+                };
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(http_body_util::StreamBody::new(frames).boxed_unsync())
+                    .unwrap()
+            }
+        })
+        .await;
+        let other_calls = Arc::new(Mutex::new(0));
+        let other_seen = other_calls.clone();
+        let second = server(move |request| {
+            let seen = other_seen.clone();
+            async move {
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(value["model"], "vendor-1-flash");
+                *seen.lock() += 1;
+                success()
+            }
+        })
+        .await;
+        let fixture = Fixture::new(&[first.url("/v1"), second.url("/v1")], false).await;
+        retry_settings(&fixture, 3);
+        // The first provider is the whole queue when the request comes.
+        queue(&fixture, 1, false);
+        let request = fixture.request(models::FLASH, failure != "status");
+        let moving = async {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while fixture.gateway.view().transient_retries.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            // The second enters the queue during the wait, and the first
+            // leaves it.
+            queue(&fixture, 1, true);
+            queue(&fixture, 0, false);
+        };
+        let (response, ()) = tokio::join!(request, moving);
+        assert_eq!(response.status(), 200, "{failure}");
+        assert!(response.text().await.unwrap().contains("fixture"));
+        assert_eq!(*calls.lock(), 1, "{failure}");
+        assert_eq!(*other_calls.lock(), 1, "{failure}");
+        fixture.gateway.stop().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn dsh_failure_reaching_breaker_threshold_does_not_schedule_short_wait() {
     for framed in [false, true] {
