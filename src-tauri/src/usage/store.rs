@@ -328,11 +328,12 @@ impl Store {
         *self.overview_cache.lock() = Some((key, view.clone()));
         Ok(view)
     }
+    /// Whether the periods differed from the saved ones and were written.
     pub(super) fn save_antigravity_quota(
         &mut self,
         id: &str,
         periods: &super::antigravity::quota::Periods,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let key = format!("antigravity_quota:{id}");
         let body = serde_json::to_string(periods).map_err(|_| failure("当前周期无法保存"))?;
         let current: Option<String> = db(self
@@ -341,10 +342,11 @@ impl Store {
                 r.get(0)
             })
             .optional())?;
-        if current.as_deref() != Some(&body) {
+        let changed = current.as_deref() != Some(&body);
+        if changed {
             db(self.connection.execute("INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, body]))?;
         }
-        Ok(())
+        Ok(changed)
     }
     pub(super) fn antigravity_models(&self) -> Result<Option<String>> {
         db(self

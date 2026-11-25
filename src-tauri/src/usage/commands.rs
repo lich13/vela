@@ -70,20 +70,38 @@ pub async fn get_usage_dashboard(r: &Runtime, filter: Filter) -> Result<store::D
         .await
         .map_err(|_| failure("用量查询中断"))?
 }
+/// The history and the account periods as they are saved. Asking for the
+/// quota is `refresh_antigravity_usage_quota`, which the page sends afterwards.
 pub async fn get_antigravity_usage_stats(
     r: &Runtime,
     filter: Filter,
 ) -> Result<super::antigravity::AntigravityUsageStats> {
     let s = r.usage.clone();
-    let quota_error = s.refresh_antigravity_quota().await.err().map(|e| e.message);
     let now_ms = now();
-    tokio::task::spawn_blocking(move || {
-        let mut stats = s.read(|db| db.antigravity_stats(&filter, now_ms))?;
-        stats.quota_error = quota_error;
-        Ok(stats)
+    tokio::task::spawn_blocking(move || s.read(|db| db.antigravity_stats(&filter, now_ms)))
+        .await
+        .map_err(|_| failure("Antigravity 统计查询中断"))?
+}
+/// What asking for the quota of the signed-in Antigravity account came to.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaRefresh {
+    /// The saved periods are no longer the ones the statistics were read with.
+    pub changed: bool,
+    /// Why the quota could not be read, to show beside the saved periods.
+    pub error: Option<String>,
+}
+pub async fn refresh_antigravity_usage_quota(r: &Runtime) -> Result<QuotaRefresh> {
+    Ok(match r.usage.refresh_antigravity_quota().await {
+        Ok(changed) => QuotaRefresh {
+            changed,
+            error: None,
+        },
+        Err(error) => QuotaRefresh {
+            changed: false,
+            error: Some(error.message),
+        },
     })
-    .await
-    .map_err(|_| failure("Antigravity 统计查询中断"))?
 }
 pub async fn get_claude_usage_stats(
     r: &Runtime,

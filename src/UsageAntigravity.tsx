@@ -126,6 +126,7 @@ function TrackWindowBlock({
 
 export default function UsageAntigravity({
   stats,
+  quotaError,
   busy,
   client = "antigravity",
   currentAccountId,
@@ -135,6 +136,11 @@ export default function UsageAntigravity({
 }: {
   client?: "antigravity" | "claude";
   stats: AntigravityUsageStats | null;
+  /**
+   * Why the quota asked for after the statistics could not be read. An
+   * instance that asks while it reads them reports it in `stats` instead.
+   */
+  quotaError?: string | null;
   busy: boolean;
   currentAccountId: string | null;
   selectedProvider?: string;
@@ -282,9 +288,9 @@ export default function UsageAntigravity({
               ))}
             </select>
           </label>
-          {stats.quotaError && (
+          {(quotaError ?? stats.quotaError) && (
             <p className="form-error" role="alert">
-              {stats.quotaError}
+              {quotaError ?? stats.quotaError}
             </p>
           )}
           {account && (

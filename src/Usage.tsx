@@ -1,5 +1,5 @@
 import UsageBill from "./UsageBill";
-import { useInstance } from "./instance";
+import { currentInstance, useInstance } from "./instance";
 import Detail from "./UsageDetail";
 import Sources from "./UsageSources";
 import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
@@ -105,12 +105,32 @@ type RankingView = {
 };
 const initialRanking: RankingView = { page: 1, sort: "requests", asc: false };
 const empty: UsagePage = { rows: [], page: 1, total: 0, detailSince: 0 };
+type QuotaAnswer = CommandResult<"refresh_antigravity_usage_quota">;
+/** The instances whose Antigravity quota is being asked for, each once at a time. */
+const quotaAsked = new Map<string, Promise<QuotaAnswer>>();
+/** Asks the instance shown for its quota, unless it is being asked already. */
+function askQuota() {
+  const instance = currentInstance();
+  let asked = quotaAsked.get(instance);
+  if (!asked) {
+    asked = command("refresh_antigravity_usage_quota")
+      .catch(
+        (e): QuotaAnswer => ({ changed: false, error: errorOf(e).message }),
+      )
+      .finally(() => quotaAsked.delete(instance));
+    quotaAsked.set(instance, asked);
+  }
+  return asked;
+}
 export default function Usage({
   onDirtyChange,
 }: {
   onDirtyChange?: (dirty: boolean) => void;
 }) {
-  const { remote } = useInstance();
+  const { remote, supports } = useInstance();
+  // A server from before the quota had a command of its own still asks for it
+  // while it reads the statistics, and reports the failure with them.
+  const quotaApart = supports("refresh_antigravity_usage_quota");
   const [billOpen, setBillOpen] = useState(false);
   const [billResult, setBillResult] = useState("");
   const [range, setRange] = useState("today"),
@@ -127,6 +147,7 @@ export default function Usage({
   const [claudeQuota, setClaudeQuota] = useState<ClaudeUsageQuota | null>(null);
   const [agStats, setAgStats] = useState<AntigravityUsageStats | null>(null),
     [agBusy, setAgBusy] = useState(false),
+    [agQuotaError, setAgQuotaError] = useState<string | null>(null),
     [agCurrentAccount, setAgCurrentAccount] = useState<string | null>(null);
   const [data, setData] = useState<Dashboard | null>(null),
     [logs, setLogs] = useState<UsagePage>(empty),
@@ -181,6 +202,7 @@ export default function Usage({
     if (next !== tab) {
       setAgStats(null);
       setAgBusy(false);
+      setAgQuotaError(null);
     }
     setTab(next);
   };
@@ -269,27 +291,41 @@ export default function Usage({
       if (id === rowsSequence.current) setRowsBusy(false);
     }
   }, [query, status, page, request]);
-  const loadClientStats = useCallback(async () => {
-    const id = ++agSequence.current;
-    setAgBusy(true);
-    try {
-      const filter = query();
-      const stats = await request(
-        tab === "claude"
-          ? "get_claude_usage_stats"
-          : "get_antigravity_usage_stats",
-        { filter },
-      );
-      if (id === agSequence.current) {
+  const loadClientStats = useCallback(
+    async function read(quota = true): Promise<void> {
+      const apart = quota && tab === "antigravity" && quotaApart;
+      // A question under way now may be answered before the statistics are
+      // read, so its answer is the one waited for.
+      const under = apart ? quotaAsked.get(currentInstance()) : undefined;
+      const id = ++agSequence.current;
+      setAgBusy(true);
+      try {
+        const filter = query();
+        const stats = await request(
+          tab === "claude"
+            ? "get_claude_usage_stats"
+            : "get_antigravity_usage_stats",
+          { filter },
+        );
+        if (id !== agSequence.current) return;
         setAgStats(stats);
         setError("");
+      } catch (e) {
+        if (id === agSequence.current) setError(errorOf(e).message);
+        return;
+      } finally {
+        if (id === agSequence.current) setAgBusy(false);
       }
-    } catch (e) {
-      if (id === agSequence.current) setError(errorOf(e).message);
-    } finally {
-      if (id === agSequence.current) setAgBusy(false);
-    }
-  }, [query, request, tab]);
+      if (!apart) return;
+      // The history is on the page. The quota takes its time to be answered
+      // and holds the lock the statistics are read under, so it is asked after.
+      const answer = await (under ?? askQuota());
+      if (id !== agSequence.current) return;
+      setAgQuotaError(answer.error);
+      if (answer.changed) await read(false);
+    },
+    [query, request, tab, quotaApart],
+  );
   const loadClaudeQuota = useCallback(
     async (refresh = false) => {
       try {
@@ -371,6 +407,8 @@ export default function Usage({
   }, [visible, tab, loadClaudeQuota]);
   const reloadAccountStats = useEffectEvent(() => {
     pending.current.clear();
+    // What went wrong was about the account signed in until now.
+    setAgQuotaError(null);
     if (tab === "antigravity") void loadClientStats();
   });
   useEffect(() => {
@@ -712,6 +750,7 @@ export default function Usage({
           <UsageAntigravity
             client={tab as "claude" | "antigravity"}
             stats={agStats}
+            quotaError={agQuotaError}
             busy={agBusy}
             currentAccountId={agCurrentAccount}
             selectedProvider={provider}
