@@ -746,6 +746,100 @@ async fn a_capacity_wait_leaves_a_provider_taken_out_of_the_queue() {
     g.stop().await.unwrap();
 }
 
+const THREAD: &str = "fixture-capacity-thread";
+
+/// The capacity waits held for the thread's owner.
+fn owner_waits(g: &Gateway) -> usize {
+    let waits = g.view().capacity_retries;
+    waits.iter().filter(|wait| wait.existing_owner).count()
+}
+
+#[tokio::test]
+async fn a_threads_capacity_waits_leave_its_owner_taken_out_of_the_queue() {
+    // The owner answers the thread's first request and is at capacity after it.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let owner = server(move |_| {
+        let first = count.fetch_add(1, Ordering::SeqCst) == 0;
+        async move {
+            if first {
+                Response::new(full("fixture-first"))
+            } else {
+                capacity_response()
+            }
+        }
+    })
+    .await;
+    let backup_hits = Arc::new(AtomicUsize::new(0));
+    let backup_count = backup_hits.clone();
+    let backup = server(move |_| {
+        backup_count.fetch_add(1, Ordering::SeqCst);
+        async { Response::new(full("fixture-recovered")) }
+    })
+    .await;
+    let (t, g) = fixture(vec![
+        format!("http://127.0.0.1:{owner}/v1"),
+        format!("http://127.0.0.1:{backup}/v1"),
+    ])
+    .await;
+    configure(&g, &t, 0);
+    update(
+        &g,
+        &t,
+        Edit::Settings {
+            settings: Settings {
+                capacity_retry_seconds: 60,
+                ..g.view().settings
+            },
+        },
+    );
+    start(&g, &t).await;
+    let send = |g: Gateway| async move {
+        request(
+            &g,
+            "/v1/responses",
+            br#"{"model":"fixture-model","input":[{"role":"user","content":"fixture"}]}"#.to_vec(),
+            vec![("content-type", "application/json"), ("session_id", THREAD)],
+        )
+        .await
+    };
+    let first = send(g.clone()).await;
+    assert_eq!(
+        first.into_body().collect().await.unwrap().to_bytes(),
+        "fixture-first"
+    );
+    // The second waits out its owner's capacity with the other provider in
+    // the queue, and the third comes during that cooldown.
+    let second = tokio::spawn(send(g.clone()));
+    until(|| owner_waits(&g) == 1).await;
+    let third = tokio::spawn(send(g.clone()));
+    until(|| owner_waits(&g) == 2).await;
+    assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
+    update(
+        &g,
+        &t,
+        Edit::QueueProvider {
+            id: g.view().providers[0].id.clone(),
+            queued: false,
+        },
+    );
+    for pending in [second, third] {
+        let response = tokio::time::timeout(Duration::from_secs(4), pending)
+            .await
+            .expect("the request stayed in its owner's capacity wait")
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "fixture-recovered"
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(backup_hits.load(Ordering::SeqCst), 2);
+    assert!(g.view().capacity_retries.is_empty());
+    g.stop().await.unwrap();
+}
+
 struct NativeSeen {
     connections: AtomicUsize,
     frames: Mutex<Vec<Vec<u8>>>,
@@ -1303,6 +1397,83 @@ async fn a_websocket_capacity_wait_leaves_a_provider_taken_out_of_the_queue() {
     assert_eq!(next_ws(&mut client).await.unwrap().as_str(), COMPLETED);
     assert_eq!(seen.connections.load(Ordering::SeqCst), 1);
     assert_eq!(seen.frames.lock().len(), 1);
+    assert_eq!(
+        backup_seen.frames.lock().as_slice(),
+        &[CREATE.as_bytes().to_vec()]
+    );
+    client
+        .send(yawc::Frame::close(1000.into(), "fixture done"))
+        .await
+        .unwrap();
+    drop(client);
+    g.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_threads_websocket_capacity_wait_leaves_its_owner_taken_out_of_the_queue() {
+    // The owner answers the thread's first turn and is at capacity for the
+    // second, which comes over the same connection.
+    let (port, seen) = native_server(0, |_connection, mut socket, seen| async move {
+        capture_request(&mut socket, &seen).await;
+        for frame in [CREATED, COMPLETED] {
+            socket
+                .send(yawc::Frame::text(frame.to_owned()))
+                .await
+                .unwrap();
+        }
+        capture_request(&mut socket, &seen).await;
+        let _ = socket
+            .send(yawc::Frame::text(CAPACITY_EVENT.to_owned()))
+            .await;
+    })
+    .await;
+    let (backup, backup_seen) = native_server(0, |_connection, mut socket, seen| async move {
+        capture_request(&mut socket, &seen).await;
+        complete_native(socket).await;
+    })
+    .await;
+    let (t, g) = fixture(vec![
+        format!("http://127.0.0.1:{port}/v1"),
+        format!("http://127.0.0.1:{backup}/v1"),
+    ])
+    .await;
+    configure(&g, &t, 0);
+    update(
+        &g,
+        &t,
+        Edit::Settings {
+            settings: Settings {
+                capacity_retry_seconds: 60,
+                ..g.view().settings
+            },
+        },
+    );
+    start(&g, &t).await;
+    let mut client = crate::gateway::test_support::loopback::ws_client(&g, THREAD).await;
+    for turn in 0..2 {
+        client
+            .send(yawc::Frame::text(CREATE.to_owned()))
+            .await
+            .unwrap();
+        if turn == 1 {
+            // The turn waits out its owner's capacity with the other
+            // provider in the queue.
+            until(|| owner_waits(&g) == 1).await;
+            assert_eq!(backup_seen.connections.load(Ordering::SeqCst), 0);
+            update(
+                &g,
+                &t,
+                Edit::QueueProvider {
+                    id: g.view().providers[0].id.clone(),
+                    queued: false,
+                },
+            );
+        }
+        assert_eq!(next_ws(&mut client).await.unwrap().as_str(), CREATED);
+        assert_eq!(next_ws(&mut client).await.unwrap().as_str(), COMPLETED);
+    }
+    assert_eq!(seen.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(seen.frames.lock().len(), 2);
     assert_eq!(
         backup_seen.frames.lock().as_slice(),
         &[CREATE.as_bytes().to_vec()]

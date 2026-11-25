@@ -360,3 +360,60 @@ async fn a_thread_whose_owner_left_the_queue_sends_its_next_request_to_the_queue
     assert_eq!(gateway.view().providers[0].rpm_used, 1);
     gateway.stop().await.unwrap();
 }
+
+/// Leaves the owner one slot and takes it.
+pub(super) async fn occupy(
+    gateway: &Gateway,
+    dir: &tempfile::TempDir,
+) -> crate::gateway::admission::Admission {
+    let id = gateway.view().providers[0].id.clone();
+    update(
+        gateway,
+        dir,
+        Edit::ConcurrencyProvider {
+            id: id.clone(),
+            max_concurrency: 1,
+        },
+    );
+    gateway
+        .0
+        .admission
+        .acquire(
+            &[gateway.route(&id).unwrap()],
+            false,
+            100,
+            &mut crate::gateway::admission::Budget::new(1),
+        )
+        .await
+        .unwrap()
+}
+
+pub(super) async fn waiting_for_a_slot(gateway: &Gateway) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while gateway.view().waiting_requests != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the request did not wait for its owner's slot");
+}
+
+#[tokio::test]
+async fn an_owner_taken_out_of_the_queue_leaves_the_request_waiting_for_its_slot_to_the_queue() {
+    let (dir, gateway, _port, backup) = setup().await;
+    // The owner is the whole queue when the request comes, its one slot taken.
+    queue(&gateway, &dir, 1, false);
+    let slot = occupy(&gateway, &dir).await;
+    let g = gateway.clone();
+    let pending = tokio::spawn(async move { followup(&g).await });
+    waiting_for_a_slot(&gateway).await;
+    // The backup enters the queue during the wait, and the owner leaves it.
+    queue(&gateway, &dir, 1, true);
+    queue(&gateway, &dir, 0, false);
+    assert_eq!(pending.await.unwrap()["provider"], "backup");
+    assert_eq!(backup.load(Ordering::SeqCst), 1);
+    // The owner's sends stay at the thread's first request.
+    drop(slot);
+    assert_eq!(gateway.view().providers[0].rpm_used, 1);
+    gateway.stop().await.unwrap();
+}

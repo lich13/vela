@@ -372,22 +372,30 @@ async fn a_dead_network_holds_the_websocket_turn_until_the_owner_answers() {
 
 #[tokio::test]
 async fn an_owner_taken_out_of_the_queue_leaves_the_turn_waiting_to_connect_to_the_queue() {
-    use super::owner_connect_retry_tests::{queue, setup_with, waiting};
-    // Waiting out the owner's short retry, and held for its dead network.
-    for probe in [false, true] {
-        let (dir, gateway, _port, backup) = setup_with(probe).await;
+    use super::owner_connect_retry_tests::{
+        occupy, queue, setup_with, waiting, waiting_for_a_slot,
+    };
+    // Waiting out the owner's short retry, held for its dead network, and
+    // waiting for its one slot.
+    for wait in ["retry", "held", "slot"] {
+        let (dir, gateway, _port, backup) = setup_with(wait == "held").await;
         let (other, _http_hits, handshakes, frames) = native_upstream(&[]).await;
         // The owner is the whole queue when the turn comes.
         queue(&gateway, &dir, 1, false);
+        let slot = if wait == "slot" {
+            Some(occupy(&gateway, &dir).await)
+        } else {
+            None
+        };
         let mut client = ws_client(&gateway, "fixture-owner-network").await;
         client
             .send(yawc::Frame::text(CREATE.to_owned()))
             .await
             .unwrap();
-        if probe {
-            held(&gateway).await;
-        } else {
-            waiting(&gateway).await;
+        match wait {
+            "held" => held(&gateway).await,
+            "slot" => waiting_for_a_slot(&gateway).await,
+            _ => waiting(&gateway).await,
         }
         // A provider enters the queue during the wait, and the owner leaves
         // it.
@@ -403,11 +411,15 @@ async fn an_owner_taken_out_of_the_queue_leaves_the_turn_waiting_to_connect_to_t
         queue(&gateway, &dir, 0, false);
         assert_eq!(next_frame(&mut client).await.as_str(), CREATED);
         assert_eq!(next_frame(&mut client).await.as_str(), COMPLETED);
+        // The owner's sends: the thread's first request, and one attempt at
+        // the turn unless its slot was taken.
+        let sent = if slot.is_some() { 1 } else { 2 };
+        drop(slot);
         settled(&gateway).await;
-        assert_eq!(handshakes.load(Ordering::SeqCst), 1, "{probe}");
-        assert_eq!(frames.load(Ordering::SeqCst), 1, "{probe}");
-        assert_eq!(backup.load(Ordering::SeqCst), 0, "{probe}");
-        assert_eq!(gateway.view().providers[0].rpm_used, 2, "{probe}");
+        assert_eq!(handshakes.load(Ordering::SeqCst), 1, "{wait}");
+        assert_eq!(frames.load(Ordering::SeqCst), 1, "{wait}");
+        assert_eq!(backup.load(Ordering::SeqCst), 0, "{wait}");
+        assert_eq!(gateway.view().providers[0].rpm_used, sent, "{wait}");
         drop(client);
         gateway.stop().await.unwrap();
     }
