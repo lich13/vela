@@ -11,7 +11,9 @@ use std::{
 // paste mode or inject shell input: the shell may already be editing a command.
 const CLEAR_REPORTING: &[u8] = b"\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l";
 
-fn info(pid: u32) -> Option<libc::proc_bsdinfo> {
+/// A process that has ended keeps its PID until its parent collects it, and
+/// is then found only when ended ones are asked for too.
+fn lookup(pid: u32, ended: bool) -> Option<libc::proc_bsdinfo> {
     let mut result = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
     // proc_pidinfo initializes the complete structure only on an exact-size result.
@@ -19,16 +21,43 @@ fn info(pid: u32) -> Option<libc::proc_bsdinfo> {
         libc::proc_pidinfo(
             pid as i32,
             libc::PROC_PIDTBSDINFO,
-            0,
+            u64::from(ended),
             result.as_mut_ptr().cast(),
             size,
         )
     };
     (read == size).then(|| unsafe { result.assume_init() })
 }
+fn info(pid: u32) -> Option<libc::proc_bsdinfo> {
+    lookup(pid, false)
+}
 
 pub(super) fn started(pid: u32) -> Option<u64> {
     info(pid).map(|p| start_stamp(&p))
+}
+/// Whether the process that had this PID has ended; `same` tells it from a
+/// later process with the PID.
+fn ended_if(pid: u32, same: impl Fn(&libc::proc_bsdinfo) -> bool) -> bool {
+    // While a process ends there is a moment in which its PID exists and
+    // neither question finds it; asking again settles that.
+    for _ in 0..3 {
+        if let Some(p) = info(pid) {
+            return p.pbi_status == libc::SZOMB && same(&p);
+        }
+        if let Some(p) = lookup(pid, true) {
+            return same(&p);
+        }
+        // Failure to inspect a live process is not proof of exit.
+        if (unsafe { libc::kill(pid as i32, 0) }) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return true;
+        }
+    }
+    false
+}
+pub(super) fn ended(pid: u32, started: u64) -> bool {
+    ended_if(pid, |p| start_stamp(p) == started)
 }
 fn start_stamp(p: &libc::proc_bsdinfo) -> u64 {
     p.pbi_start_tvsec
@@ -56,14 +85,7 @@ impl Identity {
             && self.start == (p.pbi_start_tvsec, p.pbi_start_tvusec)
     }
     fn gone(self) -> bool {
-        match info(self.pid) {
-            Some(p) => self.matches(&p) && p.pbi_status == libc::SZOMB,
-            None => {
-                // Failure to inspect a live process is not proof of exit.
-                (unsafe { libc::kill(self.pid as i32, 0) }) == -1
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-            }
-        }
+        ended_if(self.pid, |p| self.matches(p))
     }
 }
 struct Terminal {

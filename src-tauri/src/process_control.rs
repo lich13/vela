@@ -319,17 +319,29 @@ impl Processes for Native {
     fn state(&mut self, entry: &Entry) -> State {
         let pid = Pid::from_u32(entry.pid);
         self.refresh(ProcessesToUpdate::Some(&[pid]));
-        let Some(process) = self.system.process(pid) else {
+        if self.system.process(pid).is_none() {
             return State::Gone;
-        };
-        if process.status() == sysinfo::ProcessStatus::Zombie {
-            #[cfg(target_os = "macos")]
-            let same = terminal::started(entry.pid) == Some(entry.started);
-            #[cfg(not(target_os = "macos"))]
-            let same = process.start_time() == entry.started;
-            return if same { State::Gone } else { State::Changed };
         }
-        match self.entry(pid) {
+        // A process that has ended keeps its PID until its parent collects it.
+        #[cfg(not(target_os = "macos"))]
+        if let Some(process) = self.system.process(pid) {
+            if process.status() == sysinfo::ProcessStatus::Zombie {
+                return if process.start_time() == entry.started {
+                    State::Gone
+                } else {
+                    State::Changed
+                };
+            }
+        }
+        let current = self.entry(pid);
+        // macOS still lists such a process, as running, and nothing of it can
+        // be read. Asked after the read above, one that ended during the read
+        // is seen as ended rather than as another process.
+        #[cfg(target_os = "macos")]
+        if terminal::ended(entry.pid, entry.started) {
+            return State::Gone;
+        }
+        match current {
             Some(current) if entry.same_process(&current) => State::Running,
             _ => State::Changed,
         }
@@ -348,7 +360,9 @@ impl Processes for Native {
     fn wait_for_exit(&mut self, entries: &[&Entry], timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
-            if !entries.iter().any(|e| self.state(e) == State::Running) {
+            // A process on its way out can look like another one for a moment,
+            // so only one that is gone ends the wait for it.
+            if entries.iter().all(|e| self.state(e) == State::Gone) {
                 return;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());

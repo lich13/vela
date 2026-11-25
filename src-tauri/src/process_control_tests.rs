@@ -170,6 +170,52 @@ fn native_inventory_and_identity_recheck_read_child_arguments_and_user() {
     );
 }
 
+/// A child ended and left for its parent to collect is what a session and
+/// the programs it started are for a moment after each of them ends.
+#[cfg(unix)]
+#[test]
+fn a_process_that_ended_is_gone_before_its_parent_collects_it() {
+    struct OwnedChild(std::process::Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = OwnedChild(
+        std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap(),
+    );
+    let mut native = Native {
+        system: System::new(),
+        #[cfg(target_os = "macos")]
+        terminals: Vec::new(),
+    };
+    let entry = native
+        .inventory()
+        .into_iter()
+        .find(|p| p.pid == child.0.id())
+        .unwrap();
+    assert_eq!(native.state(&entry), State::Running);
+    // Ended, and not waited for until the fixture is dropped.
+    child.0.kill().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match native.state(&entry) {
+            State::Gone => break,
+            State::Running => assert!(Instant::now() < deadline, "the child did not end"),
+            State::Changed => panic!("an ended process was taken for another one"),
+        }
+    }
+    native.wait_for_exit(&[&entry], Duration::from_secs(5));
+    assert_eq!(native.state(&entry), State::Gone);
+    // Nothing is sent to what is left of it.
+    native.terminate_if_same(&entry, Termination::Force);
+    assert_eq!(native.state(&entry), State::Gone);
+}
+
 #[test]
 fn quitting_claude_code_preserves_desktop_and_other_users() {
     let mut cli = entry(2, None, "/fixture/.local/bin/claude", false);
