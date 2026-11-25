@@ -1334,8 +1334,10 @@ fn load(path: &Path) -> Journal {
                             }
                         }
                     }
-                    // The row of an interrupted write is lost; the rewrite drops its remains.
-                    Err(_) if !complete => j.dirty = true,
+                    // The row of an interrupted write is lost; the rewrite drops its
+                    // remains. Such a write leaves the beginning of a row, and an
+                    // unfinished line that is not one is damage like any other.
+                    Err(_) if !complete && line.first() == Some(&b'{') => j.dirty = true,
                     Err(_) => {
                         j.dirty = true;
                         j.error = Some("日志包含损坏记录，已跳过；其余记录仍可查看".into());
