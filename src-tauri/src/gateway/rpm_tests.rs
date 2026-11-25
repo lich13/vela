@@ -2,6 +2,7 @@
 use super::*;
 use crate::gateway::test_support::form;
 use crate::gateway::test_support::route;
+use crate::gateway::test_support::until;
 use crate::gateway::{
     admission::{Budget, Rejected, Scheduler},
     connector::Connector,
@@ -927,6 +928,51 @@ async fn http_retry_and_concurrent_requests_use_available_rolling_budget() {
         started.elapsed()
     );
     assert_eq!(gateway.view().providers[0].rpm_used, 3);
+    gateway.stop().await.unwrap();
+    drop(dir);
+}
+
+#[tokio::test]
+async fn a_retry_waiting_for_the_rate_window_leaves_a_provider_taken_out_of_the_queue() {
+    let first = http_loopback(true).await;
+    let second = http_loopback(false).await;
+    let (dir, gateway) = started_http_gateway(first.port, 1, 1).await;
+    let body = br#"{"model":"fixture-model","input":["fixture"],"future":{"keep":true}}"#.to_vec();
+    let pending = {
+        let (gateway, body) = (gateway.clone(), body.clone());
+        tokio::spawn(async move { gateway_http_request(&gateway, body).await })
+    };
+    // The provider refused its one send of the minute, and the retry has
+    // waited out the refusal: it is the next minute it waits for now.
+    until(|| {
+        let view = gateway.view();
+        first.seen.lock().len() == 1
+            && view.capacity_retries.is_empty()
+            && view.transient_retries.is_empty()
+            && view.waiting_requests == 1
+    })
+    .await;
+    assert_eq!(gateway.view().providers[0].rpm_used, 1);
+    // The provider that gets the request enters the queue only now.
+    let other = format!("http://127.0.0.1:{}/v1", second.port);
+    for edit in [
+        form(json!({"name": "fixture-rpm-other", "baseUrl": other, "token": "fixture-token"})),
+        Edit::QueueProvider {
+            id: gateway.view().providers[0].id.clone(),
+            queued: false,
+        },
+    ] {
+        gateway
+            .edit(edit, &gateway.view().revision, dir.path())
+            .unwrap();
+    }
+    let (status, answer) = pending.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(answer, Bytes::from_static(br#"{"ok":true}"#));
+    assert_eq!(first.seen.lock().len(), 1);
+    let seen = second.seen.lock().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1, body);
     gateway.stop().await.unwrap();
     drop(dir);
 }

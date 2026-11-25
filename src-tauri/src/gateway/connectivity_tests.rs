@@ -174,6 +174,43 @@ async fn a_dead_network_holds_the_request_and_its_return_sends_it_again() {
 }
 
 #[tokio::test]
+async fn a_provider_taken_out_of_the_queue_gives_up_the_request_held_for_it() {
+    for endless in [true, false] {
+        let port = free_port().await;
+        let (f, _dir, _changes) = fixture(port, endless, true).await;
+        f.edit(Edit::Mode {
+            mode: "auto".into(),
+        });
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let other = server(move |_, _| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(full(MESSAGE))
+                    .unwrap()
+            }
+        })
+        .await;
+        let pending = send(&f);
+        held(&f, 1).await;
+        // The provider that gets the request enters the queue during the
+        // outage, which the first provider never comes out of.
+        f.edit(form(serde_json::json!({
+            "name": "fixture-other",
+            "baseUrl": other.url("/v1"),
+            "token": FIXTURE_KEY,
+        })));
+        dequeue(&f);
+        assert!(pending.await.unwrap().contains("complete"), "{endless}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "{endless}");
+        released(&f).await;
+        f.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn any_answer_to_the_probe_keeps_the_ordinary_retry_and_the_switch_turns_it_off() {
     for probe in [true, false] {
         let port = free_port().await;
