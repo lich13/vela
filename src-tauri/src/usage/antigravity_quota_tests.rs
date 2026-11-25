@@ -266,7 +266,8 @@ fn a_row_stored_without_an_account_takes_the_one_in_use_then_and_a_quota_without
 fn an_untouched_quota_reset_at_the_unix_epoch_has_no_reset_time() {
     // `agy /usage` gives the Unix epoch as the reset of a quota nothing was
     // spent from.
-    let epoch = json!({"id": "gemini-5h", "reset_time": "1970-01-01T00:00:00Z", "remaining_fraction": 1.0});
+    let epoch =
+        json!({"id": "gemini-5h", "reset_time": "1970-01-01T00:00:00Z", "remaining_fraction": 1.0});
     let real = json!({"bucketId": "gemini-5h", "resetTime": "2026-01-08T05:00:00Z", "remainingFraction": 0.745});
     let read = periods(&json!([{"buckets": [
         epoch.clone(),
@@ -286,13 +287,13 @@ fn an_untouched_quota_reset_at_the_unix_epoch_has_no_reset_time() {
     assert!(!untouched.contains(0));
 
     // A period reported for the same quota elsewhere stands, in either order.
-    for buckets in [
-        json!([epoch.clone(), real.clone()]),
-        json!([real, epoch]),
-    ] {
+    for buckets in [json!([epoch.clone(), real.clone()]), json!([real, epoch])] {
         let read = periods(&json!([{ "buckets": buckets }]));
         assert_eq!(
-            (read["gemini-5h"].without, read["gemini-5h"].remaining_percent),
+            (
+                read["gemini-5h"].without,
+                read["gemini-5h"].remaining_percent
+            ),
             (None, Some(74.5))
         );
     }

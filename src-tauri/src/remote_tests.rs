@@ -176,7 +176,11 @@ async fn a_bad_alias_starts_nothing() {
         );
         assert_eq!(channel.connect().await.unwrap_err().code, SSH);
         assert_eq!(
-            channel.call("get_state", json!({}), false).await.unwrap_err().code,
+            channel
+                .call("get_state", json!({}), false)
+                .await
+                .unwrap_err()
+                .code,
             SSH
         );
         assert!(dialed.try_recv().is_err());
@@ -643,7 +647,11 @@ async fn closing_fails_waiting_calls_quietly_and_for_good() {
     assert!(far.next().await.is_none());
     assert_eq!(heard.all(), ["connected 0.41.0"]);
     assert_eq!(
-        channel.call("get_state", json!({}), false).await.unwrap_err().code,
+        channel
+            .call("get_state", json!({}), false)
+            .await
+            .unwrap_err()
+            .code,
         SSH
     );
     assert!(dialed.try_recv().is_err());

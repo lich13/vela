@@ -143,7 +143,10 @@ impl Store {
         })
     }
     pub fn reclaim_space(&self) -> Result<()> {
-        let pending: bool = storage_v12::packing_pending(&self.connection)?;
+        // Pruning and VACUUM wait for every conversion: what they free only
+        // becomes unreferenced once the last batch is in.
+        let pending: bool = storage_v12::packing_pending(&self.connection)?
+            || storage_v12::reshape_pending(&self.connection)?;
         let repack: bool = db(self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='storage_repack')",
             [],
@@ -188,7 +191,12 @@ impl Store {
     }
     /// Restartable storage-only conversion. Prices and associations remain exact;
     /// identical gateway/source metric projections share the same stored rows.
+    /// Each call does one bounded batch and answers whether more may remain.
     pub fn compact_storage_batch(&mut self) -> Result<bool> {
+        // Saving records again leaves new diagnostics to pack, so it goes first.
+        if storage_v12::reshape_batch(&self.connection, 2000)? {
+            return Ok(true);
+        }
         storage_v12::compact_diagnostics(&self.connection)
     }
     pub fn reader_with_cache(dir: &Path, cache: OverviewCache) -> Result<Self> {

@@ -781,6 +781,11 @@ fn create_tables(c: &Connection) -> Result<()> {
 }
 
 pub(super) fn initialize(c: &Connection) -> Result<()> {
+    // A new database holds nothing written before the current shapes.
+    db(c.execute(
+        "INSERT INTO metadata VALUES('storage_shapes','ready')",
+        [],
+    ))?;
     create_tables(c)?;
     query::metrics_schema(c, "usage_daily_metrics")?;
     create_views(c)?;
@@ -912,6 +917,9 @@ fn save_attempt(
         "inclusiveInputTokens",
         "generationMs",
         "estimatedDurationMs",
+        // A counter of its own in nearly every request: kept in the shape, it
+        // gave each request a shape of its own.
+        "rawInputTokens",
     ] {
         if let Some(value) = fields.remove(field) {
             diagnostic.insert(field.into(), value);
@@ -1458,6 +1466,76 @@ pub(super) fn compact_diagnostics(c: &Connection) -> Result<bool> {
 }
 pub(super) fn packing_pending(c: &Connection) -> Result<bool> {
     diagnostics::pending(c)
+}
+pub(super) fn reshape_pending(c: &Connection) -> Result<bool> {
+    db(c.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM metadata WHERE key='storage_shapes')",
+        [],
+        |r| r.get(0),
+    ))
+}
+/// Attempt shapes interned while `rawInputTokens` was part of them differ by
+/// that counter alone. Each call saves again at most `limit` of the records
+/// still using one, with their state and order unchanged; the shapes left
+/// without a record go with the next prune. False once none is left.
+pub(super) fn reshape_batch(c: &Connection, limit: usize) -> Result<bool> {
+    if !reshape_pending(c)? {
+        return Ok(false);
+    }
+    let tx = db(c.unchecked_transaction())?;
+    // The dictionary is decoded once for this connection. A saved record no
+    // longer points at any of these shapes, so the selection below only shrinks.
+    let listed: bool = db(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE name='v12_legacy_shapes')",
+        [],
+        |r| r.get(0),
+    ))?;
+    if !listed {
+        db(tx.execute_batch("CREATE TEMP TABLE v12_legacy_shapes(id INTEGER PRIMARY KEY)"))?;
+        let mut read = db(tx.prepare("SELECT id,value FROM v12_dictionary"))?;
+        let mut list = db(tx.prepare("INSERT INTO v12_legacy_shapes VALUES(?1)"))?;
+        let mut rows = db(read.query([]))?;
+        while let Some(row) = db(rows.next())? {
+            let legacy = db(row.get_ref(1))?
+                .as_blob()
+                .ok()
+                .and_then(shared_value)
+                .is_some_and(|shape| shape.get("rawInputTokens").is_some());
+            if legacy {
+                db(list.execute([db(row.get::<_, i64>(0))?]))?;
+            }
+        }
+    }
+    let mut owners = std::collections::BTreeSet::new();
+    for table in ["v12_attempt_rows", "v12_session_rows", "v12_original"] {
+        if owners.len() >= limit {
+            break;
+        }
+        let mut stmt = db(tx.prepare(&format!(
+            "SELECT DISTINCT owner FROM {table} WHERE shape IN (SELECT id FROM v12_legacy_shapes) LIMIT ?1"
+        )))?;
+        let rows = db(stmt.query_map([(limit - owners.len()) as i64], |r| {
+            r.get::<_, i64>(0)
+        }))?;
+        for owner in rows {
+            owners.insert(db(owner)?);
+        }
+    }
+    for owner in &owners {
+        update(&tx, &load_record(&tx, *owner)?)?;
+    }
+    if owners.is_empty() {
+        db(tx.execute_batch(
+            "DROP TABLE v12_legacy_shapes; INSERT OR REPLACE INTO metadata VALUES('storage_shapes','ready');",
+        ))?;
+    } else {
+        db(tx.execute(
+            "INSERT OR REPLACE INTO metadata VALUES('storage_repack','1')",
+            [],
+        ))?;
+    }
+    db(tx.commit())?;
+    Ok(!owners.is_empty())
 }
 pub(super) fn save_archive(c: &Connection, value: &Value) -> Result<i64> {
     let body = pack_diagnostic(c, value.clone(), 0)?;

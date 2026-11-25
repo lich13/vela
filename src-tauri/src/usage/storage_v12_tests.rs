@@ -7,6 +7,7 @@
 use super::{model::*, pricing::Pricing, sessions, store::Store};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File},
@@ -1759,4 +1760,302 @@ fn requested_models_count_what_gateway_clients_asked_for_not_what_was_priced() {
         ]
     );
     assert_eq!(models(1).len(), 1);
+}
+
+fn attempt_shapes(store: &Store) -> u64 {
+    store
+        .connection
+        .query_row(
+            "SELECT count(DISTINCT shape) FROM v12_attempt_rows",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn shapes_holding_raw_input(store: &Store) -> usize {
+    let mut stmt = store
+        .connection
+        .prepare("SELECT value FROM v12_dictionary")
+        .unwrap();
+    let values: Vec<Vec<u8>> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    values
+        .iter()
+        .filter_map(|value| super::body_wire::decode(&value[32..]))
+        .filter(|shape| shape.get("rawInputTokens").is_some())
+        .count()
+}
+
+/// Stores every attempt the way releases before the counter moved did: the
+/// counter inside the shape, a shape per row, and absent from the diagnostic.
+fn move_raw_input_into_shapes(connection: &Connection) -> usize {
+    let mut moved = 0;
+    for (index, table) in ["v12_attempt_rows", "v12_session_rows", "v12_original"]
+        .into_iter()
+        .enumerate()
+    {
+        let rows: Vec<(i64, i64, i64, Vec<u8>)> = connection
+            .prepare(&format!(
+                "SELECT a.owner,a.ordinal,a.shape,d.value FROM {table} a JOIN v12_dictionary d ON d.id=a.shape ORDER BY a.owner,a.ordinal"
+            ))
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for (owner, ordinal, shape, value) in rows {
+            let mut fields = super::body_wire::decode(&value[32..]).unwrap();
+            assert!(fields.get("rawInputTokens").is_none());
+            fields["rawInputTokens"] =
+                json!(1_000_000 * (index as i64 + 1) + owner * 10 + ordinal);
+            let payload = super::body_wire::encode_v13(&fields);
+            let mut bytes = Sha256::digest(&payload).to_vec();
+            bytes.extend(payload);
+            connection
+                .execute("INSERT INTO v12_dictionary(value) VALUES(?1)", [&bytes])
+                .unwrap();
+            let legacy = connection.last_insert_rowid();
+            if table != "v12_original" {
+                connection
+                    .execute(
+                        "INSERT INTO v12_dimensions SELECT ?1,provider,model,status,stream,operation FROM v12_dimensions WHERE shape=?2",
+                        params![legacy, shape],
+                    )
+                    .unwrap();
+            }
+            connection
+                .execute(
+                    &format!("UPDATE {table} SET shape=?1 WHERE owner=?2 AND ordinal=?3"),
+                    params![legacy, owner, ordinal],
+                )
+                .unwrap();
+            moved += 1;
+        }
+    }
+    moved
+}
+
+#[test]
+fn requests_differing_only_in_the_raw_input_counter_share_one_attempt_shape() {
+    let (dir, mut store) = empty_store();
+    let rows: Vec<_> = [Some(11_u64), Some(2_200), None]
+        .into_iter()
+        .enumerate()
+        .map(|(i, raw)| {
+            let mut row = priced_record(
+                &format!("fixture-raw-input-{i}"),
+                BASE + i as i64 * 1_000,
+                100,
+                20,
+                "1.4",
+            );
+            row.attempts[0].raw_input_tokens = raw;
+            row.attempts[0].input_basis = Some("inclusive".into());
+            row
+        })
+        .collect();
+    store.write_batch(&rows, None).unwrap();
+    assert_eq!(attempt_shapes(&store), 1);
+    assert_eq!(shapes_holding_raw_input(&store), 0);
+    let saved: Vec<_> = rows
+        .iter()
+        .map(|row| serde_json::to_value(store.detail(&row.id).unwrap()).unwrap())
+        .collect();
+    for (row, saved) in rows.iter().zip(&saved) {
+        assert_eq!(
+            saved["attempts"][0]["rawInputTokens"],
+            json!(row.attempts[0].raw_input_tokens)
+        );
+        assert_eq!(saved["attempts"][0]["inputBasis"], "inclusive");
+    }
+
+    compact_diagnostics_until_done(&mut store);
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    for (row, saved) in rows.iter().zip(&saved) {
+        assert_eq!(
+            &serde_json::to_value(store.detail(&row.id).unwrap()).unwrap(),
+            saved
+        );
+    }
+}
+
+#[test]
+fn gateway_reported_metadata_keeps_its_own_raw_input_counter() {
+    let (_dir, mut store) = empty_store();
+    let cases = [
+        (Some(40_u64), Some(55_u64), false),
+        (None, Some(55), false),
+        (Some(40), None, true),
+        (Some(40), Some(40), true),
+    ];
+    let mut rows = Vec::new();
+    for (i, (reported, completed, metering)) in cases.into_iter().enumerate() {
+        let mut row = priced_record(
+            &format!("fixture-raw-original-{i}"),
+            BASE + i as i64 * 1_000,
+            100,
+            20,
+            "1.4",
+        );
+        row.attempts[0].raw_input_tokens = completed;
+        let mut original = row.attempts[0].clone();
+        original.raw_input_tokens = reported;
+        if metering {
+            // The gateway's own values may also differ in what was measured.
+            original.tokens.output = None;
+            original.price = None;
+        }
+        row.gateway_reported = Some(original);
+        let tx = store.connection.transaction().unwrap();
+        super::storage_v12::save(&tx, &row, 1, i as i64 + 1).unwrap();
+        tx.commit().unwrap();
+        rows.push(row);
+    }
+    // Where the counter is the only difference, no shape is added for it.
+    assert_eq!(attempt_shapes(&store), 1);
+    assert_eq!(shapes_holding_raw_input(&store), 0);
+    for packed in [false, true] {
+        if packed {
+            compact_diagnostics_until_done(&mut store);
+        }
+        for row in &rows {
+            assert_eq!(
+                serde_json::to_value(store.detail(&row.id).unwrap()).unwrap(),
+                serde_json::to_value(row).unwrap(),
+                "{} packed={packed}",
+                row.id
+            );
+        }
+    }
+}
+
+#[test]
+fn shapes_saved_with_the_raw_input_counter_are_converted_in_resumable_batches() {
+    let (dir, mut store) = empty_store();
+    let mut rows: Vec<_> = (0..5)
+        .map(|i| {
+            priced_record(
+                &format!("fixture-legacy-shape-{i}"),
+                BASE + i * 1_000,
+                100 + i as u64,
+                20,
+                "1.4",
+            )
+        })
+        .collect();
+    let mut retried = priced_record("fixture-legacy-shape-retried", BASE + 6_000, 30, 4, "0.5");
+    let mut failed = retried.attempts[0].clone();
+    failed.id = "fixture-legacy-shape-failed-attempt".into();
+    failed.status = Some(503);
+    failed.outcome = "failed".into();
+    retried.attempts.insert(0, failed);
+    rows.push(retried);
+    // A gateway row without usage, completed by its session: the merged attempt
+    // and the gateway's original metadata each have a shape of their own.
+    let mut gateway = record(
+        "fixture-legacy-shape-gateway",
+        "proxy",
+        BASE + 7_000,
+        Some("fixture-legacy-shape-response"),
+        0,
+        0,
+    );
+    gateway.attempts[0].tokens = Tokens::default();
+    rows.push(gateway);
+    rows.push(record(
+        "fixture-legacy-shape-session",
+        "codex",
+        BASE + 7_001,
+        Some("fixture-legacy-shape-response"),
+        100,
+        20,
+    ));
+    store.write_batch(&rows, None).unwrap();
+    assert!(store
+        .detail("fixture-legacy-shape-gateway")
+        .unwrap()
+        .gateway_reported
+        .is_some());
+    compact_diagnostics_until_done(&mut store);
+    store.reclaim_space().unwrap();
+    let current_shapes = attempt_shapes(&store);
+
+    let moved = move_raw_input_into_shapes(&store.connection);
+    assert_eq!(moved, 10);
+    assert_eq!(shapes_holding_raw_input(&store), moved);
+    store
+        .connection
+        .execute("DELETE FROM metadata WHERE key='storage_shapes'", [])
+        .unwrap();
+    let snapshot = |store: &Store| {
+        let scope = |source: &str| Filter {
+            source: Some(source.into()),
+            ..all_time()
+        };
+        json!({
+            "details": rows.iter().map(|row| store.detail(&row.id).unwrap()).collect::<Vec<_>>(),
+            "all": page_value(store, &all_time()),
+            "proxy": page_value(store, &scope("proxy")),
+            "sessions": page_value(store, &scope("sessions")),
+            "dashboard": dashboard_value(store, &all_time()),
+            "proxyDashboard": dashboard_value(store, &scope("proxy")),
+            "sessionsDashboard": dashboard_value(store, &scope("sessions")),
+        })
+    };
+    let before = snapshot(&store);
+    let counters: Vec<_> = before["details"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|row| {
+            row["attempts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(row.get("gatewayReported"))
+                .map(|attempt| attempt["rawInputTokens"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(counters.len(), moved);
+    assert_eq!(
+        counters
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        moved
+    );
+
+    // One small batch, then the process stops before the rest.
+    assert!(super::storage_v12::reshape_batch(&store.connection, 2).unwrap());
+    store.reclaim_space().unwrap();
+    assert_eq!(
+        store.maintenance_status().as_deref(),
+        Some("用量存储正在回收空间"),
+        "pruning waits for the last batch"
+    );
+    assert!(shapes_holding_raw_input(&store) >= moved);
+    drop(store);
+
+    let mut store = Store::open(dir.path()).unwrap();
+    assert_eq!(snapshot(&store), before);
+    let mut batches = 0;
+    while store.compact_storage_batch().unwrap() {
+        batches += 1;
+        assert!(batches < 64, "shape conversion did not finish");
+    }
+    assert_eq!(snapshot(&store), before);
+    store.reclaim_space().unwrap();
+    assert_eq!(store.maintenance_status(), None);
+    assert_eq!(snapshot(&store), before);
+    assert_eq!(shapes_holding_raw_input(&store), 0);
+    assert_eq!(attempt_shapes(&store), current_shapes);
+    assert!(!store.compact_storage_batch().unwrap());
+    drop(store);
+    assert_eq!(snapshot(&Store::open(dir.path()).unwrap()), before);
 }
