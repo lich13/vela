@@ -283,7 +283,7 @@ async fn a_provider_is_handed_over_whole_and_taken_in_as_a_copy() {
         .iter()
         .map(|provider| provider["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["Fixture", "Fixture (copy)"]);
+    assert_eq!(names, ["Fixture", "Fixture"]);
     assert_ne!(gateway["providers"][1]["id"], id);
 
     let missing = json!({"clientId": "claude", "providerId": "missing"});

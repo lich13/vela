@@ -1066,7 +1066,8 @@ fn a_copy_takes_everything_but_the_identity_and_sits_below_its_original() {
     assert_eq!(store.model_maps[&copied], store.model_maps[&id]);
 
     // Handed to another instance, the copy arrives as whole, as its last
-    // provider. A window cannot make the edit that takes it in.
+    // provider and under the name it had. A window cannot make the edit that
+    // takes it in.
     let handed = serde_json::to_value(store.provider_copy(&id).unwrap().1).unwrap();
     assert_eq!(handed["provider"]["token"], "fixture");
     assert_eq!(handed["quotaAccessToken"], "fixture-access");
@@ -1075,13 +1076,12 @@ fn a_copy_takes_everything_but_the_identity_and_sits_below_its_original() {
     let copy = Box::new(serde_json::from_value(handed.clone()).unwrap());
     other.edit(Edit::ImportCopy { copy }, false).unwrap();
     let names: Vec<_> = other.providers.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["Theirs", "Original (copy)"]);
+    assert_eq!(names, ["Theirs", "Original"]);
     let arrived = other.providers[1].clone();
     assert_ne!(arrived.id, id);
     let mut same = arrived.clone();
     same.id.clone_from(&original_id_version.0);
     same.version.clone_from(&original_id_version.1);
-    same.name = "Original".into();
     assert_eq!(
         serde_json::to_value(&same).unwrap(),
         serde_json::to_value(&store.providers[0]).unwrap()

@@ -873,13 +873,11 @@ impl Store {
         Ok((index, copy))
     }
 
-    /// Adds a copy at `index` as a provider of its own: a new id and
-    /// version, and a name that says it is a copy.
+    /// Adds a copy at `index` as a provider of its own: a new id and version.
     fn add_copy(&mut self, copy: ProviderCopy, index: usize) {
         let mut provider = copy.provider;
         provider.id = uuid::Uuid::new_v4().to_string();
         provider.version = uuid::Uuid::new_v4().to_string();
-        provider.name = copy_name(&provider.name);
         let id = &provider.id;
         if let Some(token) = copy.quota_access_token {
             self.quota_access_tokens.insert(id.clone(), token);
@@ -1183,10 +1181,13 @@ impl Store {
                 self.save_connection(existing, replacing_token, protocol)?;
             }
             Edit::DuplicateProvider { id } => {
-                let (index, copy) = self.provider_copy(&id)?;
+                let (index, mut copy) = self.provider_copy(&id)?;
+                // Next to the original, the name says which of the two is the copy.
+                copy.provider.name = copy_name(&copy.provider.name);
                 self.add_copy(copy, index + 1);
             }
             Edit::ImportCopy { mut copy } => {
+                // On another instance the copy keeps the name it had.
                 // The other instance held it to its own port.
                 copy.provider.base_url =
                     base_url(&copy.provider.base_url, self.settings.port)?.into();
