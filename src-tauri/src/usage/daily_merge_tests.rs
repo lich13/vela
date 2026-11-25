@@ -956,3 +956,122 @@ fn storage_batches_merge_the_rollups_and_their_space_is_reclaimed_after_the_last
     assert_eq!(stored(&store), merged);
     assert_unchanged(&summaries(&store), &before);
 }
+
+/// A gateway request holding everything one request alone can hold, all of it
+/// differing with `i`: who it was, when it ran and what was observed on its way.
+fn observed(i: u64) -> Record {
+    let at = day(0) + 95_000 + i as i64 * 1_000;
+    let hash = |n: u64| Some(format!("{n:064x}"));
+    let mut usage = tokens(3_000 + i, 300 + i);
+    usage.cache_read = (i > 0).then_some(10 * i);
+    let mut row = gateway(
+        &format!("fixture-observed-{i}"),
+        at,
+        "fixture-model",
+        usage,
+        &format!("0.{:03}", 7 + i),
+    );
+    row.session_id = Some(format!("fixture-observed-session-{i}"));
+    row.detail_archived = i % 2 == 0;
+    row.failover_evidence = Some(crate::gateway::failover::Evidence {
+        eligible_candidates: 1 + i as u32,
+        ..Default::default()
+    });
+    let attempt = &mut row.attempts[0];
+    attempt.raw_input_tokens = Some(3_500 + i);
+    attempt.inclusive_input_tokens = Some(3_600 + i);
+    attempt.repeat_count = 1 + i;
+    attempt.compacted_unpriced = (i > 0).then_some(0);
+    attempt.duration_ms = 500 + 10 * i;
+    // A summary of live records takes the duration after the first token for
+    // this, so the two agree here.
+    attempt.generation_ms = attempt
+        .first_token_ms
+        .map(|first| attempt.duration_ms - first);
+    attempt.estimated_duration_ms = Some(50 + i);
+    attempt.thread_hash = hash(1 + i);
+    attempt.upstream_request_hash = hash(101 + i);
+    attempt.routing_decision = Some(if i == 0 {
+        RoutingDecision::NewThread
+    } else {
+        RoutingDecision::ExistingThread
+    });
+    attempt.routing_evidence = Some(RoutingEvidence {
+        has_tool_declarations: i % 2 == 1,
+        ..RoutingEvidence::default()
+    });
+    let cache_read = if i == 0 {
+        "upstream_unreported"
+    } else {
+        "reported"
+    };
+    attempt.availability = BTreeMap::from([("cache_read".into(), cache_read.into())]);
+    attempt.end = Some(EndMetadata {
+        cause: EndCause::Completed,
+        terminal_received: true,
+        response_started: i % 2 == 0,
+    });
+    attempt.transfer = Some(TransferMetadata {
+        connection: Some(ConnectionEvidence {
+            id: format!("fixture-connection-{i}"),
+            request_sequence: i,
+            read_bytes: 1_000 + i,
+            socket_written_bytes: 2_000 + i,
+            events: vec![TransportEvent {
+                sequence: i,
+                at: at - 50,
+                kind: "request".into(),
+            }],
+        }),
+        received_at: Some(at - 90),
+        sent_at: at - 95,
+        first_byte_at: Some(at - 80 + i as i64),
+        terminal_at: Some(at),
+        ended_at: at,
+        upstream_bytes: 10 + i,
+        downstream_bytes: 20 + i,
+        terminal_handed_off: true,
+        upstream_eof: true,
+        client_request_hash: hash(201 + i),
+        response_hash: hash(301 + i),
+        ..TransferMetadata::default()
+    });
+    row
+}
+
+#[test]
+fn requests_differing_in_all_that_one_request_alone_holds_share_a_rollup() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rows: Vec<_> = (0..3).map(observed).collect();
+    // The gateway reported one of them without its cache count, which a
+    // session file supplied.
+    let mut reported = rows[2].attempts[0].clone();
+    reported.tokens.cache_read = None;
+    rows[2].gateway_reported = Some(reported);
+    let ids: Vec<_> = rows.iter().map(|r| r.id.clone()).collect();
+
+    let mut direct = Store::open(&dir.path().join("direct")).unwrap();
+    direct.write_batch(&rows, None).unwrap();
+    let live = summaries(&direct);
+    direct.archive_batch(&ids).unwrap();
+    assert_unchanged(&summaries(&direct), &live);
+    // One rollup in the view of everything, and one in that of the gateway.
+    let merged = rollups(&direct, MERGED);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0]["sums"][0]["totals"]["requests"], 3);
+    assert_eq!(count(&direct, "SELECT count(*) FROM daily"), 2);
+
+    // Archived each for its exact usage, they had a rollup apiece, which the
+    // batches merge into those same two.
+    let mut earlier = Store::open(&dir.path().join("earlier")).unwrap();
+    archive_exact(&mut earlier, &rows);
+    unmark(&earlier);
+    assert_eq!(rollups(&earlier, EXACT).len(), 3);
+    assert_unchanged(&summaries(&earlier), &live);
+    let totals = calculator(&earlier);
+    assert_unchanged(&totals, &calculator(&direct));
+    merge_rest(&mut earlier, 2);
+    assert_eq!(stored(&earlier), stored(&direct));
+    assert_unchanged(&summaries(&earlier), &live);
+    assert_unchanged(&calculator(&earlier), &totals);
+}
