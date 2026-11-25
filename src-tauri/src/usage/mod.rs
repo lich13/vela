@@ -11,6 +11,8 @@ pub(crate) mod claude_quota;
 mod claude_stats_tests;
 pub mod commands;
 #[cfg(test)]
+mod daily_merge_tests;
+#[cfg(test)]
 mod decimal_v13_tests;
 mod dedup;
 #[cfg(test)]

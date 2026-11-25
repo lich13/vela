@@ -186,7 +186,8 @@ fn compact_merges_same_day_finished_times_without_changing_totals_or_price() {
         .unwrap();
     assert_eq!(count, 1);
     let daily = bodies::unpack(&database, &body).unwrap();
-    assert_eq!(daily["totals"]["requests"], 2);
-    assert_eq!(daily["totals"]["cost"], "0.20");
+    let sums = &daily["sums"][0]["totals"];
+    assert_eq!(sums["requests"], 2);
+    assert_eq!(sums["cost"].to_string(), "0.20");
     assert_eq!(daily["example"]["finishedAt"], serde_json::Value::Null);
 }
