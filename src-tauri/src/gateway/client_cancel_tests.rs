@@ -744,6 +744,68 @@ async fn panel_cancel_resends_past_the_retry_limit_and_back_to_its_provider() {
 }
 
 #[tokio::test]
+async fn panel_cancel_resends_to_the_queue_once_its_provider_has_left_it() {
+    // From an ordinary provider, and from one endless mode fixed the request to.
+    for endless in [false, true] {
+        let primary = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backup = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (dir, gateway) = fixture(vec![
+            format!("http://{}/v1", primary.local_addr().unwrap()),
+            format!("http://{}/v1", backup.local_addr().unwrap()),
+        ])
+        .await;
+        let (usage, _) = attach_observers(&dir, &gateway);
+        let provider = gateway.view().providers.swap_remove(0);
+        if endless {
+            edit(
+                &gateway,
+                &dir,
+                form(serde_json::json!({
+                    "id": provider.id,
+                    "baseUrl": provider.base_url,
+                    "token": "",
+                    "endlessMode": true,
+                })),
+            );
+        }
+        let mut downstream = downstream_http(&gateway, REQUEST_BODY).await;
+        let socket = accepted(&primary).await;
+        edit(
+            &gateway,
+            &dir,
+            Edit::QueueProvider {
+                id: provider.id,
+                queued: false,
+            },
+        );
+        let pending = gateway.view().pending_requests;
+        assert_eq!(pending.len(), 1, "{endless}");
+        assert!(gateway.cancel_wait(&pending[0].request_id));
+        tokio::time::timeout(WAIT, wait_for_disconnect(socket))
+            .await
+            .unwrap();
+        let mut socket = accepted(&backup).await;
+        complete(&mut socket).await;
+        assert!(read_resent(&mut downstream)
+            .await
+            .starts_with("HTTP/1.1 200"));
+        let record = wait_for_attempts(&usage, 2).await;
+        assert_eq!(
+            causes(&record),
+            [Some(EndCause::ClientCancelled), Some(EndCause::Completed)],
+            "{endless}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), primary.accept())
+                .await
+                .is_err(),
+            "{endless}"
+        );
+        gateway.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn panel_cancel_queued_request_requeues_and_leaves_its_active_neighbor() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (dir, gateway) = fixture(vec![format!(
