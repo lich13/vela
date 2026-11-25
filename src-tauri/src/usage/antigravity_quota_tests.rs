@@ -263,6 +263,115 @@ fn a_row_stored_without_an_account_takes_the_one_in_use_then_and_a_quota_without
 }
 
 #[test]
+fn an_untouched_quota_reset_at_the_unix_epoch_has_no_reset_time() {
+    // `agy /usage` gives the Unix epoch as the reset of a quota nothing was
+    // spent from.
+    let epoch = json!({"id": "gemini-5h", "reset_time": "1970-01-01T00:00:00Z", "remaining_fraction": 1.0});
+    let real = json!({"bucketId": "gemini-5h", "resetTime": "2026-01-08T05:00:00Z", "remainingFraction": 0.745});
+    let read = periods(&json!([{"buckets": [
+        epoch.clone(),
+        {"bucketId": "gemini-weekly", "resetTime": "1970-01-01T00:00:00Z", "remainingFraction": 1.0},
+        {"bucketId": "3p-5h", "resetTime": "2026-01-08T06:00:00Z", "remainingFraction": 0.42},
+    ]}]));
+    let untouched = Period {
+        remaining_percent: Some(100.0),
+        without: Some(Without::NoReset),
+        ..Period::default()
+    };
+    assert_eq!(read["gemini-5h"], untouched);
+    assert_eq!(read["gemini-weekly"], untouched);
+    assert_eq!(read["3p-5h"].without, None);
+    // It never expires, and no usage falls into it.
+    assert!(untouched.current(1) && untouched.current(i64::MAX));
+    assert!(!untouched.contains(0));
+
+    // A period reported for the same quota elsewhere stands, in either order.
+    for buckets in [
+        json!([epoch.clone(), real.clone()]),
+        json!([real, epoch]),
+    ] {
+        let read = periods(&json!([{ "buckets": buckets }]));
+        assert_eq!(
+            (read["gemini-5h"].without, read["gemini-5h"].remaining_percent),
+            (None, Some(74.5))
+        );
+    }
+}
+
+#[test]
+fn a_period_saved_as_ending_at_the_unix_epoch_reads_as_one_without_a_reset_time() {
+    let body = json!({
+        "gemini-5h": {"start": -18_000_000, "end": 0, "remainingPercent": 100.0},
+        "gemini-weekly": {"start": -604_800_000, "end": 0, "remainingPercent": 100.0},
+        "3p-5h": {"start": 0, "end": 0, "without": "disabled"},
+        "3p-weekly": {"start": 1_767_398_400_000_i64, "end": 1_768_003_200_000_i64, "remainingPercent": 68.5},
+    });
+    let saved: Periods = serde_json::from_value(body.clone()).unwrap();
+    let untouched = Period {
+        remaining_percent: Some(100.0),
+        without: Some(Without::NoReset),
+        ..Period::default()
+    };
+    assert_eq!(saved["gemini-5h"], untouched);
+    assert_eq!(saved["gemini-weekly"], untouched);
+    let now = 1_767_484_800_000;
+    assert!(saved["gemini-5h"].current(now));
+    // A reason or a real period is read as it was saved.
+    assert_eq!(
+        saved["3p-5h"],
+        Period {
+            without: Some(Without::Disabled),
+            ..Period::default()
+        }
+    );
+    assert_eq!(
+        saved["3p-weekly"],
+        Period {
+            start: 1_767_398_400_000,
+            end: 1_768_003_200_000,
+            remaining_percent: Some(68.5),
+            without: None,
+        }
+    );
+
+    // The statistics show it at once, before the quota is asked for again.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    std::fs::write(
+        dir.path().join("antigravity-accounts.json"),
+        serde_json::to_vec(&json!({
+            "schema": 1,
+            "entries": [{"id":"a","name":"Fixture a","kind":"oauth","sourceType":"fixture","payload":"{}","updatedAt":0}],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO metadata(key,value) VALUES('antigravity_quota:a',?1)",
+            [body.to_string()],
+        )
+        .unwrap();
+    let stats = store.antigravity_stats(&Filter::default(), now).unwrap();
+    let [gemini, third_party] = &stats.accounts[0].tracks[..] else {
+        panic!("two tracks");
+    };
+    for window in [&gemini.burst_5h, &gemini.weekly_7d] {
+        assert_eq!(
+            (&window.period, window.without, window.remaining_percent),
+            (&None, Some(Without::NoReset), Some(100.0))
+        );
+    }
+    assert_eq!(third_party.burst_5h.without, Some(Without::Disabled));
+    assert!(third_party.weekly_7d.period.is_some());
+
+    // Asked again, the quota is written the way it is read now, once.
+    assert!(store.save_antigravity_quota("a", &saved).unwrap());
+    assert!(!store.save_antigravity_quota("a", &saved).unwrap());
+}
+
+#[test]
 fn hourly_cost_is_the_period_spend_over_the_time_since_it_began() {
     let periods = parse(&summary());
     let start = periods["gemini-5h"].start;
