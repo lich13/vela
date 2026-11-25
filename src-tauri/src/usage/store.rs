@@ -300,7 +300,8 @@ impl Store {
         // Pruning and VACUUM wait for every conversion: what they free only
         // becomes unreferenced once the last batch is in.
         let pending: bool = storage_v12::packing_pending(&self.connection)?
-            || storage_v12::reshape_pending(&self.connection)?;
+            || storage_v12::reshape_pending(&self.connection)?
+            || self.merging_pending()?;
         let repack: bool = db(self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='storage_repack')",
             [],
@@ -351,6 +352,12 @@ impl Store {
         if storage_v12::reshape_batch(&self.connection, 2000)? {
             return Ok(true);
         }
+        // Merging rollups touches no record, so it need not come before or
+        // after that. It deletes most payloads and writes a few new ones, so
+        // packing follows it and packs only what is left.
+        if self.merge_daily_batch(500)? {
+            return Ok(true);
+        }
         storage_v12::compact_diagnostics(&self.connection)
     }
     fn merging_pending(&self) -> Result<bool> {
@@ -365,8 +372,6 @@ impl Store {
     /// stored rollups in one transaction and answers whether it read any. What
     /// a rollup projected is added to its bucket as it is, so no summary
     /// changes.
-    // Nothing but the tests calls it yet.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn merge_daily_batch(&mut self, limit: usize) -> Result<bool> {
         if !self.merging_pending()? {
             return Ok(false);
@@ -454,6 +459,14 @@ impl Store {
             )?;
             db(db(tx.prepare_cached("DELETE FROM daily WHERE id=?1"))?.execute([&id]))?;
             bodies::retire(&tx, &body)?;
+        }
+        if !buckets.0.is_empty() {
+            // What the merged rollups leave unused is freed with the next
+            // reclaim, which waits for the last batch.
+            db(tx.execute(
+                "INSERT OR REPLACE INTO metadata VALUES('storage_repack','1')",
+                [],
+            ))?;
         }
         buckets.save(&tx)?;
         if finished {

@@ -3,7 +3,7 @@
 //!
 //! Every fixture is synthetic and lives in a private temporary directory.
 
-use super::{bodies, model::*, pricing::Pricing, query, store::Store};
+use super::{bodies, model::*, pricing::Pricing, query, storage_v12, store::Store};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -475,6 +475,23 @@ fn merge_rest(store: &mut Store, limit: usize) {
     }
 }
 
+/// The rows of each table a rollup takes room in, and the pages of the file.
+fn sizes(store: &Store) -> [(&'static str, i64); 5] {
+    [
+        ("daily", "SELECT count(*) FROM daily"),
+        (
+            "usage_daily_metrics",
+            "SELECT count(*) FROM usage_daily_metrics",
+        ),
+        ("v12_archives", "SELECT count(*) FROM v12_archives"),
+        ("v12_templates", "SELECT count(*) FROM v12_templates"),
+        ("pages", "PRAGMA page_count"),
+    ]
+    .map(|(name, sql)| (name, count(store, sql)))
+}
+
+const RECLAIMING: Option<&str> = Some("用量存储正在回收空间");
+const RETIRED: &str = "SELECT count(*) FROM v12_dead_diagnostics";
 const MERGED: &str = "json_extract(body,'$.merged')";
 const EXACT: &str = "json_extract(body,'$.merged') IS NULL";
 const EXACT_PRICED: &str =
@@ -851,4 +868,91 @@ fn a_rollup_that_does_not_project_a_priced_row_for_each_attempt_stays_as_it_is()
         2
     );
     assert!(!store.merge_daily_batch(4).unwrap());
+}
+
+#[test]
+fn storage_batches_merge_the_rollups_and_their_space_is_reclaimed_after_the_last_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    // Requests of every kind, and more rollups than one batch reads.
+    let mut rows = fixture();
+    for offset in 0..2 {
+        for i in 0..130u64 {
+            rows.push(gateway(
+                &format!("fixture-many-{offset}-{i}"),
+                day(offset) + 90_000 + i as i64,
+                "fixture-model",
+                tokens(2_000 + i, 30),
+                &format!("0.{:04}", 1 + i),
+            ));
+        }
+    }
+    archive_exact(&mut store, &rows);
+    // An earlier version has packed every payload and reclaimed the space.
+    while store.compact_storage_batch().unwrap() {}
+    store.reclaim_space().unwrap();
+    assert_eq!(store.maintenance_status(), None);
+    unmark(&store);
+    let before = summaries(&store);
+    let totals = calculator(&store);
+    let was = sizes(&store);
+    let exact = |store: &Store| {
+        count(
+            store,
+            &format!("SELECT count(*) FROM daily WHERE {EXACT_PRICED}"),
+        )
+    };
+    let all = exact(&store);
+    assert!(all > 520);
+
+    // One small batch marks the space it leaves, and what it wrote is packed,
+    // as archiving details does at any time. Space asked for now is still not
+    // reclaimed: the payloads that went stay listed, and so does the mark.
+    assert!(store.merge_daily_batch(4).unwrap());
+    assert_eq!(store.maintenance_status().as_deref(), RECLAIMING);
+    while storage_v12::compact_diagnostics(&store.connection).unwrap() {}
+    store.reclaim_space().unwrap();
+    assert_eq!(store.maintenance_status().as_deref(), RECLAIMING);
+    let retired = count(&store, RETIRED);
+    assert!(retired > 0);
+    drop(store);
+
+    // After a restart each call goes on by one bounded batch.
+    let mut store = Store::open(dir.path()).unwrap();
+    assert_unchanged(&summaries(&store), &before);
+    assert!(store.compact_storage_batch().unwrap());
+    let left = exact(&store);
+    assert!(0 < left && left < all - 4, "{left} of {all}");
+    store.reclaim_space().unwrap();
+    assert_eq!(store.maintenance_status().as_deref(), RECLAIMING);
+    assert!(count(&store, RETIRED) > retired);
+    assert_unchanged(&summaries(&store), &before);
+    let mut batches = 0;
+    while store.compact_storage_batch().unwrap() {
+        batches += 1;
+        assert!(batches < 64, "the storage batches did not finish");
+    }
+    assert_eq!(exact(&store), 0);
+    assert_unchanged(&summaries(&store), &before);
+    assert_unchanged(&calculator(&store), &totals);
+
+    // Now the space is reclaimed, and every table holds less than it did.
+    store.reclaim_space().unwrap();
+    assert_eq!(store.maintenance_status(), None);
+    assert_eq!(count(&store, RETIRED), 0);
+    assert_eq!(spare_payloads(&store), 0);
+    assert_unchanged(&summaries(&store), &before);
+    assert_unchanged(&calculator(&store), &totals);
+    for ((name, now), (_, was)) in sizes(&store).into_iter().zip(was) {
+        assert!(now < was, "{name}: {now} of {was}");
+    }
+
+    // Done: a further call changes nothing, now or after a restart.
+    let merged = stored(&store);
+    assert!(!store.compact_storage_batch().unwrap());
+    drop(store);
+    let mut store = Store::open(dir.path()).unwrap();
+    assert!(!store.compact_storage_batch().unwrap());
+    assert_eq!(stored(&store), merged);
+    assert_unchanged(&summaries(&store), &before);
 }
