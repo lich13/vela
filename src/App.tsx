@@ -716,7 +716,9 @@ function Shell() {
                     {search
                       ? "尝试其他名称或邮箱"
                       : remote
-                        ? "服务器上还没有保存的账号。"
+                        ? exchanges
+                          ? "服务器上还没有保存的账号，可点“导入”从本机文件添加。"
+                          : "服务器上还没有保存的账号。"
                         : "登录 ChatGPT，或导入已有 auth.json。"}
                   </p>
                   {!search && !remote && (
