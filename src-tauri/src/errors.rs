@@ -65,7 +65,7 @@ local_codes! {
     EndpointAffinity => ENDPOINT_AFFINITY = "ENDPOINT_AFFINITY",
     EndpointRemoved => ENDPOINT_REMOVED = "ENDPOINT_REMOVED",
     Event => #[cfg(feature = "desktop")] EVENT = "EVENT",
-    ExchangeTemplate => #[cfg(feature = "desktop")] EXCHANGE_TEMPLATE = "EXCHANGE_TEMPLATE",
+    ExchangeTemplate => EXCHANGE_TEMPLATE = "EXCHANGE_TEMPLATE",
     Export => #[cfg(any(feature = "desktop", test))] EXPORT = "EXPORT",
     Failover = "FAILOVER",
     FailoverExhausted = "FAILOVER_EXHAUSTED",

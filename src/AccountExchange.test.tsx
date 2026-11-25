@@ -8,6 +8,7 @@ import { mock } from "./test-bridge";
 vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import AccountExchange from "./AccountExchange";
+import { instanceState, setInstanceState } from "./instance";
 
 const importPreview = {
   token: "fixture-import-token",
@@ -120,6 +121,7 @@ async function defaultCommand(name: string) {
 beforeEach(() => {
   mock.command.mockReset();
   mock.command.mockImplementation(defaultCommand);
+  setInstanceState({ ...instanceState(), active: "local" });
 });
 
 function mount(mode: "import" | "export") {
@@ -379,6 +381,7 @@ it("selects a Sub2API OAuth prototype before exporting multiple valid accounts w
     [
       "prepare_account_template",
       {
+        instance: "local",
         ids: ["fixture-account-a", "fixture-account-b"],
         replaceTemplate: false,
       },
@@ -387,6 +390,7 @@ it("selects a Sub2API OAuth prototype before exporting multiple valid accounts w
     [
       "prepare_account_template",
       {
+        instance: "local",
         ids: ["fixture-account-a", "fixture-account-b"],
         replaceTemplate: false,
       },
@@ -394,6 +398,7 @@ it("selects a Sub2API OAuth prototype before exporting multiple valid accounts w
     [
       "export_accounts",
       {
+        instance: "local",
         ids: ["fixture-account-a", "fixture-account-b"],
         expectedRevision: exportPreview.revision,
         format: "sub2api",
@@ -425,6 +430,7 @@ it("exports the selected CLIProxyAPI subset without preparing an OAuth template"
     [
       "export_accounts",
       {
+        instance: "local",
         ids: ["fixture-account-a"],
         expectedRevision: exportPreview.revision,
         format: "cliproxyapi",
@@ -482,6 +488,7 @@ it("cancels an unselected OAuth prototype before switching to CLIProxyAPI and ex
     [
       "export_accounts",
       {
+        instance: "local",
         ids: ["fixture-account-a"],
         expectedRevision: exportPreview.revision,
         format: "cliproxyapi",
@@ -591,7 +598,7 @@ it("replaces the OAuth template explicitly and cleans up its unselected token on
   expect(calls("prepare_account_template")).toEqual([
     [
       "prepare_account_template",
-      { ids: ["fixture-account-a"], replaceTemplate: true },
+      { instance: "local", ids: ["fixture-account-a"], replaceTemplate: true },
     ],
   ]);
   await user.click(screen.getByRole("button", { name: "取消" }));
@@ -676,9 +683,43 @@ it("refreshes export eligibility and revision after a conflict before exporting 
   expect(calls("export_accounts")[1]).toEqual([
     "export_accounts",
     {
+      instance: "local",
       ids: ["fixture-account-a"],
       expectedRevision: latest.revision,
       format: "cliproxyapi",
     },
+  ]);
+});
+
+it("names the instance that is shown to what picks, reads and writes the files here", async () => {
+  const user = userEvent.setup();
+  setInstanceState({ ...instanceState(), active: "fixture-machine" });
+  const importing = mount("import");
+  await screen.findByRole("checkbox", { name: /Fixture new Codex/ });
+  expect(calls("preview_account_import")).toEqual([
+    ["preview_account_import", { instance: "fixture-machine" }],
+  ]);
+  importing.unmount();
+  const exporting = mount("export");
+  await screen.findByRole("checkbox", { name: /Fixture saved A/ });
+  await user.click(screen.getByRole("button", { name: "导出所选" }));
+  await waitFor(() => expect(exporting.close).toHaveBeenCalledOnce());
+  const ids = ["fixture-account-a", "fixture-account-b"];
+  expect(calls("prepare_account_template")).toEqual([
+    [
+      "prepare_account_template",
+      { instance: "fixture-machine", ids, replaceTemplate: false },
+    ],
+  ]);
+  expect(calls("export_accounts")).toEqual([
+    [
+      "export_accounts",
+      {
+        instance: "fixture-machine",
+        ids,
+        expectedRevision: exportPreview.revision,
+        format: "sub2api",
+      },
+    ],
   ]);
 });

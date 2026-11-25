@@ -1,20 +1,17 @@
 //! Account exchange is deliberately separate from native authentication files.
-//! A server keeps what each account was imported from and never reads or
-//! writes an exchange file itself.
-#[cfg(feature = "desktop")]
-use super::{auth_info, now, older, Core, Profile};
-use super::{claims, clean_name};
+//! Everything here takes and gives documents. The files they are read from
+//! and written to are the desktop app's, also where it imports into or exports
+//! from another instance: a server never reads or writes an exchange file.
+use super::{auth_info, claims, clean_name, now, older, Core, Profile};
 use crate::errors::code;
-use crate::storage::{AppError, Result};
-#[cfg(feature = "desktop")]
-use crate::{exchange_template as template, storage};
+use crate::exchange_template as template;
+use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Arc};
-#[cfg(feature = "desktop")]
 use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -48,7 +45,6 @@ pub(super) fn rebind_sources(
     Ok(())
 }
 
-#[cfg(feature = "desktop")]
 fn source_extensions(source: &Source, format: &str) -> Value {
     let mut value = source.account.clone();
     let keys = if format == "sub2api" {
@@ -94,7 +90,6 @@ fn source_extensions(source: &Source, format: &str) -> Value {
     value
 }
 
-#[cfg(feature = "desktop")]
 pub(super) fn merge_sources(
     target: &mut BTreeMap<String, Source>,
     source: &BTreeMap<String, Source>,
@@ -159,8 +154,6 @@ impl<'de> Deserialize<'de> for Envelope {
         Value::deserialize(deserializer).map(|v| Self(Arc::new(v)))
     }
 }
-// A server parses an account only to learn whose it is.
-#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 struct Candidate {
     auth: String,
     name: String,
@@ -168,7 +161,6 @@ struct Candidate {
     source: Option<(String, Source)>,
     duplicate: Option<(String, String)>,
 }
-#[cfg(feature = "desktop")]
 struct Pending {
     token: String,
     at: Instant,
@@ -176,14 +168,14 @@ struct Pending {
     file_revision: String,
     candidates: Vec<Option<Candidate>>,
 }
-#[cfg(feature = "desktop")]
 #[derive(Default)]
 pub struct Service {
     pending: Option<Pending>,
     pub templates: template::Service,
 }
 
-#[cfg(feature = "desktop")]
+/// An account of the documents of an import as a window lists it, with
+/// nothing of its login.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Row {
@@ -194,28 +186,24 @@ pub struct Row {
     pub duplicate: bool,
     pub error: Option<String>,
 }
-#[cfg(feature = "desktop")]
 #[derive(Serialize)]
 pub struct Preview {
     pub token: String,
     pub revision: String,
     pub rows: Vec<Row>,
 }
-#[cfg(feature = "desktop")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Selection {
     pub id: usize,
     pub update: bool,
 }
-#[cfg(feature = "desktop")]
 #[derive(Serialize)]
 pub struct ExportRow {
     pub id: String,
     pub name: String,
     pub error: Option<String>,
 }
-#[cfg(feature = "desktop")]
 #[derive(Serialize)]
 pub struct ExportPreview {
     pub revision: String,
@@ -228,10 +216,25 @@ fn invalid(message: &str) -> AppError {
 fn conflict() -> AppError {
     AppError::new(code::CONFLICT, "账号库或凭据已变化，请重新预览后选择")
 }
+/// One import takes the documents of 1–1000 files.
+pub fn check_count(documents: usize) -> Result<()> {
+    if documents == 0 || documents > 1000 {
+        return Err(invalid("请选择 1–1000 个 JSON 文件"));
+    }
+    Ok(())
+}
+/// One import takes 8 MiB of documents. Adds `document` to the `total` so
+/// far, so that whoever reads the files stops at the one that is too much.
+pub fn check_size(total: &mut usize, document: &Value) -> Result<()> {
+    *total += document.to_string().len();
+    if *total > template::MAX_FILE as usize {
+        return Err(invalid("本次选择的文件总计超过 8 MiB"));
+    }
+    Ok(())
+}
 fn text(value: &Value) -> Option<&str> {
     value.as_str().filter(|s| !s.is_empty())
 }
-#[cfg(feature = "desktop")]
 fn expiry(value: &Value) -> Option<i64> {
     value
         .as_i64()
@@ -248,13 +251,11 @@ fn expiry(value: &Value) -> Option<i64> {
                 })
         })
 }
-#[cfg(feature = "desktop")]
 fn datetime(seconds: i64) -> Result<String> {
     chrono::DateTime::from_timestamp(seconds, 0)
         .map(|v| v.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
         .ok_or_else(|| invalid("有效期无法转换"))
 }
-#[cfg(feature = "desktop")]
 fn refresh_time(value: &Value) -> Result<Value> {
     if let Some(value) = value
         .as_str()
@@ -379,7 +380,6 @@ fn parse_account(value: &Value, format: &str, envelope: Option<Envelope>) -> Res
     })
 }
 
-#[cfg(feature = "desktop")]
 impl Core {
     pub fn exchange_revision(&self) -> String {
         // Includes names, metadata and preferences as well as credential versions.
@@ -396,6 +396,8 @@ impl Core {
         }
         self.exchange.templates.cancel(token);
     }
+    // Only the desktop app has a window whose closing ends an exchange.
+    #[cfg(feature = "desktop")]
     pub fn exchange_clear(&mut self) {
         self.exchange.pending.take();
         self.exchange.templates.clear();
@@ -411,21 +413,17 @@ impl Core {
         }
         self.exchange.templates.prune();
     }
-    pub fn exchange_preview(&mut self, paths: &[PathBuf]) -> Result<Preview> {
+    /// Lists the accounts of `documents`, each the whole of one file, and
+    /// keeps them until they are committed, cancelled or replaced.
+    pub fn exchange_preview_docs(&mut self, documents: Vec<Value>) -> Result<Preview> {
         self.exchange.pending.take();
-        if paths.is_empty() || paths.len() > 1000 {
-            return Err(invalid("请选择 1–1000 个 JSON 文件"));
-        }
+        check_count(documents.len())?;
         let mut rows = Vec::new();
         let mut candidates = Vec::new();
         let mut seen = HashSet::new();
         let mut total = 0;
-        for path in paths {
-            let doc = template::read(path)?;
-            total += doc.to_string().len();
-            if total > template::MAX_FILE as usize {
-                return Err(invalid("本次选择的文件总计超过 8 MiB"));
-            }
+        for doc in documents {
+            check_size(&mut total, &doc)?;
             let format = if template::payload(&doc).get("accounts").is_some() {
                 "sub2api"
             } else if doc.get("type").is_some() {
@@ -614,13 +612,12 @@ impl Core {
     fn oauth_template_path(&self) -> PathBuf {
         self.data_dir.join("sub2api-oauth-template.json")
     }
-    pub fn exchange_prepare_template(&self, path: &Path) -> Result<template::Prepared> {
-        self.exchange.templates.prepare(
-            template::read(path)?,
-            &self.oauth_template_path(),
-            "openai",
-            "oauth",
-        )
+    /// Takes the OAuth template out of `document`, the whole of a Sub2API
+    /// file, or lists its accounts where one has to be chosen.
+    pub fn exchange_prepare_template_doc(&self, document: Value) -> Result<template::Prepared> {
+        self.exchange
+            .templates
+            .prepare(document, &self.oauth_template_path(), "openai", "oauth")
     }
     pub fn exchange_select_template(&self, token: &str, id: usize) -> Result<()> {
         self.exchange
@@ -655,13 +652,14 @@ impl Core {
                 .collect(),
         }
     }
-    pub fn exchange_export(
+    /// The chosen accounts as documents that hold their logins: one for each
+    /// account as CLIProxyAPI reads them, or a single one for Sub2API.
+    pub fn exchange_export_documents(
         &self,
         ids: &[String],
         expected: &str,
         format: &str,
-        path: &Path,
-    ) -> Result<()> {
+    ) -> Result<Vec<Value>> {
         if expected != self.exchange_revision() {
             return Err(conflict());
         }
@@ -683,23 +681,10 @@ impl Core {
             })
             .collect::<Result<Vec<_>>>()?;
         if format == "cliproxyapi" {
-            if !path.is_dir() {
-                return Err(invalid("请选择导出目录"));
-            }
-            // Stage the whole batch before publishing. UUID names avoid overwriting user files.
-            let staged = profiles
+            return profiles
                 .iter()
-                .map(|p| {
-                    let bytes = serde_json::to_vec_pretty(&export_account(p, format, None)?)
-                        .map_err(|_| invalid("导出无法生成"))?;
-                    let file = storage::stage_write(path, &bytes)?;
-                    Ok((
-                        file,
-                        path.join(format!("codex-{}.json", uuid::Uuid::new_v4())),
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            return storage::publish_batch(staged);
+                .map(|p| export_account(p, format, None))
+                .collect();
         }
         let saved = template::Service::load(&self.oauth_template_path(), "openai", "oauth").ok();
         let first_envelope = profiles
@@ -751,18 +736,15 @@ impl Core {
         if !all_same {
             template::payload_mut(&mut document)["proxies"] = Value::Array(proxies);
         }
-        let bytes = serde_json::to_vec_pretty(&document).map_err(|_| invalid("导出无法生成"))?;
-        storage::atomic_write(path, &bytes, None)
+        Ok(vec![document])
     }
 }
-#[cfg(feature = "desktop")]
 fn source<'a>(profile: &'a Profile, format: &str) -> Option<&'a Source> {
     profile
         .exchange
         .get(format)
         .filter(|s| s.identity == profile.identity)
 }
-#[cfg(feature = "desktop")]
 fn export_account(profile: &Profile, format: &str, prototype: Option<&Value>) -> Result<Value> {
     if profile.kind != "chatgpt" {
         return Err(invalid("仅支持 ChatGPT/Codex 官方 OAuth 账号"));

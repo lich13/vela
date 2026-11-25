@@ -53,10 +53,17 @@ pub(crate) fn names() -> &'static [&'static str] {
 }
 
 /// What one instance's Rust asks of another's and no window may ask: these
-/// carry a provider with its tokens. A server lists them like the rest and
-/// answers them only to a request that says it is internal; the two commands
-/// a window reaches the table through refuse them.
-const INTERNAL: &[&str] = &["export_provider_copy", "import_provider_copy"];
+/// carry a provider with its tokens, or the documents of account files with
+/// their logins. A server lists them like the rest and answers them only to a
+/// request that says it is internal; the two commands a window reaches the
+/// table through refuse them.
+const INTERNAL: &[&str] = &[
+    "export_provider_copy",
+    "import_provider_copy",
+    "preview_account_documents",
+    "prepare_account_template_document",
+    "export_account_documents",
+];
 
 pub(crate) fn internal(name: &str) -> bool {
     INTERNAL.contains(&name)
@@ -104,6 +111,14 @@ commands! {
     blocking import_current();
     blocking rename_account(id, name);
     blocking delete_account(id);
+    blocking preview_account_documents(documents);
+    async commit_account_import(token, selected, expected_revision);
+    blocking cancel_account_exchange(token);
+    blocking preview_account_export();
+    blocking account_template_ready(ids);
+    blocking prepare_account_template_document(document);
+    blocking select_account_template(token, id);
+    blocking export_account_documents(ids, expected_revision, format);
     blocking read_antigravity_config();
     blocking save_antigravity_config(text, expected_revision);
     blocking read_previous_antigravity_config();

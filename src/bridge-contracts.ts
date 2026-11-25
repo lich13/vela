@@ -654,19 +654,24 @@ type DesktopCommands = {
     { state: AntigravityAuthState; added: number; skipped: number } | null
   >;
   export_usage_bill: Call<{ request: BillRequest }, BillExport | null>;
-  preview_account_import: Call<None, AccountImportPreview | null>;
-  commit_account_import: Call<
-    Revision & { token: string; selected: { id: number; update: boolean }[] },
-    ViewState
+  /**
+   * Account files are picked, read and written on this machine for
+   * `instance`, "local" or a machine id. What they hold goes between this
+   * app's Rust and that instance's and never reaches a window; a dismissed
+   * dialog answers null or false.
+   */
+  preview_account_import: Call<
+    { instance: string },
+    AccountImportPreview | null
   >;
-  cancel_account_exchange: Call<{ token: string }, void>;
-  preview_account_export: Call<None, AccountExportPreview>;
   prepare_account_template: Call<
-    { ids: string[]; replaceTemplate?: boolean },
+    { instance: string; ids: string[]; replaceTemplate?: boolean },
     PreparedTemplate | null
   >;
-  select_account_template: Call<{ token: string; id: number }, void>;
-  export_accounts: Call<Revision & { ids: string[]; format: string }, boolean>;
+  export_accounts: Call<
+    Revision & { instance: string; ids: string[]; format: string },
+    boolean
+  >;
   check_for_updates: Call<None, UpdateInfo>;
   open_github: Call<None, void>;
   open_update_release: Call<None, void>;
@@ -713,6 +718,15 @@ export type SharedCommands = {
   import_current: Call<None, ViewState>;
   rename_account: Call<{ id: string; name: string }, ViewState>;
   delete_account: Call<{ id: string }, ViewState>;
+  commit_account_import: Call<
+    Revision & { token: string; selected: { id: number; update: boolean }[] },
+    ViewState
+  >;
+  cancel_account_exchange: Call<{ token: string }, void>;
+  preview_account_export: Call<None, AccountExportPreview>;
+  /** Whether a Sub2API export of these accounts needs no template chosen first. */
+  account_template_ready: Call<{ ids: string[] }, boolean>;
+  select_account_template: Call<{ token: string; id: number }, void>;
   read_antigravity_config: Call<None, ConfigDocument>;
   save_antigravity_config: Call<{ text: string } & Revision, ConfigDocument>;
   read_previous_antigravity_config: Call<None, string>;
@@ -991,11 +1005,7 @@ export const desktopCommands = names<DesktopCommands>()([
   "import_antigravity_accounts",
   "export_usage_bill",
   "preview_account_import",
-  "commit_account_import",
-  "cancel_account_exchange",
-  "preview_account_export",
   "prepare_account_template",
-  "select_account_template",
   "export_accounts",
   "check_for_updates",
   "open_github",
@@ -1018,6 +1028,11 @@ export const sharedCommands = names<SharedCommands>()([
   "import_current",
   "rename_account",
   "delete_account",
+  "commit_account_import",
+  "cancel_account_exchange",
+  "preview_account_export",
+  "account_template_ready",
+  "select_account_template",
   "read_antigravity_config",
   "save_antigravity_config",
   "read_previous_antigravity_config",

@@ -15,6 +15,8 @@ pub fn invalid(message: &str) -> AppError {
     AppError::new(code::EXCHANGE_TEMPLATE, message)
 }
 
+/// The document of an exchange file. Only the desktop app reads one.
+#[cfg(feature = "desktop")]
 pub fn read(path: &Path) -> Result<Value> {
     let bytes = storage::read_bounded(path, MAX_FILE)?.ok_or_else(|| invalid("文件不存在"))?;
     let text = std::str::from_utf8(&bytes).map_err(|_| invalid("文件不是有效的 UTF-8 JSON"))?;
@@ -168,6 +170,7 @@ impl Service {
         }
     }
 
+    #[cfg(feature = "desktop")]
     pub fn clear(&self) {
         self.pending.lock().take();
     }

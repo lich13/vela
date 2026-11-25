@@ -827,8 +827,14 @@ async fn a_call_goes_to_the_selected_server_and_nowhere_else() {
 #[tokio::test(start_paused = true)]
 async fn only_what_the_apps_own_rust_asks_says_it_is_internal() {
     let bench = Bench::new();
-    // The servers answer one of the commands no window may ask.
-    bench.fleet.commands.lock().push("export_provider_copy");
+    // The servers answer every command no window may ask.
+    let internal: Vec<_> = crate::rpc::names()
+        .iter()
+        .copied()
+        .filter(|name| crate::rpc::internal(name))
+        .collect();
+    assert!(internal.contains(&"export_account_documents"));
+    bench.fleet.commands.lock().extend(&internal);
     let tokyo = bench.add("Tokyo", HOST).await;
     let osaka = bench.add("Osaka", OTHER).await;
     bench.select(&tokyo).await.unwrap();
@@ -839,30 +845,60 @@ async fn only_what_the_apps_own_rust_asks_says_it_is_internal() {
         window.await.unwrap(),
         json!({"host": HOST, "args": {"n": 1}})
     );
-    // What only Rust may ask is refused to it before anything is sent.
-    let refused = bench
-        .service
-        .call(&tokyo, "export_provider_copy", json!({}))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        (refused.code.as_str(), refused.message.as_str()),
-        (code::UNSUPPORTED, "此实例不支持该操作")
-    );
-    assert_eq!(bench.fleet.asked(), [format!("{HOST} get_state")]);
-
-    // The app's own Rust says so to the selected machine and to any other.
-    for (machine, host) in [(&tokyo, HOST), (&osaka, OTHER)] {
-        let args = json!({"clientId": "claude", "providerId": "fixture"});
-        let own = bench
+    for name in internal {
+        // What only Rust may ask is refused to it before anything is sent.
+        let refused = bench
             .service
-            .ask(machine, "export_provider_copy", args.clone())
-            .await;
+            .call(&tokyo, name, json!({}))
+            .await
+            .unwrap_err();
         assert_eq!(
-            own.unwrap(),
-            json!({"host": host, "args": args, "internal": true})
+            (refused.code.as_str(), refused.message.as_str()),
+            (code::UNSUPPORTED, "此实例不支持该操作"),
+            "{name}"
         );
+        assert_eq!(bench.fleet.asked(), [format!("{HOST} get_state")]);
+
+        // The app's own Rust says so to the selected machine and to any other.
+        for (machine, host) in [(&tokyo, HOST), (&osaka, OTHER)] {
+            let args = json!({"documents": [{"fixture": name}]});
+            let own = bench.service.ask(machine, name, args.clone()).await;
+            assert_eq!(
+                own.unwrap(),
+                json!({"host": host, "args": args, "internal": true}),
+                "{name}"
+            );
+        }
+        bench.fleet.asked.lock().truncate(1);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_apps_own_rust_asks_this_machines_table_or_another_machine_as_internal() {
+    let bench = Bench::new();
+    let name = "preview_account_documents";
+    bench.fleet.commands.lock().push(name);
+    let tokyo = bench.add("Tokyo", HOST).await;
+    bench.select(&tokyo).await.unwrap();
+    let home = tempdir().unwrap();
+    let runtime = crate::runtime::Runtime::at(
+        Arc::new(crate::runtime::Silent),
+        home.path().to_path_buf(),
+        home.path().join(".codex"),
+    )
+    .unwrap();
+    let read = json!({"documents": [{"fixture": "document"}]});
+
+    // What was read from files here goes to another machine as a request
+    // that says it is internal, and to this machine's own table as it is.
+    let far = on(&bench.service, &runtime, &tokyo, name, read.clone()).await;
+    assert_eq!(
+        far.unwrap(),
+        json!({"host": HOST, "args": read, "internal": true})
+    );
+    let near = on(&bench.service, &runtime, LOCAL, name, read).await;
+    assert_eq!(near.unwrap()["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(bench.fleet.asked(), [format!("{HOST} {name}")]);
 }
 
 #[tokio::test(start_paused = true)]

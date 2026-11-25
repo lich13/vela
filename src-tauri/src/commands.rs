@@ -1,14 +1,21 @@
 use crate::errors::code;
 use crate::{
+    core::exchange,
+    instances::on,
     power, process_control,
-    storage::{AppError, Result},
+    storage::{self, AppError, Result},
     Runtime,
 };
-use std::sync::{atomic::Ordering, Arc};
+use serde_json::{json, Value};
+use std::{
+    path::{Path, PathBuf},
+    sync::{atomic::Ordering, Arc},
+};
 use tauri::Emitter;
 #[cfg(target_os = "macos")]
 use tauri::Manager;
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
+type Instances<'a> = tauri::State<'a, Arc<crate::instances::Service>>;
 fn publish_power_result(
     app: &tauri::AppHandle,
     power: &power::Service,
@@ -134,14 +141,56 @@ pub fn get_startup_error(window: tauri::WebviewWindow, r: R<'_>) -> Option<AppEr
     out
 }
 
+/// The documents of the files of one import, read on this machine whichever
+/// instance takes them in.
+fn read_account_documents(paths: &[PathBuf]) -> Result<Vec<Value>> {
+    exchange::check_count(paths.len())?;
+    let mut total = 0;
+    paths
+        .iter()
+        .map(|path| {
+            let document = crate::exchange_template::read(path)?;
+            exchange::check_size(&mut total, &document)?;
+            Ok(document)
+        })
+        .collect()
+}
+/// Writes the documents of an export where the user chose: each as a new file
+/// of the directory for CLIProxyAPI, the only one as the file for Sub2API.
+fn write_account_documents(format: &str, path: &Path, documents: &[Value]) -> Result<()> {
+    let unwritable = || AppError::new(code::ACCOUNT_EXCHANGE, "导出无法生成");
+    let bytes = |document| serde_json::to_vec_pretty(document).map_err(|_| unwritable());
+    if format == "cliproxyapi" {
+        // Stage the whole batch before publishing. UUID names avoid overwriting user files.
+        let staged = documents
+            .iter()
+            .map(|document| {
+                let file = storage::stage_write(path, &bytes(document)?)?;
+                Ok((
+                    file,
+                    path.join(format!("codex-{}.json", uuid::Uuid::new_v4())),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return storage::publish_batch(staged);
+    }
+    let [document] = documents else {
+        return Err(unwritable());
+    };
+    storage::atomic_write(path, &bytes(document)?, None)
+}
+/// Lists the accounts of the files the user picks here, for `instance` to
+/// take in. The documents go from this app's Rust to that instance's; the
+/// window gets the list, which holds no login.
 #[tauri::command]
 pub async fn preview_account_import(
     app: tauri::AppHandle,
     r: R<'_>,
-) -> Result<Option<crate::core::exchange::Preview>> {
+    instances: Instances<'_>,
+    instance: String,
+) -> Result<Option<Value>> {
     use tauri_plugin_dialog::DialogExt;
-    let r = r.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let picked = tauri::async_runtime::spawn_blocking(move || {
         let Some(files) = app
             .dialog()
             .file()
@@ -158,47 +207,38 @@ pub async fn preview_account_import(
                     .map_err(|_| AppError::new(code::PATH, "请选择本地 JSON 文件"))
             })
             .collect::<Result<Vec<_>>>()?;
-        r.core.lock().exchange_preview(&paths).map(Some)
+        read_account_documents(&paths).map(Some)
     })
     .await
-    .map_err(|_| AppError::new(code::IMPORT, "账号文件读取失败"))?
+    .map_err(|_| AppError::new(code::IMPORT, "账号文件读取失败"))??;
+    let Some(documents) = picked else {
+        return Ok(None);
+    };
+    let args = json!({ "documents": documents });
+    on(&instances, &r, &instance, "preview_account_documents", args)
+        .await
+        .map(Some)
 }
-#[tauri::command]
-pub fn cancel_account_exchange(r: R<'_>, token: String) {
-    r.core.lock().exchange_cancel(&token);
-}
-#[tauri::command]
-pub async fn commit_account_import(
-    r: R<'_>,
-    token: String,
-    selected: Vec<crate::core::exchange::Selection>,
-    expected_revision: String,
-) -> Result<crate::core::ViewState> {
-    let _guard = r.official_tx.lock().await;
-    r.core
-        .lock()
-        .exchange_commit(&token, &selected, &expected_revision)?;
-    r.refresh()
-}
-#[tauri::command]
-pub fn preview_account_export(r: R<'_>) -> crate::core::exchange::ExportPreview {
-    let mut core = r.core.lock();
-    core.exchange_prune();
-    core.exchange_export_preview()
-}
+/// Makes the OAuth template of `instance` ready for a Sub2API export: it is
+/// already, or the user picks the Sub2API file here that it is taken from.
 #[tauri::command]
 pub async fn prepare_account_template(
     app: tauri::AppHandle,
     r: R<'_>,
+    instances: Instances<'_>,
+    instance: String,
     ids: Vec<String>,
     replace_template: Option<bool>,
-) -> Result<Option<crate::exchange_template::Prepared>> {
+) -> Result<Option<Value>> {
     use tauri_plugin_dialog::DialogExt;
-    if !replace_template.unwrap_or(false) && r.core.lock().exchange_template_ready(&ids) {
-        return Ok(Some(crate::exchange_template::Prepared::ready()));
+    if !replace_template.unwrap_or(false) {
+        let args = json!({ "ids": ids });
+        let ready = on(&instances, &r, &instance, "account_template_ready", args).await?;
+        if ready == Value::Bool(true) {
+            return Ok(Some(json!(crate::exchange_template::Prepared::ready())));
+        }
     }
-    let r = r.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let picked = tauri::async_runtime::spawn_blocking(move || {
         let Some(file) = app
             .dialog()
             .file()
@@ -211,32 +251,48 @@ pub async fn prepare_account_template(
         let path = file
             .into_path()
             .map_err(|_| AppError::new(code::PATH, "请选择本地 JSON 文件"))?;
-        r.core.lock().exchange_prepare_template(&path).map(Some)
+        crate::exchange_template::read(&path).map(Some)
     })
     .await
-    .map_err(|_| AppError::new(code::EXPORT, "OAuth 模板读取失败"))?
+    .map_err(|_| AppError::new(code::EXPORT, "OAuth 模板读取失败"))??;
+    let Some(document) = picked else {
+        return Ok(None);
+    };
+    let args = json!({ "document": document });
+    on(
+        &instances,
+        &r,
+        &instance,
+        "prepare_account_template_document",
+        args,
+    )
+    .await
+    .map(Some)
 }
-#[tauri::command]
-pub fn select_account_template(r: R<'_>, token: String, id: usize) -> Result<()> {
-    r.core.lock().exchange_select_template(&token, id)
-}
+/// Writes the chosen accounts of `instance` where the user chooses here. The
+/// documents, logins included, come from that instance's Rust to this app's
+/// and reach no window. They are asked for once; after a failure the user
+/// exports again.
 #[tauri::command]
 pub async fn export_accounts(
     app: tauri::AppHandle,
     r: R<'_>,
+    instances: Instances<'_>,
+    instance: String,
     ids: Vec<String>,
     expected_revision: String,
     format: String,
 ) -> Result<bool> {
     use tauri_plugin_dialog::DialogExt;
-    let r = r.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let file = if format == "cliproxyapi" {
+    let failed = || AppError::new(code::EXPORT, "账号导出失败");
+    let chosen = format.clone();
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        let file = if chosen == "cliproxyapi" {
             app.dialog()
                 .file()
                 .set_title("选择 CLIProxyAPI 账号导出目录")
                 .blocking_pick_folder()
-        } else if format == "sub2api" {
+        } else if chosen == "sub2api" {
             app.dialog()
                 .file()
                 .set_file_name("sub2api-oauth-accounts.json")
@@ -246,18 +302,30 @@ pub async fn export_accounts(
             return Err(AppError::new(code::EXPORT, "导出格式不支持"));
         };
         let Some(file) = file else {
-            return Ok(false);
+            return Ok(None);
         };
         let path = file
             .into_path()
             .map_err(|_| AppError::new(code::PATH, "请选择本地路径"))?;
-        r.core
-            .lock()
-            .exchange_export(&ids, &expected_revision, &format, &path)?;
-        Ok(true)
+        if chosen == "cliproxyapi" && !path.is_dir() {
+            return Err(AppError::new(code::ACCOUNT_EXCHANGE, "请选择导出目录"));
+        }
+        Ok(Some(path))
     })
     .await
-    .map_err(|_| AppError::new(code::EXPORT, "账号导出失败"))?
+    .map_err(|_| failed())??;
+    let Some(path) = path else {
+        return Ok(false);
+    };
+    let args = json!({ "ids": ids, "expectedRevision": expected_revision, "format": format });
+    let answer = on(&instances, &r, &instance, "export_account_documents", args).await?;
+    let documents: Vec<Value> = serde_json::from_value(answer).map_err(|_| failed())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        write_account_documents(&format, &path, &documents)
+    })
+    .await
+    .map_err(|_| failed())??;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -290,5 +358,48 @@ mod startup_error_tests {
         assert!(!consumed.load(Ordering::Acquire));
         assert!(take_startup_error_for_label(&slot, &consumed, "main").is_none());
         assert!(consumed.load(Ordering::Acquire));
+    }
+}
+
+#[cfg(test)]
+mod account_file_tests {
+    use super::*;
+
+    #[test]
+    fn exported_documents_are_written_where_chosen_and_read_back_for_an_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let documents = [
+            json!({"type": "codex", "name": "fixture-one"}),
+            json!({"type": "codex", "name": "fixture-two"}),
+        ];
+        // CLIProxyAPI: a new file for each, beside what the directory holds.
+        let kept = temp.path().join("codex-kept.json");
+        std::fs::write(&kept, b"{}").unwrap();
+        write_account_documents("cliproxyapi", temp.path(), &documents).unwrap();
+        let written: Vec<PathBuf> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| *path != kept)
+            .collect();
+        assert_eq!(written.len(), 2);
+        assert!(written.iter().all(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            name.starts_with("codex-") && name.ends_with(".json")
+        }));
+        assert_eq!(std::fs::read(&kept).unwrap(), b"{}");
+        let read = read_account_documents(&written).unwrap();
+        assert!(read.len() == 2 && documents.iter().all(|document| read.contains(document)));
+        // Sub2API: the one document as the chosen file, and nothing otherwise.
+        let file = temp.path().join("sub2api.json");
+        write_account_documents("sub2api", &file, &documents[..1]).unwrap();
+        assert_eq!(
+            read_account_documents(std::slice::from_ref(&file)).unwrap(),
+            documents[..1]
+        );
+        let other = temp.path().join("other.json");
+        assert!(write_account_documents("sub2api", &other, &documents).is_err());
+        assert!(!other.exists());
+        // An import of no file is refused before anything is read.
+        assert!(read_account_documents(&[]).is_err());
     }
 }

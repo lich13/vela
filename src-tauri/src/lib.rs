@@ -15,10 +15,8 @@ mod download;
 mod errors;
 mod event_raw;
 mod events;
-// Accounts are imported from and exported to files by the desktop app alone.
-#[cfg(feature = "desktop")]
 mod exchange_template;
-#[cfg(all(test, feature = "desktop"))]
+#[cfg(test)]
 mod exchange_template_tests;
 mod gateway;
 #[cfg(feature = "desktop")]
@@ -1744,11 +1742,7 @@ pub fn run() {
             quick::hide_quick,
             reveal_provider_token,
             commands::preview_account_import,
-            commands::commit_account_import,
-            commands::cancel_account_exchange,
-            commands::preview_account_export,
             commands::prepare_account_template,
-            commands::select_account_template,
             commands::export_accounts,
             get_startup,
             set_startup,
