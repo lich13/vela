@@ -231,6 +231,8 @@ pub struct Budget {
     /// The request waits for its providers without a queue deadline.
     endless: bool,
     fixed_provider: bool,
+    /// The provider it is fixed to has to be in the queue still.
+    while_queued: bool,
     intake: Option<(super::compaction::Intake, Option<String>)>,
 }
 impl Admission {
@@ -278,9 +280,16 @@ impl Budget {
     }
     pub fn pin_provider(&mut self) {
         self.fixed_provider = true;
+        self.while_queued = false;
         self.capacity_owner = None;
         self.reconnect_from = None;
         self.intake = None;
+    }
+    /// Fixes the request to its provider for as long as that one is in the
+    /// queue: taken out of it, the provider has no slot for the request.
+    pub fn hold_provider(&mut self) {
+        self.pin_provider();
+        self.while_queued = true;
     }
     pub fn new(seconds: u64) -> Self {
         Self {
@@ -292,6 +301,7 @@ impl Budget {
             protected_capacity: false,
             endless: false,
             fixed_provider: false,
+            while_queued: false,
             intake: None,
         }
     }
@@ -799,6 +809,12 @@ impl Scheduler {
         self.0.wake.notify_waiters();
         let _ = self.0.events.send(());
     }
+    /// Completes at the next signal, which every provider edit sends. Enabled
+    /// before the caller reads what an edit changes, it misses none made
+    /// between that reading and the wait.
+    pub(super) fn signalled(&self) -> tokio::sync::futures::Notified<'_> {
+        self.0.wake.notified()
+    }
     pub async fn acquire_for_immediate(
         &self,
         routes: &[Route],
@@ -874,7 +890,9 @@ impl Scheduler {
                             && s.versions.get(&r.provider.id) == Some(&r.provider.version)
                     })
                     .filter(|r| {
-                        budget.fixed_provider || manual || s.queued.contains(&r.provider.id)
+                        (budget.fixed_provider && !budget.while_queued)
+                            || manual
+                            || s.queued.contains(&r.provider.id)
                     })
                     .collect();
                 if matching.is_empty() {
