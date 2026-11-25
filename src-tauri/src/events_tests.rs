@@ -74,9 +74,7 @@ async fn complete_errors_survive_restart_and_size_growth_and_do_not_merge_differ
     restored.clear(None, None).await.unwrap();
     assert!(restored.raw(&id).unwrap().is_none());
     assert_eq!(
-        fs::read_dir(temp.path().join("diagnostic-errors"))
-            .unwrap()
-            .count(),
+        crate::event_raw::stored(&temp.path().join("diagnostic-errors.sqlite")),
         0
     );
 }

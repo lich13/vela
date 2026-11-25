@@ -1,15 +1,24 @@
 //! Complete upstream errors, kept outside the small journal index.
-use crate::storage;
+//!
+//! They live in one private SQLite file, a row per error. A row holds what
+//! used to be one file per error, compressed: a line of JSON for the headers
+//! and the body after it.
+use crate::{errors::code, storage};
 use base64::{engine::general_purpose::STANDARD, Engine};
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     io::{self, Read, Write},
     path::Path,
     sync::{Arc, OnceLock},
 };
 
 const MEMORY: usize = 2 * 1024 * 1024;
+/// Rows written in one transaction when the files of an earlier version move in.
+const ADOPTED: usize = 512;
+type Failure = Box<dyn std::error::Error>;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,39 +191,57 @@ impl Raw {
             incomplete: self.incomplete(),
         }
     }
-    pub fn save(&self, directory: &Path, id: &str) -> storage::Result<()> {
-        storage::private_dir(directory)?;
-        let mut file = storage::private_tempfile(directory)?;
+    pub fn save(&self, store: &Path, id: &str) -> storage::Result<()> {
         let meta = Meta {
             headers: self.headers.clone(),
             event: self.event.clone(),
             incomplete: self.incomplete(),
         };
-        let write = || -> io::Result<()> {
-            serde_json::to_writer(&mut file, &meta)?;
-            file.write_all(b"\n")?;
-            self.copy_to(&mut file)?;
-            file.as_file().sync_all()?;
-            file.persist(directory.join(format!("{id}.error")))
-                .map_err(|e| e.error)?;
+        let write = || -> Result<(), Failure> {
+            let mut packed = zstd::Encoder::new(Vec::new(), zstd::DEFAULT_COMPRESSION_LEVEL)?;
+            serde_json::to_writer(&mut packed, &meta)?;
+            packed.write_all(b"\n")?;
+            self.copy_to(&mut packed)?;
+            open(store, true)?.execute(
+                "INSERT OR REPLACE INTO errors(id,body) VALUES(?1,?2)",
+                (id, packed.finish()?),
+            )?;
             Ok(())
         };
-        write()
-            .map_err(|_| storage::AppError::new(crate::errors::code::LOG_WRITE, "错误原文保存失败"))
+        write().map_err(|_| storage::AppError::new(code::LOG_WRITE, "错误原文保存失败"))
     }
 }
-pub fn read(directory: &Path, id: &str) -> storage::Result<View> {
-    let id = uuid::Uuid::parse_str(id)
-        .map_err(|_| storage::AppError::new(crate::errors::code::LOG_READ, "错误原文标识无效"))?;
-    let read = || -> io::Result<View> {
-        use std::io::BufRead;
-        let mut reader =
-            io::BufReader::new(std::fs::File::open(directory.join(format!("{id}.error")))?);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let meta: Meta = serde_json::from_str(&line)?;
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes)?;
+fn open(store: &Path, create: bool) -> Result<Connection, Failure> {
+    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    if create {
+        flags |= OpenFlags::SQLITE_OPEN_CREATE;
+    }
+    let connection = Connection::open_with_flags(store, flags)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    if create {
+        storage::protect(store, false)?;
+        // Set before the table exists, this gives the pages of deleted rows
+        // back to the file system as they are freed.
+        connection.execute_batch(
+            "PRAGMA auto_vacuum=FULL;
+             CREATE TABLE IF NOT EXISTS errors(id TEXT PRIMARY KEY,body BLOB NOT NULL);",
+        )?;
+    }
+    Ok(connection)
+}
+pub fn read(store: &Path, id: &str) -> storage::Result<View> {
+    let read = || -> Result<View, Failure> {
+        let packed: Vec<u8> =
+            open(store, false)?.query_row("SELECT body FROM errors WHERE id=?1", [id], |row| {
+                row.get(0)
+            })?;
+        let mut line = zstd::decode_all(packed.as_slice())?;
+        let bytes = line.split_off(
+            line.iter()
+                .position(|b| *b == b'\n')
+                .map_or(line.len(), |n| n + 1),
+        );
+        let meta: Meta = serde_json::from_slice(&line)?;
         let (body, base64) = match String::from_utf8(bytes) {
             Ok(text) => (text, false),
             Err(e) => (STANDARD.encode(e.into_bytes()), true),
@@ -227,14 +254,180 @@ pub fn read(directory: &Path, id: &str) -> storage::Result<View> {
             incomplete: meta.incomplete,
         })
     };
-    read().map_err(|_| {
-        storage::AppError::new(crate::errors::code::LOG_READ, "错误原文读取失败或已过期")
-    })
+    read().map_err(|_| storage::AppError::new(code::LOG_READ, "错误原文读取失败或已过期"))
+}
+/// Deletes every stored error that `retained` does not name.
+pub fn retain(store: &Path, retained: &HashSet<String>) -> storage::Result<()> {
+    let prune = || -> Result<(), Failure> {
+        if !store.exists() {
+            return Ok(());
+        }
+        let mut connection = open(store, false)?;
+        let tx = connection.transaction()?;
+        {
+            let stored = tx
+                .prepare("SELECT id FROM errors")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut delete = tx.prepare("DELETE FROM errors WHERE id=?1")?;
+            for id in stored.iter().filter(|id| !retained.contains(*id)) {
+                delete.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    };
+    prune().map_err(|_| storage::AppError::new(code::LOG_WRITE, "错误原文清理失败"))
+}
+/// Moves the errors an earlier version kept as one file each into the store.
+/// A file is deleted once its row is committed, so an interrupted move
+/// continues at the next start.
+pub fn adopt(store: &Path, directory: &Path) -> storage::Result<()> {
+    let adopt = || -> Result<(), Failure> {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".error")) else {
+                continue;
+            };
+            if uuid::Uuid::parse_str(id).is_ok() && entry.file_type()?.is_file() {
+                files.push((id.to_owned(), entry.path()));
+            }
+        }
+        if !files.is_empty() {
+            let mut connection = open(store, true)?;
+            for batch in files.chunks(ADOPTED) {
+                let tx = connection.transaction()?;
+                {
+                    let mut insert =
+                        tx.prepare("INSERT OR IGNORE INTO errors(id,body) VALUES(?1,?2)")?;
+                    for (id, path) in batch {
+                        let packed = zstd::encode_all(
+                            std::fs::File::open(path)?,
+                            zstd::DEFAULT_COMPRESSION_LEVEL,
+                        )?;
+                        insert.execute((id, packed))?;
+                    }
+                }
+                tx.commit()?;
+                for (_, path) in batch {
+                    std::fs::remove_file(path)?;
+                }
+            }
+        }
+        // Whatever else is in the directory was not written here and keeps it.
+        let _ = std::fs::remove_dir(directory);
+        Ok(())
+    };
+    adopt().map_err(|_| storage::AppError::new(code::LOG_WRITE, "错误原文保存失败"))
+}
+
+/// How many errors the store holds.
+#[cfg(test)]
+pub fn stored(store: &Path) -> usize {
+    open(store, false)
+        .unwrap()
+        .query_row("SELECT count(*) FROM errors", [], |row| row.get(0))
+        .unwrap()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_stored_error_reads_back_whole_and_the_file_shrinks_when_rows_leave() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("fixture.sqlite");
+        assert!(read(&store, "fixture").is_err());
+        retain(&store, &HashSet::new()).unwrap();
+        assert!(
+            !store.exists(),
+            "reading and pruning do not create the store"
+        );
+        let header = Header {
+            name: "x-fixture".into(),
+            value: "kept".into(),
+            base64: false,
+        };
+        // Bytes that do not compress, so the size of the file follows the rows.
+        let noise: Vec<u8> = (0..64)
+            .flat_map(|_| *uuid::Uuid::new_v4().as_bytes())
+            .collect();
+        for n in 0..200 {
+            Raw::bytes(&noise, vec![header.clone()], Some("error".into()))
+                .save(&store, &format!("fixture-{n}"))
+                .unwrap();
+        }
+        Raw::bytes(b"fixture text", vec![], None)
+            .save(&store, "fixture-text")
+            .unwrap();
+        let view = read(&store, "fixture-7").unwrap();
+        assert_eq!(view.headers, vec![header]);
+        assert_eq!(view.event.as_deref(), Some("error"));
+        assert!(view.base64);
+        assert_eq!(STANDARD.decode(view.body).unwrap(), noise);
+        let text = read(&store, "fixture-text").unwrap();
+        assert_eq!((text.body.as_str(), text.base64), ("fixture text", false));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&store).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let full = std::fs::metadata(&store).unwrap().len();
+        retain(&store, &HashSet::from(["fixture-text".to_owned()])).unwrap();
+        assert_eq!(stored(&store), 1);
+        assert!(read(&store, "fixture-7").is_err());
+        assert_eq!(read(&store, "fixture-text").unwrap().body, "fixture text");
+        assert!(std::fs::metadata(&store).unwrap().len() < full / 4);
+    }
+    #[test]
+    fn files_of_an_earlier_version_move_into_the_store_and_leave_the_rest_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("fixture.sqlite");
+        let files = dir.path().join("fixture-files");
+        adopt(&store, &files).unwrap();
+        assert!(!store.exists(), "nothing to move creates nothing");
+        std::fs::create_dir(&files).unwrap();
+        let ids: Vec<_> = (0..ADOPTED + 3)
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect();
+        for (n, id) in ids.iter().enumerate() {
+            let mut file = br#"{"headers":[{"name":"x-fixture","value":"kept"}],"event":null,"incomplete":null}"#.to_vec();
+            file.extend_from_slice(format!("\nfixture body {n}").as_bytes());
+            std::fs::write(files.join(format!("{id}.error")), file).unwrap();
+        }
+        // A row already stored is kept as it is; its file only goes away.
+        Raw::bytes(b"fixture stored first", vec![], None)
+            .save(&store, &ids[0])
+            .unwrap();
+        std::fs::write(files.join("unrelated.txt"), b"fixture").unwrap();
+        std::fs::write(files.join("not-an-id.error"), b"fixture").unwrap();
+        adopt(&store, &files).unwrap();
+        assert_eq!(stored(&store), ids.len());
+        assert_eq!(read(&store, &ids[0]).unwrap().body, "fixture stored first");
+        let last = read(&store, &ids[ADOPTED + 2]).unwrap();
+        assert_eq!(last.body, format!("fixture body {}", ADOPTED + 2));
+        assert_eq!(last.headers[0].value, "kept");
+        assert!(!last.base64);
+        let mut left: Vec<_> = std::fs::read_dir(&files)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["not-an-id.error", "unrelated.txt"]);
+        std::fs::remove_file(files.join("unrelated.txt")).unwrap();
+        std::fs::remove_file(files.join("not-an-id.error")).unwrap();
+        adopt(&store, &files).unwrap();
+        assert!(!files.exists(), "the emptied directory is removed");
+        assert_eq!(stored(&store), ids.len());
+    }
     #[test]
     fn spilling_keeps_all_chunks_and_releases_the_original_allocation() {
         let mut capture = Capture::default();

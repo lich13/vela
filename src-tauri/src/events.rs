@@ -1126,7 +1126,7 @@ impl Journal {
             records: self.records.iter().cloned().collect(),
         })
     }
-    fn finish_write(&mut self, written: Result<()>, pruned: std::io::Result<()>) {
+    fn finish_write(&mut self, written: Result<()>, pruned: Result<()>) {
         // A source import can mark the journal dirty while this snapshot is written.
         if written.is_err() {
             self.dirty = true;
@@ -1171,7 +1171,7 @@ pub struct Service {
     sender: mpsc::SyncSender<Job>,
     journal: Arc<Mutex<Journal>>,
     events: broadcast::Sender<Change>,
-    raw_directory: Arc<std::path::PathBuf>,
+    raw_store: Arc<std::path::PathBuf>,
     file_cursors: Arc<Mutex<FileCursors>>,
 }
 #[derive(Default, Deserialize)]
@@ -1428,8 +1428,9 @@ fn write_records_stream(path: &Path, snapshot: &JournalSnapshot) -> Result<()> {
 impl Service {
     pub fn new(data: &Path) -> Self {
         let path = data.join("diagnostics.jsonl");
-        let raw_directory = Arc::new(data.join("diagnostic-errors"));
-        let raw_path = raw_directory.clone();
+        let raw_store = Arc::new(data.join("diagnostic-errors.sqlite"));
+        let raw_path = raw_store.clone();
+        let raw_files = data.join("diagnostic-errors");
         let journal = Arc::new(Mutex::new(load(&path)));
         let (events, _) = broadcast::channel(128);
         let (sender, receiver) = mpsc::sync_channel(256);
@@ -1438,6 +1439,9 @@ impl Service {
         let file_cursors = Arc::new(Mutex::new(FileCursors::new()));
         let writer_cursors = file_cursors.clone();
         std::thread::spawn(move || {
+            // Errors an earlier version kept as files move into the store
+            // first, so the retention below covers them too.
+            let adopted = crate::event_raw::adopt(&raw_path, &raw_files);
             // Retention also runs after restart, before processing queued writes.
             {
                 let startup = {
@@ -1454,12 +1458,15 @@ impl Service {
                         None => Ok(()),
                     };
                     let pruned = if written.is_ok() {
-                        prune_raw_ids(&raw_path, &retained)
+                        crate::event_raw::retain(&raw_path, &retained)
                     } else {
                         Ok(())
                     };
                     j.lock().finish_write(written, pruned);
                 }
+            }
+            if adopted.is_err() {
+                j.lock().error = Some("错误原文保存失败，请检查文件权限与空间".into());
             }
             let mut pending = None;
             loop {
@@ -1474,7 +1481,8 @@ impl Service {
                 if matches!(&job, Job::Prune) {
                     let mut current = j.lock();
                     if !current.needs_write(&path) {
-                        if prune_raw(&raw_path, &current).is_err() {
+                        if crate::event_raw::retain(&raw_path, &current.retained_raw_ids()).is_err()
+                        {
                             current.error = Some("日志原文清理失败，请重试".into());
                         }
                         let _ = events_copy.send(Change {
@@ -1522,7 +1530,7 @@ impl Service {
                     };
                     let result = write_records_stream(&path, &snapshot);
                     let raw_pruned = if result.is_ok() {
-                        prune_raw_ids(&raw_path, &HashSet::new())
+                        crate::event_raw::retain(&raw_path, &HashSet::new())
                     } else {
                         Ok(())
                     };
@@ -1698,7 +1706,7 @@ impl Service {
                 };
                 let raw_pruned = if result.is_ok() {
                     if let Some(retained) = &retained_raw_ids {
-                        prune_raw_ids(&raw_path, retained)
+                        crate::event_raw::retain(&raw_path, retained)
                     } else {
                         Ok(())
                     }
@@ -1723,7 +1731,7 @@ impl Service {
             sender,
             journal,
             events,
-            raw_directory,
+            raw_store,
             file_cursors,
         }
     }
@@ -1976,7 +1984,7 @@ impl Service {
             .detail(id)
             .and_then(|record| record.record.details.raw_error);
         reference
-            .map(|reference| crate::event_raw::read(&self.raw_directory, &reference.id))
+            .map(|reference| crate::event_raw::read(&self.raw_store, &reference.id))
             .transpose()
     }
     pub async fn clear(
@@ -1991,32 +1999,6 @@ impl Service {
         rx.await
             .map_err(|_| AppError::new(code::LOG_WRITE, "日志清空失败"))?
     }
-}
-
-fn prune_raw(directory: &Path, journal: &Journal) -> std::io::Result<()> {
-    prune_raw_ids(directory, &journal.retained_raw_ids())
-}
-
-fn prune_raw_ids(directory: &Path, retained: &HashSet<String>) -> std::io::Result<()> {
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".error")) else {
-            continue;
-        };
-        if uuid::Uuid::parse_str(id).is_ok()
-            && !retained.contains(id)
-            && entry.file_type()?.is_file()
-        {
-            std::fs::remove_file(entry.path())?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

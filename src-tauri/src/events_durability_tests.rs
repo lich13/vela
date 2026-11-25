@@ -105,9 +105,7 @@ async fn clear_write_failure_restores_rows_aliases_and_stable_page_order() {
     service.clear(None, None).await.unwrap();
     assert_eq!(service.query(Filter::default()).total, 0);
     assert_eq!(
-        std::fs::read_dir(dir.path().join("diagnostic-errors"))
-            .unwrap()
-            .count(),
+        crate::event_raw::stored(&dir.path().join("diagnostic-errors.sqlite")),
         0
     );
 }
@@ -115,7 +113,7 @@ async fn clear_write_failure_restores_rows_aliases_and_stable_page_order() {
 #[tokio::test]
 async fn raw_write_failure_is_visible_and_restart_prunes_expired_attachments() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("diagnostic-errors");
+    let path = dir.path().join("diagnostic-errors.sqlite");
     std::fs::write(&path, b"fixture blocker").unwrap();
     let service = Service::new(dir.path());
     let mut changes = service.subscribe();
@@ -160,7 +158,6 @@ async fn raw_write_failure_is_visible_and_restart_prunes_expired_attachments() {
         serde_json::to_vec(&record).unwrap(),
     )
     .unwrap();
-    std::fs::write(path.join("unrelated.txt"), b"fixture").unwrap();
     let service = Service::new(dir.path());
     let mut changes = service.subscribe();
     // A queued write observes completion of startup retention without sleeps.
@@ -174,9 +171,67 @@ async fn raw_write_failure_is_visible_and_restart_prunes_expired_attachments() {
         None,
     ));
     changes.recv().await.unwrap();
-    assert!(!path.join(format!("{id}.error")).exists());
-    assert!(path.join("unrelated.txt").exists());
+    assert_eq!(crate::event_raw::stored(&path), 0);
     assert!(service.detail(&id).is_none());
+}
+
+#[tokio::test]
+async fn errors_kept_as_files_are_read_from_the_store_after_an_upgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = dir.path().join("diagnostic-errors");
+    std::fs::create_dir(&files).unwrap();
+    let mut lines = String::new();
+    let mut ids = Vec::new();
+    for (body, age) in [
+        ("fixture current error", 0),
+        ("fixture expired error", super::RETENTION + 1),
+    ] {
+        let mut record = Record::new(
+            Some(ClientId::Codex),
+            Some(PROVIDER),
+            Some(body),
+            Reason::ProtocolError,
+            Action::Returned,
+            Some(502),
+            None,
+        );
+        record.last_at = super::now() - age;
+        record.first_at = record.last_at;
+        let raw = crate::event_raw::Raw::bytes(body.as_bytes(), vec![], None);
+        record.details.raw_error = Some(raw.reference(&record.id));
+        std::fs::write(
+            files.join(format!("{}.error", record.id)),
+            format!("{{\"headers\":[],\"event\":null,\"incomplete\":null}}\n{body}"),
+        )
+        .unwrap();
+        lines.push_str(&serde_json::to_string(&record).unwrap());
+        lines.push('\n');
+        ids.push(record.id);
+    }
+    std::fs::write(dir.path().join("diagnostics.jsonl"), lines).unwrap();
+    let service = Service::new(dir.path());
+    let mut changes = service.subscribe();
+    // A queued write observes completion of the startup work without sleeps.
+    service.emit(Record::new(
+        None,
+        None,
+        None,
+        Reason::Network,
+        Action::Returned,
+        None,
+        None,
+    ));
+    assert!(changes.recv().await.unwrap().error.is_none());
+    assert_eq!(
+        service.raw(&ids[0]).unwrap().unwrap().body,
+        "fixture current error"
+    );
+    assert!(service.detail(&ids[1]).is_none());
+    assert_eq!(
+        crate::event_raw::stored(&dir.path().join("diagnostic-errors.sqlite")),
+        1
+    );
+    assert!(!files.exists());
 }
 
 #[test]
@@ -187,7 +242,7 @@ fn emit_checked_returns_false_and_reports_a_full_bounded_queue() {
         sender,
         journal: Arc::new(Mutex::new(Journal::default())),
         events,
-        raw_directory: Arc::new(std::env::temp_dir().join("unused-event-fixture")),
+        raw_store: Arc::new(std::env::temp_dir().join("unused-event-fixture")),
         file_cursors: Default::default(),
     };
 
@@ -326,7 +381,7 @@ async fn duplicate_errors_merge_before_attachment_io_and_distinct_bodies_remain_
     let first_id = first.id.clone();
     service.emit(first);
     assert!(changes.recv().await.unwrap().error.is_none());
-    let path = dir.path().join("diagnostic-errors");
+    let path = dir.path().join("diagnostic-errors.sqlite");
     let retained = dir.path().join("retained-errors");
     std::fs::rename(&path, &retained).unwrap();
     std::fs::write(&path, b"fixture write blocker").unwrap();
@@ -346,7 +401,7 @@ async fn duplicate_errors_merge_before_attachment_io_and_distinct_bodies_remain_
     service.emit(second);
     assert!(changes.recv().await.unwrap().error.is_none());
     assert_eq!(service.query(Filter::default()).total, 2);
-    assert_eq!(std::fs::read_dir(&path).unwrap().count(), 2);
+    assert_eq!(crate::event_raw::stored(&path), 2);
     assert_eq!(
         service.raw(&first_id).unwrap().unwrap().body,
         "fixture first complete error"
@@ -366,7 +421,7 @@ fn source_import_during_snapshot_write_remains_pending_until_next_write() {
         sender,
         journal: Arc::new(Mutex::new(Journal::default())),
         events: broadcast::channel(8).0,
-        raw_directory: Arc::new(dir.path().join("diagnostic-errors")),
+        raw_store: Arc::new(dir.path().join("diagnostic-errors.sqlite")),
         file_cursors: Default::default(),
     };
     let record = |model| {
