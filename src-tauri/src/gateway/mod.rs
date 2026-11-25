@@ -1116,7 +1116,9 @@ impl Gateway {
             capacity_retries: self.0.admission.capacity_retries(),
             websocket_retries: self.0.admission.websocket_retries(),
             transient_retries: self.0.admission.transient_retries(),
-            handoff_waiting: if self.0.client == ClientId::Codex && s.store.mode == "auto" {
+            handoff_waiting: if matches!(self.0.client, ClientId::Codex | ClientId::Claude)
+                && s.store.mode == "auto"
+            {
                 self.0.compaction.waiting_policy(
                     &s.store
                         .providers
@@ -1505,10 +1507,14 @@ impl Gateway {
                 "网关设置已变化，请使用最新状态重试",
             ));
         }
-        if self.0.client != ClientId::Codex && matches!(&edit, Edit::TakeoverProvider { .. }) {
-            return Err(AppError::new(code::SETTINGS, "接管策略仅适用于 Codex"));
+        let threads = matches!(self.0.client, ClientId::Codex | ClientId::Claude);
+        if !threads && matches!(&edit, Edit::TakeoverProvider { .. }) {
+            return Err(AppError::new(
+                code::SETTINGS,
+                "接管策略仅适用于 Codex 和 Claude Code",
+            ));
         }
-        if self.0.client != ClientId::Codex
+        if !threads
             && matches!(
                 &edit,
                 Edit::PolicyProvider {
@@ -1520,7 +1526,10 @@ impl Gateway {
                 }
             )
         {
-            return Err(AppError::new(code::SETTINGS, "接管策略仅适用于 Codex"));
+            return Err(AppError::new(
+                code::SETTINGS,
+                "接管策略仅适用于 Codex 和 Claude Code",
+            ));
         }
         if !matches!(self.0.client, ClientId::Codex | ClientId::Grok)
             && matches!(&edit, Edit::ModelCatalog { .. })

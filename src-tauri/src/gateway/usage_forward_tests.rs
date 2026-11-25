@@ -1403,3 +1403,6 @@ mod held_response_tests;
 
 #[path = "delegation_tests.rs"]
 mod delegation_tests;
+
+#[path = "claude_threads_tests.rs"]
+mod claude_threads_tests;

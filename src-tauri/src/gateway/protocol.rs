@@ -827,6 +827,8 @@ pub struct Protocol {
     /// own: what it writes is recorded, the conversation does not move.
     took_over: bool,
     compaction_operation: bool,
+    /// The compaction leaves a window its response does not name.
+    unnamed_window: bool,
     buffering: bool,
     routing_log: Option<std::sync::Arc<super::routing_log::RoutingLog>>,
     routing_decision: Option<crate::usage::model::RoutingDecision>,
@@ -872,6 +874,7 @@ impl Protocol {
             ownership: None,
             took_over: false,
             compaction_operation: false,
+            unnamed_window: false,
             buffering: false,
             routing_log: None,
             routing_decision: None,
@@ -1201,6 +1204,11 @@ impl Protocol {
     pub fn set_operation(&mut self, operation: crate::usage::model::Operation) {
         self.compaction_operation = operation == crate::usage::model::Operation::Compaction;
     }
+    /// A compaction in a protocol that marks nothing in its response: the
+    /// conversation's next request is taken to be the one after it.
+    pub fn leaves_unnamed_window(&mut self) {
+        self.unnamed_window = true;
+    }
     pub fn output_handed(&self, business: bool) {
         if business {
             if let Some(traffic) = &self.traffic {
@@ -1225,7 +1233,13 @@ impl Protocol {
                     if let Some(log) = &self.routing_log {
                         log.finish(self.status, true);
                     }
-                    let boundary = self.observation.compaction_fingerprint.as_deref();
+                    let unnamed =
+                        (self.unnamed_window && self.compaction_operation).then(|| lease.window());
+                    let boundary = self
+                        .observation
+                        .compaction_fingerprint
+                        .as_deref()
+                        .or(unnamed.as_deref());
                     if self.took_over {
                         lease.register(boundary);
                     } else {

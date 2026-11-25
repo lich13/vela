@@ -1060,7 +1060,7 @@ pub fn derive_gateway_card(
                 runtime_alert: (!runtime_status.is_empty()).then_some(runtime_status),
                 fault_event_id: fault.map(|f| f.event_id.clone()),
                 fault_provider_id: fault.map(|_| p.id.clone()),
-                show_codex_policies: view.client_id == ClientId::Codex,
+                show_codex_policies: matches!(view.client_id, ClientId::Codex | ClientId::Claude),
                 handoff_after_compaction: p.handoff_after_compaction,
                 take_new_threads: p.take_new_threads,
                 concurrency_label: format!("并发 {}/{conc_cap}", p.active_requests),

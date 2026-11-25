@@ -277,6 +277,7 @@ fn retained(key: &str) -> bool {
             | "rate_limits"
             | "limit_id"
             | "tools"
+            | "messages"
     )
 }
 fn content(key: &str) -> bool {
@@ -303,7 +304,8 @@ impl Projector {
                     f.keep
                         && match &f.value {
                             Container::Array(items) => {
-                                matches!(f.role.as_str(), "input" | "output") || items.len() < ITEMS
+                                matches!(f.role.as_str(), "input" | "output" | "messages")
+                                    || items.len() < ITEMS
                             }
                             Container::Object(map) => {
                                 map.len() < ITEMS && (retained(key) || f.role == "modelUsage")
@@ -401,10 +403,20 @@ impl Projector {
                         _ => "unknown",
                     };
                     serde_json::json!({"type":kind,"role":role})
+                } else if frame.role == "messages" {
+                    // A Messages conversation is told from its first turn by
+                    // who spoke, so a message is kept as its role alone.
+                    let role = match value.get("role").and_then(Value::as_str) {
+                        Some("user") => "user",
+                        Some("system") => "system",
+                        Some("assistant") => "assistant",
+                        _ => "unknown",
+                    };
+                    serde_json::json!({"role":role})
                 } else {
                     value
                 };
-                if matches!(frame.role.as_str(), "input" | "output") {
+                if matches!(frame.role.as_str(), "input" | "output" | "messages") {
                     self.retained_bytes = self.retained_bytes.saturating_sub(before);
                     if !frame.keep
                         || (frame.role == "output" && !compact && items.len() >= ITEMS - 1)
@@ -422,7 +434,7 @@ impl Projector {
                             }
                             keep
                         });
-                    } else if frame.role == "input" && items.contains(&value) {
+                    } else if frame.role != "output" && items.contains(&value) {
                         return;
                     }
                     if items.len() >= ITEMS {

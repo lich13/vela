@@ -113,14 +113,34 @@ pub fn search_identity(
 pub fn identity(
     headers: &hyper::HeaderMap,
 ) -> (Option<String>, crate::usage::model::ThreadIdentity) {
+    named(
+        headers,
+        &[
+            &["thread-id", "thread_id", "conversation_id"],
+            &["session_id"],
+        ],
+    )
+}
+
+/// The conversation of a Claude Code request: the session it names in a
+/// header of its own, the same for every request of that session.
+pub fn claude_identity(
+    headers: &hyper::HeaderMap,
+) -> (Option<String>, crate::usage::model::ThreadIdentity) {
+    named(headers, &[&["x-claude-code-session-id"]])
+}
+
+/// The conversation named by the first of `groups` any of whose headers is
+/// present; only the first group is a reliable name.
+fn named(
+    headers: &hyper::HeaderMap,
+    groups: &[&[&str]],
+) -> (Option<String>, crate::usage::model::ThreadIdentity) {
     use crate::usage::model::ThreadIdentity as I;
     let mut value = None;
     let mut kind = I::Reliable;
-    for keys in [
-        &["thread-id", "thread_id", "conversation_id"][..],
-        &["session_id"][..],
-    ] {
-        for key in keys {
+    for keys in groups {
+        for key in *keys {
             for header in headers.get_all(*key) {
                 let Ok(candidate) = header.to_str() else {
                     return (None, I::Conflict);
@@ -803,6 +823,16 @@ impl Registry {
             })
             .collect()
     }
+    /// The window a conversation's last compaction left, while no request
+    /// has taken it. A protocol whose requests do not carry their window
+    /// asks for it: the next request after the compaction is the one in it.
+    pub fn fresh_window(&self, session: &str) -> Option<String> {
+        let state = self.state.lock();
+        let entry = state.entries.get(session)?;
+        (entry.claim.is_none() && entry.boundary_fresh)
+            .then(|| entry.boundary.clone())
+            .flatten()
+    }
     pub fn boundary_matches(&self, session: &str, input: Option<&str>) -> bool {
         input.is_some()
             && self.state.lock().entries.get(session).is_some_and(|entry| {
@@ -887,6 +917,11 @@ impl Drop for Registry {
 }
 
 impl Lease {
+    /// Names the window this request leaves when it is a compaction whose
+    /// response carries nothing to tell the window by.
+    pub fn window(&self) -> String {
+        storage::digest(format!("window:{}:{}", self.session, self.sequence).as_bytes())
+    }
     pub fn request_only(&self) -> bool {
         self.request_only
     }

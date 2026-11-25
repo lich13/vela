@@ -216,14 +216,41 @@ it("keeps the authoritative takeover state on failure and blocks duplicate click
   expect(handoff).toBeEnabled();
 });
 
-it("hides takeover controls for Claude", () => {
-  render(
+it("shows the takeover controls for Claude and for no client without threads", async () => {
+  const user = userEvent.setup();
+  const commit = vi.fn().mockResolvedValue(undefined);
+  const view = render(
     <ProviderControls
       provider={provider}
       clientId="claude"
       revision="claude-revision"
       disabled={false}
-      commit={vi.fn()}
+      commit={commit}
+      report={vi.fn()}
+    />,
+  );
+  await user.click(
+    screen.getByRole("button", { name: `${provider.name} 新线程接管` }),
+  );
+  expect(commit).toHaveBeenCalledWith(
+    {
+      op: "takeoverProvider",
+      id: provider.id,
+      takeNewThreads: !provider.takeNewThreads,
+    },
+    "claude-revision",
+  );
+  expect(
+    screen.getByRole("button", { name: `${provider.name} 压缩后接管` }),
+  ).toBeInTheDocument();
+
+  view.rerender(
+    <ProviderControls
+      provider={provider}
+      clientId="grok"
+      revision="grok-revision"
+      disabled={false}
+      commit={commit}
       report={vi.fn()}
     />,
   );

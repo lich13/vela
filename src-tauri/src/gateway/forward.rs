@@ -938,6 +938,11 @@ struct Plan {
     thread: Option<String>,
     thread_identity: crate::usage::model::ThreadIdentity,
     auxiliary: bool,
+    /// The client's conversations each stay with one provider.
+    threads: bool,
+    /// They do for Claude because a provider of its queue asks to be given
+    /// new or compacted conversations.
+    claude_threads: bool,
     owned_search: bool,
     ownership: Option<std::sync::Arc<super::compaction::Lease>>,
     established_capacity_owner: Option<String>,
@@ -1062,19 +1067,44 @@ async fn plan(
         parts.uri.path().trim_end_matches('/'),
         "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
     );
+    // Claude's conversations have no owner until a provider of the queue
+    // asks for new or compacted ones; until then every request starts at the
+    // head of the queue, as it always has.
+    let claude_threads = gateway.client_id() == super::ClientId::Claude
+        && mode == "auto"
+        && parts.method == hyper::Method::POST
+        && is_messages_path(parts.uri.path())
+        && ids.iter().filter_map(|id| routes.get(id)).any(|route| {
+            route.provider.take_new_threads || route.provider.handoff_after_compaction
+        });
+    let threads = gateway.client_id() == super::ClientId::Codex || claude_threads;
     let (thread, thread_identity) = if gateway.client_id() == super::ClientId::Codex
         && operation == crate::usage::model::Operation::WebSearch
         && !websocket
     {
         super::compaction::search_identity(&parts.headers)
+    } else if claude_threads {
+        super::compaction::claude_identity(&parts.headers)
     } else {
         super::compaction::identity(&parts.headers)
     };
-    let auxiliary = hints.as_ref().is_ok_and(|h| h.auxiliary);
-    if (auxiliary || hints.is_err())
-        && gateway.client_id() == super::ClientId::Codex
-        && mode == "auto"
-    {
+    let auxiliary = hints.as_ref().is_ok_and(|h| h.auxiliary)
+        || (claude_threads && super::delegation::claude_auxiliary(&parts.headers));
+    let mut hints = hints;
+    if let (true, Ok(hints), Some(session)) = (claude_threads, &mut hints, &thread) {
+        hints.auxiliary |= auxiliary;
+        // A Messages request does not carry the window it was compacted to:
+        // the conversation's first request after its compaction, an errand
+        // aside, is taken to be the one in it.
+        if !auxiliary && operation == crate::usage::model::Operation::Model {
+            if let Some(window) = gateway.0.compaction.fresh_window(session) {
+                hints.compacted_window = Some(window);
+                hints.first_turn = false;
+                hints.turn = replay::TurnEvidence::History;
+            }
+        }
+    }
+    if (auxiliary || hints.is_err()) && threads && mode == "auto" {
         if let Some(owner) = thread
             .as_deref()
             .and_then(|s| gateway.0.compaction.owner(s))
@@ -1108,9 +1138,8 @@ async fn plan(
                 )))
             }
         }
-    } else if gateway.client_id() == super::ClientId::Codex
-        && mode == "auto"
-        && responses
+    } else if mode == "auto"
+        && ((gateway.client_id() == super::ClientId::Codex && responses) || claude_threads)
         && !unknown_affinity
         && !auxiliary
     {
@@ -1191,12 +1220,26 @@ async fn plan(
         thread,
         thread_identity,
         auxiliary,
+        threads,
+        claude_threads,
         owned_search,
         ownership,
         established_capacity_owner,
         usage_trace,
         delegated,
     })
+}
+impl Plan {
+    /// Whether the request's route is decided and recorded by its
+    /// conversation: a Codex or Claude model call, or a search that follows
+    /// its conversation's owner.
+    fn tracked(&self, mode: &str) -> bool {
+        mode == "auto"
+            && self.threads
+            && (self.responses
+                || self.claude_threads
+                || (self.owned_search && self.ownership.is_some()))
+    }
 }
 /// A fresh queue wait for the request as it is planned.
 fn admission_budget(settings: &Settings, traffic: &super::freeze::Ticket, plan: &Plan) -> Budget {
@@ -2001,7 +2044,7 @@ impl Exchange<'_> {
                     &mut self.wait_budget,
                 )
             };
-        } else if self.gateway.client_id() == super::ClientId::Codex
+        } else if self.plan.threads
             && self.mode == "auto"
             && self.plan.pinned.is_none()
             && !self.plan.auxiliary
@@ -2123,7 +2166,7 @@ impl Exchange<'_> {
                 "没有符合线程接管策略的供应商",
             )));
         }
-        if self.gateway.client_id() == super::ClientId::Codex
+        if self.plan.threads
             && self.mode == "auto"
             && self.plan.pinned.is_none()
             && !self.plan.auxiliary
@@ -2416,6 +2459,9 @@ impl Exchange<'_> {
                 )
             }));
         protocol.set_operation(self.plan.operation);
+        if self.plan.claude_threads {
+            protocol.leaves_unnamed_window();
+        }
         protocol.diagnostics(self.gateway, &route.provider.id, self.plan.model.as_deref());
         match &self.ordinary {
             // The conversation stays with its owner; only a compaction the
@@ -2464,11 +2510,7 @@ impl Exchange<'_> {
                 Delegated::Auxiliary => crate::usage::model::RoutingDecision::AuxiliaryTakeover,
                 Delegated::WebSearch => crate::usage::model::RoutingDecision::WebSearchTakeover,
             }),
-            None => (self.gateway.client_id() == super::ClientId::Codex
-                && self.mode == "auto"
-                && (self.plan.responses
-                    || (self.plan.owned_search && self.plan.ownership.is_some())))
-            .then(|| {
+            None => self.plan.tracked(self.mode).then(|| {
                 admission
                     .handoff_wait
                     .or(
@@ -2487,10 +2529,7 @@ impl Exchange<'_> {
             }),
         };
         protocol.context(self.plan.thread.clone(), decision);
-        if self.gateway.client_id() == super::ClientId::Codex
-            && self.mode == "auto"
-            && (self.plan.responses || (self.plan.owned_search && self.plan.ownership.is_some()))
-        {
+        if self.plan.tracked(self.mode) {
             protocol.routing_evidence(self.plan.hints.as_ref().ok());
         }
         protocol.watch_lifecycle(
@@ -2569,7 +2608,7 @@ impl Exchange<'_> {
                 &self.plan.requirement,
                 self.parts.uri.path(),
                 self.plan.ownership.as_deref(),
-                self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
+                self.plan.threads && !self.plan.auxiliary,
                 super::attempt::may_fail_over(
                     self.mode == "manual",
                     self.plan.pinned.as_deref(),
@@ -2987,7 +3026,7 @@ impl Exchange<'_> {
                 &self.plan.requirement,
                 self.parts.uri.path(),
                 self.plan.ownership.as_deref(),
-                self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
+                self.plan.threads && !self.plan.auxiliary,
                 super::attempt::may_fail_over(
                     self.mode == "manual",
                     self.plan.pinned.as_deref(),
@@ -3457,7 +3496,7 @@ impl Exchange<'_> {
             &self.plan.requirement,
             self.parts.uri.path(),
             self.plan.ownership.as_deref(),
-            self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
+            self.plan.threads && !self.plan.auxiliary,
             super::attempt::may_fail_over(
                 self.mode == "manual",
                 self.plan.pinned.as_deref(),
@@ -3746,7 +3785,7 @@ impl Exchange<'_> {
                     &self.plan.requirement,
                     self.parts.uri.path(),
                     self.plan.ownership.as_deref(),
-                    self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
+                    self.plan.threads && !self.plan.auxiliary,
                     super::attempt::may_fail_over(
                         self.mode == "manual",
                         self.plan.pinned.as_deref(),
@@ -4334,7 +4373,7 @@ async fn forward_inner(
         };
         let mut failover = super::failover::Tracker::new(plan.usage_trace.clone());
         failover.attach_wait_budget(&request_budget);
-        if gateway.client_id() == super::ClientId::Codex && mode == "auto" && plan.responses {
+        if mode == "auto" && plan.threads && (plan.responses || plan.claude_threads) {
             failover.diagnostics(&gateway);
             if let Some(log) = failover.routing() {
                 log.pending(

@@ -108,7 +108,12 @@ impl RoutingLog {
         if let Some(lease) = lease {
             lease.attach_routing_log(self.clone());
         }
-        let (thread, identity) = super::compaction::identity(headers);
+        let (thread, identity) = match super::compaction::identity(headers) {
+            (None, crate::usage::model::ThreadIdentity::Missing) => {
+                super::compaction::claude_identity(headers)
+            }
+            found => found,
+        };
         let provider = lease.and_then(|lease| lease.owner.as_deref()).unwrap_or("");
         // A claimed window is an attempted handoff. Before admission, using the
         // old owner as the provider would falsely report no eligible receiver.

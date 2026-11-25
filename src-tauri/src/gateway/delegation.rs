@@ -54,6 +54,15 @@ fn codex_auxiliary(headers: &hyper::HeaderMap) -> bool {
             })
 }
 
+/// Whether Claude Code marks the request as an errand of its own (a title, a
+/// summary) rather than a turn of the conversation.
+pub(super) fn claude_auxiliary(headers: &hyper::HeaderMap) -> bool {
+    headers
+        .get("x-claude-code-request-class")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|class| class.trim().eq_ignore_ascii_case("auxiliary"))
+}
+
 /// The kind of request this is, when it is one a provider can take over.
 /// Codex and Claude Code name their compactions and errands themselves: Codex
 /// in its thread metadata, Claude Code in the request class it sends while
@@ -91,11 +100,7 @@ pub(super) fn class(
         ),
         ClientId::Claude if path == "/v1/messages" => (
             tools != SearchTools::Absent,
-            parts
-                .headers
-                .get("x-claude-code-request-class")
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|class| class.trim().eq_ignore_ascii_case("auxiliary")),
+            claude_auxiliary(&parts.headers),
         ),
         ClientId::Grok => (
             matches!(path, "/responses" | "/v1/responses") && tools == SearchTools::Alone,

@@ -11,11 +11,11 @@ const TURN: &[u8] = br#" { "model" : "gpt-request-fixture", "stream": false,
   "input":[{"role":"user","content":"fixture"}], "unknown":9007199254740993 } "#;
 const AUXILIARY: (&str, &str) = ("x-claude-code-request-class", "auxiliary");
 
-type Seen = Arc<Mutex<Vec<Bytes>>>;
+pub(super) type Seen = Arc<Mutex<Vec<Bytes>>>;
 
 /// An upstream that keeps the bodies it is sent and answers the nth request
 /// with `answer(n)`.
-async fn upstream(
+pub(super) async fn upstream(
     answer: impl Fn(usize) -> Response<WireBody> + Send + Sync + 'static,
 ) -> (LoopbackServer, Seen) {
     let seen = Seen::default();
@@ -36,7 +36,7 @@ async fn upstream(
     .await;
     (upstream, seen)
 }
-fn answered(status: u16, body: String) -> Response<WireBody> {
+pub(super) fn answered(status: u16, body: String) -> Response<WireBody> {
     Response::builder()
         .status(status)
         .header("content-type", "application/json")
@@ -44,7 +44,7 @@ fn answered(status: u16, body: String) -> Response<WireBody> {
         .unwrap()
 }
 /// A complete message. Each has its own id, so each is its own usage record.
-fn message(id: &str) -> String {
+pub(super) fn message(id: &str) -> String {
     json!({
         "id": id, "type": "message", "model": "claude-fixture", "stop_reason": "end_turn",
         "content": [{"type": "text", "text": "complete"}],
@@ -59,7 +59,7 @@ fn completed_response(id: &str) -> String {
     })
     .to_string()
 }
-async fn send(
+pub(super) async fn send(
     gateway: &Gateway,
     path: &str,
     headers: &[(&str, &str)],

@@ -164,7 +164,7 @@ export default function ProviderControls({
   };
   return (
     <div className="provider-controls">
-      {clientId === "codex" && (
+      {(clientId === "codex" || clientId === "claude") && (
         <>
           <button
             type="button"

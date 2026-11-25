@@ -198,6 +198,14 @@ impl RequestHints {
         } else {
             TurnEvidence::Unknown
         };
+        // A Messages request carries its whole conversation and no `input`:
+        // one nobody has answered yet is a first turn.
+        if value.get("input").is_none() {
+            if let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array) {
+                hints.turn = messages_turn(messages);
+                hints.first_turn = hints.turn == TurnEvidence::First;
+            }
+        }
         // History evidence alone can coexist with unknown or provider-local
         // references. Capacity spillover requires every input item to be known.
         hints.capacity_replay_safe = hints.turn == TurnEvidence::History
@@ -270,6 +278,28 @@ impl RequestHints {
             ..Default::default()
         };
         Ok(hints)
+    }
+}
+/// What the roles of a Messages conversation tell: only the user and the
+/// system have spoken in a first turn, and an assistant's message is history.
+/// Anything else proves neither.
+fn messages_turn(messages: &[serde_json::Value]) -> TurnEvidence {
+    let role = |message: &serde_json::Value| {
+        message
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned()
+    };
+    let roles: Vec<_> = messages.iter().map(role).collect();
+    if roles.iter().any(|role| role == "assistant") {
+        TurnEvidence::History
+    } else if roles.iter().any(|role| role == "user")
+        && roles.iter().all(|role| role == "user" || role == "system")
+    {
+        TurnEvidence::First
+    } else {
+        TurnEvidence::Unknown
     }
 }
 // Structural evidence only. Unknown/truncated arrays never prove a new conversation.
@@ -647,6 +677,64 @@ impl Replay {
 mod capacity_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn a_messages_conversation_is_told_from_its_first_turn_by_who_has_spoken() {
+        let block = json!([{"type":"text","text":"fixture"},{"type":"tool_result","content":"x"}]);
+        let said = |role: &str| json!({"role": role, "content": block});
+        let many: Vec<_> = (0..300)
+            .map(|turn| said(if turn % 2 == 0 { "user" } else { "assistant" }))
+            .collect();
+        for (messages, turn) in [
+            (json!([said("user"), said("system")]), TurnEvidence::First),
+            (json!(vec![said("user"); 200]), TurnEvidence::First),
+            (
+                json!([said("user"), said("assistant"), said("user")]),
+                TurnEvidence::History,
+            ),
+            (json!(many), TurnEvidence::History),
+            (json!([said("system")]), TurnEvidence::Unknown),
+            (json!([said("user"), said("tool")]), TurnEvidence::Unknown),
+            (
+                json!([said("user"), {"content": "fixture"}]),
+                TurnEvidence::Unknown,
+            ),
+            (json!([]), TurnEvidence::Unknown),
+        ] {
+            let value = json!({"model": "claude-fixture", "messages": messages, "stream": true});
+            for projected in [false, true] {
+                let value = if projected {
+                    let mut projector = super::super::metadata::Projector::default();
+                    projector.feed(value.to_string().as_bytes());
+                    let kept = projector.finish().unwrap();
+                    // However long the conversation, a role is kept once.
+                    let roles = kept["messages"].as_array().unwrap();
+                    assert!(roles.len() <= 3);
+                    // Nothing a message said is kept, only who said it.
+                    assert!(
+                        roles.iter().all(|message| {
+                            let message = message.as_object().unwrap();
+                            message.len() == 1 && message["role"].is_string()
+                        }),
+                        "{kept}"
+                    );
+                    kept
+                } else {
+                    value.clone()
+                };
+                let hints = RequestHints::from_value(value, projected).unwrap();
+                assert_eq!(hints.turn, turn, "{projected}");
+                assert_eq!(hints.first_turn, turn == TurnEvidence::First);
+                assert!(!hints.capacity_replay_safe && !hints.auxiliary);
+                assert_eq!(hints.model.as_deref(), Some("claude-fixture"));
+            }
+        }
+        // A request with an `input` is told by that, whatever else it carries.
+        let both = json!({"input": [{"role": "user", "content": "x"}, {"role": "assistant", "content": "x"}],
+            "messages": [{"role": "user", "content": "x"}]});
+        let hints = RequestHints::from_value(both, false).unwrap();
+        assert!(hints.turn == TurnEvidence::History && !hints.first_turn);
+    }
+
     #[test]
     fn cross_provider_capacity_requires_known_history_and_no_server_local_references() {
         let base = json!({"input":[{"role":"assistant","content":"fixture"},{"role":"user","content":"fixture"}]});
