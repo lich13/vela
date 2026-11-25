@@ -1810,8 +1810,7 @@ fn move_raw_input_into_shapes(connection: &Connection) -> usize {
         for (owner, ordinal, shape, value) in rows {
             let mut fields = super::body_wire::decode(&value[32..]).unwrap();
             assert!(fields.get("rawInputTokens").is_none());
-            fields["rawInputTokens"] =
-                json!(1_000_000 * (index as i64 + 1) + owner * 10 + ordinal);
+            fields["rawInputTokens"] = json!(1_000_000 * (index as i64 + 1) + owner * 10 + ordinal);
             let payload = super::body_wire::encode_v13(&fields);
             let mut bytes = Sha256::digest(&payload).to_vec();
             bytes.extend(payload);

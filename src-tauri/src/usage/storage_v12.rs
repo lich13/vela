@@ -782,10 +782,7 @@ fn create_tables(c: &Connection) -> Result<()> {
 
 pub(super) fn initialize(c: &Connection) -> Result<()> {
     // A new database holds nothing written before the current shapes.
-    db(c.execute(
-        "INSERT INTO metadata VALUES('storage_shapes','ready')",
-        [],
-    ))?;
+    db(c.execute("INSERT INTO metadata VALUES('storage_shapes','ready')", []))?;
     create_tables(c)?;
     query::metrics_schema(c, "usage_daily_metrics")?;
     create_views(c)?;
@@ -1514,9 +1511,7 @@ pub(super) fn reshape_batch(c: &Connection, limit: usize) -> Result<bool> {
         let mut stmt = db(tx.prepare(&format!(
             "SELECT DISTINCT owner FROM {table} WHERE shape IN (SELECT id FROM v12_legacy_shapes) LIMIT ?1"
         )))?;
-        let rows = db(stmt.query_map([(limit - owners.len()) as i64], |r| {
-            r.get::<_, i64>(0)
-        }))?;
+        let rows = db(stmt.query_map([(limit - owners.len()) as i64], |r| r.get::<_, i64>(0)))?;
         for owner in rows {
             owners.insert(db(owner)?);
         }
