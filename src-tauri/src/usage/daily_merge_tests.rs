@@ -135,7 +135,9 @@ fn fixture() -> Vec<Record> {
         row.attempts[0].price = Some(price("0.07", "fixture-price-2"));
         rows.push(row);
     }
-    // Another model, and the first one on another day.
+    // Another model, and the first one on another day. Neither day's requests
+    // report a cache count for the other model; one of the next day's reports
+    // a zero, which a summary must show as zero.
     for i in 0..2u64 {
         rows.push(gateway(
             &format!("fixture-other-model-{i}"),
@@ -144,11 +146,13 @@ fn fixture() -> Vec<Record> {
             tokens(300 + i, 40),
             "0.3",
         ));
+        let mut usage = tokens(400 + i, 50);
+        usage.cache_read = (i == 0).then_some(0);
         rows.push(gateway(
             &format!("fixture-next-day-{i}"),
             day(1) + i as i64,
             "fixture-model",
-            tokens(400 + i, 50),
+            usage,
             "0.25",
         ));
     }
@@ -399,6 +403,83 @@ fn rollups(store: &Store, condition: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Every rollup as it is stored in full, and every row a rollup projects.
+fn stored(store: &Store) -> (Vec<(String, i64, Value)>, Vec<String>) {
+    let mut statement = store
+        .connection
+        .prepare("SELECT id,day,body FROM daily ORDER BY id")
+        .unwrap();
+    let rollups = statement
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .map(|row| {
+            let (id, day, body) = row.unwrap();
+            (id, day, bodies::unpack(&store.connection, &body).unwrap())
+        })
+        .collect();
+    let mut statement = store
+        .connection
+        .prepare("SELECT * FROM usage_daily_metrics ORDER BY owner,ordinal")
+        .unwrap();
+    let columns = statement.column_count();
+    let projected = statement
+        .query_map([], |r| {
+            (0..columns)
+                .map(|i| Ok(format!("{:?}", r.get::<_, rusqlite::types::Value>(i)?)))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap()
+        .map(|row| row.unwrap().join(","))
+        .collect();
+    (rollups, projected)
+}
+
+/// Archives the requests as an earlier version did: into a rollup for each
+/// exact usage.
+fn archive_exact(store: &mut Store, rows: &[Record]) {
+    store.write_batch(rows, None).unwrap();
+    let ids: Vec<_> = rows.iter().map(|r| r.id.clone()).collect();
+    for chunk in ids.chunks(3) {
+        store.archive_batch_exact(chunk).unwrap();
+    }
+}
+
+/// A database of an earlier version says nothing of shared rollups.
+fn unmark(store: &Store) {
+    store
+        .connection
+        .execute("DELETE FROM metadata WHERE key='storage_daily'", [])
+        .unwrap();
+}
+
+/// How many payloads are kept beyond one for each rollup.
+fn spare_payloads(store: &Store) -> i64 {
+    count(
+        store,
+        "SELECT (SELECT count(*) FROM v12_archives)-(SELECT count(*) FROM daily)",
+    )
+}
+
+/// Merges what is left, in batches of `limit` rollups.
+fn merge_rest(store: &mut Store, limit: usize) {
+    let mut batches = 0;
+    while store.merge_daily_batch(limit).unwrap() {
+        batches += 1;
+        assert!(batches < 64, "the rollups were not all merged");
+    }
+}
+
+const MERGED: &str = "json_extract(body,'$.merged')";
+const EXACT: &str = "json_extract(body,'$.merged') IS NULL";
+const EXACT_PRICED: &str =
+    "json_extract(body,'$.merged') IS NULL AND json_extract(body,'$.totals.unpriced')=0";
+
 #[test]
 fn priced_requests_differing_only_in_usage_share_a_rollup_and_no_summary_changes() {
     let dir = tempfile::tempdir().unwrap();
@@ -435,7 +516,7 @@ fn priced_requests_differing_only_in_usage_share_a_rollup_and_no_summary_changes
     // One model at one price, the same at another price, another model, the
     // next day, a retried request, a failed one, either other operation, what
     // the session files hold and what both saw: ten rollups for nineteen requests.
-    let merged = rollups(&store, "json_extract(body,'$.merged')");
+    let merged = rollups(&store, MERGED);
     assert_eq!(merged.len(), 10);
     let requests: u64 = merged
         .iter()
@@ -475,9 +556,20 @@ fn priced_requests_differing_only_in_usage_share_a_rollup_and_no_summary_changes
     assert_eq!(retried["sums"][0]["totals"]["cost"].to_string(), "0.002");
     assert_eq!(retried["sums"][1]["totals"]["requests"], 2);
     assert_eq!(retried["sums"][1]["totals"]["success"], 2);
+    // No request of the other model reported a cache count, and none is made
+    // up; one of the next day's reported a zero, and that is what is kept.
+    let consumed = |input: u64| {
+        merged
+            .iter()
+            .map(|rollup| &rollup["sums"][0]["totals"]["tokens"])
+            .find(|tokens| tokens["input"] == input)
+            .unwrap()
+    };
+    assert!(consumed(601)["cacheRead"].is_null());
+    assert_eq!(consumed(801)["cacheRead"], 0);
 
     // Requests without a price are rolled up as they were: alike in everything.
-    let exact = rollups(&store, "json_extract(body,'$.merged') IS NULL");
+    let exact = rollups(&store, EXACT);
     assert_eq!(exact.len(), 2);
     assert!(exact.iter().all(|rollup| rollup.get("sums").is_none()));
     let mut counts: Vec<_> = exact
@@ -521,7 +613,7 @@ fn a_shared_rollup_keeps_one_payload_and_one_shape_for_all_its_days() {
     assert_eq!(count(&store, "SELECT count(*) FROM usage_daily_metrics"), 6);
     // Costs are numbers there, so the days of a view differ in numbers alone.
     assert_eq!(count(&store, "SELECT count(*) FROM v12_templates"), 2);
-    let merged = rollups(&store, "json_extract(body,'$.merged')");
+    let merged = rollups(&store, MERGED);
     assert_eq!(merged.len(), 3);
     assert_eq!(merged[0]["sums"][0]["totals"]["requests"], 5);
     assert_eq!(merged[0]["sums"][0]["totals"]["cost"].to_string(), "0.60");
@@ -556,9 +648,9 @@ fn requests_priced_after_they_were_archived_match_those_priced_before() {
         late.dashboard(&Filter::default()).unwrap().totals.unpriced,
         3
     );
-    assert_eq!(rollups(&late, "json_extract(body,'$.merged')").len(), 0);
+    assert_eq!(rollups(&late, MERGED).len(), 0);
     late.backfill(&pricing).unwrap();
-    let exact = rollups(&late, "json_extract(body,'$.merged') IS NULL");
+    let exact = rollups(&late, EXACT);
     assert_eq!(exact.len(), 2);
     assert!(exact
         .iter()
@@ -571,10 +663,192 @@ fn requests_priced_after_they_were_archived_match_those_priced_before() {
     let live = summaries(&early);
     assert_unchanged(&summaries(&late), &live);
     early.archive_batch(&ids).unwrap();
-    assert_eq!(rollups(&early, "json_extract(body,'$.merged')").len(), 1);
+    assert_eq!(rollups(&early, MERGED).len(), 1);
     assert_unchanged(&summaries(&early), &live);
     assert_unchanged(&calculator(&early), &calculator(&late));
     let totals = early.dashboard(&Filter::default()).unwrap().totals;
     assert_eq!((totals.requests, totals.unpriced), (3, 0));
     assert!(decimal(&totals.cost).is_some_and(|cost| !cost.is_zero()));
+
+    // Rollups priced late are merged as any other written for an exact usage.
+    unmark(&late);
+    let totals = calculator(&late);
+    merge_rest(&mut late, 4);
+    assert_eq!(rollups(&late, MERGED).len(), 1);
+    assert_eq!(rollups(&late, EXACT_PRICED).len(), 0);
+    assert_unchanged(&summaries(&late), &live);
+    assert_unchanged(&calculator(&late), &totals);
+}
+
+/// Gateway requests of the first day and the first model, at its first price.
+fn plain(name: &str, count: u64) -> Vec<Record> {
+    (0..count)
+        .map(|i| {
+            gateway(
+                &format!("fixture-plain-{name}-{i}"),
+                day(0) + 5_000 + i as i64,
+                "fixture-model",
+                tokens(150 + i, 25),
+                "0.33",
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn rollups_of_identical_requests_join_the_shared_ones_in_batches_that_can_be_interrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let rows = fixture();
+    let ids: Vec<_> = rows.iter().map(|r| r.id.clone()).collect();
+
+    // What the same requests leave when they are archived into shared rollups.
+    let mut direct = Store::open(&dir.path().join("direct")).unwrap();
+    direct.write_batch(&rows, None).unwrap();
+    let live = summaries(&direct);
+    direct.archive_batch(&ids).unwrap();
+
+    let path = dir.path().join("earlier");
+    let mut store = Store::open(&path).unwrap();
+    archive_exact(&mut store, &rows);
+    unmark(&store);
+    assert_eq!(rollups(&store, MERGED).len(), 0);
+    assert_unchanged(&summaries(&store), &live);
+    let totals = calculator(&store);
+    assert_unchanged(&totals, &calculator(&direct));
+    let spare = spare_payloads(&store);
+
+    // One small batch, then the process stops before the rest.
+    assert!(store.merge_daily_batch(4).unwrap());
+    assert!(!rollups(&store, EXACT_PRICED).is_empty());
+    assert_unchanged(&summaries(&store), &live);
+    assert_unchanged(&calculator(&store), &totals);
+    drop(store);
+
+    // It goes on where it stopped. Requests that grow old meanwhile are
+    // archived into shared rollups, which the earlier ones then join.
+    let mut store = Store::open(&path).unwrap();
+    assert_unchanged(&summaries(&store), &live);
+    assert!(store.merge_daily_batch(4).unwrap());
+    let meanwhile = plain("meanwhile", 3);
+    let meanwhile_ids: Vec<_> = meanwhile.iter().map(|r| r.id.clone()).collect();
+    for store in [&mut store, &mut direct] {
+        store.write_batch(&meanwhile, None).unwrap();
+        store.archive_batch(&meanwhile_ids).unwrap();
+    }
+    let live = summaries(&direct);
+    let totals = calculator(&direct);
+    assert_unchanged(&summaries(&store), &live);
+    assert_unchanged(&calculator(&store), &totals);
+    let mut batches = 0;
+    while store.merge_daily_batch(4).unwrap() {
+        batches += 1;
+        assert!(batches < 64, "the rollups were not all merged");
+        assert_unchanged(&summaries(&store), &live);
+        assert_unchanged(&calculator(&store), &totals);
+    }
+    assert!(batches > 2);
+    // The rollups are those the requests would have been archived into, each
+    // with one payload; the ones without a price are as they were.
+    assert_eq!(stored(&store), stored(&direct));
+    assert_eq!(rollups(&store, EXACT_PRICED).len(), 0);
+    assert_eq!(spare_payloads(&store), spare);
+
+    // Done: nothing is read again, now or after a restart.
+    let merged = stored(&store);
+    assert!(!store.merge_daily_batch(4).unwrap());
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert!(!store.merge_daily_batch(4).unwrap());
+    assert_eq!(stored(&store), merged);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT count(*) FROM metadata WHERE key LIKE 'storage_daily%'"
+        ),
+        1
+    );
+
+    // Requests archived from now on join the rollups that were merged.
+    let later = plain("later", 3);
+    let later_ids: Vec<_> = later.iter().map(|r| r.id.clone()).collect();
+    for store in [&mut store, &mut direct] {
+        store.write_batch(&later, None).unwrap();
+        store.archive_batch(&later_ids).unwrap();
+    }
+    assert_eq!(stored(&store).0.len(), merged.0.len());
+    assert_eq!(stored(&store), stored(&direct));
+}
+
+#[test]
+fn a_merged_rollup_adds_up_what_was_projected_and_works_nothing_out_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    archive_exact(&mut store, &fixture());
+    unmark(&store);
+    // What a rollup projects is what every summary reads, also where its
+    // example would give something else: a count it reports and the summaries
+    // never had, a zero they had and it lacks, a time measured otherwise.
+    store
+        .connection
+        .execute_batch(
+            "UPDATE usage_daily_metrics SET cache_read=NULL,duration_ms=duration_ms+7 WHERE model='fixture-model' AND requests>0;
+             UPDATE usage_daily_metrics SET cache_write=0 WHERE model='fixture-other-model';",
+        )
+        .unwrap();
+    let before = summaries(&store);
+    let totals = calculator(&store);
+    assert!(before["None model fixture-model"].contains("\"cacheRead\":null"));
+    assert!(before["None model fixture-other-model"].contains("\"cacheWrite\":0"));
+
+    merge_rest(&mut store, 4);
+    assert_eq!(rollups(&store, EXACT_PRICED).len(), 0);
+    assert_unchanged(&summaries(&store), &before);
+    assert_unchanged(&calculator(&store), &totals);
+}
+
+#[test]
+fn a_rollup_that_does_not_project_a_priced_row_for_each_attempt_stays_as_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    archive_exact(&mut store, &fixture());
+    unmark(&store);
+    let owner =
+        |sql: &str| -> String { store.connection.query_row(sql, [], |r| r.get(0)).unwrap() };
+    // One of two rows is gone; another row says that a price is lacking.
+    let halved = owner("SELECT owner FROM usage_daily_metrics WHERE ordinal=1 AND provider='fixture-provider' ORDER BY owner LIMIT 1");
+    let unpriced = owner("SELECT owner FROM usage_daily_metrics WHERE input=100 AND model='fixture-model' ORDER BY owner LIMIT 1");
+    store
+        .connection
+        .execute(
+            "DELETE FROM usage_daily_metrics WHERE owner=?1 AND ordinal=0",
+            [&halved],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE usage_daily_metrics SET unpriced=1 WHERE owner=?1",
+            [&unpriced],
+        )
+        .unwrap();
+    let before = summaries(&store);
+    let kept: Vec<_> = stored(&store)
+        .0
+        .into_iter()
+        .filter(|(id, _, _)| *id == halved || *id == unpriced)
+        .collect();
+    assert_eq!(kept.len(), 2);
+
+    merge_rest(&mut store, 4);
+    assert_unchanged(&summaries(&store), &before);
+    let (rollups, _) = stored(&store);
+    assert!(kept.iter().all(|rollup| rollups.contains(rollup)));
+    assert_eq!(
+        count(
+            &store,
+            &format!("SELECT count(*) FROM daily WHERE {EXACT_PRICED}")
+        ),
+        2
+    );
+    assert!(!store.merge_daily_batch(4).unwrap());
 }

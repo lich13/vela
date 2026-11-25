@@ -169,7 +169,8 @@ pub(super) fn retire(connection: &Connection, body: &str) -> Result<()> {
     let value: Value = serde_json::from_str(body).map_err(|_| failure("用量元数据无效"))?;
     if let Some(id) = value.get("_usageArchive").and_then(Value::as_i64) {
         connection
-            .execute("DELETE FROM v12_archives WHERE rid=?1", [id])
+            .prepare_cached("DELETE FROM v12_archives WHERE rid=?1")
+            .and_then(|mut statement| statement.execute([id]))
             .map_err(|_| failure("用量归档清理失败"))?;
     }
     Ok(())

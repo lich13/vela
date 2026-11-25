@@ -120,7 +120,6 @@ impl Buckets {
         mut body: Value,
         sums: Vec<query::Sum>,
     ) -> Result<()> {
-        bodies::detach_bases(c, &mut body)?;
         let invalid = || failure("用量记录无效");
         let fields = body.as_object_mut().ok_or_else(invalid)?;
         fields.remove("totals");
@@ -143,6 +142,8 @@ impl Buckets {
                 price.remove("cost");
             }
         }
+        // Only the prices that are left keep their rules.
+        bodies::detach_bases(c, &mut body)?;
         // Who served each attempt is summed apart, so it parts buckets too.
         let served: Vec<_> = sums.iter().map(|s| (&s.provider, &s.model)).collect();
         let key = safe_id(
@@ -351,6 +352,123 @@ impl Store {
             return Ok(true);
         }
         storage_v12::compact_diagnostics(&self.connection)
+    }
+    fn merging_pending(&self) -> Result<bool> {
+        db(self.connection.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM metadata WHERE key='storage_daily')",
+            [],
+            |row| row.get(0),
+        ))
+    }
+    /// Rollups written when each stood for priced requests identical in usage
+    /// join the shared ones, day after day. Each call reads at most `limit`
+    /// stored rollups in one transaction and answers whether it read any. What
+    /// a rollup projected is added to its bucket as it is, so no summary
+    /// changes.
+    // Nothing but the tests calls it yet.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn merge_daily_batch(&mut self, limit: usize) -> Result<bool> {
+        if !self.merging_pending()? {
+            return Ok(false);
+        }
+        let tx = db(self.connection.transaction())?;
+        // Where the last batch stopped: a day, and a rollup of that day.
+        let position: Option<String> = db(tx
+            .query_row(
+                "SELECT value FROM metadata WHERE key='storage_daily_after'",
+                [],
+                |row| row.get(0),
+            )
+            .optional())?;
+        let (mut day, mut after) = position
+            .as_deref()
+            .and_then(|position| position.split_once(':'))
+            .and_then(|(day, id)| Some((day.parse().ok()?, id.to_owned())))
+            .unwrap_or((i64::MIN, String::new()));
+        let mut exact = Vec::new();
+        let mut read = 0;
+        let finished = loop {
+            if read == limit {
+                break false;
+            }
+            let rows = {
+                let mut statement = db(tx.prepare_cached(
+                    "SELECT id,body FROM daily WHERE day=?1 AND id>?2 ORDER BY id LIMIT ?3",
+                ))?;
+                let rows = db(statement
+                    .query_map(params![day, after, (limit - read) as i64], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    }))?;
+                db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+            };
+            if rows.is_empty() {
+                let next: Option<i64> = db(tx.query_row(
+                    "SELECT min(day) FROM daily WHERE day>?1",
+                    [day],
+                    |row| row.get(0),
+                ))?;
+                let Some(next) = next else {
+                    break true;
+                };
+                day = next;
+                after.clear();
+                continue;
+            }
+            for (id, body) in rows {
+                read += 1;
+                after.clone_from(&id);
+                let stored: Value =
+                    serde_json::from_str(&body).map_err(|_| failure("用量元数据无效"))?;
+                if stored.get("merged").is_none()
+                    && stored.pointer("/totals/unpriced").and_then(Value::as_u64) == Some(0)
+                {
+                    exact.push((stored["_usageArchive"].as_i64(), day, id, body));
+                }
+            }
+        };
+        // Payloads are packed in blocks in the order they were written, which
+        // is not that of their rollups. Read in that order, a block is
+        // unpacked once.
+        exact.sort_by_key(|(payload, ..)| *payload);
+        let mut buckets = Buckets::default();
+        for (_, day, id, body) in exact {
+            let sums = query::projected(&tx, &id)?;
+            let payload = bodies::unpack(&tx, &body)?;
+            let attempts = payload
+                .pointer("/example/attempts")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            // Its rows are summed as they are, so they must be what a bucket
+            // holds: one for each attempt, none lacking a price. A rollup
+            // that projects anything else stays as it is.
+            if sums.is_empty()
+                || sums.len() != attempts
+                || sums.iter().any(|sum| sum.totals.unpriced > 0)
+            {
+                continue;
+            }
+            buckets.add(&tx, day, payload, sums)?;
+            db(
+                db(tx.prepare_cached("DELETE FROM usage_daily_metrics WHERE kind=1 AND owner=?1"))?
+                    .execute([&id]),
+            )?;
+            db(db(tx.prepare_cached("DELETE FROM daily WHERE id=?1"))?.execute([&id]))?;
+            bodies::retire(&tx, &body)?;
+        }
+        buckets.save(&tx)?;
+        if finished {
+            db(tx.execute_batch(
+                "DELETE FROM metadata WHERE key='storage_daily_after';
+                 INSERT OR REPLACE INTO metadata VALUES('storage_daily','ready');",
+            ))?;
+        } else {
+            db(tx.execute(
+                "INSERT OR REPLACE INTO metadata VALUES('storage_daily_after',?1)",
+                [format!("{day}:{after}")],
+            ))?;
+        }
+        db(tx.commit())?;
+        Ok(read > 0)
     }
     pub fn reader_with_cache(dir: &Path, cache: OverviewCache) -> Result<Self> {
         let mut reader = Self::reader(dir)?;
@@ -634,7 +752,7 @@ impl Store {
             if ids.is_empty() {
                 break;
             }
-            Self::archive_into(&tx, &ids, &mut buckets)?;
+            Self::archive_into(&tx, &ids, Some(&mut buckets))?;
         }
         buckets.save(&tx)?;
         db(tx.execute("INSERT INTO metadata(key,value) VALUES('detail_since',?1) ON CONFLICT(key) DO UPDATE SET value=max(cast(value AS INTEGER),cast(excluded.value AS INTEGER))",[cutoff.to_string()]))?;
@@ -643,11 +761,12 @@ impl Store {
     /// The exact set is selected while holding the writer lock. Each transaction
     /// accounts and deletes the same bounded set; no global age-based deletion.
     /// A request priced in full goes to `buckets`, which the caller saves in
-    /// the same transaction; any other keeps a rollup of its exact usage.
+    /// the same transaction; any other keeps a rollup of its exact usage, as
+    /// every request did before the shared rollups and does without `buckets`.
     fn archive_into(
         tx: &rusqlite::Transaction<'_>,
         ids: &[String],
-        buckets: &mut Buckets,
+        mut buckets: Option<&mut Buckets>,
     ) -> Result<()> {
         db(tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS archive_ids(id TEXT PRIMARY KEY,rid INTEGER); DELETE FROM archive_ids;"))?;
         let mut selected = db(tx.prepare_cached(
@@ -706,7 +825,7 @@ impl Store {
                 let status = a.status;
                 let mut t = Totals::default();
                 t.add_record(&r);
-                if t.unpriced == 0 {
+                if let Some(buckets) = buckets.as_deref_mut().filter(|_| t.unpriced == 0) {
                     // Priced in full, so nothing is left to work out from its
                     // exact usage: it shares a bucket and adds to the sums.
                     let sums = query::rows(&r, 1, &t);
@@ -1183,8 +1302,15 @@ mod test_support {
         pub(in crate::usage) fn archive_batch(&mut self, ids: &[String]) -> Result<()> {
             let tx = db(self.connection.transaction())?;
             let mut buckets = Buckets::default();
-            Self::archive_into(&tx, ids, &mut buckets)?;
+            Self::archive_into(&tx, ids, Some(&mut buckets))?;
             buckets.save(&tx)?;
+            db(tx.commit())
+        }
+        /// Archives as versions before the shared rollups did: each request
+        /// into the rollup of its exact usage.
+        pub(in crate::usage) fn archive_batch_exact(&mut self, ids: &[String]) -> Result<()> {
+            let tx = db(self.connection.transaction())?;
+            Self::archive_into(&tx, ids, None)?;
             db(tx.commit())
         }
         pub fn backfill(&mut self, pricing: &Pricing) -> Result<()> {

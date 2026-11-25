@@ -223,6 +223,33 @@ pub fn project(c: &Connection, owner: &str, r: &Record, count: u64, totals: &Tot
     write(c, owner, &rows(r, count, totals))
 }
 
+/// What the rollup `owner` projects now, in the order of its attempts; nothing
+/// unless its rows are numbered from zero without a gap.
+pub(super) fn projected(c: &Connection, owner: &str) -> Result<Vec<Sum>> {
+    let mut stmt = db(c.prepare_cached(
+        "SELECT ordinal,provider,model,requests,attempts,success,status_known,sessions,input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,cost,unpriced,duration_ms,measured_outputs,generation_ms,first_token_sum_ms,first_token_samples,cache_read_eligible,cache_input_eligible FROM usage_daily_metrics WHERE kind=1 AND owner=?1 ORDER BY ordinal",
+    ))?;
+    let rows = db(stmt.query_map([owner], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            Sum {
+                provider: r.get(1)?,
+                model: r.get(2)?,
+                totals: totals(r, 3)?,
+            },
+        ))
+    }))?;
+    let mut sums = Vec::new();
+    for row in rows {
+        let (ordinal, sum) = db(row)?;
+        if ordinal != sums.len() as i64 {
+            return Ok(Vec::new());
+        }
+        sums.push(sum);
+    }
+    Ok(sums)
+}
+
 fn gateway_kind(alias: &str) -> String {
     format!("CASE WHEN EXISTS(SELECT 1 FROM usage_metrics original_kind WHERE original_kind.kind=2 AND original_kind.owner={alias}.id) THEN 2 ELSE 0 END")
 }
