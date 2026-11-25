@@ -261,6 +261,8 @@ beforeEach(() => {
             quotaError: null,
             families: [],
           };
+        case "refresh_antigravity_usage_quota":
+          return { changed: false, error: null };
         case "get_usage_dashboard":
           return structuredClone(dashboard);
         case "get_usage_logs": {

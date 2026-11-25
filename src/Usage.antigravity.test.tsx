@@ -1,7 +1,16 @@
 import UsageAntigravity from "./UsageAntigravity";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { InstanceState } from "./bridge-contracts";
+import { setInstanceState } from "./instance";
 import type {
   AntigravityUsageStats,
   Dashboard,
@@ -369,13 +378,50 @@ function buildStats(
   };
 }
 
+type QuotaAnswer = { changed: boolean; error: string | null };
+const instances = (
+  active: "local" | "m1",
+  unsupported: string[] = [],
+): InstanceState => ({
+  revision: `r-${active}`,
+  active,
+  machines: [
+    {
+      id: "m1",
+      name: "东京",
+      kind: "linux",
+      sshHost: "tokyo",
+      fallbackHost: null,
+      useSudo: false,
+    },
+  ],
+  connection:
+    active === "local"
+      ? { status: "local", version: null, error: null, unsupported: [] }
+      : { status: "connected", version: "0.42.0", error: null, unsupported },
+});
+
 describe("Usage Antigravity statistics tab", () => {
   let statsPayload: AntigravityUsageStats;
+  /** What the next questions for the quota are answered with, in turn. */
+  let quotaAnswers: (QuotaAnswer | Promise<QuotaAnswer>)[];
+  const calls = (name: string) =>
+    mock.command.mock.calls.filter(([called]) => called === name);
+  const asking = () => {
+    let answer!: (value: QuotaAnswer) => void;
+    quotaAnswers.push(new Promise<QuotaAnswer>((done) => (answer = done)));
+    return answer;
+  };
+  afterEach(() => {
+    vi.useRealTimers();
+    act(() => setInstanceState(instances("local")));
+  });
 
   beforeEach(() => {
     mock.command.mockReset();
     mock.listeners.clear();
     statsPayload = buildStats();
+    quotaAnswers = [];
     Object.defineProperty(document, "visibilityState", {
       configurable: true,
       value: "visible",
@@ -486,6 +532,8 @@ describe("Usage Antigravity statistics tab", () => {
           name === "get_claude_usage_stats"
         )
           return statsPayload;
+        if (name === "refresh_antigravity_usage_quota")
+          return quotaAnswers.shift() ?? { changed: false, error: null };
         if (name === "get_claude_usage_quota")
           return {
             account: "f***@example.invalid",
@@ -763,6 +811,187 @@ describe("Usage Antigravity statistics tab", () => {
     expect(mock.command.mock.calls).toHaveLength(count);
     expect(screen.getByRole("combobox", { name: "用量供应商" })).toHaveValue(
       "",
+    );
+  });
+
+  const quotaCommand = "refresh_antigravity_usage_quota";
+  const statsCommand = "get_antigravity_usage_stats";
+  const periods = () => screen.getByLabelText("账号周期用量");
+  /** The page on the Antigravity tab with its statistics read. */
+  const open = async (user: ReturnType<typeof userEvent.setup>) => {
+    const view = render(<Usage />);
+    await user.click(screen.getByRole("tab", { name: "Antigravity" }));
+    await screen.findByLabelText("账号周期用量");
+    return view;
+  };
+
+  it("shows the history while the quota is asked for, and a failure beside the periods until a later answer", async () => {
+    const answer = asking();
+    const user = userEvent.setup();
+    await open(user);
+
+    // The history and the saved periods do not wait for the answer.
+    expect(within(periods()).getByText("配额剩余 74.5%")).toBeInTheDocument();
+    expect(
+      within(screen.getByLabelText("Token 构成与缓存节省")).getByText("54.0%"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(calls(quotaCommand)).toHaveLength(1));
+    expect(calls(quotaCommand)[0]).toEqual([quotaCommand]);
+    const order = mock.command.mock.calls.map(([name]) => name);
+    expect(order.indexOf(quotaCommand)).toBeGreaterThan(
+      order.indexOf(statsCommand),
+    );
+    const refresh = screen.getByRole("button", { name: "刷新用量" });
+    expect(refresh).toBeEnabled();
+    expect(within(periods()).queryByRole("alert")).not.toBeInTheDocument();
+
+    // Refreshing by hand meanwhile reads the history again and asks nothing more.
+    await user.click(refresh);
+    await waitFor(() => expect(calls(statsCommand)).toHaveLength(2));
+    await waitFor(() => expect(refresh).toBeEnabled());
+    expect(calls(quotaCommand)).toHaveLength(1);
+
+    await act(async () =>
+      answer({ changed: false, error: "agy 读取额度超时，请稍后再试" }),
+    );
+    expect(within(periods()).getByRole("alert")).toHaveTextContent(
+      "agy 读取额度超时，请稍后再试",
+    );
+    // The saved periods are the ones on the page, so nothing is read again.
+    expect(calls(statsCommand)).toHaveLength(2);
+
+    // The next answer takes the failure away.
+    await user.click(refresh);
+    await waitFor(() => expect(calls(quotaCommand)).toHaveLength(2));
+    await waitFor(() =>
+      expect(within(periods()).queryByRole("alert")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("reads the statistics again once the answer says the saved periods changed", async () => {
+    const answer = asking();
+    const user = userEvent.setup();
+    await open(user);
+    expect(within(periods()).getByText("配额剩余 74.5%")).toBeInTheDocument();
+    await waitFor(() => expect(calls(quotaCommand)).toHaveLength(1));
+    expect(calls(statsCommand)).toHaveLength(1);
+
+    const next = buildStats();
+    const window = next.accounts[0].tracks[0].burst5h;
+    window.remainingPercent = 61;
+    window.period!.remainingPercent = 61;
+    statsPayload = next;
+    await act(async () => answer({ changed: true, error: null }));
+    expect(
+      await within(periods()).findByText("配额剩余 61.0%"),
+    ).toBeInTheDocument();
+    expect(calls(statsCommand)).toHaveLength(2);
+    // What is read after a change asks for nothing again.
+    expect(calls(quotaCommand)).toHaveLength(1);
+  });
+
+  it("drops an answer that arrives after the tab was left, and asks nothing for Claude Code", async () => {
+    const answer = asking();
+    const user = userEvent.setup();
+    await open(user);
+    await waitFor(() => expect(calls(quotaCommand)).toHaveLength(1));
+
+    await user.click(screen.getByRole("tab", { name: "Claude Code" }));
+    await screen.findByRole("region", { name: "Claude 官方额度" });
+    await screen.findByLabelText("Token 构成与缓存节省");
+    await user.click(screen.getByRole("button", { name: "刷新用量" }));
+    await waitFor(() =>
+      expect(calls("get_claude_usage_stats")).toHaveLength(2),
+    );
+    await act(async () =>
+      answer({ changed: true, error: "迟到的额度读取失败" }),
+    );
+    expect(calls(statsCommand)).toHaveLength(1);
+    expect(calls("get_claude_usage_stats")).toHaveLength(2);
+    expect(calls(quotaCommand)).toHaveLength(1);
+
+    // Back on the tab the quota is asked for again; the late failure is gone.
+    await user.click(screen.getByRole("tab", { name: "Antigravity" }));
+    await screen.findByLabelText("账号周期用量");
+    await waitFor(() => expect(calls(quotaCommand)).toHaveLength(2));
+    expect(screen.queryByText("迟到的额度读取失败")).not.toBeInTheDocument();
+  });
+
+  it("asks an instance once at a time, and its answer never reaches the page of another", async () => {
+    const answer = asking();
+    const user = userEvent.setup();
+    const first = await open(user);
+    await waitFor(() => expect(calls(quotaCommand)).toHaveLength(1));
+    first.unmount();
+
+    // Opened again, the page waits for the answer already asked for.
+    const second = await open(user);
+    await waitFor(() => expect(calls(statsCommand)).toHaveLength(2));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "刷新用量" })).toBeEnabled(),
+    );
+    expect(calls(quotaCommand)).toHaveLength(1);
+    second.unmount();
+
+    // Another instance is asked for itself.
+    act(() => setInstanceState(instances("m1")));
+    await open(user);
+    await waitFor(() => expect(calls(quotaCommand)).toHaveLength(2));
+    const reads = calls(statsCommand).length;
+    await act(async () =>
+      answer({ changed: true, error: "本机的额度读取失败" }),
+    );
+    expect(screen.queryByText("本机的额度读取失败")).not.toBeInTheDocument();
+    expect(calls(statsCommand)).toHaveLength(reads);
+  });
+
+  it("leaves the quota to a server that still asks for it while it reads the statistics", async () => {
+    act(() => setInstanceState(instances("m1", [quotaCommand])));
+    statsPayload = buildStats({ quotaError: "agy 读取额度超时，请稍后再试" });
+    const user = userEvent.setup();
+    await open(user);
+    expect(within(periods()).getByRole("alert")).toHaveTextContent(
+      "agy 读取额度超时，请稍后再试",
+    );
+    const refresh = screen.getByRole("button", { name: "刷新用量" });
+    await user.click(refresh);
+    await waitFor(() => expect(calls(statsCommand)).toHaveLength(2));
+    await waitFor(() => expect(refresh).toBeEnabled());
+    expect(calls(quotaCommand)).toHaveLength(0);
+  });
+
+  it("asks for the quota again after the history of each timed refresh", async () => {
+    vi.useFakeTimers();
+    const original = mock.command.getMockImplementation()!;
+    mock.command.mockImplementation(
+      (name: string, args?: Record<string, unknown>) =>
+        name === "get_usage_state"
+          ? Promise.resolve({
+              settings: { ...settings, refreshSeconds: 5 },
+              syncing: false,
+              reports: {},
+              error: null,
+            })
+          : original(name, args),
+    );
+    const settle = () =>
+      act(async () => {
+        for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+      });
+    render(<Usage />);
+    await settle();
+    fireEvent.click(screen.getByRole("tab", { name: "Antigravity" }));
+    await settle();
+    expect(calls(statsCommand)).toHaveLength(1);
+    expect(calls(quotaCommand)).toHaveLength(1);
+
+    await act(async () => vi.advanceTimersByTime(5_000));
+    await settle();
+    expect(calls(statsCommand)).toHaveLength(2);
+    expect(calls(quotaCommand)).toHaveLength(2);
+    const order = mock.command.mock.calls.map(([name]) => name);
+    expect(order.lastIndexOf(quotaCommand)).toBeGreaterThan(
+      order.lastIndexOf(statsCommand),
     );
   });
 });

@@ -176,7 +176,7 @@ async fn a_bad_alias_starts_nothing() {
         );
         assert_eq!(channel.connect().await.unwrap_err().code, SSH);
         assert_eq!(
-            channel.call("get_state", json!({})).await.unwrap_err().code,
+            channel.call("get_state", json!({}), false).await.unwrap_err().code,
             SSH
         );
         assert!(dialed.try_recv().is_err());
@@ -309,8 +309,8 @@ async fn a_silent_server_fails_the_handshake_after_fifteen_seconds() {
     let started = tokio::time::Instant::now();
     // Two callers wait on the one attempt and share its error.
     let (first, second, mut far) = tokio::join!(
-        channel.call("get_state", json!({})),
-        channel.call("get_state", json!({})),
+        channel.call("get_state", json!({}), false),
+        channel.call("get_state", json!({}), false),
         async { dialed.recv().await.unwrap() }
     );
     assert_eq!(started.elapsed(), HANDSHAKE);
@@ -329,8 +329,8 @@ async fn two_calls_at_once_each_get_their_own_answer() {
     let (channel, mut dialed, _) = channel(Plan::default());
     let mut far = online(&channel, &mut dialed).await;
     let (first, second, ()) = tokio::join!(
-        channel.call("first", json!({"n": 1})),
-        channel.call("second", json!({"n": 2})),
+        channel.call("first", json!({"n": 1}), false),
+        channel.call("second", json!({"n": 2}), false),
         async {
             let one = far.next().await.unwrap();
             let two = far.next().await.unwrap();
@@ -356,15 +356,46 @@ async fn two_calls_at_once_each_get_their_own_answer() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn only_a_call_that_says_so_is_sent_as_internal() {
+    let (channel, mut dialed, _) = channel(Plan::default());
+    // The messages as a server from before the word reads them: any JSON.
+    let (capabilities, mut far) = tokio::join!(channel.connect(), async {
+        let mut far = dialed.recv().await.unwrap();
+        let handshake: Value = wire::read(&mut far.stream).await.unwrap().unwrap();
+        assert_eq!(handshake["command"], wire::CAPABILITIES);
+        assert!(handshake.get("internal").is_none(), "{handshake}");
+        far.answer(
+            handshake["id"].as_u64().unwrap(),
+            json!({"protocol": wire::PROTOCOL, "version": "0.41.0", "commands": []}),
+        )
+        .await;
+        far
+    });
+    capabilities.unwrap();
+    for (internal, said) in [(false, None), (true, Some(json!(true)))] {
+        let asked = channel.call("export_provider_copy", json!({"n": 1}), internal);
+        let (answer, ()) = tokio::join!(asked, async {
+            let message: Value = wire::read(&mut far.stream).await.unwrap().unwrap();
+            assert_eq!(message["command"], "export_provider_copy");
+            assert_eq!(message["args"], json!({"n": 1}));
+            assert_eq!(message.get("internal"), said.as_ref(), "{message}");
+            far.answer(message["id"].as_u64().unwrap(), json!(null))
+                .await;
+        });
+        answer.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn answers_keep_their_numbers_null_and_the_servers_own_error() {
     let (channel, mut dialed, heard) = channel(Plan::default());
     let mut far = online(&channel, &mut dialed).await;
     let numbers = json!({"cost": 0.1, "tokens": 18446744073709551615u64, "list": [1, -2]});
     let (kept, nothing, refused, ()) = tokio::join!(
-        channel.call("numbers", json!({})),
-        channel.call("nothing", json!({})),
+        channel.call("numbers", json!({}), false),
+        channel.call("nothing", json!({}), false),
         async {
-            let outcome = channel.call("refused", json!({})).await;
+            let outcome = channel.call("refused", json!({}), false).await;
             // An error the server answered leaves the connection alone.
             assert!(channel.is_open());
             outcome
@@ -404,7 +435,7 @@ async fn answers_keep_their_numbers_null_and_the_servers_own_error() {
 async fn an_event_reaches_the_listener() {
     let (channel, mut dialed, heard) = channel(Plan::default());
     let mut far = online(&channel, &mut dialed).await;
-    let (answer, ()) = tokio::join!(channel.call("get_state", json!({})), async {
+    let (answer, ()) = tokio::join!(channel.call("get_state", json!({}), false), async {
         let request = far.next().await.unwrap();
         let event = wire::Reply::Event {
             event: "gateway-state".into(),
@@ -431,8 +462,8 @@ async fn the_end_fails_every_waiting_call_and_the_next_call_reconnects() {
     });
     let mut far = online(&channel, &mut dialed).await;
     let (first, second, ()) = tokio::join!(
-        channel.call("first", json!({})),
-        channel.call("second", json!({})),
+        channel.call("first", json!({}), false),
+        channel.call("second", json!({}), false),
         async {
             far.next().await.unwrap();
             far.next().await.unwrap();
@@ -449,7 +480,7 @@ async fn the_end_fails_every_waiting_call_and_the_next_call_reconnects() {
         ["connected 0.41.0".to_string(), format!("offline {lost}")]
     );
 
-    let (answer, _far) = tokio::join!(channel.call("third", json!({})), async {
+    let (answer, _far) = tokio::join!(channel.call("third", json!({}), false), async {
         let mut far = dialed.recv().await.unwrap();
         far.greet().await;
         let request = far.next().await.unwrap();
@@ -467,7 +498,7 @@ async fn the_end_fails_every_waiting_call_and_the_next_call_reconnects() {
 async fn a_request_that_was_sent_is_not_sent_again() {
     let (channel, mut dialed, _) = channel(Plan::default());
     let mut far = online(&channel, &mut dialed).await;
-    let (answer, ()) = tokio::join!(channel.call("save_provider", json!({})), async {
+    let (answer, ()) = tokio::join!(channel.call("save_provider", json!({}), false), async {
         assert_eq!(far.next().await.unwrap().command, "save_provider");
         drop(far);
     });
@@ -475,7 +506,7 @@ async fn a_request_that_was_sent_is_not_sent_again() {
     // The failed call started no new connection.
     assert!(dialed.try_recv().is_err());
 
-    let (answer, ()) = tokio::join!(channel.call("get_state", json!({})), async {
+    let (answer, ()) = tokio::join!(channel.call("get_state", json!({}), false), async {
         let mut far = dialed.recv().await.unwrap();
         far.greet().await;
         // The new connection carries only the new request.
@@ -490,7 +521,7 @@ async fn a_request_that_was_sent_is_not_sent_again() {
 async fn an_unreadable_message_ends_the_connection() {
     let (channel, mut dialed, heard) = channel(Plan::default());
     let mut far = online(&channel, &mut dialed).await;
-    let (answer, ()) = tokio::join!(channel.call("get_state", json!({})), async {
+    let (answer, ()) = tokio::join!(channel.call("get_state", json!({}), false), async {
         far.next().await.unwrap();
         wire::write(&mut far.stream, &json!("neither an answer nor an event"))
             .await
@@ -509,7 +540,7 @@ async fn a_call_gives_up_after_a_minute_and_the_connection_stays() {
     let (channel, mut dialed, heard) = channel(Plan::default());
     let mut far = online(&channel, &mut dialed).await;
     let started = tokio::time::Instant::now();
-    let (answer, late) = tokio::join!(channel.call("slow", json!({})), async {
+    let (answer, late) = tokio::join!(channel.call("slow", json!({}), false), async {
         far.next().await.unwrap().id
     });
     assert_eq!(started.elapsed(), CALL);
@@ -520,7 +551,7 @@ async fn a_call_gives_up_after_a_minute_and_the_connection_stays() {
         format!("{HOST} 在 60 秒内没有应答，操作可能仍在进行，请稍后刷新确认")
     );
 
-    let (answer, ()) = tokio::join!(channel.call("quick", json!({})), async {
+    let (answer, ()) = tokio::join!(channel.call("quick", json!({}), false), async {
         // The late answer has nobody waiting and is dropped.
         far.answer(late, json!("late")).await;
         let request = far.next().await.unwrap();
@@ -604,7 +635,7 @@ async fn both_aliases_failing_reports_both_and_tries_no_third_time() {
 async fn closing_fails_waiting_calls_quietly_and_for_good() {
     let (channel, mut dialed, heard) = channel(Plan::default());
     let mut far = online(&channel, &mut dialed).await;
-    let (answer, ()) = tokio::join!(channel.call("get_state", json!({})), async {
+    let (answer, ()) = tokio::join!(channel.call("get_state", json!({}), false), async {
         far.next().await.unwrap();
         channel.close();
     });
@@ -612,7 +643,7 @@ async fn closing_fails_waiting_calls_quietly_and_for_good() {
     assert!(far.next().await.is_none());
     assert_eq!(heard.all(), ["connected 0.41.0"]);
     assert_eq!(
-        channel.call("get_state", json!({})).await.unwrap_err().code,
+        channel.call("get_state", json!({}), false).await.unwrap_err().code,
         SSH
     );
     assert!(dialed.try_recv().is_err());

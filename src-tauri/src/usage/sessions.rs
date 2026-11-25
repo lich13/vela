@@ -875,7 +875,7 @@ mod test_support {
             id: &str,
             periods: &super::super::antigravity::quota::Periods,
         ) -> Result<()> {
-            Store::save_antigravity_quota(self, id, periods)
+            Store::save_antigravity_quota(self, id, periods).map(|_| ())
         }
         fn antigravity_models(&self) -> Result<Option<String>> {
             Store::antigravity_models(self)

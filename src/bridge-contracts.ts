@@ -917,9 +917,18 @@ export type SharedCommands = {
   recover_claude_profile: Call<None, ClaudeProfileState>;
   get_usage_state: Call<None, UsageState>;
   get_usage_dashboard: Call<{ filter: UsageFilter }, Dashboard>;
+  /** The history and the saved account periods; the quota is not asked for. */
   get_antigravity_usage_stats: Call<
     { filter: UsageFilter },
     AntigravityUsageStats
+  >;
+  /**
+   * Asks for the quota of the signed-in account. `changed` says the saved
+   * periods are no longer the ones the statistics were read with.
+   */
+  refresh_antigravity_usage_quota: Call<
+    None,
+    { changed: boolean; error: string | null }
   >;
   get_claude_usage_stats: Call<{ filter: UsageFilter }, AntigravityUsageStats>;
   get_claude_usage_quota: Call<{ refresh: boolean }, ClaudeUsageQuota>;
@@ -1078,6 +1087,7 @@ export const sharedCommands = names<SharedCommands>()([
   "get_usage_state",
   "get_usage_dashboard",
   "get_antigravity_usage_stats",
+  "refresh_antigravity_usage_quota",
   "get_claude_usage_stats",
   "get_claude_usage_quota",
   "get_usage_logs",

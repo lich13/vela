@@ -360,6 +360,7 @@ export const usageCommands = [
   "get_usage_state",
   "get_usage_dashboard",
   "get_antigravity_usage_stats",
+  "refresh_antigravity_usage_quota",
   "get_claude_usage_stats",
   "get_claude_usage_quota",
   "get_usage_logs",
@@ -594,6 +595,8 @@ export function usagePreview(
         },
       ],
     };
+  if (name === "refresh_antigravity_usage_quota")
+    return { changed: false, error: null };
   if (
     name === "get_antigravity_usage_stats" ||
     name === "get_claude_usage_stats"

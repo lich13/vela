@@ -147,6 +147,72 @@ describe("AntigravityAccounts", () => {
     ).toBe(true);
   });
 
+  it("opens with the heading it is given, then import and export as a pair and a refresh button", async () => {
+    mockCommand.mockResolvedValue(initialState);
+    const view = render(
+      <AntigravityAccounts
+        heading={<h1>账号</h1>}
+        notify={vi.fn()}
+        setError={vi.fn()}
+      />,
+    );
+    await screen.findByText("OAuth 主号");
+    const row = view.container.querySelector<HTMLElement>(".page-heading")!;
+    expect(within(row).getByRole("heading", { level: 1 })).toHaveTextContent(
+      "账号",
+    );
+    const pair = within(row).getByRole("group", { name: "账号导入导出" });
+    expect(pair).toHaveClass("exchange-button-group");
+    expect(
+      within(pair)
+        .getAllByRole("button")
+        .map((button) => [button.textContent, button.className]),
+    ).toEqual([
+      ["导入", "exchange-button"],
+      ["导出", "exchange-button"],
+    ]);
+    const refresh = within(row).getByRole("button", {
+      name: "刷新 Antigravity 认证状态",
+    });
+    expect(refresh).toHaveTextContent("刷新");
+    expect(pair).not.toContainElement(refresh);
+  });
+
+  it("搜索按名称和邮箱过滤，不区分大小写；没有匹配时沿用 Codex 列表的说法", async () => {
+    mockCommand.mockResolvedValue(initialState);
+    render(<AntigravityAccounts notify={vi.fn()} setError={vi.fn()} />);
+    await screen.findByText("OAuth 主号");
+    const search = screen.getByRole("textbox", { name: "搜索账号" });
+    expect(search).toHaveAttribute("placeholder", "搜索账号");
+    expect(search.closest("label")).toHaveClass("search");
+    const names = () =>
+      [...document.querySelectorAll(".account-row .account-title strong")].map(
+        (node) => node.textContent,
+      );
+
+    fireEvent.change(search, { target: { value: "USER2@EXAMPLE" } });
+    expect(names()).toEqual(["OAuth 备号"]);
+    fireEvent.change(search, { target: { value: "oauth 主" } });
+    expect(names()).toEqual(["OAuth 主号"]);
+    // The count is of saved accounts, not of the rows left by the search.
+    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent(
+      "已保存账号 2",
+    );
+
+    fireEvent.change(search, { target: { value: "不存在" } });
+    expect(names()).toEqual([]);
+    expect(
+      screen.getByRole("heading", { name: "没有找到匹配账号" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("尝试其他名称或邮箱")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "导出 Antigravity 账号" }),
+    ).toBeEnabled();
+
+    fireEvent.change(search, { target: { value: "" } });
+    expect(names()).toEqual(["OAuth 主号", "OAuth 备号"]);
+  });
+
   it("说明切换会关闭运行中的 agy 会话，并报告关闭了几个", async () => {
     const notify = vi.fn();
     mockCommand.mockImplementation(async (name: string) =>
@@ -423,6 +489,9 @@ describe("AntigravityAccounts", () => {
     expect(
       screen.queryByRole("button", { name: "导入账号" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "导出 Antigravity 账号" }),
+    ).toBeDisabled();
     expect(
       screen.getByRole("button", { name: "刷新 Antigravity 认证状态" }),
     ).toBeEnabled();

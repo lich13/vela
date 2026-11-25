@@ -65,11 +65,16 @@ impl Client {
     async fn at(socket: &Path) -> Self {
         Self(UnixStream::connect(socket).await.unwrap())
     }
+    /// Sends what a window asked for.
     async fn ask(&mut self, id: u64, command: &str, args: Value) {
+        self.send(id, command, args, false).await;
+    }
+    async fn send(&mut self, id: u64, command: &str, args: Value, internal: bool) {
         let request = Request {
             id,
             command: command.into(),
             args,
+            internal,
         };
         wire::write(&mut self.0, &request).await.unwrap();
     }
@@ -95,6 +100,11 @@ impl Client {
     }
     async fn call(&mut self, command: &str, args: Value) -> std::result::Result<Value, AppError> {
         self.ask(9, command, args).await;
+        self.answer().await.1
+    }
+    /// A call of another Vela's own Rust.
+    async fn own(&mut self, command: &str, args: Value) -> std::result::Result<Value, AppError> {
+        self.send(9, command, args, true).await;
         self.answer().await.1
     }
     async fn shake_hands(&mut self) -> Capabilities {
@@ -264,14 +274,23 @@ async fn a_provider_is_handed_over_whole_and_taken_in_as_a_copy() {
     assert!(!saved.to_string().contains("fixture-token"));
 
     let named = json!({"clientId": "claude", "providerId": id});
-    let copy = client.call("export_provider_copy", named).await.unwrap();
+    // A request that does not say it is internal is a window's, whoever sent
+    // it: the tokens stay where they are.
+    let refused = client.call("export_provider_copy", named.clone()).await;
+    let refused = refused.unwrap_err();
+    assert_eq!(refused.code, code::UNSUPPORTED);
+    assert!(!refused.message.contains("fixture-token"));
+    let copy = client.own("export_provider_copy", named).await.unwrap();
     assert_eq!(copy["provider"]["token"], "fixture-token");
-    let taken = client
-        .call(
-            "import_provider_copy",
-            json!({"clientId": "claude", "copy": copy}),
-        )
-        .await;
+    let handed = json!({"clientId": "claude", "copy": copy});
+    let refused = client.call("import_provider_copy", handed.clone()).await;
+    assert_eq!(refused.unwrap_err().code, code::UNSUPPORTED);
+    let gateway = client
+        .call("get_gateway", json!({"clientId": "claude"}))
+        .await
+        .unwrap();
+    assert_eq!(gateway["providers"].as_array().unwrap().len(), 1);
+    let taken = client.own("import_provider_copy", handed).await;
     assert_eq!(taken.unwrap(), Value::Null);
     let gateway = client
         .call("get_gateway", json!({"clientId": "claude"}))
@@ -287,8 +306,41 @@ async fn a_provider_is_handed_over_whole_and_taken_in_as_a_copy() {
     assert_ne!(gateway["providers"][1]["id"], id);
 
     let missing = json!({"clientId": "claude", "providerId": "missing"});
-    let error = client.call("export_provider_copy", missing).await;
+    let error = client.own("export_provider_copy", missing).await;
     assert_eq!(error.unwrap_err().code, code::PROVIDER);
+}
+
+#[tokio::test]
+async fn what_no_window_may_ask_is_answered_only_to_a_request_that_says_it_is_internal() {
+    let fixture = fixture().await;
+    let mut client = Client::connect(&fixture).await;
+    // Listed like every other command, so the app knows the server has them.
+    let listed = client.shake_hands().await.commands;
+    for name in rpc::names() {
+        if !rpc::internal(name) {
+            continue;
+        }
+        assert!(listed.iter().any(|known| known == name), "{name}");
+        // Refused before its arguments are looked at.
+        let refused = client.call(name, json!({})).await.unwrap_err();
+        assert_eq!(
+            (refused.code.as_str(), refused.message.as_str()),
+            (code::UNSUPPORTED, "此实例不支持该操作"),
+            "{name}"
+        );
+        // Said to be internal, it gets as far as its arguments.
+        let answered = client.own(name, json!({"unknown": true})).await;
+        assert_ne!(
+            answered.err().map(|error| error.code),
+            Some(code::UNSUPPORTED.to_string()),
+            "{name}"
+        );
+    }
+    // The word opens nothing else: any other command is answered either way.
+    let frozen = client.own("get_gateway_freeze", json!({})).await;
+    assert!(frozen.is_ok(), "{frozen:?}");
+    let unknown = client.own("no_such_command", json!({})).await;
+    assert_eq!(unknown.unwrap_err().code, code::UNSUPPORTED);
 }
 
 #[tokio::test]

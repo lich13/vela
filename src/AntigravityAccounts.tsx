@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowLeftRight,
   Check,
-  Download,
+  FileInput,
+  FileOutput,
   Info,
   LoaderCircle,
   MoreHorizontal,
   Pencil,
   RefreshCw,
+  Search,
   Trash2,
-  Upload,
   UserRound,
   Users,
 } from "lucide-react";
@@ -26,6 +27,8 @@ import Modal from "./Modal";
 import { errorOf } from "./types";
 
 type Props = {
+  /** The page title and client switch, which open this page's heading row. */
+  heading?: ReactNode;
   notify: (msg: string) => void;
   setError: (msg: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
@@ -37,6 +40,7 @@ type DialogState =
   | { type: "delete"; item: AntigravityAccountItem };
 
 export default function AntigravityAccounts({
+  heading,
   notify,
   setError,
   onDirtyChange,
@@ -45,6 +49,7 @@ export default function AntigravityAccounts({
   const [state, setState] = useState<AntigravityAuthState | null>(null);
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [search, setSearch] = useState("");
 
   const [name, setName] = useState("");
   const sequence = useRef(0);
@@ -152,66 +157,94 @@ export default function AntigravityAccounts({
     }
   };
 
+  const shown = (state?.accounts ?? []).filter((a) =>
+    (a.name + " " + (a.email ?? ""))
+      .toLowerCase()
+      .includes(search.toLowerCase()),
+  );
+
   return (
     <>
-      <div className="list-tools">
-        <h2>
-          已保存账号 <span>{state?.accounts.length ?? 0}</span>
-        </h2>
-        <div className="list-tool-buttons">
+      <div className="page-heading">
+        {heading}
+        <div className="account-actions">
           {/* Account files are read and written on this machine only. */}
           {!remote && (
-            <>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="导入 Antigravity 账号"
-            title="从 Vela 导出的文件导入账号"
-            disabled={busy || !state}
-            onClick={() =>
-              void transfer(async () => {
-                const result = await command("import_antigravity_accounts", {
-                  expectedRevision: state!.revision,
-                });
-                if (!result) return null;
-                setState(result.state);
-                const skipped = result.skipped
-                  ? `${result.skipped} 个账号已存在`
-                  : "";
-                return result.added
-                  ? `已导入 ${result.added} 个账号` +
-                      (skipped && `，${skipped}，未改动`)
-                  : `没有新账号可导入${skipped && `，${skipped}`}`;
-              })
-            }
-          >
-            <Upload size={14} />
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="导出 Antigravity 账号"
-            title="选择账号并导出为一个文件"
-            disabled={busy || !state?.accounts.length}
-            onClick={() => {
-              setError("");
-              setExportIds(state!.accounts.map((a) => a.id));
-            }}
-          >
-            <Download size={14} />
-          </button>
-            </>
+            <div
+              className="exchange-button-group"
+              role="group"
+              aria-label="账号导入导出"
+            >
+              <button
+                type="button"
+                className="exchange-button"
+                aria-label="导入 Antigravity 账号"
+                title="从 Vela 导出的文件导入账号"
+                disabled={busy || !state}
+                onClick={() =>
+                  void transfer(async () => {
+                    const result = await command(
+                      "import_antigravity_accounts",
+                      { expectedRevision: state!.revision },
+                    );
+                    if (!result) return null;
+                    setState(result.state);
+                    const skipped = result.skipped
+                      ? `${result.skipped} 个账号已存在`
+                      : "";
+                    return result.added
+                      ? `已导入 ${result.added} 个账号` +
+                          (skipped && `，${skipped}，未改动`)
+                      : `没有新账号可导入${skipped && `，${skipped}`}`;
+                  })
+                }
+              >
+                <FileInput size={16} />
+                导入
+              </button>
+              <button
+                type="button"
+                className="exchange-button"
+                aria-label="导出 Antigravity 账号"
+                title="选择账号并导出为一个文件"
+                disabled={busy || !state?.accounts.length}
+                onClick={() => {
+                  setError("");
+                  setExportIds(state!.accounts.map((a) => a.id));
+                }}
+              >
+                <FileOutput size={16} />
+                导出
+              </button>
+            </div>
           )}
           <button
             type="button"
-            className="icon-button"
+            className="exchange-button"
             aria-label="刷新 Antigravity 认证状态"
             disabled={busy}
             onClick={() => void load()}
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={16} />
+            刷新
           </button>
         </div>
+      </div>
+
+      <div className="list-tools">
+        <h2>
+          已保存账号 <span>{state?.accounts.length ?? 0}</span>
+        </h2>
+        <label className="search">
+          <Search size={15} />
+          <input
+            aria-label="搜索账号"
+            placeholder="搜索账号"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <kbd>⌕</kbd>
+        </label>
       </div>
 
       {!!state?.cliSessions && (
@@ -232,14 +265,20 @@ export default function AntigravityAccounts({
             <LoaderCircle className="spin" />
             正在读取 Antigravity 账号…
           </div>
-        ) : state.accounts.length === 0 ? (
+        ) : shown.length === 0 ? (
           <div className="empty">
             <Users size={30} />
-            <h3>尚无已保存的 Antigravity 账号</h3>
-            <p>在 Antigravity app 内登录后，Vela 会自动识别并加入切换列表。</p>
+            <h3>
+              {search ? "没有找到匹配账号" : "尚无已保存的 Antigravity 账号"}
+            </h3>
+            <p>
+              {search
+                ? "尝试其他名称或邮箱"
+                : "在 Antigravity app 内登录后，Vela 会自动识别并加入切换列表。"}
+            </p>
           </div>
         ) : (
-          state.accounts.map((item) => {
+          shown.map((item) => {
             const isEffective = item.current && state.oauthPresent;
             return (
               <div

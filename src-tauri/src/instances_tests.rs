@@ -21,7 +21,8 @@ struct Line {
 }
 
 /// The servers behind the aliases, in place of `ssh`. Every connection
-/// answers the handshake, refuses `refuse` and echoes anything else.
+/// answers the handshake, refuses `refuse` and echoes anything else, with
+/// `internal` in the echo of a request that said so.
 struct Fleet {
     /// Aliases that cannot be reached.
     down: Mutex<Vec<&'static str>>,
@@ -144,7 +145,11 @@ async fn serve(
                     };
                     (None, Some(refused))
                 } else {
-                    (Some(json!({"host": alias, "args": request.args})), None)
+                    let mut echo = json!({"host": alias, "args": request.args});
+                    if request.internal {
+                        echo["internal"] = json!(true);
+                    }
+                    (Some(echo), None)
                 }
             }
         };
@@ -442,7 +447,10 @@ async fn a_machine_that_is_not_selected_is_asked_over_a_channel_of_its_own() {
         .ask(&osaka, "get_state", json!({"n": 1}))
         .await
         .unwrap();
-    assert_eq!(answer, json!({"host": OTHER, "args": {"n": 1}}));
+    assert_eq!(
+        answer,
+        json!({"host": OTHER, "args": {"n": 1}, "internal": true})
+    );
     // It was closed with the answer, and the selection never moved.
     assert_eq!(bench.fleet.connected().await, [HOST]);
     assert_eq!(bench.state().active, tokyo);
@@ -814,6 +822,47 @@ async fn a_call_goes_to_the_selected_server_and_nowhere_else() {
     assert_eq!(error.unwrap_err().code, code::STALE);
     let answer = bench.service.call(&osaka, "get_state", json!({})).await;
     assert_eq!(answer.unwrap()["host"], json!(OTHER));
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_what_the_apps_own_rust_asks_says_it_is_internal() {
+    let bench = Bench::new();
+    // The servers answer one of the commands no window may ask.
+    bench.fleet.commands.lock().push("export_provider_copy");
+    let tokyo = bench.add("Tokyo", HOST).await;
+    let osaka = bench.add("Osaka", OTHER).await;
+    bench.select(&tokyo).await.unwrap();
+
+    // A window's call is the request it always was.
+    let window = bench.service.call(&tokyo, "get_state", json!({"n": 1}));
+    assert_eq!(
+        window.await.unwrap(),
+        json!({"host": HOST, "args": {"n": 1}})
+    );
+    // What only Rust may ask is refused to it before anything is sent.
+    let refused = bench
+        .service
+        .call(&tokyo, "export_provider_copy", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (refused.code.as_str(), refused.message.as_str()),
+        (code::UNSUPPORTED, "此实例不支持该操作")
+    );
+    assert_eq!(bench.fleet.asked(), [format!("{HOST} get_state")]);
+
+    // The app's own Rust says so to the selected machine and to any other.
+    for (machine, host) in [(&tokyo, HOST), (&osaka, OTHER)] {
+        let args = json!({"clientId": "claude", "providerId": "fixture"});
+        let own = bench
+            .service
+            .ask(machine, "export_provider_copy", args.clone())
+            .await;
+        assert_eq!(
+            own.unwrap(),
+            json!({"host": host, "args": args, "internal": true})
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

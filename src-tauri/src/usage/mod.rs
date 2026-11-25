@@ -468,11 +468,13 @@ impl Service {
             store::Store::reader_with_cache(&self.0.directory, self.0.overview_cache.clone())?;
         reader.snapshot(|db| f(db))
     }
-    pub(crate) async fn refresh_antigravity_quota(&self) -> Result<()> {
-        if let Some((id, periods)) = antigravity::quota::observe(&self.0.data_dir).await? {
-            self.query(|db| db.save_antigravity_quota(&id, &periods))?;
+    /// Asks for the quota of the signed-in account and saves it; true where
+    /// the saved periods changed.
+    pub(crate) async fn refresh_antigravity_quota(&self) -> Result<bool> {
+        match antigravity::quota::observe(&self.0.data_dir).await? {
+            Some((id, periods)) => self.query(|db| db.save_antigravity_quota(&id, &periods)),
+            None => Ok(false),
         }
-        Ok(())
     }
     pub(crate) fn recent_gateway_requests(
         &self,
@@ -639,6 +641,7 @@ impl sessions::Repository for SessionStore {
     ) -> Result<()> {
         self.service
             .query(|db| db.save_antigravity_quota(id, periods))
+            .map(|_| ())
     }
     fn antigravity_models(&self) -> Result<Option<String>> {
         self.reader.antigravity_models()

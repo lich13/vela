@@ -458,8 +458,23 @@ impl Service {
 
     /// Runs a shared command on the selected server and answers what the
     /// server answered, its errors included. `instance` is the one the caller
-    /// believes is selected.
+    /// believes is selected. This is the way of whatever a window asked for:
+    /// the request does not say it is internal, and what only this app's
+    /// Rust may ask is refused before anything is sent.
     pub(crate) async fn call(&self, instance: &str, name: &str, args: Value) -> Result<Value> {
+        if crate::rpc::internal(name) {
+            return Err(crate::rpc::unsupported());
+        }
+        self.selected(instance, name, args, false).await
+    }
+
+    async fn selected(
+        &self,
+        instance: &str,
+        name: &str,
+        args: Value,
+        internal: bool,
+    ) -> Result<Value> {
         let (number, channel) = {
             let inner = self.loaded()?;
             let switched = || AppError::new(code::STALE, "实例已切换，请重试");
@@ -487,12 +502,13 @@ impl Service {
         if self.local.contains(&name) && !capabilities.commands.iter().any(|known| known == name) {
             return Err(unsupported());
         }
-        channel.call(name, args).await
+        channel.call(name, args, internal).await
     }
 
-    /// Runs a shared command on a machine of the list: the selected one over
-    /// its channel, any other over a channel of its own that is closed with
-    /// the answer.
+    /// Runs a command this app's Rust asks for itself on a machine of the
+    /// list: the selected one over its channel, any other over a channel of
+    /// its own that is closed with the answer. The request says it is
+    /// internal, which no request a window asked for does.
     pub(crate) async fn ask(&self, machine: &str, name: &str, args: Value) -> Result<Value> {
         let target = {
             let inner = self.loaded()?;
@@ -503,7 +519,7 @@ impl Service {
             }
         };
         let Some(target) = target else {
-            return self.call(machine, name, args).await;
+            return self.selected(machine, name, args, true).await;
         };
         let channel = Channel::new(target, self.dialer.clone(), Arc::new(remote::Silent));
         let answer = async {
@@ -511,7 +527,7 @@ impl Service {
             if !capabilities.commands.iter().any(|known| known == name) {
                 return Err(unsupported());
             }
-            channel.call(name, args).await
+            channel.call(name, args, true).await
         }
         .await;
         channel.close();
@@ -647,6 +663,23 @@ fn missing() -> AppError {
     AppError::new(code::MISSING, "实例不存在，请刷新后重试")
 }
 
+/// Runs a command on an instance for this app's own Rust: in this machine's
+/// table, or on another machine as a request that says it is internal. What
+/// carries credentials between instances goes this way and through no window.
+pub(crate) async fn on(
+    service: &Service,
+    runtime: &Arc<crate::runtime::Runtime>,
+    instance: &str,
+    name: &str,
+    args: Value,
+) -> Result<Value> {
+    if instance == LOCAL {
+        crate::rpc::call(runtime, name, args).await
+    } else {
+        service.ask(instance, name, args).await
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn get_instances(
     service: tauri::State<'_, Arc<Service>>,
@@ -704,9 +737,6 @@ pub(crate) async fn remote_call(
     name: String,
     args: Value,
 ) -> Result<Value> {
-    if crate::rpc::internal(&name) {
-        return Err(crate::rpc::unsupported());
-    }
     service.call(&instance, &name, args).await
 }
 
@@ -726,20 +756,10 @@ pub(crate) async fn copy_provider(
     if instance == target {
         return Err(AppError::new(code::STALE, "请选择另一个实例"));
     }
-    let on = |instance: String, name: &'static str, args: Value| {
-        let (service, runtime) = (service.inner().clone(), runtime.inner().clone());
-        async move {
-            if instance == LOCAL {
-                crate::rpc::call(&runtime, name, args).await
-            } else {
-                service.ask(&instance, name, args).await
-            }
-        }
-    };
     let named = serde_json::json!({"clientId": client_id, "providerId": provider_id});
-    let copy = on(instance, "export_provider_copy", named).await?;
+    let copy = on(&service, &runtime, &instance, "export_provider_copy", named).await?;
     let handed = serde_json::json!({"clientId": client_id, "copy": copy});
-    on(target, "import_provider_copy", handed).await?;
+    on(&service, &runtime, &target, "import_provider_copy", handed).await?;
     Ok(())
 }
 

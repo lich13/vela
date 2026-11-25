@@ -29,8 +29,9 @@ use crate::{
         calculate_usage_cost, compare_model_prices, configure_pricing, get_antigravity_usage_stats,
         get_claude_requested_models, get_claude_usage_quota, get_claude_usage_stats,
         get_models_dev, get_pricing, get_usage_calculator_models, get_usage_calculator_totals,
-        get_usage_dashboard, get_usage_detail, get_usage_logs, get_usage_state, reload_pricing,
-        search_pricing, set_usage_settings, sync_usage, update_models_dev, update_pricing,
+        get_usage_dashboard, get_usage_detail, get_usage_logs, get_usage_state,
+        refresh_antigravity_usage_quota, reload_pricing, search_pricing, set_usage_settings,
+        sync_usage, update_models_dev, update_pricing,
     },
 };
 use handlers::*;
@@ -52,12 +53,11 @@ pub(crate) fn names() -> &'static [&'static str] {
 }
 
 /// What one instance's Rust asks of another's and no window may ask: these
-/// carry a provider with its tokens. A server lists them like the rest; the
-/// two commands a window reaches the table through refuse them.
-#[cfg(any(feature = "desktop", test))]
+/// carry a provider with its tokens. A server lists them like the rest and
+/// answers them only to a request that says it is internal; the two commands
+/// a window reaches the table through refuse them.
 const INTERNAL: &[&str] = &["export_provider_copy", "import_provider_copy"];
 
-#[cfg(feature = "desktop")]
 pub(crate) fn internal(name: &str) -> bool {
     INTERNAL.contains(&name)
 }
@@ -175,6 +175,7 @@ commands! {
     blocking get_usage_state();
     async get_usage_dashboard(filter);
     async get_antigravity_usage_stats(filter);
+    async refresh_antigravity_usage_quota();
     async get_claude_usage_stats(filter);
     async get_claude_usage_quota(refresh);
     async get_usage_logs(filter);

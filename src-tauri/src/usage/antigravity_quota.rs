@@ -9,16 +9,45 @@ use std::{collections::BTreeMap, path::Path};
 mod cli;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "Saved")]
 pub struct Period {
     pub start: i64,
     pub end: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_percent: Option<f64>,
     /// Set where the account's quota was reported with no period to show;
     /// `start` and `end` say nothing then.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub without: Option<Without>,
+}
+/// A period as it was written. An untouched quota comes with the Unix epoch
+/// for its reset, and used to be saved as a period ending there.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Saved {
+    start: i64,
+    end: i64,
+    #[serde(default)]
+    remaining_percent: Option<f64>,
+    #[serde(default)]
+    without: Option<Without>,
+}
+impl From<Saved> for Period {
+    fn from(saved: Saved) -> Self {
+        if saved.without.is_none() && saved.end <= 0 {
+            return Self {
+                remaining_percent: saved.remaining_percent,
+                without: Some(Without::NoReset),
+                ..Self::default()
+            };
+        }
+        Self {
+            start: saved.start,
+            end: saved.end,
+            remaining_percent: saved.remaining_percent,
+            without: saved.without,
+        }
+    }
 }
 /// Why a reported quota has no period.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,7 +116,10 @@ fn periods(groups: &Value) -> Periods {
             "gemini-weekly" | "3p-weekly" => 7 * 86_400_000,
             _ => continue,
         };
-        let end = time(&b["resetTime"]).or_else(|| time(&b["reset_time"]));
+        // The Unix epoch stands for no reset time: the quota is untouched.
+        let end = time(&b["resetTime"])
+            .or_else(|| time(&b["reset_time"]))
+            .filter(|end| *end > 0);
         let disabled = b["disabled"] == true;
         let (Some(end), false) = (end, disabled) else {
             // A period reported for the same quota elsewhere stands.
