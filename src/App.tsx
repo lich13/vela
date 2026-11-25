@@ -416,6 +416,49 @@ function Shell() {
         .toLowerCase()
         .includes(search.toLowerCase()),
     ) ?? [];
+  // The title and the client switch open the heading row of either client's page.
+  const accountHeading = (
+    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <h1>账号</h1>
+      <div
+        className="exchange-button-group"
+        role="group"
+        aria-label="账号客户端"
+      >
+        <button
+          type="button"
+          className={
+            "exchange-button" + (accountClient === "codex" ? " active" : "")
+          }
+          aria-pressed={accountClient === "codex"}
+          onClick={() => {
+            void (async () => {
+              if (accountClient === "codex") return;
+              if (
+                agDirty.current &&
+                !(await confirmAction("切换客户端会丢弃未保存的表单。"))
+              )
+                return;
+              setAccountClient("codex");
+            })();
+          }}
+        >
+          Codex
+        </button>
+        <button
+          type="button"
+          className={
+            "exchange-button" +
+            (accountClient === "antigravity" ? " active" : "")
+          }
+          aria-pressed={accountClient === "antigravity"}
+          onClick={() => setAccountClient("antigravity")}
+        >
+          Antigravity
+        </button>
+      </div>
+    </div>
+  );
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -523,49 +566,18 @@ function Shell() {
           </Suspense>
         ) : page === "accounts" ? (
           <section className="accounts-page">
+            {accountClient === "antigravity" ? (
+              <AntigravityAccounts
+                heading={accountHeading}
+                notify={notify}
+                setError={setError}
+                onDirtyChange={agDraftChanged}
+              />
+            ) : (
+              <>
             <div className="page-heading">
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <h1>账号</h1>
-                <div
-                  className="exchange-button-group"
-                  role="group"
-                  aria-label="账号客户端"
-                >
-                  <button
-                    type="button"
-                    className={
-                      "exchange-button" +
-                      (accountClient === "codex" ? " active" : "")
-                    }
-                    aria-pressed={accountClient === "codex"}
-                    onClick={() => {
-                      void (async () => {
-                        if (accountClient === "codex") return;
-                        if (
-                          agDirty.current &&
-                          !(await confirmAction("切换客户端会丢弃未保存的表单。"))
-                        )
-                          return;
-                        setAccountClient("codex");
-                      })();
-                    }}
-                  >
-                    Codex
-                  </button>
-                  <button
-                    type="button"
-                    className={
-                      "exchange-button" +
-                      (accountClient === "antigravity" ? " active" : "")
-                    }
-                    aria-pressed={accountClient === "antigravity"}
-                    onClick={() => setAccountClient("antigravity")}
-                  >
-                    Antigravity
-                  </button>
-                </div>
-              </div>
-              {accountClient === "codex" && !remote && (
+              {accountHeading}
+              {!remote && (
                 <div className="account-actions">
                   <div
                     className="exchange-button-group"
@@ -600,14 +612,6 @@ function Shell() {
                 </div>
               )}
             </div>
-            {accountClient === "antigravity" ? (
-              <AntigravityAccounts
-                notify={notify}
-                setError={setError}
-                onDirtyChange={agDraftChanged}
-              />
-            ) : (
-              <>
             {(state?.currentState === "unsaved" ||
               state?.currentState === "missing" ||
               state?.currentState === "invalid") && (

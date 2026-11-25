@@ -233,6 +233,46 @@ describe("settings presentation", () => {
   });
 });
 describe("user workflows", () => {
+  it("keeps the title and the client switch in one heading row for either client's accounts", async () => {
+    const user = userEvent.setup();
+    const view = render(<App />);
+    await screen.findByRole("heading", { name: "账号", level: 1 });
+    const heading = () => {
+      const rows = view.container.querySelectorAll<HTMLElement>(
+        ".accounts-page .page-heading",
+      );
+      expect(rows).toHaveLength(1);
+      return within(rows[0]);
+    };
+    const client = (name: string) =>
+      within(heading().getByRole("group", { name: "账号客户端" })).getByRole(
+        "button",
+        { name },
+      );
+    const exchange = () =>
+      within(heading().getByRole("group", { name: "账号导入导出" }))
+        .getAllByRole("button")
+        .map((button) => button.textContent);
+    expect(exchange()).toEqual(["导入", "导出"]);
+    expect(heading().getByRole("button", { name: "添加账号" })).toBeEnabled();
+
+    await user.click(client("Antigravity"));
+    expect(client("Antigravity")).toHaveAttribute("aria-pressed", "true");
+    expect(heading().getByRole("heading", { level: 1 })).toHaveTextContent(
+      "账号",
+    );
+    expect(exchange()).toEqual(["导入", "导出"]);
+    expect(
+      heading().getByRole("button", { name: "刷新 Antigravity 认证状态" }),
+    ).toHaveTextContent("刷新");
+    expect(
+      heading().queryByRole("button", { name: "添加账号" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(client("Codex"));
+    expect(client("Codex")).toHaveAttribute("aria-pressed", "true");
+    expect(heading().getByRole("button", { name: "添加账号" })).toBeEnabled();
+  });
   it("opens the four-platform freeze page below gateway and receives cross-page login notices", async () => {
     const user = userEvent.setup();
     render(<App />);
