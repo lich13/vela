@@ -64,6 +64,10 @@ struct Daily {
     model: Option<String>,
     source: String,
     status: Option<u16>,
+    /// The gateway key its requests came in with, where SQL can read it;
+    /// absent for the client's own, as in every rollup written before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    entry_key: Option<String>,
     totals: Totals,
     example: Record,
 }
@@ -266,6 +270,11 @@ impl Store {
             if version == 13 {
                 let tx = db(connection.transaction())?;
                 storage_v12::upgrade_v13(&tx)?;
+                db(tx.commit())?;
+            }
+            if !storage_v12::has_entry_column(&connection)? {
+                let tx = db(connection.transaction())?;
+                storage_v12::add_entry_column(&tx)?;
                 db(tx.commit())?;
             }
             return Ok(Self {
@@ -852,6 +861,7 @@ impl Store {
                         model,
                         source: r.source.clone(),
                         status,
+                        entry_key: r.entry_key.clone(),
                         totals: t,
                         example: r,
                     };
@@ -900,6 +910,7 @@ impl Store {
                         model,
                         source: r.source.clone(),
                         status,
+                        entry_key: r.entry_key.clone(),
                         totals: Totals::default(),
                         example: r,
                     }
