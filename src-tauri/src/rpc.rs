@@ -61,6 +61,7 @@ pub(crate) fn names() -> &'static [&'static str] {
 const INTERNAL: &[&str] = &[
     "export_provider_copy",
     "import_provider_copy",
+    "export_gateway_key",
     "preview_account_documents",
     "prepare_account_template_document",
     "export_account_documents",
@@ -169,6 +170,7 @@ commands! {
     async update_gateway(client_id, edit, expected_revision, expected_config_revision);
     blocking export_provider_copy(client_id, provider_id);
     async import_provider_copy(client_id, copy);
+    blocking export_gateway_key(client_id, key_id);
     async start_gateway(client_id, expected_revision, expected_config_revision);
     async stop_gateway(client_id, expected_config_revision);
     async query_provider_quota(client_id, provider_id, force);

@@ -1713,6 +1713,7 @@ pub fn run() {
             instances::test_instance,
             instances::remote_call,
             instances::copy_provider,
+            instances::copy_gateway_key,
             list_ssh_hosts,
             antigravity::auth::export_antigravity_accounts,
             antigravity::auth::import_antigravity_accounts,

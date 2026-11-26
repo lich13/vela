@@ -532,6 +532,15 @@ pub(crate) fn export_provider_copy(
 ) -> Result<gateway::ProviderCopy> {
     r.gateway(client_id).provider_copy(&provider_id)
 }
+/// One of the keys this instance handed out, for the clipboard of the
+/// machine its owner is at.
+pub(crate) fn export_gateway_key(
+    r: &Runtime,
+    client_id: ClientId,
+    key_id: String,
+) -> Result<String> {
+    r.gateway(client_id).entry_key_token(&key_id)
+}
 /// Adds what another instance exported as the last provider here.
 pub(crate) async fn import_provider_copy(
     r: &Runtime,

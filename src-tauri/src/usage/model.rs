@@ -1247,6 +1247,10 @@ pub struct Record {
     pub failover_evidence: Option<crate::gateway::failover::Evidence>,
     pub id: String,
     pub client: String,
+    /// The id of the handed-out gateway key the request came in with; absent
+    /// for the client's own key and for whatever no gateway saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_key: Option<String>,
     pub source: String,
     pub started_at: i64,
     #[serde(default)]
@@ -1443,7 +1447,13 @@ pub struct Filter {
     pub page: u32,
     pub sort: Option<String>,
     pub operation: Option<String>,
+    /// The id of a handed-out gateway key, or `OWN_ENTRY_KEY` for everything
+    /// that came in with none.
+    pub entry_key: Option<String>,
 }
+/// Stands for the client's own key wherever a key's id is asked for or
+/// answered; the ids of the handed-out ones are UUIDs.
+pub const OWN_ENTRY_KEY: &str = "default";
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Totals {

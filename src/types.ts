@@ -242,6 +242,8 @@ export type CurrentConnection = {
   protocol?: GrokProtocol | null;
 };
 export type DshProfileCurrent = { profile: string; current: CurrentConnection };
+/** A gateway key other than the client's own: the key itself is never sent. */
+export type EntryKey = { id: string; name: string };
 export type GatewayState = {
   listener: GatewayListener;
   /** Antigravity, while its gateway runs: where the `agy` function was written. */
@@ -312,6 +314,11 @@ export type GatewayState = {
   } | null;
   modelCatalogOfficialError: string | null;
   modelCatalogError: string | null;
+  /**
+   * The keys handed out besides the client's own, by name. An instance from
+   * before there were any sends none.
+   */
+  entryKeys?: EntryKey[];
 };
 export type StartupState = {
   launchOnBoot: boolean;

@@ -236,7 +236,7 @@ fn successful_search_is_priced_once_per_request_without_token_usage() {
     service.configure(settings).unwrap();
 
     for path in ["/v1/alpha/search", "/alpha/search", "/v1/alpha/search/"] {
-        let trace = service.begin_operation("codex", None, Operation::for_path(path));
+        let trace = service.begin_operation("codex", None, Operation::for_path(path), None);
         let mut attempt = trace.attempt("fixture-provider", false, "http");
         attempt.update(&Meter::default(), Some(200), None);
         assert!(attempt.attempt.price.is_none());
@@ -290,7 +290,7 @@ fn unsuccessful_search_and_model_requests_without_usage_do_not_get_search_fees()
         (Some(200), "cancelled"),
         (None, "error"),
     ] {
-        let trace = service.begin_operation("codex", None, Operation::WebSearch);
+        let trace = service.begin_operation("codex", None, Operation::WebSearch, None);
         let mut attempt = trace.attempt("fixture-provider", false, "http");
         attempt.update(&Meter::default(), status, Some(outcome));
         assert!(attempt.attempt.price.is_none(), "{status:?} {outcome}");
@@ -303,6 +303,7 @@ fn unsuccessful_search_and_model_requests_without_usage_do_not_get_search_fees()
         "codex",
         Some("fixture-request-model"),
         Operation::for_path("/v1/responses"),
+        None,
     );
     let mut attempt = trace.attempt("fixture-provider", false, "http");
     attempt.update(&Meter::default(), Some(200), Some("success"));

@@ -492,6 +492,7 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
         totals: total,
         providers,
         models,
+        entry_keys: Vec::new(),
         detail_since,
         sources,
     })

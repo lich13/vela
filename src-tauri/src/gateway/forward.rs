@@ -1188,7 +1188,7 @@ async fn plan(
     {
         None
     } else {
-        gateway.usage_operation(model.as_deref(), operation)
+        gateway.usage_operation(model.as_deref(), operation, None)
     };
     let delegated = (!websocket && !continuation)
         .then(|| {

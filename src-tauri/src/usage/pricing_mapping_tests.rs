@@ -469,7 +469,8 @@ fn mapped_pricing_preserves_cache_dimensions_and_search_per_request_fees() {
         decimal("4.06")
     );
 
-    let search = service.begin_operation("codex", Some("fixture-shared"), Operation::WebSearch);
+    let search =
+        service.begin_operation("codex", Some("fixture-shared"), Operation::WebSearch, None);
     let mut attempt = search.attempt("provider-a", false, "http");
     attempt.update(&usage, Some(200), Some("success"));
     attempt.update(&usage, None, None);

@@ -539,6 +539,9 @@ export type GatewayEdit =
       rule: import("./failure-policy-types").FailureRule;
     }
   | { op: "deleteFailureRule"; id: string }
+  /** Hands out a key under `name`; with an `id`, renames that key instead. */
+  | { op: "saveEntryKey"; id?: string; name: string }
+  | { op: "deleteEntryKey"; id: string }
   | { op: "settings"; settings: GatewaySettings };
 type Call<A, R> = { args: A; result: R };
 type None = Record<string, never>;
@@ -700,6 +703,11 @@ type DesktopCommands = {
    * included. Both are "local" or a machine id; the copy never reaches a window.
    */
   copy_provider: Call<Provider & { instance: string; target: string }, null>;
+  /**
+   * Puts one of the keys `instance` handed out on this machine's clipboard.
+   * The instance is "local" or a machine id; the key never reaches a window.
+   */
+  copy_gateway_key: Call<Client & { instance: string; keyId: string }, null>;
 };
 /** Commands a server instance also implements: they run on the current instance. */
 export type SharedCommands = {
@@ -1018,6 +1026,7 @@ export const desktopCommands = names<DesktopCommands>()([
   "test_instance",
   "list_ssh_hosts",
   "copy_provider",
+  "copy_gateway_key",
 ]);
 export const sharedCommands = names<SharedCommands>()([
   "get_state",
@@ -1129,6 +1138,7 @@ export const sharedCommands = names<SharedCommands>()([
 export const internalCommands = [
   "export_provider_copy",
   "import_provider_copy",
+  "export_gateway_key",
   "preview_account_documents",
   "prepare_account_template_document",
   "export_account_documents",

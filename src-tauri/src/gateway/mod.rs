@@ -237,6 +237,14 @@ pub struct View {
     pub model_catalog_official_status: Option<codex_official::Status>,
     pub model_catalog_official_error: Option<String>,
     pub model_catalog_error: Option<String>,
+    /// The keys handed out besides the client's own, never the keys themselves.
+    pub entry_keys: Vec<EntryKeyView>,
+}
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryKeyView {
+    pub id: String,
+    pub name: String,
 }
 mod inner_state {
     use super::{model, model_health, storage, AppError, Circuit, ClientId, Store};
@@ -319,7 +327,7 @@ mod inner_state {
                 &store.settings,
                 &store.mode,
                 &store.selected,
-                &store.local_token,
+                (&store.local_token, &store.entry_keys),
                 running,
                 home,
                 has_recovery_error,
@@ -534,16 +542,19 @@ impl Gateway {
     pub fn set_usage(&self, service: crate::usage::Service) {
         *self.0.usage.lock() = Some(service);
     }
+    /// `entry_key` is the id of the handed-out key the request came in with,
+    /// and `None` for the client's own.
     fn usage_operation(
         &self,
         model: Option<&str>,
         operation: crate::usage::model::Operation,
+        entry_key: Option<&str>,
     ) -> Option<crate::usage::Trace> {
         self.0
             .usage
             .lock()
             .as_ref()
-            .map(|s| s.begin_operation(self.0.client.usage_name(), model, operation))
+            .map(|s| s.begin_operation(self.0.client.usage_name(), model, operation, entry_key))
     }
 
     pub fn report_diagnostics(&self) {
@@ -1138,6 +1149,15 @@ impl Gateway {
             model_catalog_official_status: official.0,
             model_catalog_official_error: official.1,
             model_catalog_error: self.0.catalog_error.lock().clone(),
+            entry_keys: s
+                .store
+                .entry_keys
+                .iter()
+                .map(|key| EntryKeyView {
+                    id: key.id.clone(),
+                    name: key.name.clone(),
+                })
+                .collect(),
         };
         // Selection readers need only connection identity and provider matching data.
         let config = Store {
@@ -1469,6 +1489,18 @@ impl Gateway {
     /// The provider `id` with its tokens, for another instance to add.
     pub fn provider_copy(&self, id: &str) -> Result<ProviderCopy> {
         Ok(self.0.inner.lock().store.provider_copy(id)?.1)
+    }
+    /// A handed-out key itself, for the clipboard of the machine its owner is at.
+    pub fn entry_key_token(&self, id: &str) -> Result<String> {
+        self.0
+            .inner
+            .lock()
+            .store
+            .entry_keys
+            .iter()
+            .find(|key| key.id == id)
+            .map(|key| key.token.clone())
+            .ok_or_else(|| AppError::new(code::MISSING, "Key 不存在，请刷新后重试"))
     }
     #[cfg(any(feature = "desktop", test))]
     pub fn edit(&self, edit: Edit, expected: &str, home: &Path) -> Result<View> {

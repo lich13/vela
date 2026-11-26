@@ -2058,6 +2058,7 @@ impl<'a> Session<'a> {
             } else {
                 crate::usage::model::Operation::Model
             },
+            None,
         );
         let mut failover = super::failover::Tracker::new(usage_trace.clone());
         failover.attach_wait_budget(request_budget);
@@ -3023,6 +3024,7 @@ impl<'a> Session<'a> {
             } else {
                 crate::usage::model::Operation::Model
             },
+            None,
         );
         self.failover = super::failover::Tracker::new(self.usage_trace.clone());
         self.failover.attach_wait_budget(self.request_budget);

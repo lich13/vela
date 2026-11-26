@@ -188,6 +188,8 @@ export type UsageRecord = {
   finishedAt?: number | null;
   id: string;
   client: string;
+  /** The id of the handed-out gateway key the request came in with, if any. */
+  entryKey?: string;
   source: string;
   startedAt: number;
   sessionId: string | null;
@@ -226,7 +228,11 @@ export type UsageFilter = {
   sessionId?: string;
   status?: string;
   page?: number;
+  /** A handed-out gateway key's id, or `ownEntryKey` for requests with none. */
+  entryKey?: string;
 };
+/** Stands for the client's own gateway key where a key's id is asked or answered. */
+export const ownEntryKey = "default";
 
 type AntigravityTokenMix = {
   input: number;
@@ -321,6 +327,11 @@ export type Dashboard = {
   totals: Totals;
   providers: Group[];
   models: Group[];
+  /**
+   * By gateway key, `ownEntryKey` for the client's own; of every key,
+   * whichever one the filter names. An older instance sends none.
+   */
+  entryKeys?: Group[];
   detailSince: number;
   sources: Record<string, number>;
 };

@@ -597,15 +597,19 @@ impl Service {
         let _ = self.0.events.send(());
         Ok(view)
     }
+    /// `entry_key` is the id of the handed-out gateway key the request came
+    /// in with, and `None` for the client's own.
     pub fn begin_operation(
         &self,
         client: &str,
         model: Option<&str>,
         operation: Operation,
+        entry_key: Option<&str>,
     ) -> Trace {
         Trace(Arc::new(TraceInner {
             service: self.clone(),
             client: client.into(),
+            entry_key: entry_key.map(str::to_owned),
             requested: model_id(model),
             operation,
             id: uuid::Uuid::new_v4().to_string(),
@@ -707,6 +711,7 @@ pub struct Trace(Arc<TraceInner>);
 struct TraceInner {
     service: Service,
     client: String,
+    entry_key: Option<String>,
     requested: Option<String>,
     operation: Operation,
     id: String,
@@ -734,6 +739,7 @@ impl Drop for TraceInner {
             id: self.id.clone(),
             failover_evidence: self.failover.get_mut().take(),
             client: self.client.clone(),
+            entry_key: self.entry_key.take(),
             source: "proxy".into(),
             started_at: self.at,
             attempts: std::mem::take(attempts),
@@ -1110,7 +1116,7 @@ mod test_support {
     use super::*;
     impl Service {
         pub fn begin(&self, client: &str, model: Option<&str>) -> Trace {
-            self.begin_operation(client, model, Operation::Model)
+            self.begin_operation(client, model, Operation::Model, None)
         }
     }
 }

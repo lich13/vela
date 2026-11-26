@@ -598,9 +598,23 @@ pub struct Store {
     pub mode: String,
     pub selected: Option<String>,
     pub local_token: String,
+    /// The keys handed out besides `local_token`, which stays the client's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entry_keys: Vec<EntryKey>,
     #[serde(default)]
     pub resume: Option<Resume>,
 }
+/// A key requests may come in with besides the client's own: it has a name
+/// to tell it by, and what comes in with it is counted apart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryKey {
+    pub id: String,
+    pub name: String,
+    pub token: String,
+}
+/// What the client's own key is called wherever keys are listed.
+pub const OWN_KEY_NAME: &str = "本机 Key";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Resume {
@@ -641,6 +655,7 @@ impl Default for Store {
             selected: None,
             resume: None,
             local_token: new_local_token(),
+            entry_keys: vec![],
         }
     }
 }
@@ -804,6 +819,15 @@ pub enum Edit {
         rule: super::failure_rules::Rule,
     },
     DeleteFailureRule {
+        id: String,
+    },
+    /// Hands out a key under a name, or renames the one that has the id.
+    SaveEntryKey {
+        #[serde(default)]
+        id: Option<String>,
+        name: String,
+    },
+    DeleteEntryKey {
         id: String,
     },
     Settings {
@@ -1040,6 +1064,12 @@ impl Store {
             .iter_mut()
             .find(|p| p.id == id)
             .ok_or_else(|| AppError::new(code::PROVIDER, "供应商不存在"))
+    }
+    fn entry_key_mut(&mut self, id: &str) -> Result<&mut EntryKey> {
+        self.entry_keys
+            .iter_mut()
+            .find(|key| key.id == id)
+            .ok_or_else(|| AppError::new(code::MISSING, "Key 不存在，请刷新后重试"))
     }
     /// Records the wire protocol of a Grok or DSH provider that was just
     /// saved; `existing` is `None` for a new provider, which is the last one.
@@ -1564,6 +1594,30 @@ impl Store {
             }
             Edit::DeleteFailureRule { id } => {
                 self.settings.custom_failure_rules.retain(|r| r.id != id);
+            }
+            Edit::SaveEntryKey { id, name: given } => {
+                let given = name(&given)?;
+                if given == OWN_KEY_NAME
+                    || self
+                        .entry_keys
+                        .iter()
+                        .any(|key| key.name == given && Some(&key.id) != id.as_ref())
+                {
+                    return Err(AppError::new(code::NAME, "已有同名的 Key"));
+                }
+                match id {
+                    // A rename leaves the key itself and what was counted under it alone.
+                    Some(id) => self.entry_key_mut(&id)?.name = given,
+                    None => self.entry_keys.push(EntryKey {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: given,
+                        token: new_local_token(),
+                    }),
+                }
+            }
+            Edit::DeleteEntryKey { id } => {
+                self.entry_key_mut(&id)?;
+                self.entry_keys.retain(|key| key.id != id);
             }
             Edit::Settings { settings } => {
                 settings.validate()?;

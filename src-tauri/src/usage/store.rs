@@ -46,6 +46,9 @@ pub struct Dashboard {
     pub totals: Totals,
     pub providers: Vec<Group>,
     pub models: Vec<Group>,
+    /// By gateway key, `OWN_ENTRY_KEY` for the client's own. Unlike the other
+    /// groups these are of every key, whichever one the filter names.
+    pub entry_keys: Vec<Group>,
     pub detail_since: i64,
     pub sources: BTreeMap<String, u64>,
 }

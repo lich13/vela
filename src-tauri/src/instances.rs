@@ -763,6 +763,31 @@ pub(crate) async fn copy_provider(
     Ok(())
 }
 
+/// Puts one of the keys an instance handed out on this machine's clipboard.
+/// The key goes from that instance's Rust to this one, over SSH where it is a
+/// server, and the window hears only whether it was copied.
+#[tauri::command]
+pub(crate) async fn copy_gateway_key(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    service: tauri::State<'_, Arc<Service>>,
+    runtime: tauri::State<'_, Arc<crate::runtime::Runtime>>,
+    instance: String,
+    client_id: crate::gateway::ClientId,
+    key_id: String,
+) -> Result<()> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    if window.label() != "main" {
+        return Err(AppError::new(code::FORBIDDEN, "仅主窗口可复制 Key"));
+    }
+    let named = serde_json::json!({"clientId": client_id, "keyId": key_id});
+    let key = on(&service, &runtime, &instance, "export_gateway_key", named).await?;
+    let key = key.as_str().ok_or_else(crate::rpc::unsupported)?;
+    app.clipboard()
+        .write_text(key)
+        .map_err(|_| AppError::new(code::CLIPBOARD, "无法写入剪贴板，请重试"))
+}
+
 #[cfg(test)]
 #[path = "instances_tests.rs"]
 mod tests;
