@@ -549,6 +549,32 @@ async fn take_slot(
     immediate: bool,
     failover: &mut super::failover::Tracker,
 ) -> Result<Admission, Failure> {
+    await_slot(
+        g,
+        client,
+        routes,
+        manual,
+        settings,
+        budget,
+        requirement,
+        immediate,
+    )
+    .await?
+    .map_err(|reason| refused(g, requirement, failover, reason))
+}
+/// Waits for a slot at one of `routes` while the client is listened to. The
+/// refusal is the caller's to settle, with `refused` or otherwise.
+#[allow(clippy::too_many_arguments)]
+async fn await_slot(
+    g: &Gateway,
+    client: &mut Peer,
+    routes: &[Route],
+    manual: bool,
+    settings: &Settings,
+    budget: &mut Budget,
+    requirement: &Requirement,
+    immediate: bool,
+) -> Result<Result<Admission, Rejected>, Failure> {
     if *client.closed.borrow() {
         return Err((1000, "client closed"));
     }
@@ -563,20 +589,26 @@ async fn take_slot(
             immediate,
         ),
     )
-    .await?
-    .map_err(|reason| {
-        if reason != Rejected::Reconnect {
-            failover.rejected(&reason);
+    .await
+}
+/// Records that no slot was given and answers what the turn ends with.
+fn refused(
+    g: &Gateway,
+    requirement: &Requirement,
+    failover: &mut super::failover::Tracker,
+    reason: Rejected,
+) -> Failure {
+    if reason != Rejected::Reconnect {
+        failover.rejected(&reason);
+    }
+    if matches!(reason, Rejected::Model) {
+        (1008, requirement.code())
+    } else {
+        if matches!(reason, Rejected::Policy) {
+            g.record_policy_rejection(None, true, "没有符合线程接管策略的供应商");
         }
-        if matches!(reason, Rejected::Model) {
-            (1008, requirement.code())
-        } else {
-            if matches!(reason, Rejected::Policy) {
-                g.record_policy_rejection(None, true, "没有符合线程接管策略的供应商");
-            }
-            rejected(reason)
-        }
-    })
+        rejected(reason)
+    }
 }
 async fn while_connecting<T>(
     client: &mut Peer,
@@ -1167,6 +1199,11 @@ async fn connect(
     let mut previous_provider: Option<String> = None;
     let mut unsupported_seen = false;
     let mut non_unsupported_failure = false;
+    // The queue places the turn: it is no manual choice and follows no
+    // response cursor. A provider taken out of the queue then leaves the turn
+    // to the queue as it is now.
+    let free = !manual && pinned.is_none() && !unknown_affinity;
+    let left = |id: &str| free && !g.routing_ids(None).iter().any(|queued| queued == id);
     loop {
         if *ordinary_attempts > cfg.max_retries
             || (unknown_affinity && !*capacity_protected && *attempts > 0)
@@ -1360,7 +1397,7 @@ async fn connect(
                 });
             budget.set_intake(intake, owner);
         }
-        let mut admission = match take_slot(
+        let acquired = await_slot(
             g,
             client,
             &candidates,
@@ -1369,10 +1406,19 @@ async fn connect(
             budget,
             requirement,
             capacity_pending,
-            failover,
         )
-        .await
+        .await;
+        // No candidate has a slot to wait for any more, and one of them was
+        // taken out of the queue: nothing refused the turn.
+        if matches!(acquired, Ok(Err(Rejected::Unavailable)))
+            && candidates.iter().any(|r| left(&r.provider.id))
         {
+            (ids, routes) = super::attempt::queue(g, pinned.as_deref(), hard_denied, uri.path());
+            continue;
+        }
+        let acquired = acquired
+            .and_then(|slot| slot.map_err(|reason| refused(g, requirement, failover, reason)));
+        let mut admission = match acquired {
             Ok(admission) => admission,
             Err((code, reason))
                 if capacity_pending
@@ -1704,12 +1750,23 @@ async fn connect(
                             request_budget,
                             current_model.as_deref(),
                             !fallback,
+                            !manual && pinned.is_none() && !unknown_affinity,
                         ),
                     )
                     .await?
                     {
                         super::connectivity::Verdict::Reachable => {}
-                        super::connectivity::Verdict::Unreachable => retry_delay = None,
+                        super::connectivity::Verdict::Unreachable => {
+                            retry_delay = None;
+                            if left(&route.provider.id) {
+                                (ids, routes) = super::attempt::queue(
+                                    g,
+                                    pinned.as_deref(),
+                                    hard_denied,
+                                    uri.path(),
+                                );
+                            }
+                        }
                         super::connectivity::Verdict::Restored => {
                             *ordinary_attempts = (*ordinary_attempts).saturating_sub(1);
                             transient_retries = 0;
@@ -1738,6 +1795,9 @@ async fn connect(
                     {
                         ids.insert(0, provider_id.clone());
                         retry_owner = Some(provider_id);
+                    } else if left(&provider_id) {
+                        (ids, routes) =
+                            super::attempt::queue(g, pinned.as_deref(), hard_denied, uri.path());
                     }
                     continue;
                 }
@@ -2173,13 +2233,21 @@ impl<'a> Session<'a> {
         let requirement = Requirement::model(self.current_model.as_deref());
         let hints = value(&self.replay_frame)
             .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
-        let movable = self.retry_fallback
-            && self.owner_capacity_wait.is_none()
-            && !self.manual
+        // The queue is free to send the turn elsewhere: it is not a manual
+        // choice and follows no response cursor.
+        let free = !self.manual
             && !self.unknown_affinity
             && hints
                 .as_ref()
                 .is_some_and(|h| h.previous_response_id.is_none());
+        // Taken out of the queue, the provider the turn would be sent to
+        // again no longer has it: the turn goes to the queue as it is now,
+        // admitted like one a failure lets move.
+        let left = free && !self.g.routing_ids(None).contains(&self.route.provider.id);
+        if left {
+            self.owner_capacity_wait = None;
+        }
+        let movable = free && self.owner_capacity_wait.is_none() && (self.retry_fallback || left);
         let candidates_for = |failed: &std::collections::HashSet<String>| {
             let candidates: Vec<_> = self
                 .g
@@ -2221,7 +2289,7 @@ impl<'a> Session<'a> {
             self.turn_failed.clear();
             retry_routes = candidates_for(&self.turn_failed);
         }
-        if self.retry_fallback
+        if (self.retry_fallback || left)
             && (retry_routes.is_empty()
                 || (!movable
                     && self.hard_denied.contains(&(
@@ -2333,6 +2401,12 @@ impl<'a> Session<'a> {
                 .failure(super::failover::Failure::AccountRejected);
             return Ok(Flow::Again);
         }
+        // Taken out of the queue while the turn waited for it: the turn is
+        // routed again at once.
+        if free && !movable && !self.g.routing_ids(None).contains(&self.route.provider.id) {
+            self.retry_immediately = true;
+            return Ok(Flow::Again);
+        }
         if self.owner_capacity_wait.is_some() {
             retry_routes = self
                 .g
@@ -2368,6 +2442,9 @@ impl<'a> Session<'a> {
                 let (intake, owner) = lease.admission_policy();
                 budget.set_intake(intake, owner);
             }
+        } else if free {
+            // Fixed for as long as the provider is in the queue.
+            budget.hold_provider();
         } else {
             budget.pin_provider();
         }
@@ -2394,16 +2471,16 @@ impl<'a> Session<'a> {
             &requirement,
             self.uri.path(),
         );
-        let acquired = take_slot(
+        let admitted = Requirement::model(self.current_model.as_deref());
+        let acquired = await_slot(
             self.g,
             client,
             &retry_routes,
             self.manual,
             self.cfg,
             &mut budget,
-            &Requirement::model(self.current_model.as_deref()),
+            &admitted,
             false,
-            &mut self.failover,
         )
         .await;
         let mut admission = match acquired {
@@ -2414,7 +2491,21 @@ impl<'a> Session<'a> {
                 turn_cancelled(client, &self.traffic, self.request_budget).await?;
                 return Ok(Flow::Again);
             }
-            result => result?,
+            Err(error) => return Err(error),
+            // No provider has a slot to wait for any more, and one of them
+            // was taken out of the queue: nothing refused the turn, which is
+            // routed again at once.
+            Ok(Err(Rejected::Unavailable))
+                if free && {
+                    let queue = self.g.routing_ids(None);
+                    retry_routes.iter().any(|r| !queue.contains(&r.provider.id))
+                } =>
+            {
+                self.retry_immediately = true;
+                return Ok(Flow::Again);
+            }
+            Ok(Err(reason)) => return Err(refused(self.g, &admitted, &mut self.failover, reason)),
+            Ok(Ok(admission)) => admission,
         };
         if !admit_ownership(
             self.g,

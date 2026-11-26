@@ -2,7 +2,7 @@
 //! one complete response or the protocol's own failure, never a cut one.
 use super::*;
 use crate::gateway::grok_config::Protocol;
-use crate::gateway::test_support::form;
+use crate::gateway::test_support::{form, until};
 
 const RESPONSES_REQUEST: &[u8] =
     br#"{"model":"gpt-fixture","stream":true,"input":[{"role":"user","content":"fixture"}]}"#;
@@ -55,14 +55,11 @@ fn answer(content_type: &'static str, bytes: &'static [u8]) -> Response<WireBody
         .body(full(bytes))
         .unwrap()
 }
-/// A gateway for `client` whose one provider answers whole, in front of an
-/// upstream that gives `answers` in turn and the last of them from then on.
-async fn fixture(
-    client: ClientId,
-    protocol: Protocol,
+/// An upstream that gives `answers` in turn and the last of them from then on.
+async fn upstream(
     content_type: &'static str,
     answers: &'static [&'static [u8]],
-) -> (Fixture, Arc<AtomicUsize>, LoopbackServer) {
+) -> (LoopbackServer, Arc<AtomicUsize>) {
     let hits = Arc::new(AtomicUsize::new(0));
     let seen = hits.clone();
     let upstream = server(move |_, _| {
@@ -73,6 +70,17 @@ async fn fixture(
         }
     })
     .await;
+    (upstream, hits)
+}
+/// A gateway for `client` whose one provider answers whole, in front of an
+/// upstream that gives `answers`.
+async fn fixture(
+    client: ClientId,
+    protocol: Protocol,
+    content_type: &'static str,
+    answers: &'static [&'static [u8]],
+) -> (Fixture, Arc<AtomicUsize>, LoopbackServer) {
+    let (upstream, hits) = upstream(content_type, answers).await;
     let f = Fixture::new(client, &[upstream.url("/v1")]).await;
     held(&f, protocol);
     f.start().await;
@@ -271,5 +279,87 @@ async fn codex_is_kept_waiting_with_events_its_parser_passes_over() {
     released.notify_one();
     let body = String::from_utf8(response_bytes(response).await.to_vec()).unwrap();
     assert!(body.contains("discard-partial") && body.contains("event: response.completed"));
+    f.stop().await;
+}
+
+/// A gateway in automatic mode over two providers: the first answers whole
+/// and only ever cuts its stream, the second completes it.
+async fn pair() -> (Fixture, [Arc<AtomicUsize>; 2], [LoopbackServer; 2]) {
+    let (first, first_hits) = upstream("text/event-stream", &[RESPONSES_PARTIAL]).await;
+    let (second, second_hits) = upstream("text/event-stream", &[RESPONSES_COMPLETE]).await;
+    let f = Fixture::new(ClientId::Codex, &[first.url("/v1"), second.url("/v1")]).await;
+    held(&f, Protocol::Responses);
+    f.edit(Edit::Mode {
+        mode: "auto".into(),
+    });
+    (f, [first_hits, second_hits], [first, second])
+}
+/// Sends the streamed request apart from the test and gives its body.
+fn sent(f: &Fixture) -> tokio::task::JoinHandle<String> {
+    let gateway = f.gateway.clone();
+    tokio::spawn(async move {
+        let response = request(&gateway, "/v1/responses", RESPONSES_REQUEST).await;
+        String::from_utf8(response_bytes(response).await.to_vec()).unwrap()
+    })
+}
+/// The second provider's whole response reached the client, once, after the
+/// first provider's one cut stream.
+fn moved_once(body: &str, hits: &[Arc<AtomicUsize>; 2]) {
+    assert!(!body.contains("discard-partial"), "{body}");
+    assert_eq!(body.matches("event: response.completed").count(), 1);
+    assert_eq!(hits[0].load(Ordering::SeqCst), 1);
+    assert_eq!(hits[1].load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_provider_taken_out_of_the_queue_before_its_retry_leaves_it_to_the_queue() {
+    let (f, hits, _upstreams) = pair().await;
+    f.start().await;
+    let pending = sent(&f);
+    until(|| hits[0].load(Ordering::SeqCst) == 1 && !f.gateway.view().transient_retries.is_empty())
+        .await;
+    dequeue(&f);
+    moved_once(&pending.await.unwrap(), &hits);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_provider_taken_out_while_its_retry_waits_for_a_slot_leaves_it_to_the_queue() {
+    let (f, hits, _upstreams) = pair().await;
+    let id = f.gateway.view().providers[0].id.clone();
+    f.edit(Edit::ConcurrencyProvider {
+        id: id.clone(),
+        max_concurrency: 1,
+    });
+    f.start().await;
+    let pending = sent(&f);
+    until(|| {
+        let view = f.gateway.view();
+        hits[0].load(Ordering::SeqCst) == 1
+            && view.providers[0].active_requests == 0
+            && !view.transient_retries.is_empty()
+    })
+    .await;
+    // The provider's one slot is taken before the retry comes for it.
+    let slot = f
+        .gateway
+        .0
+        .admission
+        .acquire(
+            &[f.gateway.route(&id).unwrap()],
+            false,
+            100,
+            &mut super::super::admission::Budget::new(1),
+        )
+        .await
+        .unwrap();
+    until(|| {
+        let view = f.gateway.view();
+        view.transient_retries.is_empty() && view.waiting_requests == 1
+    })
+    .await;
+    dequeue(&f);
+    moved_once(&pending.await.unwrap(), &hits);
+    drop(slot);
     f.stop().await;
 }

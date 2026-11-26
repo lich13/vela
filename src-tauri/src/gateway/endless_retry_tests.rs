@@ -799,3 +799,167 @@ async fn a_rate_limit_is_still_retried_where_it_was_with_another_provider_free()
     assert_eq!(second_hits.load(Ordering::SeqCst), 0);
     f.stop().await;
 }
+
+/// A retry twelve seconds away: the fixture's wait for a response ends first
+/// unless something sends the request sooner.
+fn distant() -> Pacing {
+    Pacing {
+        limit: Some(60),
+        ..Default::default()
+    }
+}
+fn limited() -> Response<WireBody> {
+    rejected(429, "rate_limit_error", "rate limit")
+}
+/// The whole response, which holds one message and no more.
+async fn delivered_once(response: Response<Incoming>) {
+    let body = response_bytes(response).await;
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("complete"), "{text}");
+    assert_eq!(text.matches("event: message_stop").count(), 1, "{text}");
+}
+
+#[tokio::test]
+async fn a_provider_taken_out_of_the_queue_during_the_wait_loses_the_retry_to_the_queue() {
+    // The second provider is in the queue from the start, or joins it only
+    // once the first is waiting.
+    for late in [false, true] {
+        let (first, first_hits) = answering(|_| limited()).await;
+        let (second, second_hits) = answering(|_| sse(COMPLETE)).await;
+        let mut urls = vec![first.url("/v1")];
+        if !late {
+            urls.push(second.url("/v1"));
+        }
+        let f = queued(&urls, distant()).await;
+        let response = request(&f.gateway, "/v1/messages", STREAM_REQUEST).await;
+        waiting(&f, &first_hits, 1).await;
+        if late {
+            f.edit(form(serde_json::json!({
+                "name": "fixture-late",
+                "baseUrl": second.url("/v1"),
+                "token": FIXTURE_KEY,
+            })));
+        }
+        dequeue(&f);
+        delivered_once(response).await;
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1, "{late}");
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1, "{late}");
+        f.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_provider_taken_out_with_no_other_in_the_queue_answers_with_its_rejection() {
+    let (upstream, hits) = answering(|_| limited()).await;
+    let f = queued(&[upstream.url("/v1")], distant()).await;
+    let response = request(&f.gateway, "/v1/messages", STREAM_REQUEST).await;
+    waiting(&f, &hits, 1).await;
+    dequeue(&f);
+    // Answered at once, without the retry the provider no longer has.
+    let body = response_bytes(response).await;
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("event: error"), "{text}");
+    assert!(text.contains("rate_limit_error"), "{text}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_provider_taken_out_after_the_retry_budget_ran_out_still_loses_the_retry_to_the_queue() {
+    let (first, first_hits) = answering(|_| limited()).await;
+    let (second, second_hits) = answering(|_| sse(COMPLETE)).await;
+    let f = queued(&[first.url("/v1"), second.url("/v1")], distant()).await;
+    let mut settings = f.gateway.view().settings;
+    settings.retry_budget_seconds = 1;
+    f.edit(Edit::Settings { settings });
+    let response = request(&f.gateway, "/v1/messages", STREAM_REQUEST).await;
+    waiting(&f, &first_hits, 1).await;
+    // Endless mode keeps the request past the budget, which the second
+    // provider, not in endless mode, goes by.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    dequeue(&f);
+    delivered_once(response).await;
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_reset_during_the_wait_sends_the_retry_to_the_provider_still_in_the_queue() {
+    let (first, first_hits) = answering(|n| match n {
+        0 => limited(),
+        _ => sse(COMPLETE),
+    })
+    .await;
+    let (second, second_hits) = answering(|_| sse(COMPLETE)).await;
+    let f = queued(&[first.url("/v1"), second.url("/v1")], distant()).await;
+    let response = request(&f.gateway, "/v1/messages", STREAM_REQUEST).await;
+    waiting(&f, &first_hits, 1).await;
+    let id = f.gateway.view().providers[0].id.clone();
+    f.edit(Edit::Reset { id });
+    delivered_once(response).await;
+    assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_manual_choice_keeps_its_retry_with_its_queue_switch_turned_off() {
+    let (first, first_hits) = answering(|n| match n {
+        0 => limited(),
+        _ => sse(COMPLETE),
+    })
+    .await;
+    let (second, second_hits) = answering(|_| sse(COMPLETE)).await;
+    // Manual mode: the request is the selected provider's, in the queue or not.
+    let f = endless(
+        ClientId::Claude,
+        &[first.url("/v1"), second.url("/v1")],
+        true,
+        distant(),
+    )
+    .await;
+    let response = request(&f.gateway, "/v1/messages", STREAM_REQUEST).await;
+    waiting(&f, &first_hits, 1).await;
+    dequeue(&f);
+    delivered_once(response).await;
+    assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_request_following_a_response_keeps_its_retry_with_that_responses_provider() {
+    let (first, first_hits) = answering(|n| match n {
+        0 => limited(),
+        _ => json(HTTP_RESPONSE),
+    })
+    .await;
+    let (second, second_hits) = answering(|_| json(HTTP_RESPONSE)).await;
+    let f = endless(
+        ClientId::Codex,
+        &[first.url("/v1"), second.url("/v1")],
+        false,
+        distant(),
+    )
+    .await;
+    f.edit(Edit::Mode {
+        mode: "auto".into(),
+    });
+    // The response it continues was the first provider's.
+    let id = f.gateway.view().providers[0].id.clone();
+    f.gateway.remember("resp_fixture_previous", &id);
+    let gateway = f.gateway.clone();
+    let pending = tokio::spawn(async move {
+        let body = br#"{"model":"gpt-request-fixture","stream":false,
+            "previous_response_id":"resp_fixture_previous",
+            "input":[{"role":"user","content":"fixture"}]}"#;
+        response_bytes(request(&gateway, "/v1/responses", body).await).await
+    });
+    waiting(&f, &first_hits, 1).await;
+    dequeue(&f);
+    assert_eq!(pending.await.unwrap(), HTTP_RESPONSE);
+    assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+    f.stop().await;
+}

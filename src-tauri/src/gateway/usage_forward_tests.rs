@@ -103,6 +103,12 @@ impl Fixture {
     }
 }
 
+/// Takes the fixture's first provider out of the queue.
+fn dequeue(f: &Fixture) {
+    let id = f.gateway.view().providers[0].id.clone();
+    f.edit(Edit::QueueProvider { id, queued: false });
+}
+
 async fn request(gateway: &Gateway, path: &str, body: &[u8]) -> Response<Incoming> {
     let client: HttpClient =
         Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));

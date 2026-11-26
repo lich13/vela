@@ -1646,6 +1646,57 @@ impl Exchange<'_> {
         self.ordinary_attempts = attempts;
         true
     }
+    /// The queue is free to send the request elsewhere: it is not a manual
+    /// choice, follows no response cursor, and no provider took it over.
+    fn reselects(&self) -> bool {
+        self.mode == "auto"
+            && self.plan.pinned.is_none()
+            && !self.plan.unknown_affinity
+            && self.ordinary.is_none()
+    }
+    /// The provider `id`, which the request was to be sent to next, has been
+    /// taken out of the queue: the request leaves it for the queue as it is
+    /// now. What endless mode set aside, the attempts made there and any
+    /// capacity wait go with it; the providers that refused the request for
+    /// good and its body stay. Its retry budget stays too, or starts over if
+    /// endless mode had the request exempt from it. Reports whether it left.
+    fn release(&mut self, id: &str) -> bool {
+        if !self.reselects()
+            || self
+                .gateway
+                .routing_ids(None)
+                .iter()
+                .any(|queued| queued == id)
+        {
+            return false;
+        }
+        if let Some((_, attempts)) = self.unpinned.take() {
+            self.ordinary_attempts = attempts;
+        }
+        if self.unbounded {
+            // The time endless mode held the request is no more counted
+            // than the attempts it made there.
+            self.request_budget.begin();
+            self.request_budget.attach_traffic(&self.traffic);
+            self.request_budget
+                .describe(None, self.plan.model.as_deref(), "admission");
+        }
+        self.claude_owner = None;
+        self.retry_owner = None;
+        self.capacity_pending = false;
+        self.capacity_wait_owner = None;
+        self.capacity_retry_after = None;
+        self.capacity_sources.clear();
+        self.set_unbounded(false);
+        self.wait_budget = admission_budget(self.settings, &self.traffic, &self.plan);
+        (self.ids, self.routes) = super::attempt::queue(
+            self.gateway,
+            self.plan.pinned.as_deref(),
+            &self.hard_denied,
+            self.parts.uri.path(),
+        );
+        true
+    }
     /// Applies the providers' current endless settings to this request, so an
     /// edit reaches a request already in flight on its next attempt.
     fn refresh_endless(&mut self) {
@@ -1659,8 +1710,9 @@ impl Exchange<'_> {
         }
     }
     /// A manual interruption drops the attempt or wait in progress and sends
-    /// the request again, to the same provider when it has one. The dropped
-    /// attempt is not counted, and the waiting budget starts over.
+    /// the request again, to the same provider when it has one that is still
+    /// in the queue. The dropped attempt is not counted, and the waiting
+    /// budget starts over.
     fn resend(&mut self, before: (usize, usize, Vec<String>)) {
         self.request_budget.begin();
         self.request_budget.attach_traffic(&self.traffic);
@@ -1669,8 +1721,10 @@ impl Exchange<'_> {
         }
         (self.attempted, self.ordinary_attempts, self.ids) = before;
         if let Some(owner) = self.claude_owner.clone() {
-            self.ids = vec![owner.clone()];
-            self.retry_owner = Some(owner);
+            if !self.release(&owner) {
+                self.ids = vec![owner.clone()];
+                self.retry_owner = Some(owner);
+            }
         } else {
             if self.ids.is_empty() && self.capacity_pending {
                 // Interrupted while waiting out a capacity cooldown: the
@@ -1691,19 +1745,23 @@ impl Exchange<'_> {
                 .as_ref()
                 .and_then(|id| self.ids.iter().position(|other| other == id))
             {
-                // The provider it was interrupted at is still in the queue,
-                // so it is not one that already failed this request.
+                // The provider it was interrupted at is still among those it
+                // may go to, so it is not one that already failed this
+                // request. Taken out of the queue meanwhile, it leaves the
+                // request to the queue as it is now.
                 let id = self.ids.remove(position);
-                let ready = self
-                    .gateway
-                    .routing_ids(self.plan.pinned.as_deref())
-                    .contains(&id)
-                    && self
-                        .routes
-                        .get(&id)
-                        .is_some_and(|r| r.health_for(&self.plan.requirement).available);
-                self.ids.insert(0, id.clone());
-                self.retry_owner = ready.then_some(id);
+                if !self.release(&id) {
+                    let ready = self
+                        .gateway
+                        .routing_ids(self.plan.pinned.as_deref())
+                        .contains(&id)
+                        && self
+                            .routes
+                            .get(&id)
+                            .is_some_and(|r| r.health_for(&self.plan.requirement).available);
+                    self.ids.insert(0, id.clone());
+                    self.retry_owner = ready.then_some(id);
+                }
             }
         }
         // The resend does not skip a cooldown: with every provider still
@@ -1891,6 +1949,7 @@ impl Exchange<'_> {
                 self.request_budget,
                 self.plan.model.as_deref(),
                 true,
+                self.reselects(),
             )
             .await
                 == super::connectivity::Verdict::Restored;
@@ -2208,12 +2267,20 @@ impl Exchange<'_> {
                 &self.plan.requirement,
                 self.capacity_pending || offered,
             )
-            .await
-            .inspect_err(|reason| {
-                if !taken {
-                    self.failover.rejected(reason)
-                }
-            });
+            .await;
+        // No candidate has a slot to wait for any more, and one of them was
+        // taken out of the queue: nothing refused the request, which goes to
+        // the queue as it is now.
+        if matches!(admission, Err(Rejected::Unavailable))
+            && candidates.iter().any(|r| self.release(&r.provider.id))
+        {
+            return Err(End::Again);
+        }
+        let admission = admission.inspect_err(|reason| {
+            if !taken {
+                self.failover.rejected(reason)
+            }
+        });
         if offered
             && self.attempted == 0
             && matches!(
@@ -2398,6 +2465,11 @@ impl Exchange<'_> {
             Ok(value) => value,
             Err(e) => {
                 admission.permits.neutral(self.settings);
+                // Taken out of the queue just as it gave the slot: nothing
+                // was sent, and the request goes to the queue as it is now.
+                if self.release(&route.provider.id) {
+                    return Err(End::Again);
+                }
                 return Err(End::reply(error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     &e.code,
@@ -2653,11 +2725,17 @@ impl Exchange<'_> {
                 self.request_budget,
                 self.plan.model.as_deref(),
                 stranded,
+                self.reselects(),
             )
             .await
             {
                 super::connectivity::Verdict::Reachable => {}
-                super::connectivity::Verdict::Unreachable => retry_delay = None,
+                super::connectivity::Verdict::Unreachable => {
+                    retry_delay = None;
+                    // Held or not, a provider taken out of the queue leaves
+                    // the request to the queue as it is now.
+                    self.release(&route.provider.id);
+                }
                 super::connectivity::Verdict::Restored => {
                     self.ordinary_attempts = self.ordinary_attempts.saturating_sub(1);
                     self.transient_retries = 0;
@@ -2683,7 +2761,10 @@ impl Exchange<'_> {
                     self.ids.insert(0, route.provider.id.clone());
                     self.retry_owner = Some(route.provider.id.clone());
                 }
-                Ok(false) => {}
+                // Taken out of the queue meanwhile: the queue as it is now.
+                Ok(false) => {
+                    self.release(&route.provider.id);
+                }
                 Err(Rejected::Stopped) => {
                     self.failover.finish(super::failover::Exit::Stopped);
                     return End::reply(stopped());
@@ -3142,7 +3223,10 @@ impl Exchange<'_> {
                     self.ids.insert(0, route.provider.id.clone());
                     self.retry_owner = Some(route.provider.id.clone());
                 }
-                Ok(false) => {}
+                // Taken out of the queue meanwhile: the queue as it is now.
+                Ok(false) => {
+                    self.release(&route.provider.id);
+                }
                 Err(Rejected::Stopped) => {
                     self.failover.finish(super::failover::Exit::Stopped);
                     return End::reply(stopped());
@@ -3558,7 +3642,10 @@ impl Exchange<'_> {
                     self.ids.insert(0, route.provider.id.clone());
                     self.retry_owner = Some(route.provider.id.clone());
                 }
-                Ok(false) => {}
+                // Taken out of the queue meanwhile: the queue as it is now.
+                Ok(false) => {
+                    self.release(&route.provider.id);
+                }
                 Err(Rejected::Stopped) => {
                     self.failover.finish(super::failover::Exit::Stopped);
                     return End::reply(stopped());
@@ -3882,7 +3969,10 @@ impl Exchange<'_> {
                         self.ids.insert(0, route.provider.id.clone());
                         self.retry_owner = Some(route.provider.id.clone());
                     }
-                    Ok(false) => {}
+                    // Taken out of the queue meanwhile: the queue as it is now.
+                    Ok(false) => {
+                        self.release(&route.provider.id);
+                    }
                     Err(Rejected::Stopped) => {
                         self.failover.finish(super::failover::Exit::Stopped);
                         return Err(End::reply(stopped()));
@@ -3919,6 +4009,16 @@ impl Exchange<'_> {
         stream_started: &mut Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<Accepted, End> {
         self.traffic.waiting();
+        // The provider this round goes back to: the one a retry returns to,
+        // or the one endless mode fixed. Taken out of the queue while the
+        // request waited, it no longer has the request.
+        if let Some(id) = self
+            .retry_owner
+            .clone()
+            .or_else(|| self.claude_owner.clone())
+        {
+            self.release(&id);
+        }
         // An unknown previous_response_id has no safe owner to replay against;
         // preserve the existing one-attempt rule instead of silently
         // repeating the request on an arbitrary provider.
@@ -3969,7 +4069,12 @@ impl Exchange<'_> {
             }
             self.claude_owner = Some(route.provider.id.clone());
             self.set_unbounded(true);
-            self.wait_budget.pin_provider();
+            if self.reselects() {
+                // Fixed for as long as the provider is in the queue.
+                self.wait_budget.hold_provider();
+            } else {
+                self.wait_budget.pin_provider();
+            }
         }
         let (upstream, upstream_model) = match upstream_request(
             &route,

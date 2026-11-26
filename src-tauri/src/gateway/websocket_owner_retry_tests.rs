@@ -45,7 +45,11 @@ async fn next_frame(ws: &mut yawc::TcpWebSocket) -> yawc::Frame {
         .expect("fixture websocket closed")
 }
 
-async fn native_upstream() -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+/// An upstream that refuses its first handshakes with `refused`, one status
+/// each, then takes the handshake and answers the turn in full.
+async fn native_upstream(
+    refused: &'static [u16],
+) -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let http_hits = Arc::new(AtomicUsize::new(0));
     let handshakes = Arc::new(AtomicUsize::new(0));
     let frames = Arc::new(AtomicUsize::new(0));
@@ -62,12 +66,10 @@ async fn native_upstream() -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<Atom
                 let _ = request.into_body().collect().await;
                 return Response::new(replay::full(r#"{"provider":"owner"}"#));
             }
-            let attempt = handshake_seen.fetch_add(1, Ordering::SeqCst) + 1;
-            if attempt == 1 {
-                return json_response(500, r#"{"error":{"message":"fixture 500"}}"#, None);
-            }
-            if attempt == 2 {
-                return json_response(507, r#"{"error":{"message":"fixture 507"}}"#, None);
+            let attempt = handshake_seen.fetch_add(1, Ordering::SeqCst);
+            if let Some(status) = refused.get(attempt) {
+                let body = format!(r#"{{"error":{{"message":"fixture {status}"}}}}"#);
+                return json_response(*status, &body, None);
             }
             let (response, upgrade) = yawc::WebSocket::upgrade_with_options(
                 &mut request,
@@ -100,7 +102,7 @@ async fn native_upstream() -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<Atom
 
 #[tokio::test]
 async fn established_owner_native_websocket_retries_500_507_without_failover() {
-    let (port, http_hits, handshakes, frames) = native_upstream().await;
+    let (port, http_hits, handshakes, frames) = native_upstream(&[500, 507]).await;
     let backup_hits = Arc::new(AtomicUsize::new(0));
     let backup_seen = backup_hits.clone();
     let backup = server(move |_| {
@@ -279,6 +281,24 @@ fn all_server_errors_share_six_failure_transient_threshold() {
     }
 }
 
+/// The turn is held for its provider's network, with no end to the wait.
+async fn held(gateway: &Gateway) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let pending = gateway.view().pending_requests;
+            if pending
+                .first()
+                .is_some_and(|p| p.phase == "held" && p.remaining_seconds.is_none())
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn was not held");
+}
+
 #[tokio::test]
 async fn a_dead_network_holds_the_websocket_turn_until_the_owner_answers() {
     let (dir, gateway, port, backup) = super::owner_connect_retry_tests::setup_with(true).await;
@@ -295,20 +315,7 @@ async fn a_dead_network_holds_the_websocket_turn_until_the_owner_answers() {
         .send(yawc::Frame::text(CREATE.to_owned()))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let pending = gateway.view().pending_requests;
-            if pending
-                .first()
-                .is_some_and(|p| p.phase == "held" && p.remaining_seconds.is_none())
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the turn was not held");
+    held(&gateway).await;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap();
@@ -361,4 +368,59 @@ async fn a_dead_network_holds_the_websocket_turn_until_the_owner_answers() {
     assert_eq!(backup.load(Ordering::SeqCst), 0);
     restored.abort();
     gateway.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_owner_taken_out_of_the_queue_leaves_the_turn_waiting_to_connect_to_the_queue() {
+    use super::owner_connect_retry_tests::{
+        occupy, queue, setup_with, waiting, waiting_for_a_slot,
+    };
+    // Waiting out the owner's short retry, held for its dead network, and
+    // waiting for its one slot.
+    for wait in ["retry", "held", "slot"] {
+        let (dir, gateway, _port, backup) = setup_with(wait == "held").await;
+        let (other, _http_hits, handshakes, frames) = native_upstream(&[]).await;
+        // The owner is the whole queue when the turn comes.
+        queue(&gateway, &dir, 1, false);
+        let slot = if wait == "slot" {
+            Some(occupy(&gateway, &dir).await)
+        } else {
+            None
+        };
+        let mut client = ws_client(&gateway, "fixture-owner-network").await;
+        client
+            .send(yawc::Frame::text(CREATE.to_owned()))
+            .await
+            .unwrap();
+        match wait {
+            "held" => held(&gateway).await,
+            "slot" => waiting_for_a_slot(&gateway).await,
+            _ => waiting(&gateway).await,
+        }
+        // A provider enters the queue during the wait, and the owner leaves
+        // it.
+        update(
+            &gateway,
+            &dir,
+            form(json!({
+                "name": "fixture-other",
+                "baseUrl": format!("http://127.0.0.1:{other}/v1"),
+                "token": "fixture-token",
+            })),
+        );
+        queue(&gateway, &dir, 0, false);
+        assert_eq!(next_frame(&mut client).await.as_str(), CREATED);
+        assert_eq!(next_frame(&mut client).await.as_str(), COMPLETED);
+        // The owner's sends: the thread's first request, and one attempt at
+        // the turn unless its slot was taken.
+        let sent = if slot.is_some() { 1 } else { 2 };
+        drop(slot);
+        settled(&gateway).await;
+        assert_eq!(handshakes.load(Ordering::SeqCst), 1, "{wait}");
+        assert_eq!(frames.load(Ordering::SeqCst), 1, "{wait}");
+        assert_eq!(backup.load(Ordering::SeqCst), 0, "{wait}");
+        assert_eq!(gateway.view().providers[0].rpm_used, sent, "{wait}");
+        drop(client);
+        gateway.stop().await.unwrap();
+    }
 }

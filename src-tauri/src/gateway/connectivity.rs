@@ -115,7 +115,9 @@ pub(super) fn connection_failure(local_code: Option<&str>) -> bool {
 
 /// Probes the endpoint `route` just failed to reach. With `hold`, a request
 /// whose network is down waits here, outside its retry budget, until the
-/// endpoint answers; dropping the future ends the wait.
+/// endpoint answers; dropping the future ends the wait. With `queued`, the
+/// request is the queue's to place elsewhere: it is not held for a provider
+/// taken out of the queue, and one taken out while it is held releases it.
 pub(super) async fn settle(
     gateway: &Gateway,
     route: &Route,
@@ -123,6 +125,7 @@ pub(super) async fn settle(
     budget: &WaitBudget,
     model: Option<&str>,
     hold: bool,
+    queued: bool,
 ) -> Verdict {
     if !settings.network_probe {
         return Verdict::Reachable;
@@ -152,11 +155,18 @@ pub(super) async fn settle(
     };
     let mut pause = None;
     loop {
+        // Enabled before the queue is read, so no edit falls between the two.
+        let edited = gateway.0.admission.signalled();
+        tokio::pin!(edited);
+        edited.as_mut().enable();
         let state = *link.borrow_and_update();
         match state {
             Link::Up if pause.is_some() => return Verdict::Restored,
             Link::Up => return Verdict::Reachable,
             Link::Down if !hold => return Verdict::Unreachable,
+            Link::Down if queued && !gateway.routing_ids(None).contains(&route.provider.id) => {
+                return Verdict::Unreachable
+            }
             Link::Down if pause.is_none() => {
                 budget.describe(Some(&route.provider.id), model, "held");
                 pause = Some(budget.execution());
@@ -172,8 +182,13 @@ pub(super) async fn settle(
             }
             _ => {}
         }
-        if link.changed().await.is_err() {
-            return Verdict::Reachable;
+        tokio::select! {
+            changed = link.changed() => {
+                if changed.is_err() {
+                    return Verdict::Reachable;
+                }
+            }
+            _ = edited, if queued && pause.is_some() => {}
         }
     }
 }
