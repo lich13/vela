@@ -1,13 +1,15 @@
 import { within } from "@testing-library/react";
 import type { EventRecord } from "./EventLog";
 import { mock } from "./test-bridge";
-import type {
-  Attempt,
-  Dashboard,
-  UsageFilter,
-  UsagePage,
-  UsageRecord,
-  UsageState,
+import type { EntryKey } from "./types";
+import {
+  ownEntryKey,
+  type Attempt,
+  type Dashboard,
+  type UsageFilter,
+  type UsagePage,
+  type UsageRecord,
+  type UsageState,
 } from "./usage-types";
 
 /**
@@ -88,28 +90,33 @@ export const usageState: UsageState = {
   error: null,
 };
 
-/** A dashboard for `requests` successful requests that have no price. */
+/**
+ * A dashboard for `requests` successful requests that have no price, all of
+ * them under the client's own key.
+ */
 export function usageDashboard(
   requests: number,
   totals: Partial<Dashboard["totals"]> = {},
 ): Dashboard {
+  const all: Dashboard["totals"] = {
+    requests,
+    attempts: requests,
+    success: requests,
+    statusKnown: requests,
+    sessions: 0,
+    tokens: { input: 1000, output: 2000, cacheRead: 3000, cacheWrite: 4000 },
+    cost: "0",
+    unpriced: requests,
+    durationMs: 0,
+    measuredOutputs: 0,
+    generationMs: 0,
+    ...totals,
+  };
   return {
-    totals: {
-      requests,
-      attempts: requests,
-      success: requests,
-      statusKnown: requests,
-      sessions: 0,
-      tokens: { input: 1000, output: 2000, cacheRead: 3000, cacheWrite: 4000 },
-      cost: "0",
-      unpriced: requests,
-      durationMs: 0,
-      measuredOutputs: 0,
-      generationMs: 0,
-      ...totals,
-    },
+    totals: all,
     providers: [],
     models: [],
+    entryKeys: requests ? [{ id: ownEntryKey, totals: all }] : [],
     detailSince: 0,
     sources: {},
   };
@@ -117,11 +124,14 @@ export function usageDashboard(
 
 /**
  * Answers the usage page's commands from the given fixtures, twenty rows to a
- * page. Any other command fails the test.
+ * page. Any other command fails the test. `keys` are the keys each gateway
+ * hands out, by its client id; without them the gateways answer as an instance
+ * from before there were any.
  */
 export function serveUsage(
   records: () => UsageRecord[],
   dashboard: () => Dashboard,
+  keys?: () => Record<string, EntryKey[]>,
 ) {
   mock.command.mockReset();
   mock.listeners.clear();
@@ -135,6 +145,9 @@ export function serveUsage(
         case "get_gateway":
           return {
             providers: [{ id: "fixture-provider", name: "Fixture Provider" }],
+            ...(keys
+              ? { entryKeys: keys()[args.clientId as string] ?? [] }
+              : {}),
           };
         case "get_usage_state":
           return structuredClone(usageState);

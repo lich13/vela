@@ -11,7 +11,8 @@ import type {
   UsageSettings,
   UsageState,
 } from "./usage-types";
-import { densePreview } from "./preview-fixtures";
+import { ownEntryKey } from "./usage-types";
+import { densePreview, previewKeys } from "./preview-fixtures";
 const tokens: Tokens = {
   input: 1400,
   output: 860,
@@ -249,6 +250,21 @@ if (densePreview) {
     },
   });
 }
+if (densePreview) {
+  // Every other gateway request came in with a key its client hands out, and
+  // one with a key deleted since.
+  const through = (client: string) =>
+    rows
+      .filter((row) => row.source === "proxy" && row.client === client)
+      .filter((_, i) => i % 2 === 0);
+  through("codex").forEach((row, i) => {
+    row.entryKey = i ? previewKeys.codex[i % 2].id : previewKeys.deleted;
+  });
+  for (const row of through("claude")) row.entryKey = previewKeys.claude[0].id;
+}
+/** Whether a request is counted under the key a filter names. */
+const underKey = (row: UsageRecord, key: string | undefined) =>
+  !key || (row.entryKey ?? ownEntryKey) === key;
 for (const row of rows) {
   row.finishedAt =
     row.attempts.at(-1)?.transfer?.terminalAt ??
@@ -433,6 +449,7 @@ export function usagePreview(
       .filter(
         (row) =>
           (!filter.client || row.client === filter.client) &&
+          underKey(row, filter.entryKey) &&
           (!filter.start || row.startedAt >= filter.start) &&
           (!filter.end || row.startedAt <= filter.end),
       )
@@ -550,7 +567,8 @@ export function usagePreview(
       ? undefined
       : structuredClone(price);
   const f = (args.filter ?? {}) as UsageFilter;
-  const selected = rows
+  // Whatever key the filter names; the overview groups these by key.
+  const everyKey = rows
     .filter(
       (r) =>
         (!f.source ||
@@ -569,6 +587,7 @@ export function usagePreview(
     .sort(
       (a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt),
     );
+  const selected = everyKey.filter((row) => underKey(row, f.entryKey));
   if (name === "get_claude_usage_quota")
     return {
       account: "f***@example.invalid",
@@ -785,15 +804,16 @@ export function usagePreview(
     };
   }
   if (name === "get_usage_dashboard") {
-    const group = (key: (r: UsageRecord) => string) =>
-      [...new Set(selected.map(key))].map((id) => ({
+    const group = (key: (r: UsageRecord) => string, of = selected) =>
+      [...new Set(of.map(key))].map((id) => ({
         id,
-        totals: total(selected.filter((r) => key(r) === id)),
+        totals: total(of.filter((r) => key(r) === id)),
       }));
     const d: Dashboard = {
       totals: total(selected),
       providers: group((r) => r.attempts.at(-1)!.provider ?? "session"),
       models: group((r) => r.attempts.at(-1)!.pricingModel ?? "unknown"),
+      entryKeys: group((r) => r.entryKey ?? ownEntryKey, everyKey),
       detailSince: 0,
       sources: Object.fromEntries(
         group((r) => r.source).map((g) => [g.id, g.totals.requests]),

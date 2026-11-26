@@ -20,7 +20,7 @@ import {
   DEFAULT_RISK_CODES,
   DEFAULT_UPSTREAM_RETRY_SECONDS,
 } from "./types";
-import { densePreview } from "./preview-fixtures";
+import { densePreview, previewKeys } from "./preview-fixtures";
 const healthy: Health = {
   state: "closed",
   failures: 0,
@@ -748,6 +748,17 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       s.settings.customFailureRules = s.settings.customFailureRules?.filter(
         (r) => r.id !== e.id,
       );
+    if (e.op === "saveEntryKey") {
+      const key = s.entryKeys?.find((k) => k.id === e.id);
+      if (key) key.name = String(e.name);
+      else
+        s.entryKeys = [
+          ...(s.entryKeys ?? []),
+          { id: crypto.randomUUID(), name: String(e.name) },
+        ];
+    }
+    if (e.op === "deleteEntryKey")
+      s.entryKeys = s.entryKeys?.filter((k) => k.id !== e.id);
     if (e.op === "mode") s.mode = e.mode as "auto" | "manual";
     if (e.op === "select") {
       s.selected = id;
@@ -943,6 +954,8 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
 }
 
 if (densePreview) {
+  gatewayDemo.entryKeys = structuredClone(previewKeys.codex);
+  claudeGatewayDemo.entryKeys = structuredClone(previewKeys.claude);
   gatewayDemo.pendingRequests = Array.from({ length: 4 }, (_, i) => ({
     requestId: `fixture-wait-${i}`,
     providerId: i % 2 ? "backup" : "primary",

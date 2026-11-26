@@ -30,7 +30,7 @@ import {
   CalendarDays,
 } from "lucide-react";
 import { command } from "./bridge";
-import { errorOf } from "./types";
+import { errorOf, type EntryKey } from "./types";
 import { confirmAction } from "./confirmation";
 import Pricing from "./UsagePricing";
 import UsageAntigravity from "./UsageAntigravity";
@@ -39,8 +39,11 @@ import {
   type AntigravityUsageStats,
   type ClaudeUsageQuota,
   averageFirstToken,
+  clientName,
+  deletedKeyName,
   firstTokenLabel,
   firstTokenTitle,
+  ownEntryKey,
   type Totals,
   compact,
   money,
@@ -140,6 +143,7 @@ export default function Usage({
   const [client, setClient] = useState(""),
     [provider, setProvider] = useState(""),
     [operation, setOperation] = useState(""),
+    [entryKey, setEntryKey] = useState(""),
     [status, setStatus] = useState(""),
     [page, setPage] = useState(1);
   const [tab, setTab] = useState("requests");
@@ -157,6 +161,8 @@ export default function Usage({
       {},
     ),
     [agProviders, setAgProviders] = useState<Record<string, string>>({}),
+    // The keys the instance hands out, each under its client's usage name.
+    [keys, setKeys] = useState<(EntryKey & { client: string })[]>([]),
     [selected, setSelected] = useState<UsageRecord | null>(null),
     [sheet, setSheet] = useState(false),
     [error, setError] = useState(""),
@@ -166,6 +172,7 @@ export default function Usage({
   const [rankings, setRankings] = useState<Record<string, RankingView>>({
     providers: initialRanking,
     models: initialRanking,
+    keys: initialRanking,
   });
   const timeButton = useRef<HTMLButtonElement>(null);
   const resetPages = () => {
@@ -173,6 +180,7 @@ export default function Usage({
     setRankings((v) => ({
       providers: { ...v.providers, page: 1 },
       models: { ...v.models, page: 1 },
+      keys: { ...v.keys, page: 1 },
     }));
   };
   const pricingDirty = useRef(false);
@@ -194,10 +202,14 @@ export default function Usage({
       !(await confirmAction("离开定价会丢弃未保存的修改。"))
     )
       return;
-    if ((next === "antigravity" || next === "claude") && next !== client) {
-      setClient(next);
-      setProvider("");
-      resetPages();
+    if (next === "antigravity" || next === "claude") {
+      if (entryKey || next !== client) resetPages();
+      // Those two pages do not count by key.
+      setEntryKey("");
+      if (next !== client) {
+        setClient(next);
+        setProvider("");
+      }
     }
     if (next !== tab) {
       setAgStats(null);
@@ -257,8 +269,9 @@ export default function Usage({
       client: client || undefined,
       provider: provider || undefined,
       operation: operation || undefined,
+      entryKey: entryKey || undefined,
     };
-  }, [range, from, to, live, client, provider, operation]);
+  }, [range, from, to, live, client, provider, operation, entryKey]);
   const loadOverview = useCallback(async () => {
     const id = ++sequence.current;
     setBusy(true);
@@ -461,6 +474,18 @@ export default function Usage({
         setClaudeProviders(
           Object.fromEntries(claude.providers.map((p) => [p.id, p.name])),
         );
+        setKeys(
+          // The usage side knows the agy gateway as antigravity.
+          Object.entries({
+            codex,
+            claude,
+            grok,
+            dsh,
+            antigravity: agy,
+          }).flatMap(([id, gateway]) =>
+            (gateway.entryKeys ?? []).map((key) => ({ ...key, client: id })),
+          ),
+        );
         if (seenAgKeyRef.current === null) {
           seenAgKeyRef.current = agSignature(ag);
           const agMap = updateAccounts(ag);
@@ -501,6 +526,39 @@ export default function Usage({
   };
   const name = (id: string | null) =>
     id ? providers[id] || `供应商 ${id.slice(0, 8)}` : "本机会话";
+  // Keys only the history still knows: deleted since, they have no name left.
+  const formerKeys = (data?.entryKeys ?? [])
+    .map((group) => group.id)
+    .filter((id) => id !== ownEntryKey && !keys.some((key) => key.id === id));
+  // The page says nothing of keys until the instance hands one out or has
+  // counted one.
+  const keyed = keys.length > 0 || formerKeys.length > 0;
+  const keyOptions = [
+    ...keys.filter((key) => !client || key.client === client).map((k) => k.id),
+    ...formerKeys,
+  ];
+  const keyName = (id: string) =>
+    keys.find((key) => key.id === id)?.name ?? deletedKeyName(id);
+  // Two clients may each hand out a key of the same name, so with every client
+  // shown a key says whose it is.
+  const keyLabel = (id: string) => {
+    if (id === ownEntryKey) return "本机 Key";
+    const key = keys.find((key) => key.id === id);
+    return key && !client
+      ? `${key.name}（${clientName(key.client)}）`
+      : keyName(id);
+  };
+  const keyLost =
+    entryKey !== "" &&
+    !(keyed && (entryKey === ownEntryKey || keyOptions.includes(entryKey)));
+  useEffect(() => {
+    if (!keyLost) return;
+    setEntryKey("");
+    resetPages();
+  }, [keyLost]);
+  useEffect(() => {
+    if (!keyed && tab === "keys") setTab("requests");
+  }, [keyed, tab]);
   const t = data?.totals;
   const cacheRate = t?.cacheInputEligible
     ? (100 * (t.cacheReadEligible ?? 0)) / t.cacheInputEligible
@@ -611,7 +669,7 @@ export default function Usage({
           />
         </div>
       )}
-      <div className="usage-filters">
+      <div className={keyed ? "usage-filters with-key" : "usage-filters"}>
         <select
           aria-label="用量客户端"
           value={client}
@@ -620,6 +678,7 @@ export default function Usage({
             const next = e.target.value;
             choose(setClient, next);
             setProvider("");
+            setEntryKey("");
           }}
         >
           <option value="">全部客户端</option>
@@ -663,6 +722,22 @@ export default function Usage({
           <option value="compaction">压缩</option>
           <option value="web_search">搜索</option>
         </select>
+        {keyed && (
+          <select
+            aria-label="用量 Key"
+            value={entryKey}
+            disabled={independent}
+            onChange={(e) => choose(setEntryKey, e.target.value)}
+          >
+            <option value="">全部 Key</option>
+            <option value={ownEntryKey}>本机 Key</option>
+            {keyOptions.map((id) => (
+              <option key={id} value={id}>
+                {keyLabel(id)}
+              </option>
+            ))}
+          </select>
+        )}
         <button
           ref={timeButton}
           className="usage-time-button"
@@ -705,6 +780,7 @@ export default function Usage({
             ["requests", "请求日志"],
             ["providers", "供应商"],
             ["models", "模型"],
+            ...(keyed ? [["keys", "Key"]] : []),
             ["claude", "Claude Code"],
             ["antigravity", "Antigravity"],
             ["pricing", "定价"],
@@ -769,23 +845,30 @@ export default function Usage({
           groups={
             tab === "providers"
               ? (data?.providers ?? [])
-              : (data?.models ?? []).filter(
-                  ({ totals }) =>
-                    totals.success > 0 ||
-                    Object.values(totals.tokens).some(
-                      (value) => (value ?? 0) > 0,
-                    ) ||
-                    Number(totals.cost) !== 0,
-                )
+              : tab === "keys"
+                ? // Of every key, whichever one the page is narrowed to.
+                  (data?.entryKeys ?? [])
+                : (data?.models ?? []).filter(
+                    ({ totals }) =>
+                      totals.success > 0 ||
+                      Object.values(totals.tokens).some(
+                        (value) => (value ?? 0) > 0,
+                      ) ||
+                      Number(totals.cost) !== 0,
+                  )
           }
           name={(id) =>
             tab === "providers"
               ? name(id === "session" ? null : id)
-              : id === "web_search"
-                ? "网络搜索"
-                : id
+              : tab === "keys"
+                ? keyLabel(id)
+                : id === "web_search"
+                  ? "网络搜索"
+                  : id
           }
-          kind={tab === "providers" ? "供应商" : "模型"}
+          kind={
+            tab === "providers" ? "供应商" : tab === "keys" ? "Key" : "模型"
+          }
           view={rankings[tab]}
           onChange={(v) =>
             setRankings((previous) => ({ ...previous, [tab]: v }))
@@ -796,6 +879,7 @@ export default function Usage({
         <Detail
           record={selected}
           name={name}
+          keyName={keyName}
           onClose={() => {
             detailSequence.current++;
             setSelected(null);

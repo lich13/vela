@@ -202,6 +202,28 @@ it("other gateways of a server stay switchable unless the server lacks the comma
   expect(await screen.findByRole("button", { name: "启用" })).toBeDisabled();
 });
 
+it("a server's gateway hands keys out unless it is from before there were any or cannot be taken over", async () => {
+  localStorage.setItem("vela.main.client", "codex");
+  const { unmount } = render(<Gateway notify={() => {}} />);
+  await screen.findByRole("button", { name: "启用" });
+  expect(screen.getByText("访问 Key")).toBeInTheDocument();
+  unmount();
+
+  const before = instances("m1");
+  before.connection.unsupported = ["export_gateway_key"];
+  setInstanceState(before);
+  const page = render(<Gateway notify={() => {}} />);
+  await screen.findByRole("button", { name: "启用" });
+  expect(screen.queryByText("访问 Key")).not.toBeInTheDocument();
+  page.unmount();
+
+  setInstanceState(instances("m1"));
+  localStorage.setItem("vela.main.client", "agy");
+  render(<Gateway notify={() => {}} />);
+  await screen.findByText("服务器版暂不支持接管 agy");
+  expect(screen.queryByText("访问 Key")).not.toBeInTheDocument();
+});
+
 it("the quick panel of a server offers the instances and drops the controls of this machine", async () => {
   localStorage.setItem("vela.quick.client", "agy");
   render(<QuickPanel />);

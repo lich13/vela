@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { command } from "./bridge";
 import { Drawer } from "./Drawer";
 import { billTime, localSecond } from "./UsageBill";
-import { errorOf, type ClientId } from "./types";
+import { errorOf, type ClientId, type EntryKey } from "./types";
 import {
   numeric,
+  ownEntryKey,
   type CalculatorModel,
   type CostCalculation,
   type UsageFilter,
@@ -46,6 +47,8 @@ export default function UsageCostCalculator({
   );
   const [models, setModels] = useState<CalculatorModel[]>([]);
   const [model, setModel] = useState("");
+  const [keys, setKeys] = useState<EntryKey[]>([]);
+  const [entryKey, setEntryKey] = useState(filter.entryKey ?? "");
   const [from, setFrom] = useState(() => localSecond(filter.start ?? today()));
   const [to, setTo] = useState(() => localSecond(filter.end ?? Date.now()));
   const [unitPrices, setUnitPrices] = useState<FiveTuple>([
@@ -65,6 +68,7 @@ export default function UsageCostCalculator({
     let active = true;
     setProviders([]);
     setModels([]);
+    setKeys([]);
     void Promise.all([
       command("get_gateway", { clientId: client }).catch(() => null),
       command("get_usage_calculator_models", { client }).catch(() => []),
@@ -72,6 +76,7 @@ export default function UsageCostCalculator({
       if (!active) return;
       if (view) {
         setProviders(view.providers.map(({ id, name }) => ({ id, name })));
+        setKeys(view.entryKeys ?? []);
       }
       setModels(usedModels);
     });
@@ -79,6 +84,14 @@ export default function UsageCostCalculator({
       active = false;
     };
   }, [client]);
+
+  // Counted by key only where the client shown hands keys out, and then by
+  // its own key or one of those: nothing the form does not show narrows it.
+  const chosenKey =
+    keys.length > 0 &&
+    (entryKey === ownEntryKey || keys.some((key) => key.id === entryKey))
+      ? entryKey
+      : "";
 
   const calculate = async () => {
     const start = billTime(from, "start"),
@@ -102,6 +115,7 @@ export default function UsageCostCalculator({
           provider,
           model: model.trim() || undefined,
           source: "proxy",
+          entryKey: chosenKey || undefined,
         },
       });
       if (!totals.attempts) throw new Error("所选周期没有符合条件的网关用量");
@@ -158,6 +172,7 @@ export default function UsageCostCalculator({
                 onChange={(e) => {
                   setClient(e.target.value as ClientId);
                   setProvider("");
+                  setEntryKey("");
                   setError("");
                 }}
               >
@@ -183,28 +198,48 @@ export default function UsageCostCalculator({
               </select>
             </label>
           </div>
-          <label className="usage-field">
-            模型
-            <input
-              value={model}
-              list="usage-calculator-models"
-              placeholder="全部模型，可选择已使用模型"
-              onChange={(e) => {
-                const chosen = e.target.value;
-                setModel(chosen);
-                // A used model brings its prices along.
-                const rates = models.find(
-                  (item) => item.model === chosen,
-                )?.rates;
-                if (rates) setUnitPrices(rates);
-              }}
-            />
-            <datalist id="usage-calculator-models">
-              {models.map((item) => (
-                <option key={item.model} value={item.model} />
-              ))}
-            </datalist>
-          </label>
+          {/* The key goes beside the model; without one the model keeps the row. */}
+          <div className={keys.length > 0 ? "usage-price-fields" : undefined}>
+            <label className="usage-field">
+              模型
+              <input
+                value={model}
+                list="usage-calculator-models"
+                placeholder="全部模型，可选择已使用模型"
+                onChange={(e) => {
+                  const chosen = e.target.value;
+                  setModel(chosen);
+                  // A used model brings its prices along.
+                  const rates = models.find(
+                    (item) => item.model === chosen,
+                  )?.rates;
+                  if (rates) setUnitPrices(rates);
+                }}
+              />
+              <datalist id="usage-calculator-models">
+                {models.map((item) => (
+                  <option key={item.model} value={item.model} />
+                ))}
+              </datalist>
+            </label>
+            {keys.length > 0 && (
+              <label className="usage-field">
+                Key
+                <select
+                  value={chosenKey}
+                  onChange={(e) => setEntryKey(e.target.value)}
+                >
+                  <option value="">全部 Key</option>
+                  <option value={ownEntryKey}>本机 Key</option>
+                  {keys.map((key) => (
+                    <option key={key.id} value={key.id}>
+                      {key.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
           <div className="usage-price-fields">
             <label className="usage-field">
               开始

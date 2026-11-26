@@ -63,6 +63,10 @@
   background: color-mix(in srgb, var(--surface) 92%, var(--surface-subtle));
   box-shadow: var(--surface-highlight), var(--shadow-sm);
 }
+/* A fifth control, for the key: the time button keeps room for its longest label */
+.usage-filters.with-key {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(136px, 1fr);
+}
 .usage-filters > * {
   min-width: 0;
   width: 100%;
@@ -1310,8 +1314,12 @@
   min-width: 670px;
 }
 @container (max-width: 660px) {
-  .usage-filters {
+  .usage-filters,
+  .usage-filters.with-key {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .usage-filters.with-key > .usage-time-button {
+    grid-column: 1 / -1;
   }
   .usage-request-table tbody tr {
     column-gap: 6px;
