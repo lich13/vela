@@ -1,5 +1,5 @@
 //! Shared gateway ports prevent self-routing and cross-client loops.
-use super::{listener::Listener, ClientId, Gateway, Shared};
+use super::{listener::Listener, model::EntryKey, ClientId, Gateway, Shared};
 use crate::storage::Result;
 use parking_lot::{Mutex, RwLock};
 use std::path::PathBuf;
@@ -9,7 +9,13 @@ use std::sync::{Arc, Weak};
 pub(super) struct TokenEntry {
     pub client: ClientId,
     pub token: String,
+    /// The keys the client handed out besides `token`. A client stays one
+    /// entry however many it has.
+    pub keys: Vec<String>,
     pub shared: Weak<Shared>,
+}
+fn tokens(keys: &[EntryKey]) -> Vec<String> {
+    keys.iter().map(|key| key.token.clone()).collect()
 }
 
 pub struct Registry {
@@ -79,20 +85,26 @@ impl Registry {
             let _ = gateway.events.send(());
         }
     }
-    pub(super) fn register(&self, shared: &Arc<Shared>, token: &str) -> Result<()> {
+    pub(super) fn register(
+        &self,
+        shared: &Arc<Shared>,
+        token: &str,
+        keys: &[EntryKey],
+    ) -> Result<()> {
         self.update_ports()?;
         self.update_tokens(|entries| {
             entries.retain(|entry| entry.client != shared.client);
             entries.push(TokenEntry {
                 client: shared.client,
                 token: token.to_owned(),
+                keys: tokens(keys),
                 shared: Arc::downgrade(shared),
             });
         });
         Ok(())
     }
     /// Publish only after the private store transaction has committed or reloaded.
-    pub(super) fn publish_token(&self, shared: &Arc<Shared>, token: &str) {
+    pub(super) fn publish_token(&self, shared: &Arc<Shared>, token: &str, keys: &[EntryKey]) {
         let identity = Arc::as_ptr(shared);
         self.update_tokens(|entries| {
             if let Some(entry) = entries
@@ -100,6 +112,7 @@ impl Registry {
                 .find(|entry| entry.shared.as_ptr() == identity)
             {
                 entry.token = token.to_owned();
+                entry.keys = tokens(keys);
             }
         });
     }

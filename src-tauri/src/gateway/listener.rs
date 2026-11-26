@@ -206,8 +206,8 @@ pub fn token_matches(actual: &[u8], expected: &[u8]) -> bool {
             == 0
 }
 
-/// Both headers, when present, must identify the same client. Repeated values
-/// are rejected before routing and again at the forwarding boundary.
+/// Every header that is present must carry the same credential. Repeated
+/// values are rejected before routing and again at the forwarding boundary.
 pub fn authorized(headers: &hyper::HeaderMap, token: &str) -> bool {
     let bearer = headers.get_all(hyper::header::AUTHORIZATION);
     let api = headers.get_all("x-api-key");
@@ -251,7 +251,28 @@ pub fn authorized(headers: &hyper::HeaderMap, token: &str) -> bool {
             .is_none_or(|v| token_matches(v.as_bytes(), token.as_bytes()))
 }
 
-/// Unprefixed routes use an exact local token.
+/// Which of one client's credentials the headers carry: `Some(None)` is its
+/// own token, `Some(Some(id))` a key it handed out. As in `route`, the headers
+/// carry none when more than one credential matches them.
+pub fn credential<'a>(
+    headers: &hyper::HeaderMap,
+    token: &str,
+    keys: &'a [super::model::EntryKey],
+) -> Option<Option<&'a str>> {
+    let mut held = std::iter::once((token, None))
+        .chain(
+            keys.iter()
+                .map(|key| (key.token.as_str(), Some(key.id.as_str()))),
+        )
+        .filter(|(credential, _)| authorized(headers, credential))
+        .map(|(_, id)| id);
+    let first = held.next()?;
+    held.next().is_none().then_some(first)
+}
+
+/// Unprefixed routes use an exact local token, or one of the keys the client
+/// handed out besides it: whichever it is, no other credential of any client
+/// may match as well.
 /// Models and protocol paths never infer a client (Grok also supports messages).
 pub fn route(
     uri: &hyper::Uri,
@@ -273,11 +294,13 @@ pub fn route(
         .collect();
     let mut matched = None;
     for gateway in gateways {
-        if authorized(headers, &gateway.token) {
-            if matched.is_some() {
-                return Err(RouteError::Unauthorized);
+        for credential in std::iter::once(&gateway.token).chain(&gateway.keys) {
+            if authorized(headers, credential) {
+                if matched.is_some() {
+                    return Err(RouteError::Unauthorized);
+                }
+                matched = Some(gateway.client);
             }
-            matched = Some(gateway.client);
         }
     }
     let client = matched.ok_or(RouteError::Unauthorized)?;

@@ -27,6 +27,10 @@ use tokio::sync::watch;
 mod error_frame_delivery_tests;
 #[derive(Clone, Copy)]
 struct ReceivedAt(i64);
+/// The id of the handed-out key a request came in with. A request that came
+/// in with the client's own key carries none.
+#[derive(Clone)]
+pub(super) struct EntryKeyId(pub(super) String);
 pub async fn serve(
     registry: std::sync::Arc<super::registry::Registry>,
     listener: tokio::net::TcpListener,
@@ -1188,7 +1192,14 @@ async fn plan(
     {
         None
     } else {
-        gateway.usage_operation(model.as_deref(), operation, None)
+        gateway.usage_operation(
+            model.as_deref(),
+            operation,
+            parts
+                .extensions
+                .get::<EntryKeyId>()
+                .map(|key| key.0.as_str()),
+        )
     };
     let delegated = (!websocket && !continuation)
         .then(|| {
@@ -2549,7 +2560,10 @@ impl Exchange<'_> {
         }
         protocol.attach_routing_log(self.failover.routing());
         protocol.request_headers(&self.parts.headers);
-        if !routing::resource(&self.parts.method, self.parts.uri.path()) {
+        // Whatever uses a handed-out key says nothing of the client itself.
+        if self.parts.extensions.get::<EntryKeyId>().is_none()
+            && !routing::resource(&self.parts.method, self.parts.uri.path())
+        {
             protocol.business_request(self.gateway, &self.parts.headers);
         }
         protocol.request_speed(self.plan.hints.as_ref().ok().and_then(|h| h.speed.clone()));
@@ -4349,7 +4363,7 @@ async fn forward_inner(
     mut request: Request<Incoming>,
     mut stream_started: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Response<WireBody> {
-    let (settings, mode, mut ids, token, running) = {
+    let (settings, mode, mut ids, credential, running) = {
         let s = gateway.request_state();
         let ids = if s.store.mode == "auto" {
             s.store
@@ -4365,19 +4379,52 @@ async fn forward_inner(
             s.store.settings.clone(),
             s.store.mode.clone(),
             ids,
-            s.store.local_token.clone(),
+            // The listener chose the client by the credentials as they were
+            // published; these are the ones the client has now.
+            super::listener::credential(
+                request.headers(),
+                &s.store.local_token,
+                &s.store.entry_keys,
+            )
+            .map(|key| key.map(str::to_owned)),
             s.running,
         )
     };
     if !running {
         return stopped();
     }
-    if !super::listener::authorized(request.headers(), &token) {
+    let Some(entry_key) = credential else {
         return error(
             StatusCode::UNAUTHORIZED,
             code::LOCAL_AUTH,
             "本地网关认证失败",
         );
+    };
+    let websocket = request
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    let responses_socket = websocket
+        && matches!(
+            request.uri().path().trim_end_matches('/'),
+            "/responses" | "/v1/responses"
+        );
+    if let Some(id) = entry_key {
+        // A handed-out key is for what is counted as its usage. The provider's
+        // files, uploads and stored responses are not, nor is what passes
+        // through a tunnel, which taking the key back would not end either.
+        let (method, path) = (request.method(), request.uri().path());
+        if (websocket && !responses_socket)
+            || (routing::resource(method, path) && !routing::model_list(method, path))
+        {
+            return error(
+                StatusCode::FORBIDDEN,
+                code::FORBIDDEN,
+                "此 Key 不能访问该接口",
+            );
+        }
+        request.extensions_mut().insert(EntryKeyId(id));
     }
     if gateway.client_id() == super::ClientId::Agy && super::gemini::telemetry(request.uri().path())
     {
@@ -4416,17 +4463,7 @@ async fn forward_inner(
         .collect();
     routes.retain(|_, route| route.accepts_protocol(request.uri().path()));
     let active = Active::new(gateway.clone());
-    let websocket = request
-        .headers()
-        .get(header::UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
-    if websocket
-        && matches!(
-            request.uri().path().trim_end_matches('/'),
-            "/responses" | "/v1/responses"
-        )
-    {
+    if responses_socket {
         return super::websocket::accept(
             gateway,
             request,

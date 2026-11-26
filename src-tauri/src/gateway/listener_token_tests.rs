@@ -1,6 +1,6 @@
-use super::super::{ClientId, Gateway};
+use super::super::{ClientId, Edit, Gateway};
 use super::{authorized, route, RouteError};
-use crate::gateway::test_support::form;
+use crate::gateway::test_support::{form, hand_out_key};
 use hyper::{
     header::{self, HeaderValue},
     HeaderMap, Uri,
@@ -49,11 +49,12 @@ impl Fixture {
 }
 
 fn set_local_token(gateway: &Gateway, token: &str) {
-    {
+    let keys = {
         let mut state = gateway.0.inner.lock();
         state.editable_mut().store.local_token = token.to_owned();
-    }
-    gateway.0.registry.publish_token(&gateway.0, token);
+        state.store.entry_keys.clone()
+    };
+    gateway.0.registry.publish_token(&gateway.0, token, &keys);
 }
 
 fn persist_local_token(gateway: &Gateway, token: &str) {
@@ -398,6 +399,162 @@ fn persisted_store_token_is_registered_after_gateway_reload() {
         route_with_token(&reloaded, "/v1/responses", &old_token),
         Err(RouteError::Unauthorized)
     );
+}
+
+#[test]
+fn a_handed_out_key_routes_to_its_client_beside_every_clients_own_token() {
+    let fixture = Fixture::new();
+    let (_, key) = hand_out_key(&fixture.claude, fixture._temp.path(), "fixture-partner");
+    let request = "/v1/messages?beta=fixture";
+    let authorization = bearer(&key);
+    for (form, headers) in [
+        ("authorization", headers(Some(&authorization), None)),
+        ("x-api-key", headers(None, Some(&key))),
+        (
+            "matching-dual-headers",
+            headers(Some(&authorization), Some(&key)),
+        ),
+    ] {
+        assert_eq!(
+            route_with_headers(&fixture, request, &headers),
+            Ok((ClientId::Claude, request.to_owned())),
+            "form={form}"
+        );
+    }
+    for (client, token) in CLIENTS {
+        assert_eq!(
+            route_with_token(&fixture.codex, request, token),
+            Ok((client, request.to_owned())),
+            "own token of {client:?}"
+        );
+    }
+    // The list names the key; the key itself is not in it.
+    let view = serde_json::to_string(&fixture.claude.view()).unwrap();
+    assert!(view.contains("fixture-partner"));
+    assert!(!view.contains(&key));
+}
+
+#[test]
+fn headers_carrying_two_different_credentials_of_one_client_are_unauthorized() {
+    let fixture = Fixture::new();
+    let home = fixture._temp.path();
+    let (_, first) = hand_out_key(&fixture.codex, home, "fixture-first");
+    let (_, second) = hand_out_key(&fixture.codex, home, "fixture-second");
+    let request = "/v1/responses";
+    for key in [&first, &second] {
+        assert_eq!(
+            route_with_token(&fixture.codex, request, key),
+            Ok((ClientId::Codex, request.to_owned()))
+        );
+    }
+    for (authorization, api_key) in [
+        (first.as_str(), second.as_str()),
+        (second.as_str(), first.as_str()),
+        (first.as_str(), CODEX_TOKEN),
+        (CODEX_TOKEN, second.as_str()),
+    ] {
+        assert_eq!(
+            route_with_headers(
+                &fixture,
+                request,
+                &headers(Some(&bearer(authorization)), Some(api_key)),
+            ),
+            Err(RouteError::Unauthorized)
+        );
+    }
+    let mut google = headers(Some(&bearer(&first)), None);
+    google.insert("x-goog-api-key", value(&second));
+    assert_eq!(
+        route_with_headers(&fixture, request, &google),
+        Err(RouteError::Unauthorized)
+    );
+}
+
+#[test]
+fn a_credential_that_two_clients_hold_is_ambiguous_whichever_kind_it_is() {
+    let fixture = Fixture::new();
+    let (_, key) = hand_out_key(&fixture.codex, fixture._temp.path(), "fixture-partner");
+    // Claude's own token is now the key Codex handed out.
+    set_local_token(&fixture.claude, &key);
+    assert_eq!(
+        route_with_token(&fixture.codex, "/v1/responses", &key),
+        Err(RouteError::Unauthorized)
+    );
+    assert_eq!(
+        route_with_token(&fixture.codex, "/v1/responses", CODEX_TOKEN),
+        Ok((ClientId::Codex, "/v1/responses".to_owned()))
+    );
+}
+
+#[test]
+fn a_deleted_key_is_unauthorized_and_the_clients_other_credentials_still_route() {
+    let fixture = Fixture::new();
+    let home = fixture._temp.path();
+    let (id, deleted) = hand_out_key(&fixture.codex, home, "fixture-leaving");
+    let (_, kept) = hand_out_key(&fixture.codex, home, "fixture-staying");
+    fixture
+        .codex
+        .edit(
+            Edit::DeleteEntryKey { id },
+            &fixture.codex.view().revision,
+            home,
+        )
+        .unwrap();
+    assert_eq!(
+        route_with_token(&fixture.codex, "/v1/responses", &deleted),
+        Err(RouteError::Unauthorized)
+    );
+    for token in [kept.as_str(), CODEX_TOKEN] {
+        assert_eq!(
+            route_with_token(&fixture.codex, "/v1/responses", token),
+            Ok((ClientId::Codex, "/v1/responses".to_owned()))
+        );
+    }
+}
+
+#[test]
+fn a_renamed_key_keeps_its_id_and_routes_with_the_same_key() {
+    let fixture = Fixture::new();
+    let home = fixture._temp.path();
+    let (id, key) = hand_out_key(&fixture.codex, home, "fixture-before");
+    let view = fixture
+        .codex
+        .edit(
+            Edit::SaveEntryKey {
+                id: Some(id.clone()),
+                name: "fixture-after".into(),
+            },
+            &fixture.codex.view().revision,
+            home,
+        )
+        .unwrap();
+    let listed: Vec<_> = view
+        .entry_keys
+        .iter()
+        .map(|key| (key.id.as_str(), key.name.as_str()))
+        .collect();
+    assert_eq!(listed, [(id.as_str(), "fixture-after")]);
+    assert_eq!(fixture.codex.entry_key_token(&id).unwrap(), key);
+    assert_eq!(
+        route_with_token(&fixture.codex, "/v1/responses", &key),
+        Ok((ClientId::Codex, "/v1/responses".to_owned()))
+    );
+}
+
+#[test]
+fn handed_out_keys_are_registered_again_after_gateway_reload() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("reload-data");
+    let first = Gateway::new(data.clone()).unwrap();
+    let (id, key) = hand_out_key(&first, temp.path(), "fixture-partner");
+    drop(first);
+
+    let reloaded = Gateway::new(data).unwrap();
+    assert_eq!(
+        route_with_token(&reloaded, "/v1/responses", &key),
+        Ok((ClientId::Codex, "/v1/responses".to_owned()))
+    );
+    assert_eq!(reloaded.entry_key_token(&id).unwrap(), key);
 }
 
 #[test]

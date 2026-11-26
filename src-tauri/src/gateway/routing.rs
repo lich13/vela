@@ -79,17 +79,28 @@ impl Requirement {
         }
     }
 }
+/// The path without the API version before it.
+fn unversioned(path: &str) -> String {
+    let path = super::gemini::path(path);
+    path.strip_prefix("/v1/")
+        .map(|p| format!("/{p}"))
+        .unwrap_or_else(|| path.to_owned())
+}
+fn under(path: &str, prefix: &str) -> bool {
+    path == prefix || path.starts_with(&format!("{prefix}/"))
+}
 pub fn resource(method: &hyper::Method, path: &str) -> bool {
     if super::gemini::model(path).is_some() {
         return false;
     }
-    let path = super::gemini::path(path);
-    let path = path
-        .strip_prefix("/v1/")
-        .map(|p| format!("/{p}"))
-        .unwrap_or_else(|| path.to_owned());
+    let path = unversioned(path);
     ["/models", "/files", "/uploads"]
         .iter()
-        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+        .any(|prefix| under(&path, prefix))
         || (*method == hyper::Method::GET && path.starts_with("/responses/"))
+}
+/// Reading the list of models or an entry of it: of the resource requests,
+/// the one that touches nothing a provider keeps for its account.
+pub fn model_list(method: &hyper::Method, path: &str) -> bool {
+    *method == hyper::Method::GET && under(&unversioned(path), "/models")
 }
