@@ -2246,6 +2246,9 @@ impl<'a> Session<'a> {
         let left = free && !self.g.routing_ids(None).contains(&self.route.provider.id);
         if left {
             self.owner_capacity_wait = None;
+            // As for a request over HTTP, only the providers that refused
+            // the turn for good stay out of the queue it goes back to.
+            self.turn_failed.clear();
         }
         let movable = free && self.owner_capacity_wait.is_none() && (self.retry_fallback || left);
         let candidates_for = |failed: &std::collections::HashSet<String>| {

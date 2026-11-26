@@ -779,6 +779,81 @@ async fn a_first_turn_waiting_for_a_slot_leaves_a_provider_taken_out_of_the_queu
     g.stop().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_turn_leaving_the_queue_goes_back_to_a_provider_that_failed_it_in_passing() {
+    // The first provider fails the turn once with a service error and
+    // answers from then on.
+    let (port, state) = native_server(|connection, mut ws, state| async move {
+        while let Some(frame) = ws.next().await {
+            if frame.opcode() == yawc::OpCode::Close {
+                break;
+            }
+            if frame.opcode().is_control() {
+                continue;
+            }
+            record_native_request(&state, &frame);
+            if connection == 1 {
+                let _ = ws
+                    .send(yawc::Frame::text(
+                        json!({"type": "response.failed", "response": {
+                            "id": "fixture-native-response", "status": "failed",
+                            "error": {"code": "server_error", "message": "fixture failure"},
+                        }})
+                        .to_string(),
+                    ))
+                    .await;
+                continue;
+            }
+            for event in [NATIVE_CREATED, NATIVE_COMPLETED] {
+                if ws.send(yawc::Frame::text(event.to_owned())).await.is_err() {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    // The second provider drops the turn once it is told to.
+    let drop_now = Arc::new(tokio::sync::Notify::new());
+    let told = drop_now.clone();
+    let (other, other_state) = native_server(move |_connection, mut ws, state| {
+        let told = told.clone();
+        async move {
+            if let Some(frame) = native_next("fixture waiting for response.create", &mut ws).await {
+                record_native_request(&state, &frame);
+                told.notified().await;
+                let _ = ws
+                    .send(yawc::Frame::close(1011.into(), "fixture disconnect"))
+                    .await;
+            }
+        }
+    })
+    .await;
+    let (t, g) = fixture(vec![
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{other}"),
+    ])
+    .await;
+    native_retry_settings(&g, &t, 4, 600);
+    start(&g, &t).await;
+    let mut client = concurrency::responses_client(&g).await;
+    turn(&mut client).await;
+    wait_native_request(&state).await;
+    // The second provider leaves the queue with the turn, then drops it.
+    wait_native_request(&other_state).await;
+    let id = g.view().providers[1].id.clone();
+    update(&g, &t, Edit::QueueProvider { id, queued: false });
+    drop_now.notify_one();
+    answered(&mut client).await;
+    assert_eq!(state.requests.lock().len(), 2);
+    assert_eq!(other_state.requests.lock().len(), 1);
+    client
+        .send(yawc::Frame::close(1000.into(), "fixture done"))
+        .await
+        .unwrap();
+    drop(client);
+    g.stop().await.unwrap();
+}
+
 fn auto_retry(g: &Gateway, t: &tempfile::TempDir) {
     update(
         g,

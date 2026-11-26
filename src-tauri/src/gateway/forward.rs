@@ -1536,7 +1536,7 @@ impl Exchange<'_> {
         self.claude_owner = None;
         self.unpinned = None;
         self.set_unbounded(false);
-        self.request_budget.begin();
+        self.request_budget.begin_again();
         self.request_budget.attach_traffic(&self.traffic);
         self.attempted = 0;
         self.ordinary_attempts = 0;
@@ -1675,8 +1675,8 @@ impl Exchange<'_> {
         }
         if self.unbounded {
             // The time endless mode held the request is no more counted
-            // than the attempts it made there.
-            self.request_budget.begin();
+            // against its budget than the attempts it made there.
+            self.request_budget.begin_again();
             self.request_budget.attach_traffic(&self.traffic);
             self.request_budget
                 .describe(None, self.plan.model.as_deref(), "admission");
@@ -1714,7 +1714,7 @@ impl Exchange<'_> {
     /// in the queue. The dropped attempt is not counted, and the waiting
     /// budget starts over.
     fn resend(&mut self, before: (usize, usize, Vec<String>)) {
-        self.request_budget.begin();
+        self.request_budget.begin_again();
         self.request_budget.attach_traffic(&self.traffic);
         if self.unbounded {
             self.request_budget.set_endless(true);

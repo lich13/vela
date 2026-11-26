@@ -93,7 +93,8 @@ pub(super) fn endpoint_key(route: &Route) -> String {
 pub(super) enum Verdict {
     /// The provider answered, or probing is off: retry as before.
     Reachable,
-    /// The network is down and this request has somewhere else to go.
+    /// The network is down and this request has somewhere else to go, or
+    /// its provider was taken out of the queue.
     Unreachable,
     /// The request was held until the provider answered again.
     Restored,
@@ -117,7 +118,8 @@ pub(super) fn connection_failure(local_code: Option<&str>) -> bool {
 /// whose network is down waits here, outside its retry budget, until the
 /// endpoint answers; dropping the future ends the wait. With `queued`, the
 /// request is the queue's to place elsewhere: it is not held for a provider
-/// taken out of the queue, and one taken out while it is held releases it.
+/// taken out of the queue, and one taken out while the request is held or
+/// awaits the verdict releases it.
 pub(super) async fn settle(
     gateway: &Gateway,
     route: &Route,
@@ -160,13 +162,15 @@ pub(super) async fn settle(
         tokio::pin!(edited);
         edited.as_mut().enable();
         let state = *link.borrow_and_update();
+        // Taken out of the queue, the provider no longer has the request,
+        // whether its network was found down or is still being checked.
+        if queued && state != Link::Up && !gateway.routing_ids(None).contains(&route.provider.id) {
+            return Verdict::Unreachable;
+        }
         match state {
             Link::Up if pause.is_some() => return Verdict::Restored,
             Link::Up => return Verdict::Reachable,
             Link::Down if !hold => return Verdict::Unreachable,
-            Link::Down if queued && !gateway.routing_ids(None).contains(&route.provider.id) => {
-                return Verdict::Unreachable
-            }
             Link::Down if pause.is_none() => {
                 budget.describe(Some(&route.provider.id), model, "held");
                 pause = Some(budget.execution());
@@ -188,7 +192,7 @@ pub(super) async fn settle(
                     return Verdict::Reachable;
                 }
             }
-            _ = edited, if queued && pause.is_some() => {}
+            _ = edited, if queued => {}
         }
     }
 }

@@ -111,6 +111,9 @@ struct Pending {
     view: PendingRequest,
     transfer: Option<Transfer>,
     started: Instant,
+    /// What the request had waited before this budget began: a resend
+    /// starts the budget over, not the request.
+    earlier: Duration,
     deadline: Instant,
     compaction_execution: bool,
     compaction_since: Instant,
@@ -135,11 +138,18 @@ impl Pending {
     fn expires_at(&self) -> Instant {
         self.deadline + self.paused_for() + self.execution_elapsed
     }
+    /// How long the whole request has waited, frozen time aside.
+    fn waited(&self) -> Duration {
+        self.earlier + self.started.elapsed().saturating_sub(self.paused_for())
+    }
 }
 #[derive(Default)]
 struct State {
     active: Option<Pending>,
     cancelled: Option<Instant>,
+    /// When the request an interruption took off the list began, and how
+    /// long it had waited, for the budget that sends it again.
+    interrupted: Option<(u64, Duration)>,
     /// The response is with the client: a cancel can no longer send the
     /// request again, only end it.
     delivering: bool,
@@ -183,11 +193,7 @@ impl Registry {
                 let state = shared.state.lock();
                 let active = state.active.as_ref()?;
                 let mut view = active.view.clone();
-                view.elapsed_seconds = active
-                    .started
-                    .elapsed()
-                    .saturating_sub(active.paused_for())
-                    .as_secs();
+                view.elapsed_seconds = active.waited().as_secs();
                 view.attempt_seconds = active
                     .attempt_since
                     .elapsed()
@@ -246,7 +252,9 @@ impl Registry {
         }) {
             return None;
         }
-        state.cancelled = state.active.take().map(|p| p.deadline);
+        let taken = state.active.take();
+        state.interrupted = taken.as_ref().map(|p| (p.view.started_at, p.waited()));
+        state.cancelled = taken.map(|p| p.deadline);
         let delivering = state.delivering;
         drop(state);
         self.remove(id);
@@ -318,8 +326,27 @@ impl WaitBudget {
         self.begin_at(Instant::now());
     }
     pub fn begin_at(&self, started: Instant) {
+        self.start(started, false);
+    }
+    /// Starts the budget over for the request it already counts: the
+    /// deadline and the attempt are new, when the request began and how long
+    /// it has waited are not.
+    pub fn begin_again(&self) {
+        self.start(Instant::now(), true);
+    }
+    fn start(&self, started: Instant, again: bool) {
         let id = uuid::Uuid::new_v4().to_string();
         let mut state = self.shared.state.lock();
+        let interrupted = state.interrupted.take();
+        let kept = again
+            .then(|| {
+                state
+                    .active
+                    .as_ref()
+                    .map(|p| (p.view.started_at, p.waited()))
+                    .or(interrupted)
+            })
+            .flatten();
         if let (Some(registry), Some(old)) = (&self.shared.registry, state.active.take()) {
             registry.remove(&old.view.request_id);
         }
@@ -329,11 +356,16 @@ impl WaitBudget {
                 request_id: id.clone(),
                 provider_id: None,
                 model: None,
-                started_at: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .saturating_sub(started.elapsed().as_secs()),
+                started_at: kept.map_or_else(
+                    || {
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                            .saturating_sub(started.elapsed().as_secs())
+                    },
+                    |(at, _)| at,
+                ),
                 elapsed_seconds: 0,
                 attempt_seconds: 0,
                 remaining_seconds: Some(self.seconds),
@@ -344,6 +376,7 @@ impl WaitBudget {
             },
             transfer: None,
             started,
+            earlier: kept.map_or(Duration::ZERO, |(_, waited)| waited),
             deadline: started + Duration::from_secs(self.seconds),
             compaction_execution: false,
             compaction_since: started,
@@ -793,6 +826,63 @@ mod tests {
             serde_json::to_value(registry.view().pop().unwrap()).unwrap()["attemptSeconds"],
             3
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_budget_begun_again_keeps_the_time_and_the_start_of_its_request() {
+        let registry = Registry::new(broadcast::channel(16).0);
+        let budget = WaitBudget::tracked(300, &registry);
+        let gate = crate::gateway::freeze::Gate::default();
+        let traffic = gate.request(crate::gateway::freeze::Scope::Client(
+            crate::gateway::ClientId::Codex,
+        ));
+        traffic.waiting();
+        budget.begin();
+        budget.attach_traffic(&traffic);
+        let row = || registry.view().pop().unwrap();
+        let times = || {
+            let row = row();
+            (
+                row.elapsed_seconds,
+                row.attempt_seconds,
+                row.remaining_seconds,
+            )
+        };
+        tokio::time::advance(Duration::from_secs(70)).await;
+        // Frozen time is no part of what the request waited.
+        gate.set(true).unwrap();
+        tokio::time::advance(Duration::from_secs(1000)).await;
+        gate.set(false).unwrap();
+        let (began, first) = (row().started_at, row().request_id);
+        assert_eq!(times(), (70, 70, Some(230)));
+
+        // The panel's resend takes the request off the list; the budget
+        // that sends it again goes on counting the same request.
+        assert!(registry.cancel(&first));
+        assert!(registry.view().is_empty());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        budget.begin_again();
+        budget.attach_traffic(&traffic);
+        assert_ne!(row().request_id, first);
+        assert_eq!(row().started_at, began);
+        assert_eq!(times(), (70, 0, Some(300)));
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(times(), (75, 5, Some(295)));
+
+        // So does one begun again without an interruption.
+        budget.begin_again();
+        budget.attach_traffic(&traffic);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(times(), (78, 3, Some(297)));
+        assert_eq!(row().started_at, began);
+
+        // Another request on the same budget starts from nothing, also
+        // after an interruption nothing was sent again for.
+        assert!(registry.cancel(&row().request_id));
+        budget.acknowledge_cancel();
+        budget.begin();
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(times(), (4, 4, Some(296)));
     }
 
     #[tokio::test(start_paused = true)]

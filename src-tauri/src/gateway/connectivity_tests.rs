@@ -211,6 +211,63 @@ async fn a_provider_taken_out_of_the_queue_gives_up_the_request_held_for_it() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "a refused loopback connection takes Windows about two seconds, which these timings do not allow for"
+)]
+async fn a_provider_taken_out_of_the_queue_gives_up_the_request_awaiting_the_verdict() {
+    let port = free_port().await;
+    let (f, _dir, _changes) = fixture(port, true, true).await;
+    f.edit(Edit::Mode {
+        mode: "auto".into(),
+    });
+    // Twenty failed probes decide the network is down: two seconds of checking.
+    let mut settings = f.gateway.view().settings;
+    settings.network_probe_attempts = 20;
+    f.edit(Edit::Settings { settings });
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    let other = server(move |_, _| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        async move {
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(full(MESSAGE))
+                .unwrap()
+        }
+    })
+    .await;
+    let pending = send(&f);
+    tokio::time::timeout(LONG, async {
+        while !f
+            .gateway
+            .view()
+            .pending_requests
+            .iter()
+            .any(|p| p.phase == "retry")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the request did not reach the probe");
+    f.edit(form(serde_json::json!({
+        "name": "fixture-other",
+        "baseUrl": other.url("/v1"),
+        "token": FIXTURE_KEY,
+    })));
+    dequeue(&f);
+    // Well before the probe could have decided.
+    let answer = tokio::time::timeout(Duration::from_secs(1), pending)
+        .await
+        .expect("the request waited for the verdict");
+    assert!(answer.unwrap().contains("complete"));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    released(&f).await;
+    f.stop().await;
+}
+
+#[tokio::test]
 async fn any_answer_to_the_probe_keeps_the_ordinary_retry_and_the_switch_turns_it_off() {
     for probe in [true, false] {
         let port = free_port().await;
