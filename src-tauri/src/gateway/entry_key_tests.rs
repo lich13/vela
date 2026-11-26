@@ -127,6 +127,16 @@ fn a_handed_out_key_asks_only_for_what_is_counted_and_for_the_list_of_models() {
         ("POST", "/v1/chat/completions/../../files"),
         ("POST", "/v1/Responses"),
         ("POST", "/v1//responses"),
+        // Under a second version, which is not taken off where it is passed on,
+        // or under none or another than the one these are asked under.
+        ("POST", "/v1/v1/responses"),
+        ("POST", "/v1/v1/chat/completions"),
+        ("POST", "/v1beta/v1/messages"),
+        ("GET", "/v1/v1/models"),
+        ("GET", "/v1/v1beta/models/gemini-fixture"),
+        ("POST", "/responses"),
+        ("POST", "/v1beta/responses"),
+        ("POST", "/v1alpha/messages"),
         // Nothing at all.
         ("GET", "/v1"),
         ("POST", "/v1"),
@@ -140,6 +150,24 @@ fn a_handed_out_key_asks_only_for_what_is_counted_and_for_the_list_of_models() {
     }
     for (method, path) in refused {
         assert!(!counted(method, path), "{method} {path}");
+    }
+    // The socket it may open is the one of the Responses protocol, under the
+    // path that is passed on as it came.
+    for path in ["/v1/responses", "/v1/responses/"] {
+        assert!(routing::counted_socket(path), "{path}");
+    }
+    for path in [
+        "/responses",
+        "/v1/responses//",
+        "/v1/v1/responses",
+        "/v1beta/responses",
+        "/v1/responses/compact",
+        "/v1/responses/fixture-response",
+        "/v1/realtime",
+        "/v1/Responses",
+        "/v1",
+    ] {
+        assert!(!routing::counted_socket(path), "{path}");
     }
 }
 

@@ -4416,7 +4416,7 @@ async fn forward_inner(
         // own, and a tunnel passes uncounted and would outlast the key.
         let path = request.uri().path();
         let counted = if websocket {
-            responses_socket
+            routing::counted_socket(path)
         } else {
             routing::counted(request.method(), path)
                 // Antigravity's metric calls are answered below and go nowhere.

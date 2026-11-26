@@ -633,6 +633,19 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
         call(port, "GET", "/v1/realtime", &tunnelled, b"").await,
         403
     );
+    // Nor is what is asked for under a path that is not the one written for
+    // it: a second version or an empty segment is passed on as it came.
+    for (method, path) in [("POST", "/v1/v1/responses"), ("GET", "/v1/v1/models")] {
+        assert_eq!(
+            call(port, method, path, &[("Authorization", &bearer)], b"").await,
+            403,
+            "{method} {path}"
+        );
+    }
+    assert_eq!(
+        call(port, "GET", "/v1/responses//", &tunnelled, b"").await,
+        403
+    );
     assert_eq!(
         upstream.seen.lock().len(),
         generated.len(),

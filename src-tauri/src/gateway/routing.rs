@@ -113,9 +113,11 @@ fn plain(segment: &str) -> bool {
 /// own. The path has to be one of these as it is written: it is passed on as
 /// it came, and a provider may well read `/models/../files` as its files.
 pub fn counted(method: &hyper::Method, path: &str) -> bool {
-    let rest = unversioned(path);
-    let rest = rest.strip_suffix('/').unwrap_or(&rest);
+    let whole = path.strip_suffix('/').unwrap_or(path);
     if *method == hyper::Method::GET {
+        // A list is asked for under the one version its protocol names. Under
+        // a second one the provider would be asked for another path.
+        let rest = super::gemini::path(whole);
         return rest == "/models"
             || rest
                 .strip_prefix("/models/")
@@ -124,12 +126,18 @@ pub fn counted(method: &hyper::Method, path: &str) -> bool {
     *method == hyper::Method::POST
         && (super::gemini::model(path).is_some()
             || matches!(
-                rest,
-                "/responses"
-                    | "/responses/compact"
-                    | "/chat/completions"
-                    | "/messages"
-                    | "/messages/count_tokens"
+                whole,
+                "/v1/responses"
+                    | "/v1/responses/compact"
+                    | "/v1/chat/completions"
+                    | "/v1/messages"
+                    | "/v1/messages/count_tokens"
+                    | "/v1/alpha/search"
                     | "/alpha/search"
             ))
+}
+/// The one socket a handed-out key may open: that of the Responses protocol,
+/// whose turns are counted as they pass. Its path is passed on as it came too.
+pub fn counted_socket(path: &str) -> bool {
+    path.strip_suffix('/').unwrap_or(path) == "/v1/responses"
 }
