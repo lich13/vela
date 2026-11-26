@@ -431,6 +431,42 @@ async fn a_running_gateway_hands_out_and_takes_back_a_key_whatever_became_of_the
 }
 
 #[tokio::test]
+async fn a_key_leaves_the_connections_to_the_providers_and_the_clients_list_of_models_alone() {
+    let (t, g) = fixture(vec!["https://a.invalid".into()]).await;
+    let provider = g.view().providers[0].id.clone();
+    update(&g, &t, Edit::ModelCatalog { enabled: true });
+    // The pass over the client's list that the edit asked for is over, and a
+    // connection is kept for the requests to come.
+    g.sync_catalog().await.unwrap();
+    let pending = || {
+        g.0.catalog_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+    };
+    assert!(!pending());
+    let kept: HttpClient =
+        Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));
+    g.0.clients.lock().insert("fixture".into(), kept);
+
+    let (id, _) = hand_out_key(&g, t.path(), "fixture-partner");
+    update(&g, &t, save(Some(&id), "fixture-renamed"));
+    update(&g, &t, Edit::DeleteEntryKey { id });
+    assert_eq!(g.0.clients.lock().len(), 1);
+    assert!(!pending());
+
+    // An edit of a provider lets go of the one and asks for the other.
+    update(
+        &g,
+        &t,
+        Edit::RenameProvider {
+            id: provider,
+            name: "fixture-renamed".into(),
+        },
+    );
+    assert!(g.0.clients.lock().is_empty());
+    assert!(pending());
+}
+
+#[tokio::test]
 async fn a_key_waits_for_a_store_the_transaction_record_has_yet_to_write() {
     let (t, g) = fixture(vec!["https://a.invalid".into()]).await;
     start(&g, &t).await;

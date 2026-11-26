@@ -1860,10 +1860,15 @@ impl Gateway {
                 .map(|p| (p.id.clone(), Self::quota_version(&s.store, p)))
                 .collect(),
         );
-        let catalog = catalog_edit || s.store.model_catalog;
+        // A key is nothing of how a provider is reached or of what it serves:
+        // the connections kept to the providers and the list of models in the
+        // client's own file stay as they are.
+        let catalog = !key_edit && (catalog_edit || s.store.model_catalog);
         drop(s);
         self.0.registry.update_ports()?;
-        self.0.clients.lock().clear();
+        if !key_edit {
+            self.0.clients.lock().clear();
+        }
         self.0.registry.changed();
         if catalog {
             self.schedule_catalog_sync();
