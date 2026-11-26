@@ -865,6 +865,26 @@ async fn a_provider_taken_out_with_no_other_in_the_queue_answers_with_its_reject
 }
 
 #[tokio::test]
+async fn a_provider_taken_out_after_the_retry_budget_ran_out_still_loses_the_retry_to_the_queue() {
+    let (first, first_hits) = answering(|_| limited()).await;
+    let (second, second_hits) = answering(|_| sse(COMPLETE)).await;
+    let f = queued(&[first.url("/v1"), second.url("/v1")], distant()).await;
+    let mut settings = f.gateway.view().settings;
+    settings.retry_budget_seconds = 1;
+    f.edit(Edit::Settings { settings });
+    let response = request(&f.gateway, "/v1/messages", STREAM_REQUEST).await;
+    waiting(&f, &first_hits, 1).await;
+    // Endless mode keeps the request past the budget, which the second
+    // provider, not in endless mode, goes by.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    dequeue(&f);
+    delivered_once(response).await;
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
 async fn a_reset_during_the_wait_sends_the_retry_to_the_provider_still_in_the_queue() {
     let (first, first_hits) = answering(|n| match n {
         0 => limited(),

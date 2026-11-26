@@ -1658,7 +1658,8 @@ impl Exchange<'_> {
     /// taken out of the queue: the request leaves it for the queue as it is
     /// now. What endless mode set aside, the attempts made there and any
     /// capacity wait go with it; the providers that refused the request for
-    /// good, its waiting budget and its body stay. Reports whether it left.
+    /// good and its body stay. Its retry budget stays too, or starts over if
+    /// endless mode had the request exempt from it. Reports whether it left.
     fn release(&mut self, id: &str) -> bool {
         if !self.reselects()
             || self
@@ -1671,6 +1672,14 @@ impl Exchange<'_> {
         }
         if let Some((_, attempts)) = self.unpinned.take() {
             self.ordinary_attempts = attempts;
+        }
+        if self.unbounded {
+            // The time endless mode held the request is no more counted
+            // than the attempts it made there.
+            self.request_budget.begin();
+            self.request_budget.attach_traffic(&self.traffic);
+            self.request_budget
+                .describe(None, self.plan.model.as_deref(), "admission");
         }
         self.claude_owner = None;
         self.retry_owner = None;
