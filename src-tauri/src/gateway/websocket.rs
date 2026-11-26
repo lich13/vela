@@ -4106,6 +4106,53 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn only_a_turn_made_with_the_clients_own_key_speaks_for_the_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = Gateway::new(dir.path().join("data")).unwrap();
+        let budget = super::super::wait_budget::WaitBudget::tracked(60, &g.0.pending_requests);
+        let failover = super::super::failover::Tracker::new(None);
+        // One turn that ends well and is handed on whole, as `agent` asked it.
+        let turn = |agent: &'static str, entry_key: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::USER_AGENT, agent.parse().unwrap());
+            let mut protocol = attempt_protocol(
+                &g,
+                &budget,
+                &[],
+                "fixture-provider",
+                Some("fixture-model"),
+                &None,
+                &failover,
+                &headers,
+                entry_key,
+                crate::usage::model::now(),
+                None,
+                None,
+            );
+            protocol.websocket_status(101);
+            protocol.value(
+                &serde_json::json!({"type": "response.completed", "response": {
+                    "id": "fixture-response", "status": "completed", "model": "fixture-model",
+                    "usage": {"input_tokens": 2, "output_tokens": 1}
+                }}),
+            );
+            protocol.delivery().handed(1, true);
+            protocol.finish(Some(101), code::OK);
+        };
+        let agent = || {
+            g.successful_user_agent()
+                .ok()
+                .map(|agent| agent.to_str().unwrap().to_owned())
+        };
+        turn("fixture-partner/1.0", Some("fixture-key-id"));
+        assert_eq!(agent(), None);
+        turn("fixture-client/1.0", None);
+        assert_eq!(agent().as_deref(), Some("fixture-client/1.0"));
+        turn("fixture-partner/2.0", Some("fixture-key-id"));
+        assert_eq!(agent().as_deref(), Some("fixture-client/1.0"));
+    }
+
+    #[tokio::test]
     async fn keepalive_preserves_control_frames_and_does_not_leak_its_own_pong() {
         let (a, b) = tokio::io::duplex(4096);
         let peer = WebSocket::from_stream(a, yawc::Role::Server, Options::default()).unwrap();
