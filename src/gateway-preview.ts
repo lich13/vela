@@ -20,7 +20,7 @@ import {
   DEFAULT_RISK_CODES,
   DEFAULT_UPSTREAM_RETRY_SECONDS,
 } from "./types";
-import { densePreview } from "./preview-fixtures";
+import { densePreview, previewKeys } from "./preview-fixtures";
 const healthy: Health = {
   state: "closed",
   failures: 0,
@@ -954,6 +954,8 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
 }
 
 if (densePreview) {
+  gatewayDemo.entryKeys = structuredClone(previewKeys.codex);
+  claudeGatewayDemo.entryKeys = structuredClone(previewKeys.claude);
   gatewayDemo.pendingRequests = Array.from({ length: 4 }, (_, i) => ({
     requestId: `fixture-wait-${i}`,
     providerId: i % 2 ? "backup" : "primary",
