@@ -543,10 +543,10 @@ fn archived_cache_alias_prevents_double_billing_without_guessing_a_pair() {
     assert_eq!(store.dashboard(&all_time()).unwrap().totals.requests, 0);
 }
 
-/// Puts a database back into the shape it had before a record kept the key
-/// it came in with: the column is gone, and the two views that list a
-/// record's columns, with the triggers of the first, are made again from
-/// their own text without it.
+/// Puts a database back into the shape it had before a record, and the
+/// receipt left of it, kept the key it came in with: the column is gone from
+/// both, and the two views that list a record's columns, with the triggers of
+/// the first, are made again from their own text without it.
 fn without_entry_column(dir: &Path) {
     let c = rusqlite::Connection::open(dir.join("usage.sqlite")).unwrap();
     super::query::register(&c).unwrap();
@@ -571,16 +571,18 @@ fn without_entry_column(dir: &Path) {
          DROP VIEW records; DROP VIEW v12_records;
          {};
          ALTER TABLE v12_rows DROP COLUMN entry;
+         ALTER TABLE receipts DROP COLUMN entry;
          COMMIT;",
         made.replace(",r.entry", "")
     ))
     .unwrap();
 }
 
-/// Whether a record has the column for the key it came in with.
-fn has_entry_column(c: &rusqlite::Connection) -> bool {
+/// How many of the two, a record and a receipt, have the column for the key
+/// a request came in with.
+fn entry_columns(c: &rusqlite::Connection) -> i64 {
     c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('v12_rows') WHERE name='entry')",
+        "SELECT (SELECT count(*) FROM pragma_table_info('v12_rows') WHERE name='entry')+(SELECT count(*) FROM pragma_table_info('receipts') WHERE name='entry')",
         [],
         |row| row.get(0),
     )
@@ -710,7 +712,7 @@ fn receipts_and_cursors_of_version_13_are_taken_over_and_still_match() {
         )
         .unwrap();
     assert_eq!(texts, ("texttexttexttext".into(), "text".into()));
-    assert!(!has_entry_column(&old));
+    assert_eq!(entry_columns(&old), 0);
     drop(old);
 
     let mut store = Store::open(dir.path()).unwrap();
@@ -719,8 +721,9 @@ fn receipts_and_cursors_of_version_13_are_taken_over_and_still_match() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, 14);
-    // Version 13 goes all the way: its records have the column for a key too.
-    assert!(has_entry_column(&store.connection));
+    // Version 13 goes all the way: its records and receipts have the column
+    // for a key too.
+    assert_eq!(entry_columns(&store.connection), 2);
     assert_eq!(receipts(&store), kept);
     assert_eq!(tables(&store), made);
     assert_eq!(kinds(&store), ("blobblobblobblob".into(), "blob".into()));
@@ -1941,6 +1944,97 @@ fn gateway_requests_with_the_same_response_merge_within_one_key_and_not_across_k
     assert_eq!(requests(&store, KEY_B), 2);
 }
 
+#[test]
+fn an_archived_gateway_request_is_another_request_to_one_of_another_key_with_its_response() {
+    let (_dir, mut store, _pricing) = fixture();
+    let answered = |id: &str, at: i64, key: Option<&str>, response: &str| {
+        let mut request = keyed(id, at, key);
+        request.attempts[0].response_id = Some(safe_id(response));
+        request
+    };
+    let shared = "fixture-response-archived-shared";
+    let own = "fixture-response-archived-own";
+    let named = "fixture-response-archived-named";
+    let archived = [
+        answered("fixture-archived-a", BASE, Some(KEY_A), shared),
+        answered("fixture-archived-own", BASE + 1, None, own),
+        answered("fixture-archived-b", BASE + 2, Some(KEY_B), named),
+    ];
+    store.write_batch(&archived, None).unwrap();
+    store
+        .archive_batch(&archived.map(|request| request.id))
+        .unwrap();
+    // What is left of each names the key it came in with, as its record did.
+    let receipts: Vec<(String, Option<String>)> = store
+        .connection
+        .prepare("SELECT usage_text(id),usage_text(entry) FROM receipts ORDER BY 1")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        receipts,
+        [
+            ("fixture-archived-a".into(), Some(KEY_A.into())),
+            ("fixture-archived-b".into(), Some(KEY_B.into())),
+            ("fixture-archived-own".into(), None),
+        ]
+    );
+
+    let mut session = record(
+        "fixture-later-session",
+        "codex",
+        "codex",
+        BASE + DAY + 4,
+        None,
+        Some("fixture-model"),
+        usage(10, 1),
+        None,
+    );
+    session.attempts[0].response_id = Some(safe_id(named));
+    store
+        .write_batch(
+            &[
+                answered("fixture-later-b", BASE + DAY, Some(KEY_B), shared),
+                answered("fixture-later-own", BASE + DAY + 1, None, shared),
+                answered("fixture-later-a", BASE + DAY + 2, Some(KEY_A), shared),
+                answered("fixture-later-own-again", BASE + DAY + 3, None, own),
+                session,
+            ],
+            None,
+        )
+        .unwrap();
+    let merged = |id: &str| {
+        let row = store.detail(id).unwrap();
+        (row.deduplication, row.duplicate_of)
+    };
+    // With another key, the client's own included, it is a request of its own.
+    for id in ["fixture-later-b", "fixture-later-own"] {
+        assert_eq!(merged(id), (String::new(), None), "id={id}");
+    }
+    // With the same key it is the archived request, as it was before keys.
+    assert_eq!(
+        merged("fixture-later-a"),
+        ("archived_match".into(), Some("fixture-archived-a".into()))
+    );
+    assert_eq!(
+        merged("fixture-later-own-again"),
+        ("archived_match".into(), Some("fixture-archived-own".into()))
+    );
+    // A session names the archived request it is, whatever key that came in with.
+    assert_eq!(
+        merged("fixture-later-session"),
+        ("archived_match".into(), Some("fixture-archived-b".into()))
+    );
+    let requests = |key: &str| store.dashboard(&by_key(key)).unwrap().totals.requests;
+    assert_eq!(
+        (requests(KEY_A), requests(KEY_B), requests(OWN_ENTRY_KEY)),
+        (1, 2, 2)
+    );
+    assert_eq!(store.dashboard(&all_time()).unwrap().totals.requests, 5);
+}
+
 /// Opens a copy of the usage database of `dir` and checks what opening does
 /// to one written before a record kept its key. `dir` is only read: the copy
 /// is what a reader sees of it, made in a temporary directory. Every message
@@ -1965,16 +2059,17 @@ fn a_copy_written_before_keys_opens_with_its_records_under_the_own_key(dir: &Pat
             .execute("VACUUM INTO ?1", [target.to_str().unwrap()])
             .unwrap_or_else(|_| panic!("the usage database could not be copied"));
     }
-    // Version, whether a record has the column, records and rollups.
-    let state = |c: &rusqlite::Connection| -> (i64, bool, i64, i64) {
+    // Version, how many of a record and a receipt have the column, records
+    // and rollups.
+    let state = |c: &rusqlite::Connection| -> (i64, i64, i64, i64) {
         c.query_row(
-            "SELECT (SELECT user_version FROM pragma_user_version),EXISTS(SELECT 1 FROM pragma_table_info('v12_rows') WHERE name='entry'),(SELECT count(*) FROM v12_rows),(SELECT count(*) FROM daily)",
+            "SELECT (SELECT user_version FROM pragma_user_version),(SELECT count(*) FROM pragma_table_info('v12_rows') WHERE name='entry')+(SELECT count(*) FROM pragma_table_info('receipts') WHERE name='entry'),(SELECT count(*) FROM v12_rows),(SELECT count(*) FROM daily)",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap_or_else(|_| panic!("the copy could not be read"))
     };
-    let (version, column, records, rollups) = state(
+    let (version, columns, records, rollups) = state(
         &rusqlite::Connection::open(&target)
             .unwrap_or_else(|_| panic!("the copy could not be opened")),
     );
@@ -1982,14 +2077,14 @@ fn a_copy_written_before_keys_opens_with_its_records_under_the_own_key(dir: &Pat
         matches!(version, 13 | 14),
         "the copy is not of a version that is taken over"
     );
-    assert!(!column, "the copy already has the column");
+    assert!(columns == 0, "the copy already has the column");
     assert!(records > 0 || rollups > 0, "the copy holds no usage");
 
     let store =
         Store::open(copy.path()).unwrap_or_else(|_| panic!("the copy could not be taken over"));
     assert!(
-        state(&store.connection) == (14, true, records, rollups),
-        "taking the copy over changed more than the column"
+        state(&store.connection) == (14, 2, records, rollups),
+        "taking the copy over changed more than the two columns"
     );
     let overview = store
         .dashboard(&Filter::default())
@@ -2056,22 +2151,20 @@ fn a_database_written_before_keys_gains_the_column_and_keeps_its_records_under_t
     without_entry_column(dir.path());
     {
         let old = rusqlite::Connection::open(&path).unwrap();
-        assert_eq!((version(&old), has_entry_column(&old)), (14, false));
+        assert_eq!((version(&old), entry_columns(&old)), (14, 0));
     }
     // A copy of it is taken over, as one of a real database is before a
     // release; the database itself is left as it was.
     a_copy_written_before_keys_opens_with_its_records_under_the_own_key(dir.path());
-    assert!(!has_entry_column(
-        &rusqlite::Connection::open(&path).unwrap()
-    ));
+    assert_eq!(
+        entry_columns(&rusqlite::Connection::open(&path).unwrap()),
+        0
+    );
 
     let mut store = Store::open(dir.path()).unwrap();
     assert_eq!(
-        (
-            version(&store.connection),
-            has_entry_column(&store.connection)
-        ),
-        (14, true)
+        (version(&store.connection), entry_columns(&store.connection)),
+        (14, 2)
     );
     // What it held reads as it did, all of it under the client's own key.
     assert_eq!(
@@ -2092,10 +2185,10 @@ fn a_database_written_before_keys_gains_the_column_and_keeps_its_records_under_t
     assert_eq!(store.logs(&by_key(OWN_ENTRY_KEY)).unwrap().total, 2);
     assert_eq!(store.logs(&by_key(KEY_A)).unwrap().total, 0);
 
-    // A record's columns and the views that list them are those of a database
-    // made new.
+    // The columns of a record and of a receipt, and the views that list a
+    // record's, are those of a database made new.
     let columns = |c: &rusqlite::Connection| -> Vec<String> {
-        c.prepare("SELECT concat_ws('|',cid,name,type,\"notnull\",coalesce(dflt_value,''),pk) FROM pragma_table_info('v12_rows') ORDER BY cid")
+        c.prepare("SELECT concat_ws('|',t.name,i.cid,i.name,i.type,i.\"notnull\",coalesce(i.dflt_value,''),i.pk) FROM sqlite_master t,pragma_table_info(t.name) i WHERE t.name IN ('v12_rows','receipts') ORDER BY t.name,i.cid")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()

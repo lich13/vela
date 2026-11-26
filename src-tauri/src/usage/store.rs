@@ -223,14 +223,15 @@ fn held_sums(mut body: Value) -> Result<Vec<query::Sum>> {
     serde_json::from_value(held).map_err(|_| failure("用量记录无效"))
 }
 /// A cursor's body is compressed (`usage_compress`); the identifiers of a
-/// receipt are keys (`usage_key`), as those of a stored record are.
+/// receipt are keys (`usage_key`), as those of a stored record are, the
+/// gateway key its request came in with among them.
 pub(super) fn common_schema(c: &Connection) -> Result<()> {
     db(c.execute_batch(
         "CREATE TABLE IF NOT EXISTS cursors(id TEXT PRIMARY KEY,body BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS daily(id TEXT PRIMARY KEY,day INTEGER NOT NULL,body TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS price_bases(hash TEXT PRIMARY KEY,body TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS receipts(id BLOB PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider BLOB,response BLOB,signature BLOB,ended INTEGER NOT NULL,effective INTEGER NOT NULL,operation TEXT NOT NULL DEFAULT 'model');
+         CREATE TABLE IF NOT EXISTS receipts(id BLOB PRIMARY KEY,client TEXT NOT NULL,source TEXT NOT NULL,time INTEGER NOT NULL,provider BLOB,response BLOB,signature BLOB,ended INTEGER NOT NULL,effective INTEGER NOT NULL,operation TEXT NOT NULL DEFAULT 'model',entry BLOB);
          CREATE INDEX IF NOT EXISTS receipt_response ON receipts(client,response);
          CREATE INDEX IF NOT EXISTS receipt_signature ON receipts(client,signature,ended);
          CREATE INDEX IF NOT EXISTS daily_time ON daily(day);",
@@ -272,9 +273,9 @@ impl Store {
                 storage_v12::upgrade_v13(&tx)?;
                 db(tx.commit())?;
             }
-            if !storage_v12::has_entry_column(&connection)? {
+            if !storage_v12::has_entry_columns(&connection)? {
                 let tx = db(connection.transaction())?;
-                storage_v12::add_entry_column(&tx)?;
+                storage_v12::add_entry_columns(&tx)?;
                 db(tx.commit())?;
             }
             return Ok(Self {

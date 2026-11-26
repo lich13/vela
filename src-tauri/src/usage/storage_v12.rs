@@ -807,22 +807,33 @@ pub(super) fn upgrade_v13(c: &Connection) -> Result<()> {
          PRAGMA user_version=14;",
     ))
 }
-/// Whether a record has a column for the gateway key it came in with. A
-/// database written before a gateway had such keys lacks it, at the same
-/// version: what it holds reads the same with and without the column.
-pub(super) fn has_entry_column(c: &Connection) -> Result<bool> {
+/// Whether `table` has a column for the gateway key a request came in with.
+fn has_entry_column(c: &Connection, table: &str) -> Result<bool> {
     db(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('v12_rows') WHERE name='entry')",
-        [],
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='entry')",
+        [table],
         |row| row.get(0),
     ))
 }
-/// Adds that column, which rewrites no row, and makes the views that list a
-/// record's columns again; dropping a view drops its triggers with it.
-pub(super) fn add_entry_column(c: &Connection) -> Result<()> {
-    db(c.execute_batch(&format!(
-        "ALTER TABLE v12_rows ADD COLUMN entry BLOB; DROP VIEW records; DROP VIEW v12_records; {RECORD_VIEWS}"
-    )))
+/// Whether a record, and the receipt that is left of it once it is archived,
+/// have that column. A database written before a gateway had such keys lacks
+/// both, at the same version: what it holds reads the same with and without.
+pub(super) fn has_entry_columns(c: &Connection) -> Result<bool> {
+    Ok(has_entry_column(c, "v12_rows")? && has_entry_column(c, "receipts")?)
+}
+/// Adds the column where it is missing, which rewrites no row. After a
+/// record's, the views that list a record's columns are made again; dropping
+/// a view drops its triggers with it.
+pub(super) fn add_entry_columns(c: &Connection) -> Result<()> {
+    if !has_entry_column(c, "v12_rows")? {
+        db(c.execute_batch(&format!(
+            "ALTER TABLE v12_rows ADD COLUMN entry BLOB; DROP VIEW records; DROP VIEW v12_records; {RECORD_VIEWS}"
+        )))?;
+    }
+    if !has_entry_column(c, "receipts")? {
+        db(c.execute_batch("ALTER TABLE receipts ADD COLUMN entry BLOB;"))?;
+    }
+    Ok(())
 }
 
 fn record_state(c: &Connection, values: &[rusqlite::types::Value]) -> Result<i64> {
@@ -1457,10 +1468,10 @@ pub(super) fn set_state(c: &Connection, r: &Record, effective: i64) -> Result<()
 }
 // archive_ids is a bounded, connection-local selection owned by Store::archive_batch.
 pub(super) fn archive_selected(c: &Connection) -> Result<()> {
-    db(c.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation)
+    db(c.execute("INSERT OR IGNORE INTO receipts(id,client,source,time,provider,response,signature,ended,effective,operation,entry)
       SELECT r.key,usage_label(r.client),usage_label(r.source),r.time,usage_key(usage_value(p.value)),r.response,
         usage_key(usage_signature(r.client,s.value,coalesce(a.input,b.input),coalesce(a.output,b.output),coalesce(a.cache_read,b.cache_read),coalesce(a.cache_write,b.cache_write),coalesce(a.operation,b.operation))),
-        r.time+r.ended,r.effective,CASE coalesce(a.operation,b.operation) WHEN 1 THEN 'compaction' WHEN 2 THEN 'web_search' ELSE 'model' END
+        r.time+r.ended,r.effective,CASE coalesce(a.operation,b.operation) WHEN 1 THEN 'compaction' WHEN 2 THEN 'web_search' ELSE 'model' END,r.entry
       FROM v12_records r
       LEFT JOIN v12_attempts a ON a.owner=r.rid AND a.ordinal=r.last
       LEFT JOIN v12_sessions b ON b.owner=r.rid AND b.ordinal=r.last

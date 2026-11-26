@@ -112,7 +112,9 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
     for r in &all {
         let signatures = r.correlation_signatures();
         // A receipt holds its identifiers as keys. The order is that of their text.
-        let mut archived_stmt=db(c.prepare("SELECT usage_text(id),usage_text(response) FROM (SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?2 IS NOT NULL AND response=usage_key(?2) AND (provider IS NULL OR ?3 IS NULL OR provider=usage_key(?3)) UNION SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?5 IS NOT NULL AND signature IN (usage_key(?5),usage_key(?9)) AND ended BETWEEN ?6 AND ?7 AND (provider IS NULL OR ?3 IS NULL OR provider=usage_key(?3)) AND source<>'grok' AND source<>?4 AND (source='proxy' OR ?4='proxy') AND (response IS NULL OR ?2 IS NULL)) ORDER BY CASE WHEN response=usage_key(?2) THEN 0 ELSE 1 END,usage_text(id) LIMIT 3"))?;
+        // One left of a gateway request is another request to one that came in
+        // with another key, as a record of it would be (`exact`).
+        let mut archived_stmt=db(c.prepare("SELECT usage_text(id),usage_text(response) FROM (SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?2 IS NOT NULL AND response=usage_key(?2) AND (provider IS NULL OR ?3 IS NULL OR provider=usage_key(?3)) AND (source<>'proxy' OR ?4<>'proxy' OR entry IS usage_key(?10)) UNION SELECT id,response FROM receipts WHERE effective=1 AND operation=?8 AND client=?1 AND ?5 IS NOT NULL AND signature IN (usage_key(?5),usage_key(?9)) AND ended BETWEEN ?6 AND ?7 AND (provider IS NULL OR ?3 IS NULL OR provider=usage_key(?3)) AND source<>'grok' AND source<>?4 AND (source='proxy' OR ?4='proxy') AND (response IS NULL OR ?2 IS NULL)) ORDER BY CASE WHEN response=usage_key(?2) THEN 0 ELSE 1 END,usage_text(id) LIMIT 3"))?;
         let archived = db(archived_stmt.query_map(
             params![
                 r.client,
@@ -126,7 +128,8 @@ pub fn reconcile(c: &Connection, seed: &Record) -> Result<()> {
                     .map(|a| a.operation)
                     .unwrap_or_default()
                     .as_str(),
-                signatures[1]
+                signatures[1],
+                r.entry_key
             ],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
         ))?;
