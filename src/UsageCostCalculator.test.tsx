@@ -259,3 +259,135 @@ it("keeps the inputs after a calculation failure and permits retry", async () =>
   await user.click(screen.getByRole("button", { name: "计算" }));
   await screen.findByText("$5.685872");
 });
+
+const claudeKey = {
+  id: "b7d4e9f0-2a6c-4b31-9e75-4c0a8d5e6f03",
+  name: "Fixture CI",
+};
+const codexKey = {
+  id: "3f6a1c2e-7b4d-4e19-8a50-1d2c9e6b7f01",
+  name: "Fixture bot",
+};
+/**
+ * Claude Code and Codex each hand a key out and Grok Build hands out none. The
+ * DeepSeek Harness gateway cannot be read.
+ */
+function handOutKeys() {
+  const usual = vi.mocked(command).getMockImplementation()!;
+  vi.mocked(command).mockImplementation(async (name, ...rest) => {
+    if (name !== "get_gateway") return usual(name, ...rest) as never;
+    const { clientId } = rest[0] as { clientId: string };
+    if (clientId === "dsh") throw new Error("fixture gateway unreadable");
+    return {
+      providers: [],
+      entryKeys:
+        clientId === "claude"
+          ? [claudeKey]
+          : clientId === "codex"
+            ? [codexKey]
+            : [],
+    } as never;
+  });
+}
+/** Calculates, and answers with the filter the usage was asked for with. */
+async function counted(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "计算" }));
+  await screen.findByText("$5.685872");
+  const [, args] = called("get_usage_calculator_totals").at(-1)!;
+  return (args as { filter: Record<string, unknown> }).filter;
+}
+
+it("counts the usage that came in with the key chosen, and lets the key go with the client", async () => {
+  handOutKeys();
+  const user = userEvent.setup();
+  render(
+    <UsageCostCalculator
+      filter={{ client: "claude", entryKey: claudeKey.id }}
+      close={() => {}}
+    />,
+  );
+  // The key the page is narrowed to, once the client's keys are known.
+  await screen.findByRole("option", { name: "Fixture CI" });
+  const key = () => screen.getByLabelText("Key");
+  expect(key()).toHaveValue(claudeKey.id);
+  expect(
+    [...key().querySelectorAll("option")].map((option) => option.textContent),
+  ).toEqual(["全部 Key", "本机 Key", "Fixture CI"]);
+  // Beside the model, in the two columns the other rows have.
+  expect(key().closest("div")).toBe(
+    screen.getByLabelText("模型").closest("div"),
+  );
+  expect(key().closest("div")).toHaveClass("usage-price-fields", {
+    exact: true,
+  });
+  expect(await counted(user)).toMatchObject({
+    client: "claude",
+    source: "proxy",
+    entryKey: claudeKey.id,
+  });
+
+  await user.selectOptions(key(), "本机 Key");
+  expect((await counted(user)).entryKey).toBe("default");
+  await user.selectOptions(key(), "全部 Key");
+  expect((await counted(user)).entryKey).toBeUndefined();
+
+  // Another client has a key of its own too, and keys it hands out: none of
+  // them is chosen.
+  await user.selectOptions(key(), "本机 Key");
+  await user.selectOptions(screen.getByLabelText("客户端"), "codex");
+  await screen.findByRole("option", { name: "Fixture bot" });
+  expect(key()).toHaveValue("");
+  const other = await counted(user);
+  expect(other.client).toBe("codex");
+  expect(other.entryKey).toBeUndefined();
+  await user.selectOptions(key(), "Fixture bot");
+  expect((await counted(user)).entryKey).toBe(codexKey.id);
+
+  // A gateway that cannot be read offers no key, and not the last client's.
+  await user.selectOptions(screen.getByLabelText("客户端"), "dsh");
+  await ready();
+  expect(screen.queryByLabelText("Key")).toBeNull();
+  expect((await counted(user)).entryKey).toBeUndefined();
+
+  // A client that hands out none shows the form as it was.
+  await user.selectOptions(screen.getByLabelText("客户端"), "codex");
+  await screen.findByRole("option", { name: "Fixture bot" });
+  await user.selectOptions(screen.getByLabelText("客户端"), "grok");
+  await ready();
+  expect(screen.queryByLabelText("Key")).toBeNull();
+  expect(screen.getByLabelText("模型").closest("div")).not.toHaveClass(
+    "usage-price-fields",
+  );
+  const none = await counted(user);
+  expect(none.client).toBe("grok");
+  expect(none.entryKey).toBeUndefined();
+});
+
+it("counts every key where the page's key is not one the client shown hands out", async () => {
+  handOutKeys();
+  const user = userEvent.setup();
+  // Every client is on the page, narrowed to a key of Codex, and the
+  // calculator opens on Claude Code.
+  const first = render(
+    <UsageCostCalculator filter={{ entryKey: codexKey.id }} close={() => {}} />,
+  );
+  await screen.findByRole("option", { name: "Fixture CI" });
+  expect(screen.getByLabelText("Key")).toHaveValue("");
+  const asked = await counted(user);
+  expect(asked.client).toBe("claude");
+  expect(asked.entryKey).toBeUndefined();
+  first.unmount();
+
+  // The client's own key is no choice where it is the only one.
+  render(
+    <UsageCostCalculator
+      filter={{ client: "grok", entryKey: "default" }}
+      close={() => {}}
+    />,
+  );
+  await ready();
+  expect(screen.queryByLabelText("Key")).toBeNull();
+  const own = await counted(user);
+  expect(own.client).toBe("grok");
+  expect(own.entryKey).toBeUndefined();
+});
