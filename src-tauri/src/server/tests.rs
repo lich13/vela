@@ -310,6 +310,76 @@ async fn a_provider_is_handed_over_whole_and_taken_in_as_a_copy() {
     assert_eq!(error.unwrap_err().code, code::PROVIDER);
 }
 
+#[tokio::test]
+async fn a_key_is_handed_out_by_name_and_read_only_by_a_request_that_says_it_is_internal() {
+    let fixture = fixture().await;
+    let mut client = Client::connect(&fixture).await;
+    let gateway = client
+        .call("get_gateway", json!({"clientId": "claude"}))
+        .await
+        .unwrap();
+    assert_eq!(gateway["entryKeys"], json!([]));
+    let edit = |revision: &Value, edit: Value| {
+        json!({
+            "clientId": "claude",
+            "expectedRevision": revision,
+            "edit": edit,
+        })
+    };
+    let handed = json!({"op": "saveEntryKey", "name": "fixture-partner"});
+    let saved = client
+        .call("update_gateway", edit(&gateway["revision"], handed))
+        .await
+        .unwrap();
+    // A window is told the id and the name of a key and nothing else of it.
+    let id = saved["entryKeys"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        saved["entryKeys"],
+        json!([{"id": id, "name": "fixture-partner"}])
+    );
+
+    let named = json!({"clientId": "claude", "keyId": id});
+    let refused = client.call("export_gateway_key", named.clone()).await;
+    assert_eq!(refused.unwrap_err().code, code::UNSUPPORTED);
+    let key = client.own("export_gateway_key", named.clone()).await;
+    let key = key.unwrap().as_str().unwrap().to_owned();
+    assert!(key.starts_with("gs_") && key.len() == 67, "{}", key.len());
+    assert!(!saved.to_string().contains(&key));
+    // It is a key of the client that handed it out and of no other.
+    let other = json!({"clientId": "codex", "keyId": id});
+    let error = client.own("export_gateway_key", other).await;
+    assert_eq!(error.unwrap_err().code, code::MISSING);
+
+    // Whoever read the gateway before the key was there has to read it again.
+    let renaming = json!({"op": "saveEntryKey", "id": id, "name": "fixture-renamed"});
+    let stale = client
+        .call(
+            "update_gateway",
+            edit(&gateway["revision"], renaming.clone()),
+        )
+        .await;
+    assert_eq!(stale.unwrap_err().code, code::CONFLICT);
+    // A new name leaves the key what it was, and taken back it is not read.
+    let renamed = client
+        .call("update_gateway", edit(&saved["revision"], renaming))
+        .await
+        .unwrap();
+    assert_eq!(
+        renamed["entryKeys"],
+        json!([{"id": id, "name": "fixture-renamed"}])
+    );
+    let again = client.own("export_gateway_key", named.clone()).await;
+    assert_eq!(again.unwrap(), json!(key));
+    let taking = json!({"op": "deleteEntryKey", "id": id});
+    let taken = client
+        .call("update_gateway", edit(&renamed["revision"], taking))
+        .await
+        .unwrap();
+    assert_eq!(taken["entryKeys"], json!([]));
+    let error = client.own("export_gateway_key", named).await;
+    assert_eq!(error.unwrap_err().code, code::MISSING);
+}
+
 /// A ChatGPT login as Codex keeps it: unsigned tokens of a made-up account.
 fn login() -> Value {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
