@@ -727,6 +727,48 @@ async fn a_provider_answering_whole_never_hands_on_a_cut_gemini_response() {
 }
 
 #[tokio::test]
+async fn a_count_of_tokens_asked_with_a_handed_out_key_is_a_request_of_that_key() {
+    let f = fixture().await;
+    let (usage, _events) = attach_observers(&f.temp, &f.agy);
+    let counted = r#"{"totalTokens":31}"#;
+    let (port, seen) = upstream("application/json", counted.into()).await;
+    f.save(&format!("http://127.0.0.1:{port}"));
+    f.start().await;
+    let (id, key) = hand_out_key(&f.agy, &f.home, "fixture-partner");
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let address = f.agy.view().address;
+    let path = "/v1beta/models/gemini-fixture:countTokens";
+    let body = r#"{"contents":[{"role":"user","parts":[{"text":"fixture"}]}]}"#;
+    // `agy`'s own count is no usage of its, as before. One asked with a key
+    // that was handed out is a request its holder made, and it used no tokens.
+    for credential in [f.token(), key.clone()] {
+        let response = client
+            .post(format!("{address}{path}"))
+            .header("x-goog-api-key", credential)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.text().await.unwrap(), counted);
+    }
+    until(|| usage_records(&usage).iter().any(|record| record.completed)).await;
+    let records = usage_records(&usage);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        (records[0].client.as_str(), records[0].source.as_str()),
+        ("antigravity", "proxy")
+    );
+    assert_eq!(records[0].entry_key.as_ref(), Some(&id));
+    let attempt = records[0].final_attempt().unwrap();
+    assert_eq!(attempt.status, Some(200));
+    assert_eq!(attempt.tokens.total(), None);
+    assert_eq!(seen.lock().len(), 2);
+}
+
+#[tokio::test]
 async fn a_handed_out_key_is_counted_under_antigravity_and_stays_out_of_the_environment_file() {
     let f = fixture().await;
     let (usage, _events) = attach_observers(&f.temp, &f.agy);

@@ -1186,20 +1186,20 @@ async fn plan(
     };
     let established_capacity_owner =
         routing::capacity_owner(gateway.client_id(), mode == "manual", ownership.as_deref());
+    let entry_key = parts
+        .extensions
+        .get::<EntryKeyId>()
+        .map(|key| key.0.as_str());
+    // A count of tokens in Gemini's protocol is no usage of the client's own.
+    // Asked with a handed-out key it is a request its holder made of a
+    // provider, and is kept as one that used no tokens.
     let usage_trace = if (matches!(requirement, Requirement::Resource)
         && operation != crate::usage::model::Operation::WebSearch)
-        || (gemini && super::gemini::counts(parts.uri.path()))
+        || (gemini && super::gemini::counts(parts.uri.path()) && entry_key.is_none())
     {
         None
     } else {
-        gateway.usage_operation(
-            model.as_deref(),
-            operation,
-            parts
-                .extensions
-                .get::<EntryKeyId>()
-                .map(|key| key.0.as_str()),
-        )
+        gateway.usage_operation(model.as_deref(), operation, entry_key)
     };
     let delegated = (!websocket && !continuation)
         .then(|| {
