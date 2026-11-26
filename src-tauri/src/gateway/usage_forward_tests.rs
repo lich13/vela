@@ -1412,3 +1412,6 @@ mod delegation_tests;
 
 #[path = "claude_threads_tests.rs"]
 mod claude_threads_tests;
+
+#[path = "entry_key_usage_tests.rs"]
+mod entry_key_usage_tests;

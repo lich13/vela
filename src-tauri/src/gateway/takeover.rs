@@ -646,6 +646,17 @@ pub fn grok_unchanged(data: &Path, text: &str) -> Result<bool> {
 pub fn exit_pair(data: &Path) -> Result<Option<Pair>> {
     Ok(load(data)?.map(|r| r.exit))
 }
+/// Refuses a write that goes to `gateway.json` alone while the journal holds a
+/// store that has yet to reach the file: that store knows nothing of the write.
+pub fn check_pending_store(data: &Path) -> Result<()> {
+    if load(data)?.is_some_and(|record| record.store_after.is_some()) {
+        return Err(AppError::new(
+            code::RECOVERY,
+            "请先停止网关并完成待处理事务",
+        ));
+    }
+    Ok(())
+}
 /// What stopping writes when no provider is left to write: the connection the
 /// takeover replaced. Codex cannot take a field out of its files again, so a
 /// field that was not there keeps the gateway's value, and an API key that was

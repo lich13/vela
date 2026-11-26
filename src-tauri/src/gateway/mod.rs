@@ -723,6 +723,7 @@ impl Gateway {
         let admission = admission::Scheduler::new(events.clone());
         admission.configure(&store.providers, false);
         let local_token = store.local_token.clone();
+        let entry_keys = store.entry_keys.clone();
         let gateway = Self(Arc::new(Shared {
             #[cfg(test)]
             discover_new_providers: std::sync::atomic::AtomicBool::new(false),
@@ -756,7 +757,7 @@ impl Gateway {
             quota: quota::Service::new(),
             admission,
         }));
-        registry.register(&gateway.0, &local_token)?;
+        registry.register(&gateway.0, &local_token, &entry_keys)?;
         Ok(gateway)
     }
     fn replace_store(&self, state: &mut Inner, store: Store) {
@@ -782,7 +783,7 @@ impl Gateway {
         state.editable_mut().store = store;
         self.0
             .registry
-            .publish_token(&self.0, &state.store.local_token);
+            .publish_token(&self.0, &state.store.local_token, &state.store.entry_keys);
         self.wake_endpoint_prober();
         #[cfg(test)]
         if !self.0.discover_new_providers.load(Ordering::Relaxed) {
@@ -1682,6 +1683,10 @@ impl Gateway {
             &edit,
             Edit::ModelCatalog { .. } | Edit::ModelCatalogSource { .. }
         );
+        let key_edit = matches!(
+            &edit,
+            Edit::SaveEntryKey { .. } | Edit::DeleteEntryKey { .. }
+        );
         // Selecting a provider or editing one's connection picks a protocol on
         // purpose; any other edit may leave Grok on a provider of another one.
         let protocol_choice = matches!(
@@ -1784,7 +1789,10 @@ impl Gateway {
             && next.connection == codex_api::Connection::Bearer
             && takeover::codex_lacks_custom(home)?;
         // DSH and Antigravity keep no connection in a client file to follow the choice.
-        let revision = if !matches!(self.0.client, ClientId::Agy | ClientId::Dsh)
+        // Nor does any client's file say anything of a handed-out key, so what
+        // became of that file cannot stand in the way of revoking one.
+        let revision = if !key_edit
+            && !matches!(self.0.client, ClientId::Agy | ClientId::Dsh)
             && (s.running || direct_select)
             && !select_only
         {
@@ -1824,6 +1832,9 @@ impl Gateway {
         } else if sync_dsh_models {
             dsh::commit_mapping(&self.0.data, home, &mut next, &s.revision)?
         } else {
+            if key_edit && s.running {
+                takeover::check_pending_store(&self.0.data)?;
+            }
             next.persist(&self.0.data.join("gateway.json"), &s.revision)?
         };
         if s.last_successful

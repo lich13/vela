@@ -1,7 +1,11 @@
 // 覆盖共享监听的客户端生命周期和认证隔离。
 use super::{grok_config::Protocol, listener, ClientId, Edit, Gateway};
-use crate::gateway::test_support::form;
+use crate::gateway::test_support::{
+    form, hand_out_key,
+    loopback::{COMPLETED, CREATE, CREATED},
+};
 use bytes::Bytes;
+use futures_util::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
@@ -16,6 +20,7 @@ use tokio::{
 };
 
 const MODEL: &str = "fixture-model";
+const UPSTREAM_TOKEN: &str = "fixture-codex-upstream-token";
 
 fn free_port() -> u16 {
     std::net::TcpListener::bind(("127.0.0.1", 0))
@@ -206,10 +211,13 @@ fn listener_inherits_legacy_codex_port_and_persists_its_independent_revision() {
 
 #[derive(Clone, Debug)]
 struct SeenRequest {
+    method: String,
     path: String,
     model: Option<String>,
     authorization: Option<String>,
     api_key: Option<String>,
+    /// The value of every header, as it arrived.
+    values: Vec<String>,
 }
 
 struct Upstream {
@@ -234,21 +242,32 @@ impl Upstream {
                         let Ok((socket, _)) = accepted else { break; };
                         let seen = captured.clone();
                         tokio::spawn(async move {
-                            let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+                            let service = hyper::service::service_fn(move |mut request: Request<Incoming>| {
                                 let seen = seen.clone();
                                 async move {
+                                    let method = request.method().as_str().to_owned();
                                     let path = request.uri().path_and_query()
                                         .map(|part| part.as_str().to_owned())
                                         .unwrap_or_default();
                                     let authorization = request.headers().get("authorization").and_then(|h| h.to_str().ok()).map(str::to_owned);
                                     let api_key = request.headers().get("x-api-key").and_then(|h| h.to_str().ok()).map(str::to_owned);
+                                    let values = request.headers().values()
+                                        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+                                        .collect();
+                                    if request.headers().contains_key("upgrade") {
+                                        seen.lock().push(SeenRequest { method, path, model: None, authorization, api_key, values });
+                                        let (response, upgrade) = yawc::WebSocket::upgrade(&mut request)
+                                            .expect("fixture upgrade should be a WebSocket handshake");
+                                        tokio::spawn(answer_turns(upgrade));
+                                        return Ok::<_, Infallible>(response.map(|_| Full::new(Bytes::new())));
+                                    }
                                     let body = request.into_body().collect().await
                                         .expect("fixture request body should be readable")
                                         .to_bytes();
                                     let model = serde_json::from_slice::<Value>(&body).ok()
                                         .and_then(|value| value.get("model")
                                             .and_then(Value::as_str).map(str::to_owned));
-                                    seen.lock().push(SeenRequest { path, model, authorization, api_key });
+                                    seen.lock().push(SeenRequest { method, path, model, authorization, api_key, values });
                                     Ok::<_, Infallible>(Response::builder()
                                         .status(StatusCode::OK)
                                         .header("content-type", "application/json")
@@ -258,6 +277,7 @@ impl Upstream {
                             });
                             let _ = hyper::server::conn::http1::Builder::new()
                                 .serve_connection(TokioIo::new(socket), service)
+                                .with_upgrades()
                                 .await;
                         });
                     }
@@ -277,6 +297,35 @@ impl Upstream {
             let _ = shutdown.send(());
         }
         let _ = self.task.await;
+    }
+}
+
+/// The upstream's side of a WebSocket: every turn sent is answered as a
+/// finished response.
+async fn answer_turns(upgrade: yawc::UpgradeFut) {
+    let Ok(mut socket) = upgrade.await else {
+        return;
+    };
+    while let Some(frame) = socket.next().await {
+        let sent = match frame.opcode() {
+            yawc::OpCode::Close => break,
+            yawc::OpCode::Ping => {
+                socket
+                    .send(yawc::Frame::pong(frame.payload().to_vec()))
+                    .await
+            }
+            yawc::OpCode::Text => {
+                let created = socket.send(yawc::Frame::text(CREATED)).await;
+                match created {
+                    Ok(()) => socket.send(yawc::Frame::text(COMPLETED)).await,
+                    failed => failed,
+                }
+            }
+            _ => Ok(()),
+        };
+        if sent.is_err() {
+            break;
+        }
     }
 }
 
@@ -376,8 +425,349 @@ async fn post(port: u16, path: &str, token: &str, body: &[u8]) -> u16 {
         .unwrap()
 }
 
+/// One request with the headers given, and the status it is answered with.
+/// No more than the head of the answer is read.
+async fn call(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> u16 {
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    socket.write_all(head.as_bytes()).await.unwrap();
+    socket.write_all(body).await.unwrap();
+
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut chunk = [0u8; 1024];
+        while !response.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert_ne!(read, 0, "gateway should answer before closing");
+            response.extend_from_slice(&chunk[..read]);
+        }
+    })
+    .await
+    .expect("gateway should answer the fixture request");
+    std::str::from_utf8(&response)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
 async fn start(gateway: &Gateway, home: &Path) {
     gateway.start(&gateway.view().revision, home).await.unwrap();
+}
+
+/// A running Codex gateway whose one provider is `upstream` and takes any
+/// model, with the port it listens on and the home it was started from.
+async fn running_codex(
+    temp: &tempfile::TempDir,
+    upstream: &Upstream,
+) -> (Gateway, u16, std::path::PathBuf) {
+    let codex = Gateway::new(temp.path().join("data")).unwrap();
+    let port = different_free_port(upstream.port);
+    codex
+        .set_listener_port(port, &codex.listener_view().revision)
+        .unwrap();
+    let home = temp.path().join("home/codex");
+    seed_client_configs(
+        &home,
+        &temp.path().join("home/claude"),
+        &temp.path().join("home/grok"),
+    );
+    codex
+        .edit(
+            form(json!({
+                "name": "fixture-provider",
+                "baseUrl": format!("http://127.0.0.1:{}/v1", upstream.port),
+                "token": UPSTREAM_TOKEN,
+            })),
+            &codex.view().revision,
+            &home,
+        )
+        .unwrap();
+    start(&codex, &home).await;
+    (codex, port, home)
+}
+
+/// What the upstream was sent must name the provider's token and nothing of
+/// the credential the request came in with.
+fn assert_only_the_providers_token(request: &SeenRequest, inbound: &str) {
+    assert_eq!(
+        request.authorization.as_deref(),
+        Some(format!("Bearer {UPSTREAM_TOKEN}").as_str()),
+        "{} {}",
+        request.method,
+        request.path
+    );
+    assert!(request.api_key.is_none());
+    assert!(
+        !request.values.iter().any(|value| value.contains(inbound)),
+        "{} {} carried the inbound credential upstream",
+        request.method,
+        request.path
+    );
+}
+
+#[tokio::test]
+async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_upstream() {
+    let temp = tempfile::tempdir().unwrap();
+    let upstream = Upstream::start().await;
+    let (codex, port, home) = running_codex(&temp, &upstream).await;
+    let own = local_token(&codex);
+    let (id, key) = hand_out_key(&codex, &home, "fixture-partner");
+    let bearer = format!("Bearer {key}");
+    let body = serde_json::to_vec(&json!({
+        "model": MODEL,
+        "input": [{"role": "user", "content": "fixture"}],
+    }))
+    .unwrap();
+    let json = ("Content-Type", "application/json");
+
+    // The key in any of the three headers, and in all of them at once.
+    for credentials in [
+        vec![("Authorization", bearer.as_str())],
+        vec![("x-api-key", key.as_str())],
+        vec![("x-goog-api-key", key.as_str())],
+        vec![
+            ("Authorization", bearer.as_str()),
+            ("x-api-key", key.as_str()),
+            ("x-goog-api-key", key.as_str()),
+        ],
+    ] {
+        let headers: Vec<_> = credentials.iter().copied().chain([json]).collect();
+        assert_eq!(
+            call(port, "POST", "/v1/responses", &headers, &body).await,
+            200,
+            "{credentials:?}"
+        );
+    }
+    // Another protocol whose usage is counted is asked for the same way.
+    assert_eq!(
+        call(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            &[("Authorization", &bearer), json],
+            &body
+        )
+        .await,
+        200
+    );
+    let generated = upstream.seen.lock().clone();
+    assert_eq!(
+        generated
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "/v1/responses",
+            "/v1/responses",
+            "/v1/responses",
+            "/v1/responses",
+            "/v1/chat/completions"
+        ]
+    );
+    for request in &generated {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.model.as_deref(), Some(MODEL));
+        assert_only_the_providers_token(request, &key);
+    }
+
+    // Whatever else a provider serves, and a connection that passes through
+    // uncounted, are not for a handed-out key.
+    let upgrade = [
+        ("Connection", "Upgrade"),
+        ("Upgrade", "websocket"),
+        ("Sec-WebSocket-Version", "13"),
+        ("Sec-WebSocket-Key", "Zml4dHVyZS1ub25jZS0wMQ=="),
+    ];
+    let kept_out = [
+        // What the provider keeps for its account.
+        ("GET", "/v1/files"),
+        ("POST", "/v1/files"),
+        ("GET", "/v1/files/fixture-file/content"),
+        ("DELETE", "/v1/files/fixture-file"),
+        ("POST", "/v1/uploads"),
+        ("POST", "/v1/uploads/fixture-upload/parts"),
+        ("GET", "/v1/responses/fixture-response"),
+        ("GET", "/v1/responses/fixture-response/input_items"),
+        ("DELETE", "/v1/responses/fixture-response"),
+        ("POST", "/v1/responses/fixture-response/cancel"),
+        ("GET", "/v1/chat/completions"),
+        ("GET", "/v1/batches"),
+        ("POST", "/v1/vector_stores/fixture-store/search"),
+        (
+            "GET",
+            "/v1/containers/fixture-container/files/fixture-file/content",
+        ),
+        ("GET", "/v1/conversations/fixture-conversation/items"),
+        // What it serves without the gateway counting it.
+        ("POST", "/v1/embeddings"),
+        ("POST", "/v1/images/generations"),
+        // The same, written as only a provider would read it.
+        ("GET", "/v1/models/../files"),
+        ("GET", "/v1/models/%2e%2e/files"),
+        ("GET", "/v1//files"),
+        ("GET", "/v1/%66iles"),
+        ("POST", "/v1/responses/../files"),
+    ];
+    for (method, path) in kept_out {
+        assert_eq!(
+            call(port, method, path, &[("Authorization", &bearer)], b"").await,
+            403,
+            "{method} {path}"
+        );
+    }
+    let tunnelled: Vec<_> = [("Authorization", bearer.as_str())]
+        .into_iter()
+        .chain(upgrade)
+        .collect();
+    assert_eq!(
+        call(port, "GET", "/v1/realtime", &tunnelled, b"").await,
+        403
+    );
+    assert_eq!(
+        upstream.seen.lock().len(),
+        generated.len(),
+        "a refusal reaches no upstream"
+    );
+
+    // The list of models is.
+    for path in ["/v1/models", "/v1/models/fixture-model"] {
+        assert_eq!(
+            call(port, "GET", path, &[("Authorization", &bearer)], b"").await,
+            200,
+            "{path}"
+        );
+    }
+    let listed = upstream.seen.lock()[generated.len()..].to_vec();
+    assert_eq!(
+        listed.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+        ["/v1/models", "/v1/models/fixture-model"]
+    );
+    for request in &listed {
+        assert_only_the_providers_token(request, &key);
+    }
+
+    // The client's own key is kept out of none of it.
+    let before_own = upstream.seen.lock().len();
+    let own_bearer = format!("Bearer {own}");
+    for (method, path) in kept_out {
+        assert_eq!(
+            call(port, method, path, &[("Authorization", &own_bearer)], b"").await,
+            200,
+            "{method} {path}"
+        );
+    }
+    let own_tunnel: Vec<_> = [("Authorization", own_bearer.as_str())]
+        .into_iter()
+        .chain(upgrade)
+        .collect();
+    assert_eq!(
+        call(port, "GET", "/v1/realtime", &own_tunnel, b"").await,
+        101
+    );
+    let own_requests = upstream.seen.lock()[before_own..].to_vec();
+    assert_eq!(
+        own_requests
+            .iter()
+            .map(|r| (r.method.as_str(), r.path.as_str()))
+            .collect::<Vec<_>>(),
+        kept_out
+            .into_iter()
+            .chain([("GET", "/v1/realtime")])
+            .collect::<Vec<_>>()
+    );
+    for request in &own_requests {
+        assert_only_the_providers_token(request, &own);
+    }
+
+    // Taken back, the key is no credential at all.
+    codex
+        .edit(Edit::DeleteEntryKey { id }, &codex.view().revision, &home)
+        .unwrap();
+    let seen = upstream.seen.lock().len();
+    assert_eq!(
+        call(
+            port,
+            "POST",
+            "/v1/responses",
+            &[("Authorization", &bearer), json],
+            &body
+        )
+        .await,
+        401
+    );
+    assert_eq!(
+        call(
+            port,
+            "POST",
+            "/v1/responses",
+            &[("Authorization", &own_bearer), json],
+            &body
+        )
+        .await,
+        200
+    );
+    assert_eq!(upstream.seen.lock().len(), seen + 1);
+
+    codex.stop().await.unwrap();
+    upstream.stop().await;
+}
+
+#[tokio::test]
+async fn a_websocket_made_with_a_handed_out_key_shows_the_upstream_none_of_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let upstream = Upstream::start().await;
+    let (codex, port, home) = running_codex(&temp, &upstream).await;
+    let (_, key) = hand_out_key(&codex, &home, "fixture-partner");
+
+    let mut socket = tokio::time::timeout(
+        Duration::from_secs(5),
+        yawc::WebSocket::connect(
+            format!("ws://127.0.0.1:{port}/v1/responses")
+                .parse()
+                .unwrap(),
+        )
+        .with_request(
+            yawc::HttpRequest::builder()
+                .header("authorization", format!("Bearer {key}"))
+                .header("x-api-key", key.as_str())
+                .header("x-goog-api-key", key.as_str()),
+        ),
+    )
+    .await
+    .expect("gateway should answer the fixture handshake")
+    .expect("a handed-out key should open a Responses WebSocket");
+    socket.send(yawc::Frame::text(CREATE)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = socket.next().await.expect("fixture turn should finish");
+            if frame.opcode() == yawc::OpCode::Text
+                && frame.payload().as_ref() == COMPLETED.as_bytes()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("fixture turn should finish in time");
+
+    let requests = upstream.seen.lock().clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/responses");
+    assert_only_the_providers_token(&requests[0], &key);
+
+    drop(socket);
+    codex.stop().await.unwrap();
+    upstream.stop().await;
 }
 
 #[tokio::test]

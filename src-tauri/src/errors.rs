@@ -73,7 +73,7 @@ local_codes! {
     FileType => FILE_TYPE = "FILE_TYPE",
     FirstByteTimeout => FIRST_BYTE_TIMEOUT = "FIRST_BYTE_TIMEOUT",
     RetryBudgetExhausted => RETRY_BUDGET_EXHAUSTED = "RETRY_BUDGET_EXHAUSTED",
-    Forbidden => #[cfg(any(feature = "desktop", test))] FORBIDDEN = "FORBIDDEN",
+    Forbidden => FORBIDDEN = "FORBIDDEN",
     Gateway => GATEWAY = "GATEWAY",
     GatewayActive => GATEWAY_ACTIVE = "GATEWAY_ACTIVE",
     GatewayLoop => GATEWAY_LOOP = "GATEWAY_LOOP",

@@ -82,6 +82,24 @@ pub(crate) fn form(fields: serde_json::Value) -> Edit {
     serde_json::from_value(edit).unwrap()
 }
 
+/// Hands out a key under `name`: its id and the key itself.
+pub(crate) fn hand_out_key(gateway: &Gateway, home: &Path, name: &str) -> (String, String) {
+    let edit = Edit::SaveEntryKey {
+        id: None,
+        name: name.into(),
+    };
+    let view = gateway.edit(edit, &gateway.view().revision, home).unwrap();
+    let id = view
+        .entry_keys
+        .iter()
+        .find(|key| key.name == name)
+        .expect("the key that was just handed out")
+        .id
+        .clone();
+    let key = gateway.entry_key_token(&id).unwrap();
+    (id, key)
+}
+
 /// The stored form of a thread or window identifier.
 pub(crate) fn digest(value: &str) -> String {
     crate::storage::digest(value.as_bytes())

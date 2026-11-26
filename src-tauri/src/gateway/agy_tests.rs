@@ -1,8 +1,7 @@
 use super::*;
-use crate::gateway::test_support::form;
 use crate::gateway::test_support::{
     downstream::{attach_observers, usage_records},
-    until,
+    form, hand_out_key, until,
 };
 use crate::gateway::tests::server;
 use http_body_util::BodyExt;
@@ -725,4 +724,149 @@ async fn a_provider_answering_whole_never_hands_on_a_cut_gemini_response() {
         }
         f.agy.stop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn a_handed_out_key_is_counted_under_antigravity_and_stays_out_of_the_environment_file() {
+    let f = fixture().await;
+    let (usage, _events) = attach_observers(&f.temp, &f.agy);
+    let (port, seen) = upstream("text/event-stream", STREAM.into()).await;
+    let provider = f.save(&format!("http://127.0.0.1:{port}"));
+    f.edit(Edit::ModelsProvider {
+        id: provider,
+        allowed_models: Some(vec!["gemini-fixture".into()]),
+    });
+    f.start().await;
+    let written = std::fs::read_to_string(f.environment()).unwrap();
+    let (id, key) = hand_out_key(&f.agy, &f.home, "fixture-partner");
+    // The file is what `agy` itself starts with: it names the gateway's own
+    // key and is not written again for one that is handed to someone else.
+    assert_eq!(std::fs::read_to_string(f.environment()).unwrap(), written);
+    assert!(written.contains(&f.token()) && !written.contains(&key));
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let address = f.agy.view().address;
+    let path = "/v1beta/models/gemini-fixture:streamGenerateContent?alt=sse";
+    let body = r#"{"contents":[{"role":"user","parts":[{"text":"fixture"}]}]}"#;
+    // The key in the header a Gemini client sends one in, `agy`'s own the way
+    // `agy` sends it, and the key the way `agy` would.
+    for (n, (header, value, expected)) in [
+        ("x-goog-api-key", key.clone(), Some(&id)),
+        ("authorization", format!("Bearer {}", f.token()), None),
+        ("authorization", format!("Bearer {key}"), Some(&id)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = client
+            .post(format!("{address}{path}"))
+            .header(header, value)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let answered = format!("fixture-response-{}", n + 1);
+        assert_eq!(
+            response.text().await.unwrap(),
+            STREAM.replace("fixture-response", &answered)
+        );
+        until(|| usage_records(&usage).iter().filter(|r| r.completed).count() == n + 1).await;
+        let records = usage_records(&usage);
+        let record = records
+            .iter()
+            .find(|record| {
+                record.final_attempt().unwrap().response_id
+                    == Some(crate::usage::model::safe_id(&answered))
+            })
+            .expect("the call that was just answered");
+        assert_eq!(
+            (record.client.as_str(), record.source.as_str()),
+            ("antigravity", "proxy")
+        );
+        assert_eq!(record.entry_key.as_ref(), expected);
+        assert_eq!(record.final_attempt().unwrap().tokens.input, Some(80));
+    }
+    {
+        // Whichever key let a call in, the provider is shown its own alone.
+        let seen = seen.lock();
+        assert_eq!(seen.len(), 3);
+        for (uri, headers, sent) in seen.iter() {
+            assert_eq!(uri, path);
+            assert_eq!(headers["x-goog-api-key"], "fixture-upstream");
+            assert!(!headers.contains_key("authorization"));
+            assert!(!headers.contains_key("x-api-key"));
+            assert_eq!(sent.as_ref(), body.as_bytes());
+        }
+    }
+
+    // `agy`'s metric calls are answered for whoever is let in and go nowhere,
+    // and the list of models is the one `agy` is given.
+    let response = client
+        .post(format!("{address}/v1beta:recordClientEvents"))
+        .header("x-goog-api-key", &key)
+        .json(&json!({"events":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.text().await.unwrap(), "{}");
+    let response = client
+        .get(format!("{address}/v1beta/models?pageSize=1000"))
+        .header("x-goog-api-key", &key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let listed: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(listed["models"][0]["name"], "models/gemini-fixture");
+    // Gemini's generation and nothing else is spoken here: what a provider
+    // keeps for its account is no path of this gateway's, whoever asks.
+    for (method, path) in [
+        (reqwest::Method::GET, "/v1beta/files"),
+        (reqwest::Method::POST, "/v1beta/cachedContents"),
+        (
+            reqwest::Method::POST,
+            "/v1beta/models/gemini-fixture:embedContent",
+        ),
+        (reqwest::Method::GET, "/v1/files"),
+        (reqwest::Method::POST, "/v1/responses"),
+    ] {
+        for credential in [&key, &f.token()] {
+            let response = client
+                .request(method.clone(), format!("{address}{path}"))
+                .header("x-goog-api-key", credential)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 404, "{path}");
+        }
+    }
+    assert_eq!(seen.lock().len(), 3);
+    assert_eq!(usage_records(&usage).len(), 3);
+
+    // Taken back, the key lets nothing in, and `agy` goes on as it was.
+    f.edit(Edit::DeleteEntryKey { id });
+    for path in [path, "/v1beta:recordClientEvents"] {
+        let response = client
+            .post(format!("{address}{path}"))
+            .header("x-goog-api-key", &key)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401, "{path}");
+    }
+    assert_eq!(
+        f.request(reqwest::Method::POST, path)
+            .body(body)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(seen.lock().len(), 4);
+    assert_eq!(std::fs::read_to_string(f.environment()).unwrap(), written);
 }

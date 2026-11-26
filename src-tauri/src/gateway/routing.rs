@@ -79,17 +79,57 @@ impl Requirement {
         }
     }
 }
+/// The path without the API version before it.
+fn unversioned(path: &str) -> String {
+    let path = super::gemini::path(path);
+    path.strip_prefix("/v1/")
+        .map(|p| format!("/{p}"))
+        .unwrap_or_else(|| path.to_owned())
+}
+fn under(path: &str, prefix: &str) -> bool {
+    path == prefix || path.starts_with(&format!("{prefix}/"))
+}
 pub fn resource(method: &hyper::Method, path: &str) -> bool {
     if super::gemini::model(path).is_some() {
         return false;
     }
-    let path = super::gemini::path(path);
-    let path = path
-        .strip_prefix("/v1/")
-        .map(|p| format!("/{p}"))
-        .unwrap_or_else(|| path.to_owned());
+    let path = unversioned(path);
     ["/models", "/files", "/uploads"]
         .iter()
-        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+        .any(|prefix| under(&path, prefix))
         || (*method == hyper::Method::GET && path.starts_with("/responses/"))
+}
+/// A path segment that is what it reads as: nothing an upstream would
+/// resolve, merge or decode into another path.
+fn plain(segment: &str) -> bool {
+    !matches!(segment, "" | "." | "..")
+        && segment
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.:@".contains(&c))
+}
+/// What a handed-out key may ask for: a generation in one of the wire
+/// protocols whose usage is counted, a compaction, a search, a token count,
+/// or the list of models. Whatever else a provider serves is its account's
+/// own. The path has to be one of these as it is written: it is passed on as
+/// it came, and a provider may well read `/models/../files` as its files.
+pub fn counted(method: &hyper::Method, path: &str) -> bool {
+    let rest = unversioned(path);
+    let rest = rest.strip_suffix('/').unwrap_or(&rest);
+    if *method == hyper::Method::GET {
+        return rest == "/models"
+            || rest
+                .strip_prefix("/models/")
+                .is_some_and(|id| id.split('/').all(plain));
+    }
+    *method == hyper::Method::POST
+        && (super::gemini::model(path).is_some()
+            || matches!(
+                rest,
+                "/responses"
+                    | "/responses/compact"
+                    | "/chat/completions"
+                    | "/messages"
+                    | "/messages/count_tokens"
+                    | "/alpha/search"
+            ))
 }

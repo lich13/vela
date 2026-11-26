@@ -500,6 +500,10 @@ pub(super) fn accept(
         .unwrap_or_default();
     let headers = request.headers().clone();
     let uri = request.uri().clone();
+    let entry_key = request
+        .extensions()
+        .get::<forward::EntryKeyId>()
+        .map(|key| key.0.clone());
     let upgraded = WebSocket::upgrade_with_options(&mut request, options());
     let Ok((response, future)) = upgraded else {
         return forward::error(
@@ -528,7 +532,7 @@ pub(super) fn accept(
             return;
         };
         let result = tokio::select! {
-            result = session(&gateway, &mut client, &settings, manual, ids, routes, headers, uri) => result,
+            result = session(&gateway, &mut client, &settings, manual, ids, routes, headers, uri, entry_key) => result,
             _ = stop.changed() => Err((1012, "gateway stopped")),
         };
         if let Err((code, reason)) = result {
@@ -656,7 +660,9 @@ async fn upstream_native(
     forward::clean_headers(headers, true);
     headers.remove(header::HOST);
     headers.remove(header::CONTENT_LENGTH);
+    // Whichever header the client's credential came in, it stays here.
     headers.remove("x-api-key");
+    headers.remove("x-goog-api-key");
     headers.insert(
         header::AUTHORIZATION,
         format!("Bearer {}", route.provider.token)
@@ -924,6 +930,7 @@ async fn session(
     routes: HashMap<String, Route>,
     headers: HeaderMap,
     uri: Uri,
+    entry_key: Option<String>,
 ) -> Result<(), Failure> {
     let request_budget =
         super::wait_budget::WaitBudget::tracked(cfg.retry_budget_seconds, &g.0.pending_requests);
@@ -945,6 +952,7 @@ async fn session(
                 current_routes.clone(),
                 headers.clone(),
                 uri.clone(),
+                entry_key.as_deref(),
                 &mut next_turn,
                 &request_budget,
             ) => result,
@@ -1090,6 +1098,7 @@ fn attempt_protocol(
     ownership: &Option<std::sync::Arc<super::compaction::Lease>>,
     failover: &super::failover::Tracker,
     headers: &HeaderMap,
+    entry_key: Option<&str>,
     received_at: i64,
     speed: Option<String>,
     usage_trace: Option<&crate::usage::Trace>,
@@ -1102,7 +1111,10 @@ fn attempt_protocol(
     protocol.attach_ownership(ownership.clone(), provider);
     protocol.attach_routing_log(failover.routing());
     protocol.request_headers(headers);
-    protocol.business_request(g, headers);
+    // Whatever uses a handed-out key says nothing of the client itself.
+    if entry_key.is_none() {
+        protocol.business_request(g, headers);
+    }
     protocol.request_received(received_at);
     protocol.request_speed(speed);
     if let Some(trace) = usage_trace {
@@ -1131,6 +1143,7 @@ struct Connecting<'a> {
     routes: HashMap<String, Route>,
     headers: &'a HeaderMap,
     uri: &'a Uri,
+    entry_key: Option<&'a str>,
     request_budget: &'a super::wait_budget::WaitBudget,
     first: &'a Frame,
     turn_rules: &'a [super::failure_rules::Rule],
@@ -1167,6 +1180,7 @@ async fn connect(
         mut routes,
         headers,
         uri,
+        entry_key,
         request_budget,
         first,
         turn_rules,
@@ -1483,6 +1497,7 @@ async fn connect(
             ownership,
             failover,
             headers,
+            entry_key,
             turn_received_at,
             value(first).and_then(|v| crate::usage::model::speed(&v["speed"])),
             usage_trace.as_ref(),
@@ -1882,6 +1897,22 @@ async fn first_create(
     };
     Ok(Some(first))
 }
+/// A connection made with a handed-out key lasts no longer than the key: once
+/// that is taken back no turn starts on it. The turn in flight is left to end.
+fn key_held(g: &Gateway, entry_key: Option<&str>) -> Result<(), Failure> {
+    let held = entry_key.is_none_or(|id| {
+        g.request_state()
+            .store
+            .entry_keys
+            .iter()
+            .any(|key| key.id == id)
+    });
+    if held {
+        Ok(())
+    } else {
+        Err((1008, code::LOCAL_AUTH))
+    }
+}
 /// The turns of one client connection and the upstream it currently holds.
 struct Session<'a> {
     g: &'a Gateway,
@@ -1889,6 +1920,8 @@ struct Session<'a> {
     manual: bool,
     headers: HeaderMap,
     uri: Uri,
+    /// The id of the handed-out key the client connected with, if it was one.
+    entry_key: Option<&'a str>,
     request_budget: &'a super::wait_budget::WaitBudget,
     /// Receives the frame that must reopen the session on another provider.
     next_turn: &'a mut Option<Frame>,
@@ -1953,10 +1986,12 @@ impl<'a> Session<'a> {
         routes: HashMap<String, Route>,
         headers: HeaderMap,
         uri: Uri,
+        entry_key: Option<&'a str>,
         next_turn: &'a mut Option<Frame>,
         request_budget: &'a super::wait_budget::WaitBudget,
         first: Frame,
     ) -> Result<Option<Session<'a>>, Failure> {
+        key_held(g, entry_key)?;
         let traffic =
             g.0.registry
                 .freeze
@@ -2058,7 +2093,7 @@ impl<'a> Session<'a> {
             } else {
                 crate::usage::model::Operation::Model
             },
-            None,
+            entry_key,
         );
         let mut failover = super::failover::Tracker::new(usage_trace.clone());
         failover.attach_wait_budget(request_budget);
@@ -2082,6 +2117,7 @@ impl<'a> Session<'a> {
             routes,
             headers: &headers,
             uri: &uri,
+            entry_key,
             request_budget,
             first: &first,
             turn_rules: &turn_rules,
@@ -2179,6 +2215,7 @@ impl<'a> Session<'a> {
             manual,
             headers,
             uri,
+            entry_key,
             request_budget,
             next_turn,
             traffic,
@@ -2555,6 +2592,7 @@ impl<'a> Session<'a> {
             &self.ownership,
             &self.failover,
             &self.headers,
+            self.entry_key,
             self.turn_received_at,
             value(&self.replay_frame).and_then(|v| crate::usage::model::speed(&v["speed"])),
             self.usage_trace.as_ref(),
@@ -2784,6 +2822,7 @@ impl<'a> Session<'a> {
     /// Starts the queued turn on this connection, or returns the handoff
     /// signal when the turn belongs on another provider.
     async fn start(&mut self, client: &mut Peer, frame: Frame) -> Result<Flow, Failure> {
+        key_held(self.g, self.entry_key)?;
         self.traffic.finish();
         self.traffic = self
             .pending_traffic
@@ -3024,7 +3063,7 @@ impl<'a> Session<'a> {
             } else {
                 crate::usage::model::Operation::Model
             },
-            None,
+            self.entry_key,
         );
         self.failover = super::failover::Tracker::new(self.usage_trace.clone());
         self.failover.attach_wait_budget(self.request_budget);
@@ -3145,6 +3184,7 @@ impl<'a> Session<'a> {
             &self.ownership,
             &self.failover,
             &self.headers,
+            self.entry_key,
             self.turn_received_at,
             hints.as_ref().and_then(|h| h.speed.clone()),
             self.usage_trace.as_ref(),
@@ -3960,6 +4000,7 @@ async fn session_once(
     routes: HashMap<String, Route>,
     headers: HeaderMap,
     uri: Uri,
+    entry_key: Option<&str>,
     next_turn: &mut Option<Frame>,
     request_budget: &super::wait_budget::WaitBudget,
 ) -> Result<(), Failure> {
@@ -3975,6 +4016,7 @@ async fn session_once(
         routes,
         headers,
         uri,
+        entry_key,
         next_turn,
         request_budget,
         first,
@@ -4062,6 +4104,53 @@ async fn session_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_a_turn_made_with_the_clients_own_key_speaks_for_the_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = Gateway::new(dir.path().join("data")).unwrap();
+        let budget = super::super::wait_budget::WaitBudget::tracked(60, &g.0.pending_requests);
+        let failover = super::super::failover::Tracker::new(None);
+        // One turn that ends well and is handed on whole, as `agent` asked it.
+        let turn = |agent: &'static str, entry_key: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::USER_AGENT, agent.parse().unwrap());
+            let mut protocol = attempt_protocol(
+                &g,
+                &budget,
+                &[],
+                "fixture-provider",
+                Some("fixture-model"),
+                &None,
+                &failover,
+                &headers,
+                entry_key,
+                crate::usage::model::now(),
+                None,
+                None,
+            );
+            protocol.websocket_status(101);
+            protocol.value(
+                &serde_json::json!({"type": "response.completed", "response": {
+                    "id": "fixture-response", "status": "completed", "model": "fixture-model",
+                    "usage": {"input_tokens": 2, "output_tokens": 1}
+                }}),
+            );
+            protocol.delivery().handed(1, true);
+            protocol.finish(Some(101), code::OK);
+        };
+        let agent = || {
+            g.successful_user_agent()
+                .ok()
+                .map(|agent| agent.to_str().unwrap().to_owned())
+        };
+        turn("fixture-partner/1.0", Some("fixture-key-id"));
+        assert_eq!(agent(), None);
+        turn("fixture-client/1.0", None);
+        assert_eq!(agent().as_deref(), Some("fixture-client/1.0"));
+        turn("fixture-partner/2.0", Some("fixture-key-id"));
+        assert_eq!(agent().as_deref(), Some("fixture-client/1.0"));
+    }
 
     #[tokio::test]
     async fn keepalive_preserves_control_frames_and_does_not_leak_its_own_pong() {
