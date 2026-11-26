@@ -366,7 +366,8 @@ fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
         cache_input_eligible: row.get(i + 23)?,
     })
 }
-fn selection(f: &Filter) -> (String, Vec<Value>) {
+/// `extra` is what else each row of `m` carries, for the one caller that asks.
+fn selection(f: &Filter, extra: &str) -> (String, Vec<Value>) {
     let (condition, mut args) = conditions(f, "r", false);
     let mut daily = vec![
         "d.day>=?".to_string(),
@@ -432,7 +433,7 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
     };
     // The key goes along as text, so that one key's records and rollups make
     // one group. It stands before `id owner`, which `native_sql` rewrites.
-    let cte=format!("WITH selected AS (SELECT {kind} kind,usage_text(r.entry) entry_key,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,json_extract(d.body,'$.entryKey'),d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,s.entry_key,x.*{round_count} FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner{subset}) ",daily.join(" AND "));
+    let cte=format!("WITH selected AS (SELECT {kind} kind,usage_text(r.entry) entry_key,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,json_extract(d.body,'$.entryKey'),d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,s.entry_key,x.*{round_count}{extra} FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner{subset}) ",daily.join(" AND "));
     (cte, args)
 }
 fn grok_model_filter(f: &Filter) -> Option<&str> {
@@ -441,13 +442,26 @@ fn grok_model_filter(f: &Filter) -> Option<&str> {
         .flatten()
 }
 pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashboard> {
+    // Only the final attempt has a request count. Attribute a missing price to
+    // that row once, consulting earlier attempts only if its own price exists.
+    // This avoids sorting every request ID for a second logical aggregation. It
+    // is worked out as the row is made: the totals and every key's group count
+    // it, and looked up under a GROUP BY it reads every attempt for every row.
+    let unpriced_requests = if grok_model_filter(f).is_some() {
+        ""
+    } else {
+        ",CASE WHEN x.requests>0 AND (x.unpriced>0 OR EXISTS(SELECT 1 FROM usage_metrics a WHERE a.kind=x.kind AND a.owner=x.owner AND a.unpriced>0)) THEN x.requests ELSE 0 END unpriced_requests"
+    };
     // Every key is listed whichever one is chosen, so that the choice does not
     // remove the others. The selection is therefore of all of them, and each
     // other aggregate narrows it to the chosen one.
-    let (cte, mut args) = selection(&Filter {
-        entry_key: None,
-        ..f.clone()
-    });
+    let (cte, mut args) = selection(
+        &Filter {
+            entry_key: None,
+            ..f.clone()
+        },
+        unpriced_requests,
+    );
     let chosen = match f.entry_key.as_deref().filter(|v| !v.is_empty()) {
         Some(OWN_ENTRY_KEY) => " WHERE entry_key IS NULL".to_owned(),
         Some(id) => {
@@ -461,9 +475,6 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     // Each aggregate reads the same narrow materialized projection, rather than
     // repeating the indexed record/attempt join for every panel.
     let cte = cte.replace("m AS (", "m AS MATERIALIZED (");
-    // Only the final attempt has a request count. Attribute a missing price to
-    // that row once, consulting earlier attempts only if its own price exists.
-    // This avoids sorting every request ID for a second logical aggregation.
     let sum = if grok_model_filter(f).is_some() {
         SUM.replace("sum(requests)", "sum(matched_rounds)")
             .replace("sum(sessions)", "sum(matched_rounds)")
@@ -474,7 +485,10 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     let total_sum = if grok_model_filter(f).is_some() {
         sum.clone()
     } else {
-        sum.replace("coalesce(sum(unpriced),0)","coalesce(sum(CASE WHEN requests>0 AND (unpriced>0 OR EXISTS(SELECT 1 FROM usage_metrics a WHERE a.kind=m.kind AND a.owner=m.owner AND a.unpriced>0)) THEN requests ELSE 0 END),0)")
+        sum.replace(
+            "coalesce(sum(unpriced),0)",
+            "coalesce(sum(unpriced_requests),0)",
+        )
     };
     // Source badges only use request counts, not a full cost/token aggregate.
     let count = if grok_model_filter(f).is_some() {
@@ -546,7 +560,7 @@ pub fn calculator_totals(c: &Connection, filter: &Filter) -> Result<Totals> {
         source: Some("proxy".into()),
         ..filter.clone()
     };
-    let (cte, mut args) = selection(&scope);
+    let (cte, mut args) = selection(&scope, "");
     let mut conditions = Vec::new();
     for (field, value) in [("provider", &filter.provider), ("model", &filter.model)] {
         if let Some(value) = value.as_ref().filter(|v| !v.is_empty()) {
@@ -572,7 +586,7 @@ pub fn calculator_models(c: &Connection, client: &str) -> Result<Vec<String>> {
         client: (!client.is_empty()).then(|| client.into()),
         ..Filter::default()
     };
-    let (cte, args) = selection(&scope);
+    let (cte, args) = selection(&scope, "");
     let sql = native_sql(format!(
         "{cte} SELECT model, coalesce(sum(attempts), 0) AS n FROM m
          WHERE model IS NOT NULL AND model <> '' AND model <> 'unknown' AND model <> 'web_search'
