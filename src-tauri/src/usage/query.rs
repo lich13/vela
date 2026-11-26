@@ -297,6 +297,15 @@ pub fn conditions(f: &Filter, alias: &str, status: bool) -> (String, Vec<Value>)
             }
         }
     }
+    // A request that came in with the client's own key keeps none.
+    match f.entry_key.as_deref().filter(|v| !v.is_empty()) {
+        Some(OWN_ENTRY_KEY) => terms.push(format!("{alias}.entry IS NULL")),
+        Some(id) => {
+            terms.push(format!("{alias}.entry=usage_key(?)"));
+            args.push(Value::Text(id.into()));
+        }
+        None => (),
+    }
     if let Some(session_id) = f.session_id.as_deref().filter(|v| !v.is_empty()) {
         terms.push(format!("usage_v11_session({alias}.body)=?"));
         args.push(Value::Text(session_id.into()));
@@ -383,6 +392,14 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
             }
         }
     }
+    match f.entry_key.as_deref().filter(|v| !v.is_empty()) {
+        Some(OWN_ENTRY_KEY) => daily.push("json_extract(d.body,'$.entryKey') IS NULL".into()),
+        Some(id) => {
+            daily.push("json_extract(d.body,'$.entryKey')=?".into());
+            args.push(Value::Text(id.into()));
+        }
+        None => (),
+    }
     if f.session_id.as_deref().is_some_and(|v| !v.is_empty()) {
         daily.push("0=1".into());
     }
@@ -413,7 +430,9 @@ fn selection(f: &Filter) -> (String, Vec<Value>) {
     } else {
         ("", "")
     };
-    let cte=format!("WITH selected AS (SELECT {kind} kind,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,x.*{round_count} FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner{subset}) ",daily.join(" AND "));
+    // The key goes along as text, so that one key's records and rollups make
+    // one group. It stands before `id owner`, which `native_sql` rewrites.
+    let cte=format!("WITH selected AS (SELECT {kind} kind,usage_text(r.entry) entry_key,id owner,time,source FROM records r WHERE {eligible} AND {condition} UNION ALL SELECT 1,json_extract(d.body,'$.entryKey'),d.id,d.day,json_extract(d.body,'$.source') FROM daily d WHERE {}), m AS (SELECT s.time,s.source,s.entry_key,x.*{round_count} FROM selected s JOIN usage_metrics x ON x.kind=s.kind AND x.owner=s.owner{subset}) ",daily.join(" AND "));
     (cte, args)
 }
 fn grok_model_filter(f: &Filter) -> Option<&str> {
@@ -422,7 +441,22 @@ fn grok_model_filter(f: &Filter) -> Option<&str> {
         .flatten()
 }
 pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashboard> {
-    let (cte, args) = selection(f);
+    // Every key is listed whichever one is chosen, so that the choice does not
+    // remove the others. The selection is therefore of all of them, and each
+    // other aggregate narrows it to the chosen one.
+    let (cte, mut args) = selection(&Filter {
+        entry_key: None,
+        ..f.clone()
+    });
+    let chosen = match f.entry_key.as_deref().filter(|v| !v.is_empty()) {
+        Some(OWN_ENTRY_KEY) => " WHERE entry_key IS NULL".to_owned(),
+        Some(id) => {
+            // Numbered after the selection's own, and so bound once for all.
+            args.push(Value::Text(id.into()));
+            format!(" WHERE entry_key=?{}", args.len())
+        }
+        None => String::new(),
+    };
     let cte = native_sql(cte);
     // Each aggregate reads the same narrow materialized projection, rather than
     // repeating the indexed record/attempt join for every panel.
@@ -449,11 +483,13 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
         "requests"
     };
     let source_sum=format!("coalesce(sum({count}),0),0,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'0',0,0,0,0,0,0,0,0");
+    // A key's group counts what the totals count, so the groups add up to them.
     let sql=format!("{cte}
-      SELECT 'totals','',{total_sum} FROM m
-      UNION ALL SELECT 'provider',coalesce(provider,'session'),{sum} FROM m GROUP BY coalesce(provider,'session')
-      UNION ALL SELECT 'model',coalesce(model,'unknown'),{sum} FROM m GROUP BY coalesce(model,'unknown')
-      UNION ALL SELECT 'source',source,{source_sum} FROM m GROUP BY source");
+      SELECT 'totals','',{total_sum} FROM m{chosen}
+      UNION ALL SELECT 'provider',coalesce(provider,'session'),{sum} FROM m{chosen} GROUP BY coalesce(provider,'session')
+      UNION ALL SELECT 'model',coalesce(model,'unknown'),{sum} FROM m{chosen} GROUP BY coalesce(model,'unknown')
+      UNION ALL SELECT 'source',source,{source_sum} FROM m{chosen} GROUP BY source
+      UNION ALL SELECT 'key',coalesce(entry_key,'{OWN_ENTRY_KEY}'),{total_sum} FROM m GROUP BY coalesce(entry_key,'{OWN_ENTRY_KEY}')");
     let mut stmt = db(c.prepare(&sql))?;
     let rows = db(
         stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
@@ -467,6 +503,7 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     let mut total = Totals::default();
     let mut providers = Vec::new();
     let mut models = Vec::new();
+    let mut entry_keys = Vec::new();
     let mut sources = BTreeMap::new();
     for row in rows {
         let (kind, id, value) = db(row)?;
@@ -474,6 +511,7 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
             "totals" => total = value,
             "provider" => providers.push(Group { id, totals: value }),
             "model" => models.push(Group { id, totals: value }),
+            "key" => entry_keys.push(Group { id, totals: value }),
             "source" => {
                 sources.insert(id, value.requests);
             }
@@ -488,11 +526,12 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     };
     providers.sort_by(order);
     models.sort_by(order);
+    entry_keys.sort_by(order);
     Ok(Dashboard {
         totals: total,
         providers,
         models,
-        entry_keys: Vec::new(),
+        entry_keys,
         detail_since,
         sources,
     })
