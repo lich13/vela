@@ -59,9 +59,10 @@ DNS、TCP 和 TLS 握手共用故障策略中的连接时限，TLS 不重新计�
 
 - 用法与该客户端自己的请求相同：同一个地址（Codex、Grok、DSH 带 `/v1`，Claude 与 Antigravity 用根地址）、同样的三种认证头、同样的协议和模型；请求进入该客户端的供应商队列，共用并发、冷却、额度与接管规则。
 - 监听仍只在 `127.0.0.1`。要让其他机器使用，请自备反向代理或隧道把请求转到本机端口，HTTPS 由代理负责。持有 Key 即可使用该客户端的全部供应商额度，请只发给信任的对象。
-- 访问 Key 只能用于生成、压缩、搜索、Token 计数和读取模型列表：`POST` 的 `/responses`、`/responses/compact`、`/chat/completions`、`/messages`、`/messages/count_tokens`、`/alpha/search` 和 Gemini 的 `/models/<模型>:generateContent`、`:streamGenerateContent`、`:countTokens`，`GET` 的 `/models` 与 `/models/<模型>`（均指版本前缀之后的部分，其中哪些可用仍取决于所属客户端），以及 Responses 的 WebSocket 连接。其余请求返回 403，包括文件、上传、已保存的响应（`/files`、`/uploads`、`GET /responses/{id}`）、嵌入、图像等接口和 Responses 以外的 WebSocket 连接：它们使用供应商账号的凭据，网关也不为其计量。路径须按字面匹配，带 `..`、空段或百分号编码的写法同样返回 403。本机 Key 不受这一限制。
+- 访问 Key 只能用于生成、压缩、搜索、Token 计数和读取模型列表：`POST` 的 `/v1/responses`、`/v1/responses/compact`、`/v1/chat/completions`、`/v1/messages`、`/v1/messages/count_tokens`、`/v1/alpha/search`（或 `/alpha/search`）和 Gemini 的 `/models/<模型>:generateContent`、`:streamGenerateContent`、`:countTokens`，`GET` 的 `/models` 与 `/models/<模型>`（Gemini 与模型列表的路径前面是一个版本前缀：`/v1`、`/v1beta` 或 `/v1alpha`），以及 `/v1/responses` 的 WebSocket 连接；其中哪些可用仍取决于所属客户端。所属客户端能接受、但不在这份清单里的请求返回 403，包括文件、上传、已保存的响应（`/files`、`/uploads`、`GET /responses/{id}`）、嵌入、图像等接口和 Responses 以外的 WebSocket 连接：它们使用供应商账号的凭据，网关也不为其计量。所属客户端本来就不接受的路径与本机 Key 一样返回 404，例如对 Antigravity 的 Key 请求 `/v1/responses` 或 `/v1beta/files`。路径须按字面匹配，重复的版本前缀（`/v1/v1/…`）、`..`、空段或百分号编码的写法同样返回 403。本机 Key 不受这份清单限制。
+- 用访问 Key 发到供应商的 Token 计数请求各记为一次请求、不计 Token；读取模型列表不计入用量。
 - 名称 1–120 个字符，同一客户端内不能重复。重命名不换 Key，已发出去的继续可用，用量也继续记在同一把 Key 下。
-- 删除立即生效：新的请求返回 401；已建立的 Responses WebSocket 在下一轮开始前被关闭；正在进行的那一次响应照常结束并记账。网关运行中、客户端配置被外部修改时也可以删除。
+- 删除立即生效：新的请求返回 401；已建立的 Responses WebSocket 在下一轮开始前被关闭；正在进行的那一次响应照常结束并记账。网关运行中、客户端配置被外部修改时也可以删除。添加、重命名和删除都不改客户端的配置文件，也不影响正在使用的上游连接。
 - 每把 Key 的请求数、Token 和估算费用分开统计，见[用量](usage.md)的“按 Key 统计”。访问 Key 没有额度上限、到期时间或单独倍率。
 
 ## 没有供应商时
