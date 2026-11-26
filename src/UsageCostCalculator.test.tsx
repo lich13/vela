@@ -391,3 +391,77 @@ it("counts every key where the page's key is not one the client shown hands out"
   expect(own.client).toBe("grok");
   expect(own.entryKey).toBeUndefined();
 });
+
+it("reads the client's keys before it counts by the key the page is narrowed to", async () => {
+  handOutKeys();
+  const usual = vi.mocked(command).getMockImplementation()!;
+  // The gateway is slow to answer the drawer as it opens.
+  let answer!: () => void;
+  const slow = new Promise<void>((resolve) => {
+    answer = resolve;
+  });
+  let asked = 0;
+  vi.mocked(command).mockImplementation(async (name, ...rest) => {
+    if (name === "get_gateway" && asked++ === 0) await slow;
+    return usual(name, ...rest) as never;
+  });
+  const user = userEvent.setup();
+  render(
+    <UsageCostCalculator
+      filter={{ client: "claude", entryKey: claudeKey.id }}
+      close={() => {}}
+    />,
+  );
+  expect(screen.queryByLabelText("Key")).toBeNull();
+  // Asked again, the gateway says the key is this client's.
+  expect((await counted(user)).entryKey).toBe(claudeKey.id);
+  expect(called("get_usage_calculator_totals")).toHaveLength(1);
+  expect(screen.getByLabelText("Key")).toHaveValue(claudeKey.id);
+
+  // The first answer changes neither the choice nor the amount shown for it.
+  answer();
+  await ready();
+  expect(screen.getByLabelText("Key")).toHaveValue(claudeKey.id);
+  expect(screen.getByText("$5.685872")).toBeInTheDocument();
+});
+
+it("counts nothing under a key while the keys of the client shown cannot be read", async () => {
+  handOutKeys();
+  const usual = vi.mocked(command).getMockImplementation()!;
+  let readable = false;
+  vi.mocked(command).mockImplementation(async (name, ...rest) => {
+    if (name === "get_gateway" && !readable)
+      throw new Error("fixture gateway unreadable");
+    return usual(name, ...rest) as never;
+  });
+  const user = userEvent.setup();
+  const narrowed = render(
+    <UsageCostCalculator
+      filter={{ client: "claude", entryKey: claudeKey.id }}
+      close={() => {}}
+    />,
+  );
+  await ready();
+  expect(screen.queryByLabelText("Key")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "计算" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "无法读取访问 Key，请重试",
+  );
+  expect(called("get_usage_calculator_totals")).toEqual([]);
+  expect(called("calculate_usage_cost")).toEqual([]);
+
+  // The key is still the one chosen once the gateway answers.
+  readable = true;
+  expect((await counted(user)).entryKey).toBe(claudeKey.id);
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByLabelText("Key")).toHaveValue(claudeKey.id);
+  narrowed.unmount();
+
+  // With no key chosen there is nothing to read first.
+  readable = false;
+  render(<UsageCostCalculator filter={{ client: "claude" }} close={() => {}} />);
+  await ready();
+  const every = await counted(user);
+  expect(every.client).toBe("claude");
+  expect(every.entryKey).toBeUndefined();
+});
