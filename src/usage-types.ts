@@ -233,6 +233,8 @@ export type UsageFilter = {
 };
 /** Stands for the client's own gateway key where a key's id is asked or answered. */
 export const ownEntryKey = "default";
+/** What a key is called once it is deleted and only its usage is left. */
+export const deletedKeyName = (id: string) => `Key ${id.slice(0, 8)}`;
 
 type AntigravityTokenMix = {
   input: number;

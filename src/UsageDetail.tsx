@@ -27,6 +27,7 @@ import {
 import {
   clientName,
   compact,
+  deletedKeyName,
   money,
   numeric,
   type Attempt,
@@ -82,10 +83,13 @@ const failoverLabels: Record<string, string> = {
 export default function Detail({
   record: r,
   name,
+  keyName = deletedKeyName,
   onClose,
 }: {
   record: UsageRecord;
   name: (id: string | null) => string;
+  /** What a handed-out gateway key is called, by its id. */
+  keyName?: (id: string) => string;
   onClose: () => void;
 }) {
   const last = r.attempts.at(-1)!;
@@ -134,6 +138,13 @@ export default function Detail({
             "来源",
             r.source === "proxy" ? "网关" : clientName(r.source) + " 会话",
           ],
+          // Only a request that came in with a handed-out key says so.
+          ...(r.entryKey
+            ? ([["访问 Key", keyName(r.entryKey)]] as [
+                string,
+                React.ReactNode,
+              ][])
+            : []),
           [r.source === "grok" ? "轮次 ID" : "请求 ID", r.id],
           ...(r.source === "grok"
             ? ([
