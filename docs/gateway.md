@@ -59,7 +59,7 @@ DNS、TCP 和 TLS 握手共用故障策略中的连接时限，TLS 不重新计�
 
 - 用法与该客户端自己的请求相同：同一个地址（Codex、Grok、DSH 带 `/v1`，Claude 与 Antigravity 用根地址）、同样的三种认证头、同样的协议和模型；请求进入该客户端的供应商队列，共用并发、冷却、额度与接管规则。
 - 监听仍只在 `127.0.0.1`。要让其他机器使用，请自备反向代理或隧道把请求转到本机端口，HTTPS 由代理负责。持有 Key 即可使用该客户端的全部供应商额度，请只发给信任的对象。
-- 访问 Key 只能发会计入用量的请求和读取模型列表。文件、上传、读取已保存的响应（`/files`、`/uploads`、`GET /responses/{id}`）以及 Responses 以外的 WebSocket 连接返回 403：这些请求使用供应商账号的凭据，且不计入用量。本机 Key 不受这一限制。
+- 访问 Key 只能用于生成、压缩、搜索、Token 计数和读取模型列表：`POST` 的 `/responses`、`/responses/compact`、`/chat/completions`、`/messages`、`/messages/count_tokens`、`/alpha/search` 和 Gemini 的 `/models/<模型>:generateContent`、`:streamGenerateContent`、`:countTokens`，`GET` 的 `/models` 与 `/models/<模型>`（均指版本前缀之后的部分，其中哪些可用仍取决于所属客户端），以及 Responses 的 WebSocket 连接。其余请求返回 403，包括文件、上传、已保存的响应（`/files`、`/uploads`、`GET /responses/{id}`）、嵌入、图像等接口和 Responses 以外的 WebSocket 连接：它们使用供应商账号的凭据，网关也不为其计量。路径须按字面匹配，带 `..`、空段或百分号编码的写法同样返回 403。本机 Key 不受这一限制。
 - 名称 1–120 个字符，同一客户端内不能重复。重命名不换 Key，已发出去的继续可用，用量也继续记在同一把 Key 下。
 - 删除立即生效：新的请求返回 401；已建立的 Responses WebSocket 在下一轮开始前被关闭；正在进行的那一次响应照常结束并记账。网关运行中、客户端配置被外部修改时也可以删除。
 - 每把 Key 的请求数、Token 和估算费用分开统计，见[用量](usage.md)的“按 Key 统计”。访问 Key 没有额度上限、到期时间或单独倍率。

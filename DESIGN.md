@@ -408,7 +408,7 @@ Codex 的网络搜索与 Claude、Grok 共用“接管网络搜索请求”：�
 
 - 每个客户端网关除自己的本机 Key（`localToken`）外可以发放访问 Key：由应用生成，不接受自定义值；名称 1–120 个可见字符，同一客户端内不重复。新增、重命名、删除经既有的网关编辑提交，直接落盘、不走接管事务，运行中立即生效，客户端配置被外部修改不妨碍撤销；重命名不换 Key。
 - 分流规则不变：无前缀请求按“本机 Key 或任一访问 Key”精确匹配客户端，全部客户端合计恰好命中一把才放行，命中多把或多个认证头不属于同一把一律 401。命中访问 Key 的请求与该客户端自己的请求共用地址、协议、供应商队列和全部调度规则。
-- 访问 Key 只放行会计入用量的请求和模型列表：`/files`、`/uploads`、`GET /responses/{id}` 与 Responses 以外的 WebSocket 升级返回 403，本机 Key 不受限。访问 Key 的请求不更新“最近成功请求的客户端身份”。入站认证头（含 `x-goog-api-key`）不随请求或 WebSocket 握手发往上游。
+- 访问 Key 按允许清单放行（`routing::counted`）：`POST` 的 `/responses`、`/responses/compact`、`/chat/completions`、`/messages`、`/messages/count_tokens`、`/alpha/search` 与 Gemini 的模型调用（生成和计数），`GET` 的 `/models` 及其条目，另加 Responses 的 WebSocket 升级和 Antigravity 由网关直接应答的指标调用。请求原样转发，所以路径须按字面匹配，不放行 `/models/../files` 这类只有上游才会解析成别处的写法。其余路径（文件、上传、已保存的响应、嵌入、图像等）与 Responses 以外的 WebSocket 升级返回 403，本机 Key 不受限。访问 Key 的请求不更新“最近成功请求的客户端身份”。入站认证头（含 `x-goog-api-key`）不随请求或 WebSocket 握手发往上游。
 - 删除即撤销：新请求 401；已建立的 Responses WebSocket 在下一轮开始前以 1008 关闭；正在进行的那一次响应照常结束并记账。
 - 明文只在“复制”时由 Rust 写入本机剪贴板，不进入界面、列表、事件或日志；选中其他实例时经内部命令 `export_gateway_key` 在两端 Rust 之间传递。入口仅主窗口；对方握手没有该命令时整个区块隐藏。
 - 网关页在供应商列表与“故障策略”之间加默认收起的“访问 Key”折叠区，沿用“高级设置”的行样式和图标按钮：首行“本机 Key｜默认”，其后每把 Key 一行（复制、重命名、删除），底部“添加 Key”；逐条保存，不占用“保存参数”。
