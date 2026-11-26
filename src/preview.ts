@@ -378,6 +378,8 @@ export async function run(
     };
   if (name === "get_startup") return { ...startup };
   if (name === "reveal_provider_token") return "fixture-preview-token";
+  // Rust puts the key on the clipboard; the preview has no key to put there.
+  if (name === "copy_gateway_key") return null;
   if (name === "set_startup") {
     startup = {
       ...startup,

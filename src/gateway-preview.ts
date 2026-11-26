@@ -748,6 +748,17 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       s.settings.customFailureRules = s.settings.customFailureRules?.filter(
         (r) => r.id !== e.id,
       );
+    if (e.op === "saveEntryKey") {
+      const key = s.entryKeys?.find((k) => k.id === e.id);
+      if (key) key.name = String(e.name);
+      else
+        s.entryKeys = [
+          ...(s.entryKeys ?? []),
+          { id: crypto.randomUUID(), name: String(e.name) },
+        ];
+    }
+    if (e.op === "deleteEntryKey")
+      s.entryKeys = s.entryKeys?.filter((k) => k.id !== e.id);
     if (e.op === "mode") s.mode = e.mode as "auto" | "manual";
     if (e.op === "select") {
       s.selected = id;

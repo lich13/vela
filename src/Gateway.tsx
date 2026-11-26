@@ -2,6 +2,7 @@ import ConnectionTestIcon from "./ConnectionTestIcon";
 import Advanced from "./GatewayAdvanced";
 import DshProfile, { connectDsh } from "./DshProfile";
 import { preferredDshProfile } from "./dsh-profile";
+import GatewayKeys from "./GatewayKeys";
 import GatewayModels from "./GatewayModels";
 import GrokImport from "./GrokImport";
 import GatewayDialog, { type ProviderTab } from "./GatewayProviderDialog";
@@ -647,6 +648,15 @@ function GatewayContent({
             }}
           </SortableProviders>
         </div>
+        <GatewayKeys
+          clientId={clientId}
+          keys={state.entryKeys ?? []}
+          revision={state.revision}
+          busy={busy}
+          save={edit}
+          run={run}
+          notify={notify}
+        />
         <Advanced
           clientId={clientId}
           onDirtyChange={markAdvanced}
