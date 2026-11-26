@@ -718,16 +718,13 @@ fn create_tables(c: &Connection) -> Result<()> {
       CREATE TABLE v12_dead_diagnostics(block INTEGER NOT NULL,slot INTEGER NOT NULL,PRIMARY KEY(block,slot)) WITHOUT ROWID;
       CREATE TABLE v12_record_states(id INTEGER PRIMARY KEY,started INTEGER NOT NULL,finished INTEGER,completed INTEGER NOT NULL,last INTEGER NOT NULL,archived INTEGER NOT NULL,original INTEGER NOT NULL,compaction INTEGER NOT NULL,ended INTEGER NOT NULL);
       CREATE UNIQUE INDEX v12_record_state_values ON v12_record_states(started,finished,completed,last,archived,original,compaction,ended);
-      CREATE TABLE v12_rows(rid INTEGER PRIMARY KEY,key BLOB NOT NULL,client BLOB NOT NULL,source BLOB NOT NULL,time INTEGER NOT NULL,response BLOB,signature INTEGER,effective INTEGER NOT NULL,duplicate INTEGER,archived_duplicate TEXT,sequence INTEGER NOT NULL,shape INTEGER NOT NULL,body BLOB NOT NULL,session BLOB,state INTEGER NOT NULL);
-      CREATE VIEW v12_records AS SELECT r.rid,r.key,r.client,r.source,r.time,r.response,r.signature,r.effective,r.duplicate,r.archived_duplicate,r.sequence,s.started,s.finished,s.completed,s.last,r.shape,r.body,s.archived,s.original,s.compaction,s.ended,r.session FROM v12_rows r JOIN v12_record_states s ON s.id=r.state;
+      CREATE TABLE v12_rows(rid INTEGER PRIMARY KEY,key BLOB NOT NULL,client BLOB NOT NULL,source BLOB NOT NULL,time INTEGER NOT NULL,response BLOB,signature INTEGER,effective INTEGER NOT NULL,duplicate INTEGER,archived_duplicate TEXT,sequence INTEGER NOT NULL,shape INTEGER NOT NULL,body BLOB NOT NULL,session BLOB,state INTEGER NOT NULL,entry BLOB);
       CREATE INDEX v12_key_hint ON v12_rows(usage_hint(key));
       CREATE INDEX v12_time ON v12_rows(time);
       CREATE INDEX v12_response ON v12_rows(usage_hint(response)) WHERE response IS NOT NULL;
       CREATE INDEX v12_signature ON v12_rows(signature,source) WHERE signature IS NOT NULL;
       CREATE INDEX v12_duplicate ON v12_rows(duplicate) WHERE duplicate IS NOT NULL;
-      CREATE INDEX v12_archived_duplicate ON v12_rows(archived_duplicate,time) WHERE archived_duplicate IS NOT NULL;
-      CREATE TRIGGER v12_record_update INSTEAD OF UPDATE OF body,effective,duplicate,archived_duplicate ON v12_records BEGIN UPDATE v12_rows SET body=NEW.body,effective=NEW.effective,duplicate=NEW.duplicate,archived_duplicate=NEW.archived_duplicate WHERE rid=OLD.rid; END;
-      CREATE TRIGGER v12_record_delete INSTEAD OF DELETE ON v12_records BEGIN DELETE FROM v12_rows WHERE rid=OLD.rid; END;"))?;
+      CREATE INDEX v12_archived_duplicate ON v12_rows(archived_duplicate,time) WHERE archived_duplicate IS NOT NULL;"))?;
     db(c.execute_batch("CREATE TABLE v12_measures(id INTEGER PRIMARY KEY,hint INTEGER NOT NULL,
       inclusive_input INTEGER,input INTEGER,output INTEGER,cache_read INTEGER,cache_write INTEGER,cache_write_5m INTEGER,cache_write_1h INTEGER,image_input INTEGER,image_output INTEGER,audio_input INTEGER,audio_output INTEGER,
       cost TEXT,unpriced INTEGER NOT NULL,duration INTEGER NOT NULL,repeat_count INTEGER NOT NULL);
@@ -809,6 +806,23 @@ pub(super) fn upgrade_v13(c: &Connection) -> Result<()> {
          DROP TABLE receipts_v13; DROP TABLE cursors_v13;
          PRAGMA user_version=14;",
     ))
+}
+/// Whether a record has a column for the gateway key it came in with. A
+/// database written before a gateway had such keys lacks it, at the same
+/// version: what it holds reads the same with and without the column.
+pub(super) fn has_entry_column(c: &Connection) -> Result<bool> {
+    db(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('v12_rows') WHERE name='entry')",
+        [],
+        |row| row.get(0),
+    ))
+}
+/// Adds that column, which rewrites no row, and makes the views that list a
+/// record's columns again; dropping a view drops its triggers with it.
+pub(super) fn add_entry_column(c: &Connection) -> Result<()> {
+    db(c.execute_batch(&format!(
+        "ALTER TABLE v12_rows ADD COLUMN entry BLOB; DROP VIEW records; DROP VIEW v12_records; {RECORD_VIEWS}"
+    )))
 }
 
 fn record_state(c: &Connection, values: &[rusqlite::types::Value]) -> Result<i64> {
@@ -987,6 +1001,7 @@ pub(super) fn save(c: &Connection, r: &Record, effective: i64, sequence: i64) ->
         "duplicateOf",
         "detailArchived",
         "sessionId",
+        "entryKey",
     ] {
         obj.remove(k);
     }
@@ -1004,6 +1019,7 @@ pub(super) fn save(c: &Connection, r: &Record, effective: i64, sequence: i64) ->
         .map(key);
     let sig = r.signature().map(|signature| hint(&key(&signature)));
     let session = r.session_id.as_deref().map(key);
+    let entry = r.entry_key.as_deref().map(key);
     let previous = owner(c, &r.id)?;
     let time = r.event_time();
     let delta = |at: i64| {
@@ -1037,7 +1053,7 @@ pub(super) fn save(c: &Connection, r: &Record, effective: i64, sequence: i64) ->
             Sql::Integer(delta(ended)?),
         ],
     )?;
-    db(c.execute("INSERT INTO v12_rows(key,client,source,time,response,signature,effective,sequence,shape,body,rid,session,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(rid) DO UPDATE SET client=excluded.client,source=excluded.source,time=excluded.time,response=excluded.response,signature=excluded.signature,effective=excluded.effective,shape=excluded.shape,body=excluded.body,session=excluded.session,state=excluded.state",params![key(&r.id),db(label(r.client.clone().into()))?,db(label(r.source.clone().into()))?,time,response,sig,effective,sequence,shape,pack_diagnostic(c,Value::Object(diagnostic),r.started_at)?,previous,session,state]))?;
+    db(c.execute("INSERT INTO v12_rows(key,client,source,time,response,signature,effective,sequence,shape,body,rid,session,state,entry) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(rid) DO UPDATE SET client=excluded.client,source=excluded.source,time=excluded.time,response=excluded.response,signature=excluded.signature,effective=excluded.effective,shape=excluded.shape,body=excluded.body,session=excluded.session,state=excluded.state,entry=excluded.entry",params![key(&r.id),db(label(r.client.clone().into()))?,db(label(r.source.clone().into()))?,time,response,sig,effective,sequence,shape,pack_diagnostic(c,Value::Object(diagnostic),r.started_at)?,previous,session,state,entry]))?;
     let owner = previous.unwrap_or_else(|| c.last_insert_rowid());
     for table in ["v12_attempt_rows", "v12_session_rows", "v12_original"] {
         db(c.execute(&format!("DELETE FROM {table} WHERE owner=?1"), [owner]))?;
@@ -1228,6 +1244,10 @@ pub(super) fn load(c: &Connection, owner: i64) -> Result<Value> {
     obj.insert("detailArchived".into(), json!(db(row.get::<_, bool>(17))?));
     obj.insert("responseId".into(), json!(identifier(db(row.get(5))?)?));
     obj.insert("sessionId".into(), json!(identifier(db(row.get(21))?)?));
+    // A record of the client's own key reads as it did before there were others.
+    if let Some(entry) = identifier(db(row.get(22))?)? {
+        obj.insert("entryKey".into(), json!(entry));
+    }
     let target: Option<Vec<u8>> = db(c
         .query_row(
             "SELECT coalesce(d.key,usage_key(r.archived_duplicate)) FROM v12_records r LEFT JOIN v12_rows d ON d.rid=r.duplicate WHERE r.rid=?1",
@@ -1291,10 +1311,18 @@ fn metric_select(table: &str, kind: i64) -> String {
       CASE WHEN ({cache_read}) IS NOT NULL AND ({cache_read})<=({cache_input}) THEN ({cache_input}) ELSE 0 END cache_input_eligible
       FROM {table} a JOIN v12_records r ON r.rid=a.owner LEFT JOIN v12_dictionary p ON p.id=a.provider LEFT JOIN v12_dictionary m ON m.id=a.model LEFT JOIN v12_dictionary shape_value ON shape_value.id=a.shape")
 }
+/// The two views that list every column of a record, and the triggers of the
+/// first. A new database is given this text, and so is one whose records gain
+/// a column, so the two never differ. `load` reads the first by position:
+/// a new column goes last.
+const RECORD_VIEWS: &str = "CREATE VIEW v12_records AS SELECT r.rid,r.key,r.client,r.source,r.time,r.response,r.signature,r.effective,r.duplicate,r.archived_duplicate,r.sequence,s.started,s.finished,s.completed,s.last,r.shape,r.body,s.archived,s.original,s.compaction,s.ended,r.session,r.entry FROM v12_rows r JOIN v12_record_states s ON s.id=r.state;
+      CREATE TRIGGER v12_record_update INSTEAD OF UPDATE OF body,effective,duplicate,archived_duplicate ON v12_records BEGIN UPDATE v12_rows SET body=NEW.body,effective=NEW.effective,duplicate=NEW.duplicate,archived_duplicate=NEW.archived_duplicate WHERE rid=OLD.rid; END;
+      CREATE TRIGGER v12_record_delete INSTEAD OF DELETE ON v12_records BEGIN DELETE FROM v12_rows WHERE rid=OLD.rid; END;
+      CREATE VIEW records AS SELECT usage_text(r.key) id,r.rid,r.client client_code,r.source source_code,usage_label(r.client) client,usage_label(r.source) source,r.time,usage_value(p.value) provider,usage_value(m.value) model,dim.status status,usage_text(r.response) response,usage_signature(r.client,s.value,measure.input,measure.output,measure.cache_read,measure.cache_write,dim.operation) signature,r.effective,r.duplicate,r.archived_duplicate,r.time+r.ended ended,coalesce(usage_text(d.key),r.archived_duplicate) duplicate_of,r.sequence local_sequence,
+      json_object('_usageRow',r.rid,'attempts',json_array(json_object('operation',CASE dim.operation WHEN 1 THEN 'compaction' WHEN 2 THEN 'web_search' ELSE 'model' END,'compactionKind',CASE WHEN r.compaction THEN 'legacy' ELSE NULL END,'price',CASE WHEN measure.cost IS NULL THEN NULL ELSE json('{}') END)), 'gatewayReported',CASE WHEN r.original THEN json('{}') ELSE NULL END,'mergedSources',CASE WHEN EXISTS(SELECT 1 FROM v12_rows child WHERE child.duplicate=r.rid) THEN json('[\"session\"]') ELSE json('[]') END) body,r.entry
+      FROM v12_records r LEFT JOIN v12_attempt_rows a ON a.owner=r.rid AND a.ordinal=r.last LEFT JOIN v12_session_rows b ON b.owner=r.rid AND b.ordinal=r.last LEFT JOIN v12_dimensions dim ON dim.shape=coalesce(a.shape,b.shape) LEFT JOIN v12_measures measure ON measure.id=coalesce(a.measure,b.measure) LEFT JOIN v12_dictionary p ON p.id=dim.provider LEFT JOIN v12_dictionary m ON m.id=dim.model LEFT JOIN v12_dictionary s ON s.id=coalesce(a.shape,b.shape) LEFT JOIN v12_rows d ON d.rid=r.duplicate;";
 fn create_views(c: &Connection) -> Result<()> {
-    db(c.execute_batch("CREATE VIEW records AS SELECT usage_text(r.key) id,r.rid,r.client client_code,r.source source_code,usage_label(r.client) client,usage_label(r.source) source,r.time,usage_value(p.value) provider,usage_value(m.value) model,dim.status status,usage_text(r.response) response,usage_signature(r.client,s.value,measure.input,measure.output,measure.cache_read,measure.cache_write,dim.operation) signature,r.effective,r.duplicate,r.archived_duplicate,r.time+r.ended ended,coalesce(usage_text(d.key),r.archived_duplicate) duplicate_of,r.sequence local_sequence,
-      json_object('_usageRow',r.rid,'attempts',json_array(json_object('operation',CASE dim.operation WHEN 1 THEN 'compaction' WHEN 2 THEN 'web_search' ELSE 'model' END,'compactionKind',CASE WHEN r.compaction THEN 'legacy' ELSE NULL END,'price',CASE WHEN measure.cost IS NULL THEN NULL ELSE json('{}') END)), 'gatewayReported',CASE WHEN r.original THEN json('{}') ELSE NULL END,'mergedSources',CASE WHEN EXISTS(SELECT 1 FROM v12_rows child WHERE child.duplicate=r.rid) THEN json('[\"session\"]') ELSE json('[]') END) body
-      FROM v12_records r LEFT JOIN v12_attempt_rows a ON a.owner=r.rid AND a.ordinal=r.last LEFT JOIN v12_session_rows b ON b.owner=r.rid AND b.ordinal=r.last LEFT JOIN v12_dimensions dim ON dim.shape=coalesce(a.shape,b.shape) LEFT JOIN v12_measures measure ON measure.id=coalesce(a.measure,b.measure) LEFT JOIN v12_dictionary p ON p.id=dim.provider LEFT JOIN v12_dictionary m ON m.id=dim.model LEFT JOIN v12_dictionary s ON s.id=coalesce(a.shape,b.shape) LEFT JOIN v12_rows d ON d.rid=r.duplicate;") )?;
+    db(c.execute_batch(RECORD_VIEWS))?;
     let original = metric_select("v12_raw_attempts", 2)
         + " WHERE EXISTS(SELECT 1 FROM v12_original o WHERE o.owner=r.rid AND o.metrics_changed)";
     db(c.execute_batch(&format!("CREATE VIEW usage_metrics AS {} UNION ALL {} UNION ALL {original} UNION ALL SELECT * FROM usage_daily_metrics;",metric_select("v12_attempts",0),metric_select("v12_sessions",0))))?;

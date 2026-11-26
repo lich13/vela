@@ -10,7 +10,9 @@ use serde_json::Value;
 fn projection(value: &Value) -> Value {
     let mut projected = serde_json::Map::new();
     if let Some(example) = value.get("example") {
-        for key in ["scope", "client", "provider", "model", "source", "status"] {
+        for key in [
+            "scope", "client", "provider", "model", "source", "status", "entryKey",
+        ] {
             if let Some(field) = value.get(key) {
                 projected.insert(key.into(), field.clone());
             }

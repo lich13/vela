@@ -30,7 +30,12 @@ fn compatible(a: &Record, b: &Record) -> bool {
         && (provider(a).is_none() || provider(b).is_none() || provider(a) == provider(b))
 }
 fn exact(a: &Record, b: &Record) -> bool {
-    response(a).is_some() && response(a) == response(b) && compatible(a, b)
+    response(a).is_some()
+        && response(a) == response(b)
+        && compatible(a, b)
+        // What came in through the gateway with two keys is two requests,
+        // whatever the upstream called its answers.
+        && (a.source != "proxy" || b.source != "proxy" || a.entry_key == b.entry_key)
 }
 fn fingerprint(a: &Record, b: &Record) -> bool {
     a.source != b.source
