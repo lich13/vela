@@ -1,24 +1,37 @@
 import { useEffect, useState } from "react";
 import { command } from "./bridge";
 import { Drawer } from "./Drawer";
+import { useInstance } from "./instance";
 import { billTime, localSecond } from "./UsageBill";
-import { errorOf, type ClientId, type EntryKey } from "./types";
+import {
+  errorOf,
+  type ClientId,
+  type EntryKey,
+  type GatewayState,
+} from "./types";
 import {
   numeric,
   ownEntryKey,
   type CalculatorModel,
   type CostCalculation,
+  type ProviderPriceMapping,
   type UsageFilter,
 } from "./usage-types";
 
 type FiveTuple = [string, string, string, string, string];
+/** A client by the name its usage is counted under. */
+type Client = ProviderPriceMapping["client"];
 
-const clients: [ClientId, string][] = [
+const clients: [Client, string][] = [
   ["claude", "Claude Code"],
   ["codex", "Codex"],
   ["grok", "Grok Build"],
   ["dsh", "DeepSeek Harness"],
+  ["antigravity", "Antigravity"],
 ];
+/** Usage names the Antigravity gateway `antigravity`; its gateway id is `agy`. */
+const gatewayOf = (client: Client): ClientId =>
+  client === "antigravity" ? "agy" : client;
 const quantities = [
   "输入",
   "输出",
@@ -36,10 +49,13 @@ export default function UsageCostCalculator({
   filter: UsageFilter;
   close: () => void;
 }) {
-  const [client, setClient] = useState<ClientId>(() =>
-    clients.some(([id]) => id === filter.client)
-      ? (filter.client as ClientId)
-      : "claude",
+  const { takeover } = useInstance();
+  // A server does not run the agy gateway, so it has no usage of it to cost.
+  const offered = clients.filter(
+    ([id]) => id !== "antigravity" || takeover("agy"),
+  );
+  const [client, setClient] = useState<Client>(
+    () => offered.find(([id]) => id === filter.client)?.[0] ?? "claude",
   );
   const [provider, setProvider] = useState(filter.provider ?? "");
   const [providers, setProviders] = useState<{ id: string; name: string }[]>(
@@ -47,7 +63,8 @@ export default function UsageCostCalculator({
   );
   const [models, setModels] = useState<CalculatorModel[]>([]);
   const [model, setModel] = useState("");
-  const [keys, setKeys] = useState<EntryKey[]>([]);
+  // What the client shown hands out; unknown until its gateway has been read.
+  const [keys, setKeys] = useState<EntryKey[] | null>(null);
   const [entryKey, setEntryKey] = useState(filter.entryKey ?? "");
   const [from, setFrom] = useState(() => localSecond(filter.start ?? today()));
   const [to, setTo] = useState(() => localSecond(filter.end ?? Date.now()));
@@ -64,20 +81,24 @@ export default function UsageCostCalculator({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  /** Shows what a gateway offers, and answers with the keys it hands out. */
+  const offer = (view: GatewayState) => {
+    const handedOut = view.entryKeys ?? [];
+    setProviders(view.providers.map(({ id, name }) => ({ id, name })));
+    setKeys(handedOut);
+    return handedOut;
+  };
   useEffect(() => {
     let active = true;
     setProviders([]);
     setModels([]);
-    setKeys([]);
+    setKeys(null);
     void Promise.all([
-      command("get_gateway", { clientId: client }).catch(() => null),
+      command("get_gateway", { clientId: gatewayOf(client) }).catch(() => null),
       command("get_usage_calculator_models", { client }).catch(() => []),
     ]).then(([view, usedModels]) => {
       if (!active) return;
-      if (view) {
-        setProviders(view.providers.map(({ id, name }) => ({ id, name })));
-        setKeys(view.entryKeys ?? []);
-      }
+      if (view) offer(view);
       setModels(usedModels);
     });
     return () => {
@@ -87,11 +108,12 @@ export default function UsageCostCalculator({
 
   // Counted by key only where the client shown hands keys out, and then by
   // its own key or one of those: nothing the form does not show narrows it.
-  const chosenKey =
-    keys.length > 0 &&
-    (entryKey === ownEntryKey || keys.some((key) => key.id === entryKey))
+  const among = (handedOut: EntryKey[]) =>
+    handedOut.length > 0 &&
+    (entryKey === ownEntryKey || handedOut.some((key) => key.id === entryKey))
       ? entryKey
       : "";
+  const chosenKey = keys ? among(keys) : "";
 
   const calculate = async () => {
     const start = billTime(from, "start"),
@@ -107,6 +129,18 @@ export default function UsageCostCalculator({
     setBusy(true);
     setError("");
     try {
+      // Whether the key the page is narrowed to is this client's is not known
+      // before its keys are: counting without it would cost every key's usage
+      // as that one's.
+      let handedOut = keys;
+      if (entryKey && !handedOut)
+        handedOut = await command("get_gateway", {
+          clientId: gatewayOf(client),
+        }).then(offer, () => null);
+      if (entryKey && !handedOut) {
+        setError("无法读取访问 Key，请重试");
+        return;
+      }
       const totals = await command("get_usage_calculator_totals", {
         filter: {
           start,
@@ -115,7 +149,7 @@ export default function UsageCostCalculator({
           provider,
           model: model.trim() || undefined,
           source: "proxy",
-          entryKey: chosenKey || undefined,
+          entryKey: (handedOut && among(handedOut)) || undefined,
         },
       });
       if (!totals.attempts) throw new Error("所选周期没有符合条件的网关用量");
@@ -193,13 +227,13 @@ export default function UsageCostCalculator({
               <select
                 value={client}
                 onChange={(e) => {
-                  setClient(e.target.value as ClientId);
+                  setClient(e.target.value as Client);
                   setProvider("");
                   setEntryKey("");
                   setError("");
                 }}
               >
-                {clients.map(([id, label]) => (
+                {offered.map(([id, label]) => (
                   <option key={id} value={id}>
                     {label}
                   </option>
@@ -222,7 +256,7 @@ export default function UsageCostCalculator({
             </label>
           </div>
           {/* The key goes beside the model; without one the model keeps the row. */}
-          {keys.length > 0 ? (
+          {keys && keys.length > 0 ? (
             <div className="usage-price-fields">
               {modelField}
               <label className="usage-field">

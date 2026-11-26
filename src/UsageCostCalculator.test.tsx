@@ -3,14 +3,36 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import UsageCostCalculator from "./UsageCostCalculator";
 import { command } from "./bridge";
+import type { InstanceState } from "./bridge-contracts";
+import { setInstanceState } from "./instance";
 
 vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
+/** The pages show this machine, or a server reached over SSH. */
+const instance = (active: "local" | "fixture-server"): InstanceState => ({
+  revision: `fixture-${active}`,
+  active,
+  machines: [
+    {
+      id: "fixture-server",
+      name: "Fixture server",
+      kind: "linux",
+      sshHost: "fixture-host",
+      fallbackHost: null,
+      useSudo: false,
+    },
+  ],
+  connection:
+    active === "local"
+      ? { status: "local", version: null, error: null, unsupported: [] }
+      : { status: "connected", version: null, error: null, unsupported: [] },
+});
 const result = {
   rates: ["8", "40", "0.2", "10", "16"],
   costs: ["0.000016", "0.06", "0.0032", "1.76", "3.862656"],
   total: "5.685872",
 };
 beforeEach(() => {
+  setInstanceState(instance("local"));
   vi.mocked(command).mockReset();
   vi.mocked(command).mockImplementation(async (name) => {
     if (name === "get_gateway")
@@ -268,9 +290,13 @@ const codexKey = {
   id: "3f6a1c2e-7b4d-4e19-8a50-1d2c9e6b7f01",
   name: "Fixture bot",
 };
+const agyKey = {
+  id: "5a0c7e21-9d3f-4b86-a1e2-8f6b4c0d7e05",
+  name: "Fixture agy",
+};
 /**
- * Claude Code and Codex each hand a key out and Grok Build hands out none. The
- * DeepSeek Harness gateway cannot be read.
+ * Claude Code, Codex and Antigravity each hand a key out and Grok Build hands
+ * out none. The DeepSeek Harness gateway cannot be read.
  */
 function handOutKeys() {
   const usual = vi.mocked(command).getMockImplementation()!;
@@ -285,7 +311,9 @@ function handOutKeys() {
           ? [claudeKey]
           : clientId === "codex"
             ? [codexKey]
-            : [],
+            : clientId === "agy"
+              ? [agyKey]
+              : [],
     } as never;
   });
 }
@@ -390,4 +418,135 @@ it("counts every key where the page's key is not one the client shown hands out"
   const own = await counted(user);
   expect(own.client).toBe("grok");
   expect(own.entryKey).toBeUndefined();
+});
+
+it("reads the client's keys before it counts by the key the page is narrowed to", async () => {
+  handOutKeys();
+  const usual = vi.mocked(command).getMockImplementation()!;
+  // The gateway is slow to answer the drawer as it opens.
+  let answer!: () => void;
+  const slow = new Promise<void>((resolve) => {
+    answer = resolve;
+  });
+  let asked = 0;
+  vi.mocked(command).mockImplementation(async (name, ...rest) => {
+    if (name === "get_gateway" && asked++ === 0) await slow;
+    return usual(name, ...rest) as never;
+  });
+  const user = userEvent.setup();
+  render(
+    <UsageCostCalculator
+      filter={{ client: "claude", entryKey: claudeKey.id }}
+      close={() => {}}
+    />,
+  );
+  expect(screen.queryByLabelText("Key")).toBeNull();
+  // Asked again, the gateway says the key is this client's.
+  expect((await counted(user)).entryKey).toBe(claudeKey.id);
+  expect(called("get_usage_calculator_totals")).toHaveLength(1);
+  expect(screen.getByLabelText("Key")).toHaveValue(claudeKey.id);
+
+  // The first answer changes neither the choice nor the amount shown for it.
+  answer();
+  await ready();
+  expect(screen.getByLabelText("Key")).toHaveValue(claudeKey.id);
+  expect(screen.getByText("$5.685872")).toBeInTheDocument();
+});
+
+it("counts nothing under a key while the keys of the client shown cannot be read", async () => {
+  handOutKeys();
+  const usual = vi.mocked(command).getMockImplementation()!;
+  let readable = false;
+  vi.mocked(command).mockImplementation(async (name, ...rest) => {
+    if (name === "get_gateway" && !readable)
+      throw new Error("fixture gateway unreadable");
+    return usual(name, ...rest) as never;
+  });
+  const user = userEvent.setup();
+  const narrowed = render(
+    <UsageCostCalculator
+      filter={{ client: "claude", entryKey: claudeKey.id }}
+      close={() => {}}
+    />,
+  );
+  await ready();
+  expect(screen.queryByLabelText("Key")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "计算" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "无法读取访问 Key，请重试",
+  );
+  expect(called("get_usage_calculator_totals")).toEqual([]);
+  expect(called("calculate_usage_cost")).toEqual([]);
+
+  // The key is still the one chosen once the gateway answers.
+  readable = true;
+  expect((await counted(user)).entryKey).toBe(claudeKey.id);
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByLabelText("Key")).toHaveValue(claudeKey.id);
+  narrowed.unmount();
+
+  // With no key chosen there is nothing to read first.
+  readable = false;
+  render(<UsageCostCalculator filter={{ client: "claude" }} close={() => {}} />);
+  await ready();
+  const every = await counted(user);
+  expect(every.client).toBe("claude");
+  expect(every.entryKey).toBeUndefined();
+});
+
+it("costs the Antigravity gateway's usage under the name usage knows it by", async () => {
+  handOutKeys();
+  const user = userEvent.setup();
+  const offered = () =>
+    [...screen.getByLabelText("客户端").querySelectorAll("option")].map(
+      (option) => option.textContent,
+    );
+  const narrowed = { client: "antigravity", entryKey: agyKey.id };
+  const here = render(
+    <UsageCostCalculator filter={narrowed} close={() => {}} />,
+  );
+  await screen.findByRole("option", { name: "Fixture agy" });
+  expect(offered()).toEqual([
+    "Claude Code",
+    "Codex",
+    "Grok Build",
+    "DeepSeek Harness",
+    "Antigravity",
+  ]);
+  expect(screen.getByLabelText("客户端")).toHaveValue("antigravity");
+  expect(screen.getByLabelText("Key")).toHaveValue(agyKey.id);
+  // Its gateway goes by agy.
+  expect(called("get_gateway")).toEqual([["get_gateway", { clientId: "agy" }]]);
+  expect(called("get_usage_calculator_models")).toEqual([
+    ["get_usage_calculator_models", { client: "antigravity" }],
+  ]);
+  expect(await counted(user)).toMatchObject({
+    client: "antigravity",
+    source: "proxy",
+    entryKey: agyKey.id,
+  });
+
+  // Chosen by hand as well, from another client.
+  await user.selectOptions(screen.getByLabelText("客户端"), "codex");
+  await screen.findByRole("option", { name: "Fixture bot" });
+  await user.selectOptions(screen.getByLabelText("客户端"), "antigravity");
+  await user.selectOptions(await screen.findByLabelText("Key"), "Fixture agy");
+  expect(await counted(user)).toMatchObject({
+    client: "antigravity",
+    entryKey: agyKey.id,
+  });
+  here.unmount();
+
+  // A server runs no agy gateway and has none of its usage to cost.
+  setInstanceState(instance("fixture-server"));
+  render(<UsageCostCalculator filter={narrowed} close={() => {}} />);
+  await screen.findByRole("option", { name: "Fixture CI" });
+  expect(offered()).toEqual([
+    "Claude Code",
+    "Codex",
+    "Grok Build",
+    "DeepSeek Harness",
+  ]);
+  expect(screen.getByLabelText("客户端")).toHaveValue("claude");
+  expect(screen.getByLabelText("Key")).toHaveValue("");
 });
