@@ -548,16 +548,40 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
             "{credentials:?}"
         );
     }
+    // Another protocol whose usage is counted is asked for the same way.
+    assert_eq!(
+        call(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            &[("Authorization", &bearer), json],
+            &body
+        )
+        .await,
+        200
+    );
     let generated = upstream.seen.lock().clone();
-    assert_eq!(generated.len(), 4);
+    assert_eq!(
+        generated
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "/v1/responses",
+            "/v1/responses",
+            "/v1/responses",
+            "/v1/responses",
+            "/v1/chat/completions"
+        ]
+    );
     for request in &generated {
-        assert_eq!(request.path, "/v1/responses");
+        assert_eq!(request.method, "POST");
         assert_eq!(request.model.as_deref(), Some(MODEL));
         assert_only_the_providers_token(request, &key);
     }
 
-    // What a provider keeps for its account, and a connection that passes
-    // through uncounted, are not for a handed-out key.
+    // Whatever else a provider serves, and a connection that passes through
+    // uncounted, are not for a handed-out key.
     let upgrade = [
         ("Connection", "Upgrade"),
         ("Upgrade", "websocket"),
@@ -565,6 +589,7 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
         ("Sec-WebSocket-Key", "Zml4dHVyZS1ub25jZS0wMQ=="),
     ];
     let kept_out = [
+        // What the provider keeps for its account.
         ("GET", "/v1/files"),
         ("POST", "/v1/files"),
         ("GET", "/v1/files/fixture-file/content"),
@@ -573,6 +598,25 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
         ("POST", "/v1/uploads/fixture-upload/parts"),
         ("GET", "/v1/responses/fixture-response"),
         ("GET", "/v1/responses/fixture-response/input_items"),
+        ("DELETE", "/v1/responses/fixture-response"),
+        ("POST", "/v1/responses/fixture-response/cancel"),
+        ("GET", "/v1/chat/completions"),
+        ("GET", "/v1/batches"),
+        ("POST", "/v1/vector_stores/fixture-store/search"),
+        (
+            "GET",
+            "/v1/containers/fixture-container/files/fixture-file/content",
+        ),
+        ("GET", "/v1/conversations/fixture-conversation/items"),
+        // What it serves without the gateway counting it.
+        ("POST", "/v1/embeddings"),
+        ("POST", "/v1/images/generations"),
+        // The same, written as only a provider would read it.
+        ("GET", "/v1/models/../files"),
+        ("GET", "/v1/models/%2e%2e/files"),
+        ("GET", "/v1//files"),
+        ("GET", "/v1/%66iles"),
+        ("POST", "/v1/responses/../files"),
     ];
     for (method, path) in kept_out {
         assert_eq!(
@@ -591,7 +635,7 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
     );
     assert_eq!(
         upstream.seen.lock().len(),
-        4,
+        generated.len(),
         "a refusal reaches no upstream"
     );
 
@@ -603,7 +647,7 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
             "{path}"
         );
     }
-    let listed = upstream.seen.lock()[4..].to_vec();
+    let listed = upstream.seen.lock()[generated.len()..].to_vec();
     assert_eq!(
         listed.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
         ["/v1/models", "/v1/models/fixture-model"]
@@ -613,6 +657,7 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
     }
 
     // The client's own key is kept out of none of it.
+    let before_own = upstream.seen.lock().len();
     let own_bearer = format!("Bearer {own}");
     for (method, path) in kept_out {
         assert_eq!(
@@ -629,7 +674,7 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
         call(port, "GET", "/v1/realtime", &own_tunnel, b"").await,
         101
     );
-    let own_requests = upstream.seen.lock()[6..].to_vec();
+    let own_requests = upstream.seen.lock()[before_own..].to_vec();
     assert_eq!(
         own_requests
             .iter()

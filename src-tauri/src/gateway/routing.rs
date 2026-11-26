@@ -99,8 +99,37 @@ pub fn resource(method: &hyper::Method, path: &str) -> bool {
         .any(|prefix| under(&path, prefix))
         || (*method == hyper::Method::GET && path.starts_with("/responses/"))
 }
-/// Reading the list of models or an entry of it: of the resource requests,
-/// the one that touches nothing a provider keeps for its account.
-pub fn model_list(method: &hyper::Method, path: &str) -> bool {
-    *method == hyper::Method::GET && under(&unversioned(path), "/models")
+/// A path segment that is what it reads as: nothing an upstream would
+/// resolve, merge or decode into another path.
+fn plain(segment: &str) -> bool {
+    !matches!(segment, "" | "." | "..")
+        && segment
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.:@".contains(&c))
+}
+/// What a handed-out key may ask for: a generation in one of the wire
+/// protocols whose usage is counted, a compaction, a search, a token count,
+/// or the list of models. Whatever else a provider serves is its account's
+/// own. The path has to be one of these as it is written: it is passed on as
+/// it came, and a provider may well read `/models/../files` as its files.
+pub fn counted(method: &hyper::Method, path: &str) -> bool {
+    let rest = unversioned(path);
+    let rest = rest.strip_suffix('/').unwrap_or(&rest);
+    if *method == hyper::Method::GET {
+        return rest == "/models"
+            || rest
+                .strip_prefix("/models/")
+                .is_some_and(|id| id.split('/').all(plain));
+    }
+    *method == hyper::Method::POST
+        && (super::gemini::model(path).is_some()
+            || matches!(
+                rest,
+                "/responses"
+                    | "/responses/compact"
+                    | "/chat/completions"
+                    | "/messages"
+                    | "/messages/count_tokens"
+                    | "/alpha/search"
+            ))
 }
