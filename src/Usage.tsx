@@ -548,6 +548,9 @@ export default function Usage({
       ? `${key.name}（${clientName(key.client)}）`
       : keyName(id);
   };
+  // With every client shown, the calculator opens on the one whose key the
+  // page is narrowed to.
+  const keyOwner = keys.find((key) => key.id === entryKey)?.client;
   const keyLost =
     entryKey !== "" &&
     !(keyed && (entryKey === ownEntryKey || keyOptions.includes(entryKey)));
@@ -839,7 +842,10 @@ export default function Usage({
           />
         </>
       ) : tab === "pricing" ? (
-        <Pricing onDirtyChange={priceDirty} filter={query()} />
+        <Pricing
+          onDirtyChange={priceDirty}
+          filter={{ ...query(), client: client || keyOwner }}
+        />
       ) : (
         <Ranking
           groups={

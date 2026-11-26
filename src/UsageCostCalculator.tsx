@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { command } from "./bridge";
 import { Drawer } from "./Drawer";
+import { useInstance } from "./instance";
 import { billTime, localSecond } from "./UsageBill";
 import {
   errorOf,
@@ -13,17 +14,24 @@ import {
   ownEntryKey,
   type CalculatorModel,
   type CostCalculation,
+  type ProviderPriceMapping,
   type UsageFilter,
 } from "./usage-types";
 
 type FiveTuple = [string, string, string, string, string];
+/** A client by the name its usage is counted under. */
+type Client = ProviderPriceMapping["client"];
 
-const clients: [ClientId, string][] = [
+const clients: [Client, string][] = [
   ["claude", "Claude Code"],
   ["codex", "Codex"],
   ["grok", "Grok Build"],
   ["dsh", "DeepSeek Harness"],
+  ["antigravity", "Antigravity"],
 ];
+/** Usage names the Antigravity gateway `antigravity`; its gateway id is `agy`. */
+const gatewayOf = (client: Client): ClientId =>
+  client === "antigravity" ? "agy" : client;
 const quantities = [
   "输入",
   "输出",
@@ -41,10 +49,13 @@ export default function UsageCostCalculator({
   filter: UsageFilter;
   close: () => void;
 }) {
-  const [client, setClient] = useState<ClientId>(() =>
-    clients.some(([id]) => id === filter.client)
-      ? (filter.client as ClientId)
-      : "claude",
+  const { takeover } = useInstance();
+  // A server does not run the agy gateway, so it has no usage of it to cost.
+  const offered = clients.filter(
+    ([id]) => id !== "antigravity" || takeover("agy"),
+  );
+  const [client, setClient] = useState<Client>(
+    () => offered.find(([id]) => id === filter.client)?.[0] ?? "claude",
   );
   const [provider, setProvider] = useState(filter.provider ?? "");
   const [providers, setProviders] = useState<{ id: string; name: string }[]>(
@@ -83,7 +94,7 @@ export default function UsageCostCalculator({
     setModels([]);
     setKeys(null);
     void Promise.all([
-      command("get_gateway", { clientId: client }).catch(() => null),
+      command("get_gateway", { clientId: gatewayOf(client) }).catch(() => null),
       command("get_usage_calculator_models", { client }).catch(() => []),
     ]).then(([view, usedModels]) => {
       if (!active) return;
@@ -123,10 +134,9 @@ export default function UsageCostCalculator({
       // as that one's.
       let handedOut = keys;
       if (entryKey && !handedOut)
-        handedOut = await command("get_gateway", { clientId: client }).then(
-          offer,
-          () => null,
-        );
+        handedOut = await command("get_gateway", {
+          clientId: gatewayOf(client),
+        }).then(offer, () => null);
       if (entryKey && !handedOut) {
         setError("无法读取访问 Key，请重试");
         return;
@@ -217,13 +227,13 @@ export default function UsageCostCalculator({
               <select
                 value={client}
                 onChange={(e) => {
-                  setClient(e.target.value as ClientId);
+                  setClient(e.target.value as Client);
                   setProvider("");
                   setEntryKey("");
                   setError("");
                 }}
               >
-                {clients.map(([id, label]) => (
+                {offered.map(([id, label]) => (
                   <option key={id} value={id}>
                     {label}
                   </option>

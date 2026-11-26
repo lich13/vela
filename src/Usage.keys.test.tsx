@@ -356,3 +356,55 @@ it("lets the key go on the pages that do not count by one", async () => {
     }),
   );
 });
+
+it("opens the calculator on the client whose key the page is narrowed to", async () => {
+  counted = { [ownEntryKey]: 2, [codexKey.id]: 1 };
+  serve({ codex: [codexKey], claude: [claudeKey] });
+  const usual = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation(
+    async (name: string, args?: Record<string, unknown>) => {
+      switch (name) {
+        case "get_pricing":
+        case "get_models_dev":
+          // Still being read when the test ends.
+          return new Promise(() => {});
+        case "get_usage_calculator_models":
+          return [];
+        case "get_usage_calculator_totals":
+          return { attempts: 1, tokens: { input: 1 } };
+        case "calculate_usage_cost":
+          return {
+            rates: ["2", "2", "2", "2", "2"],
+            costs: ["0.000002", "0", "0", "0", "0"],
+            total: "0.000002",
+          };
+        default:
+          return usual(name, args);
+      }
+    },
+  );
+  const user = userEvent.setup();
+  render(<Usage />);
+  await screen.findByRole("option", { name: "Fixture CI（Codex）" });
+  // Every client is shown, and the key is one Codex hands out.
+  await user.selectOptions(screen.getByLabelText("用量 Key"), codexKey.id);
+  await user.click(screen.getByRole("tab", { name: "定价" }));
+  await user.click(await screen.findByRole("button", { name: "倍率换算" }));
+  const drawer = within(
+    await screen.findByRole("dialog", { name: "倍率换算" }),
+  );
+  expect(drawer.getByLabelText("客户端")).toHaveValue("codex");
+  await drawer.findByRole("option", { name: "Fixture CI" });
+  expect(drawer.getByLabelText("Key")).toHaveValue(codexKey.id);
+  await user.click(drawer.getByRole("button", { name: "计算" }));
+  await drawer.findByText("$0.000002");
+  expect(filters("get_usage_calculator_totals")).toHaveLength(1);
+  expect(filters("get_usage_calculator_totals")[0]).toMatchObject({
+    client: "codex",
+    source: "proxy",
+    entryKey: codexKey.id,
+  });
+  // The page goes on showing every client.
+  expect(screen.getByLabelText("用量客户端")).toHaveValue("");
+  expect(screen.getByLabelText("用量 Key")).toHaveValue(codexKey.id);
+});
