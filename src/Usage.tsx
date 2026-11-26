@@ -108,6 +108,8 @@ type RankingView = {
 };
 const initialRanking: RankingView = { page: 1, sort: "requests", asc: false };
 const empty: UsagePage = { rows: [], page: 1, total: 0, detailSince: 0 };
+/** The gateways that hand keys out, in the order the page lists their keys. */
+const keyGateways = ["codex", "claude", "grok", "dsh", "agy"] as const;
 type QuotaAnswer = CommandResult<"refresh_antigravity_usage_quota">;
 /** The instances whose Antigravity quota is being asked for, each once at a time. */
 const quotaAsked = new Map<string, Promise<QuotaAnswer>>();
@@ -161,8 +163,8 @@ export default function Usage({
       {},
     ),
     [agProviders, setAgProviders] = useState<Record<string, string>>({}),
-    // The keys the instance hands out, each under its client's usage name.
-    [keys, setKeys] = useState<(EntryKey & { client: string })[]>([]),
+    // The keys each gateway hands out, by its client id.
+    [handedOut, setHandedOut] = useState<Record<string, EntryKey[]>>({}),
     [selected, setSelected] = useState<UsageRecord | null>(null),
     [sheet, setSheet] = useState(false),
     [error, setError] = useState(""),
@@ -440,9 +442,32 @@ export default function Usage({
     events.watch("pricing-state", () => void loadData(true));
     return () => events.dispose();
   }, [loadData, visible]);
+  // A client's keys are as its gateway last said them, in an event of its own
+  // or in the answer to a reading: an answer that set out before what is on
+  // the page does not replace it.
+  const keyClock = useRef(0),
+    keysAsOf = useRef<Record<string, number>>({});
+  const acceptKeys = useCallback(
+    (at: number, clientId: string, entryKeys: EntryKey[] = []) => {
+      if ((keysAsOf.current[clientId] ?? 0) > at) return;
+      keysAsOf.current[clientId] = at;
+      setHandedOut((previous) => ({ ...previous, [clientId]: entryKeys }));
+    },
+    [],
+  );
+  /** Reads the keys again: another window may have changed them since. */
+  const loadKeys = useCallback(() => {
+    const began = ++keyClock.current;
+    for (const clientId of keyGateways)
+      void command("get_gateway", { clientId })
+        .then((gateway) => acceptKeys(began, clientId, gateway.entryKeys))
+        // The names on the page stay as they are.
+        .catch(() => {});
+  }, [acceptKeys]);
   useEffect(() => {
     if (!visible) return;
     let gone = false;
+    const began = ++keyClock.current;
     const seenAgKeyRef = { current: null as string | null };
     const agSignature = (ag: AntigravityAuthState | null) =>
       ag
@@ -474,18 +499,14 @@ export default function Usage({
         setClaudeProviders(
           Object.fromEntries(claude.providers.map((p) => [p.id, p.name])),
         );
-        setKeys(
-          // The usage side knows the agy gateway as antigravity.
-          Object.entries({
-            codex,
-            claude,
-            grok,
-            dsh,
-            antigravity: agy,
-          }).flatMap(([id, gateway]) =>
-            (gateway.entryKeys ?? []).map((key) => ({ ...key, client: id })),
-          ),
-        );
+        for (const [clientId, gateway] of Object.entries({
+          codex,
+          claude,
+          grok,
+          dsh,
+          agy,
+        }))
+          acceptKeys(began, clientId, gateway.entryKeys);
         if (seenAgKeyRef.current === null) {
           seenAgKeyRef.current = agSignature(ag);
           const agMap = updateAccounts(ag);
@@ -506,12 +527,15 @@ export default function Usage({
       setProviders((prev) => ({ ...prev, ...agMap }));
       if (changed) reloadAccountStats();
     });
+    events.watch("gateway-state", (gateway) =>
+      acceptKeys(++keyClock.current, gateway.clientId, gateway.entryKeys),
+    );
     return () => {
       gone = true;
       sequence.current++;
       events.dispose();
     };
-  }, [visible]);
+  }, [visible, acceptKeys]);
   useEffect(() => {
     if (!visible || !state?.settings.refreshSeconds) return;
     const t = setInterval(
@@ -526,6 +550,14 @@ export default function Usage({
   };
   const name = (id: string | null) =>
     id ? providers[id] || `供应商 ${id.slice(0, 8)}` : "本机会话";
+  // Every key handed out, under the name usage knows its client by: the agy
+  // gateway is antigravity there.
+  const keys = keyGateways.flatMap((clientId) =>
+    (handedOut[clientId] ?? []).map((key) => ({
+      ...key,
+      client: clientId === "agy" ? "antigravity" : clientId,
+    })),
+  );
   // Keys only the history still knows: deleted since, they have no name left.
   const formerKeys = (data?.entryKeys ?? [])
     .map((group) => group.id)
@@ -637,7 +669,10 @@ export default function Usage({
             className="icon-button"
             aria-label="刷新用量"
             disabled={independent ? agBusy : busy}
-            onClick={() => void load(true)}
+            onClick={() => {
+              void load(true);
+              loadKeys();
+            }}
           >
             <RefreshCw size={17} />
           </button>
