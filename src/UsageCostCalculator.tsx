@@ -151,6 +151,29 @@ export default function UsageCostCalculator({
     }
   };
 
+  const modelField = (
+    <label className="usage-field">
+      模型
+      <input
+        value={model}
+        list="usage-calculator-models"
+        placeholder="全部模型，可选择已使用模型"
+        onChange={(e) => {
+          const chosen = e.target.value;
+          setModel(chosen);
+          // A used model brings its prices along.
+          const rates = models.find((item) => item.model === chosen)?.rates;
+          if (rates) setUnitPrices(rates);
+        }}
+      />
+      <datalist id="usage-calculator-models">
+        {models.map((item) => (
+          <option key={item.model} value={item.model} />
+        ))}
+      </datalist>
+    </label>
+  );
+
   return (
     <Drawer title="倍率换算" onClose={close}>
       <form
@@ -199,30 +222,9 @@ export default function UsageCostCalculator({
             </label>
           </div>
           {/* The key goes beside the model; without one the model keeps the row. */}
-          <div className={keys.length > 0 ? "usage-price-fields" : undefined}>
-            <label className="usage-field">
-              模型
-              <input
-                value={model}
-                list="usage-calculator-models"
-                placeholder="全部模型，可选择已使用模型"
-                onChange={(e) => {
-                  const chosen = e.target.value;
-                  setModel(chosen);
-                  // A used model brings its prices along.
-                  const rates = models.find(
-                    (item) => item.model === chosen,
-                  )?.rates;
-                  if (rates) setUnitPrices(rates);
-                }}
-              />
-              <datalist id="usage-calculator-models">
-                {models.map((item) => (
-                  <option key={item.model} value={item.model} />
-                ))}
-              </datalist>
-            </label>
-            {keys.length > 0 && (
+          {keys.length > 0 ? (
+            <div className="usage-price-fields">
+              {modelField}
               <label className="usage-field">
                 Key
                 <select
@@ -238,8 +240,10 @@ export default function UsageCostCalculator({
                   ))}
                 </select>
               </label>
-            )}
-          </div>
+            </div>
+          ) : (
+            modelField
+          )}
           <div className="usage-price-fields">
             <label className="usage-field">
               开始
