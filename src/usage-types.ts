@@ -380,6 +380,10 @@ export type CurveProvider = {
   failures: CurveFailures;
   /** The share of attempts that failed in each stretch of the range. */
   trend: (number | null)[];
+  /** Over the whole range. */
+  firstToken: CurveFirstToken;
+  /** Only those in which something ended, in order of time. */
+  buckets: CurveBucket[];
 };
 /**
  * What succeeded and how soon comes from the usage records, what failed from
@@ -394,15 +398,11 @@ export type UsageCurves = {
   failuresSince: number;
   /** From when requests are kept one by one, as a percentile needs them. */
   detailSince: number;
-  /** The providers with traffic or failures, the most rate-limited first. */
+  /**
+   * The providers with traffic or failures, the most rate-limited first and
+   * each with its buckets: choosing among them asks nothing more.
+   */
   providers: CurveProvider[];
-  /** Of the provider the filter names or, where it names none, the first. */
-  selected: {
-    id: string;
-    firstToken: CurveFirstToken;
-    /** Only those in which something ended, in order of time. */
-    buckets: CurveBucket[];
-  } | null;
 };
 export type UsageSettings = {
   logColumns?: Record<string, boolean>;

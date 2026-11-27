@@ -109,7 +109,8 @@ pub struct Bucket {
     pub first_token: FirstToken,
 }
 
-/// What one provider did over the range, to choose it by.
+/// What one provider did over the range: the totals to choose it by and the
+/// buckets to draw it with.
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Provider {
@@ -123,12 +124,6 @@ pub struct Provider {
     /// The share of attempts that failed in each stretch of the range, none
     /// where no attempt is known to have ended.
     pub trend: Vec<Option<f64>>,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Selected {
-    pub id: String,
     /// Over the whole range.
     pub first_token: FirstToken,
     /// Only those in which something ended, in order of time.
@@ -147,10 +142,9 @@ pub struct Curves {
     /// From when requests are kept one by one, as a percentile needs them.
     pub detail_since: i64,
     /// The providers that had traffic or failed, the most rate-limited first.
+    /// Each comes with its buckets, so that choosing among them asks nothing
+    /// more.
     pub providers: Vec<Provider>,
-    /// The provider the filter names or, where it names none, the first of
-    /// `providers`.
-    pub selected: Option<Selected>,
 }
 
 /// What the usage records say of one provider in one bucket.
@@ -264,9 +258,10 @@ fn failed() -> crate::storage::AppError {
     super::model::failure("用量曲线查询失败")
 }
 
-/// The curves the filter asks for. `failures` are the journal's rows that
-/// reach into its range, and `failures_since` the time the journal holds
-/// them all from, in milliseconds.
+/// The curves of every provider in the filter's range and client, whichever
+/// provider it names. `failures` are the journal's rows that reach into the
+/// range, and `failures_since` the time the journal holds them all from, in
+/// milliseconds.
 pub fn read(
     c: &Connection,
     f: &Filter,
@@ -277,7 +272,7 @@ pub fn read(
 ) -> Result<Curves> {
     let asked_end = f.end.unwrap_or(now);
     let step = step(f.start, asked_end);
-    let mut usage = usage(c, f, step)?;
+    let usage = usage(c, f, step)?;
     let mut failed: BTreeMap<&str, BTreeMap<i64, Failures>> = BTreeMap::new();
     let client = f.client.as_deref().filter(|client| !client.is_empty());
     for row in failures {
@@ -332,23 +327,26 @@ pub fn read(
     let mut providers: Vec<Provider> = ids
         .into_iter()
         .map(|id| {
+            let (answered, lost) = (usage.get(id), failed.get(id));
             let mut provider = Provider {
                 id: id.to_owned(),
                 requests: 0,
                 ok: 0,
                 failures: Failures::default(),
                 trend: Vec::new(),
+                first_token: FirstToken::default(),
+                buckets: Vec::new(),
             };
             let mut trend = vec![(0u64, 0u64); stretches];
             let stretch = |bucket: i64| (place(bucket) * stretches / count).min(stretches - 1);
-            for (bucket, seen) in usage.get(id).into_iter().flatten() {
+            for (bucket, seen) in answered.into_iter().flatten() {
                 provider.requests += seen.requests;
                 if covered(*bucket) {
                     provider.ok += seen.ok;
                     trend[stretch(*bucket)].0 += seen.ok;
                 }
             }
-            for (bucket, failures) in failed.get(id).into_iter().flatten() {
+            for (bucket, failures) in lost.into_iter().flatten() {
                 if covered(*bucket) {
                     provider.failures.merge(failures);
                     trend[stretch(*bucket)].1 += failures.total();
@@ -361,6 +359,32 @@ pub fn read(
                         .then(|| (failed as f64 / (ok + failed) as f64 * 1e4).round() / 1e4)
                 })
                 .collect();
+            let times: std::collections::BTreeSet<i64> = answered
+                .into_iter()
+                .flat_map(|buckets| buckets.keys().copied())
+                .chain(lost.into_iter().flat_map(|buckets| buckets.keys().copied()))
+                .collect();
+            let mut all = Vec::new();
+            provider.buckets = times
+                .into_iter()
+                .map(|at| {
+                    let seen = answered.and_then(|buckets| buckets.get(&at));
+                    let mut first_token =
+                        seen.map_or_else(Vec::new, |seen| seen.first_token.clone());
+                    all.extend_from_slice(&first_token);
+                    Bucket {
+                        at,
+                        ok: seen.map_or(0, |seen| seen.ok),
+                        failures: covered(at).then(|| {
+                            lost.and_then(|buckets| buckets.get(&at))
+                                .copied()
+                                .unwrap_or_default()
+                        }),
+                        first_token: FirstToken::of(&mut first_token),
+                    }
+                })
+                .collect();
+            provider.first_token = FirstToken::of(&mut all);
             provider
         })
         .collect();
@@ -369,38 +393,6 @@ pub fn read(
             .cmp(&(a.failures.limited, a.failures.total(), a.requests))
             .then_with(|| a.id.cmp(&b.id))
     });
-    let chosen = match f.provider.as_deref().filter(|id| !id.is_empty()) {
-        // Requests that went through no gateway have no provider to chart.
-        Some("session") => None,
-        Some(id) => Some(id.to_owned()),
-        None => providers.first().map(|provider| provider.id.clone()),
-    };
-    let selected = chosen.map(|id| {
-        let mut own = usage.remove(&id).unwrap_or_default();
-        let empty = BTreeMap::new();
-        let failed = failed.get(id.as_str()).unwrap_or(&empty);
-        let times: std::collections::BTreeSet<i64> =
-            own.keys().chain(failed.keys()).copied().collect();
-        let mut all = Vec::new();
-        let buckets = times
-            .into_iter()
-            .map(|at| {
-                let mut seen = own.remove(&at).unwrap_or_default();
-                all.extend_from_slice(&seen.first_token);
-                Bucket {
-                    at,
-                    ok: seen.ok,
-                    failures: covered(at).then(|| failed.get(&at).copied().unwrap_or_default()),
-                    first_token: FirstToken::of(&mut seen.first_token),
-                }
-            })
-            .collect();
-        Selected {
-            id,
-            first_token: FirstToken::of(&mut all),
-            buckets,
-        }
-    });
     Ok(Curves {
         start: first,
         end: last.saturating_add(step),
@@ -408,7 +400,6 @@ pub fn read(
         failures_since,
         detail_since,
         providers,
-        selected,
     })
 }
 

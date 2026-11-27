@@ -1,6 +1,6 @@
 // 覆盖供应商曲线：分桶、失败分类、首字分位数、日志覆盖范围与无数据。
 use super::super::{model::*, query, store::Store};
-use super::{spread, step, Bucket, Failures, FirstToken};
+use super::{spread, step, Bucket, Curves, Failures, FirstToken, Provider};
 use crate::{events::UpstreamFailure, gateway::ClientId};
 
 const MINUTE: i64 = 60_000;
@@ -59,15 +59,18 @@ fn failed(
         status,
     }
 }
-fn range(provider: Option<&str>) -> Filter {
+fn range() -> Filter {
     Filter {
         start: Some(BASE),
         // Twenty buckets of five minutes.
         end: Some(BASE + 100 * MINUTE - 1),
         client: Some("claude".into()),
-        provider: provider.map(str::to_owned),
         ..Filter::default()
     }
+}
+/// The provider `id` as `curves` has it.
+fn of<'a>(curves: &'a Curves, id: &str) -> &'a Provider {
+    curves.providers.iter().find(|p| p.id == id).unwrap()
 }
 fn store() -> (tempfile::TempDir, Store) {
     store_of("claude")
@@ -228,17 +231,14 @@ fn a_merged_row_is_spread_over_the_buckets_it_reaches() {
 #[test]
 fn a_provider_s_curves_join_what_succeeded_with_what_the_journal_says_failed() {
     let (_dir, store) = store();
-    let curves = store
-        .curves(&range(Some(A)), 0, &journal(), BASE + DAY)
-        .unwrap();
+    let curves = store.curves(&range(), 0, &journal(), BASE + DAY).unwrap();
     assert_eq!(
         (curves.start, curves.end, curves.step),
         (BASE, BASE + 100 * MINUTE, 5 * MINUTE)
     );
-    let selected = curves.selected.unwrap();
-    assert_eq!(selected.id, A);
+    let provider = of(&curves, A);
     assert_eq!(
-        selected.first_token,
+        provider.first_token,
         FirstToken {
             samples: 3,
             p50: Some(200),
@@ -246,7 +246,7 @@ fn a_provider_s_curves_join_what_succeeded_with_what_the_journal_says_failed() {
         }
     );
     assert_eq!(
-        selected.buckets,
+        provider.buckets,
         [
             Bucket {
                 at: BASE,
@@ -294,11 +294,14 @@ fn a_provider_s_curves_join_what_succeeded_with_what_the_journal_says_failed() {
 }
 
 #[test]
-fn providers_are_listed_most_rate_limited_first_whichever_is_chosen() {
+fn providers_are_listed_most_rate_limited_first_whichever_the_filter_names() {
     let (_dir, store) = store();
-    let curves = store
-        .curves(&range(Some(B)), 0, &journal(), BASE + DAY)
-        .unwrap();
+    // Naming one narrows nothing: all of them are there to choose among.
+    let named = Filter {
+        provider: Some(B.into()),
+        ..range()
+    };
+    let curves = store.curves(&named, 0, &journal(), BASE + DAY).unwrap();
     let summary: Vec<_> = curves
         .providers
         .iter()
@@ -338,11 +341,10 @@ fn providers_are_listed_most_rate_limited_first_whichever_is_chosen() {
         (trend[0], trend[1], trend[5], trend[6], trend[12]),
         (Some(0.0), None, Some(1.0), Some(1.0), Some(1.0))
     );
-    assert_eq!(curves.selected.unwrap().id, B);
     // Every client's, where none is asked for.
     let every = Filter {
         client: None,
-        ..range(None)
+        ..range()
     };
     let curves = store.curves(&every, 0, &journal(), BASE + DAY).unwrap();
     let other = curves.providers.iter().find(|p| p.id == B).unwrap();
@@ -351,17 +353,12 @@ fn providers_are_listed_most_rate_limited_first_whichever_is_chosen() {
 }
 
 #[test]
-fn the_most_rate_limited_provider_is_shown_where_none_is_named() {
+fn every_provider_comes_with_its_own_buckets() {
     let (_dir, store) = store();
-    let curves = |provider: Option<&str>| {
-        store
-            .curves(&range(provider), 0, &journal(), BASE + DAY)
-            .unwrap()
-    };
-    let selected = curves(None).selected.unwrap();
-    assert_eq!(selected.id, C);
+    let curves = store.curves(&range(), 0, &journal(), BASE + DAY).unwrap();
+    // One the usage records know nothing of is drawn from the journal alone.
     assert_eq!(
-        selected.buckets,
+        of(&curves, C).buckets,
         [Bucket {
             at: BASE + 40 * MINUTE,
             ok: 0,
@@ -372,14 +369,18 @@ fn the_most_rate_limited_provider_is_shown_where_none_is_named() {
             first_token: none(),
         }]
     );
-    // Requests that went through no gateway have no provider.
-    assert!(curves(Some("session")).selected.is_none());
-    // One that did nothing in the range has nothing to draw.
-    let idle = curves(Some("00000000-0000-4000-8000-00000000000d"))
-        .selected
-        .unwrap();
-    assert!(idle.buckets.is_empty());
-    assert_eq!(idle.first_token, none());
+    // One that answered and never failed has a rate of nothing, known.
+    let quiet = of(&curves, B);
+    assert_eq!(
+        quiet.buckets,
+        [Bucket {
+            at: BASE + 10 * MINUTE,
+            ok: 1,
+            failures: Some(Failures::default()),
+            first_token: none(),
+        }]
+    );
+    assert_eq!(quiet.first_token, none());
 }
 
 #[test]
@@ -387,12 +388,10 @@ fn nothing_is_said_of_failures_before_the_journal_reaches() {
     let (_dir, store) = store();
     let since = BASE + 30 * MINUTE;
     let curves = store
-        .curves(&range(Some(A)), since, &journal(), BASE + DAY)
+        .curves(&range(), since, &journal(), BASE + DAY)
         .unwrap();
     assert_eq!(curves.failures_since, since);
-    let failures: Vec<_> = curves
-        .selected
-        .unwrap()
+    let failures: Vec<_> = of(&curves, A)
         .buckets
         .iter()
         .map(|bucket| {
@@ -421,9 +420,9 @@ fn nothing_is_said_of_failures_before_the_journal_reaches() {
     assert_eq!(provider.trend[0], None);
     // The journal's week and the page's are measured a moment apart.
     let curves = store
-        .curves(&range(Some(A)), BASE + MINUTE, &journal(), BASE + DAY)
+        .curves(&range(), BASE + MINUTE, &journal(), BASE + DAY)
         .unwrap();
-    assert!(curves.selected.unwrap().buckets[0].failures.is_some());
+    assert!(of(&curves, A).buckets[0].failures.is_some());
 }
 
 #[test]
@@ -431,7 +430,7 @@ fn a_range_without_a_beginning_starts_where_anything_is_known() {
     let (_dir, store) = store();
     let filter = Filter {
         start: None,
-        ..range(Some(A))
+        ..range()
     };
     let curves = store.curves(&filter, 0, &journal(), BASE + DAY).unwrap();
     assert_eq!(curves.step, DAY);
@@ -440,18 +439,17 @@ fn a_range_without_a_beginning_starts_where_anything_is_known() {
         curves.end,
         query::bucket(BASE + 100 * MINUTE - 1, DAY) + DAY
     );
-    let selected = curves.selected.unwrap();
-    assert_eq!(selected.buckets.iter().map(|b| b.ok).sum::<u64>(), 3);
-    assert_eq!(selected.first_token.samples, 3);
+    let provider = of(&curves, A);
+    assert_eq!(provider.buckets.iter().map(|b| b.ok).sum::<u64>(), 3);
+    assert_eq!(provider.first_token.samples, 3);
 }
 
 #[test]
 fn nothing_recorded_is_nothing_to_draw() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let curves = store.curves(&range(None), 0, &[], BASE + DAY).unwrap();
+    let curves = store.curves(&range(), 0, &[], BASE + DAY).unwrap();
     assert!(curves.providers.is_empty());
-    assert!(curves.selected.is_none());
     assert_eq!((curves.start, curves.end), (BASE, BASE + 100 * MINUTE));
     let all = store
         .curves(&Filter::default(), 0, &[], BASE + DAY)
@@ -468,12 +466,11 @@ fn requests_kept_only_as_daily_totals_count_without_a_percentile() {
         start: Some(BASE - 2 * DAY),
         end: Some(BASE + 2 * DAY),
         client: Some("codex".into()),
-        ..range(Some(A))
+        ..range()
     };
     let curves = store.curves(&filter, 0, &[], BASE + 40 * DAY).unwrap();
-    let provider = curves.providers.iter().find(|p| p.id == A).unwrap();
+    let provider = of(&curves, A);
     assert_eq!((provider.requests, provider.ok), (5, 3));
-    let selected = curves.selected.unwrap();
-    assert_eq!(selected.buckets.iter().map(|b| b.ok).sum::<u64>(), 3);
-    assert_eq!(selected.first_token, none());
+    assert_eq!(provider.buckets.iter().map(|b| b.ok).sum::<u64>(), 3);
+    assert_eq!(provider.first_token, none());
 }

@@ -940,8 +940,9 @@ export type SharedCommands = {
   get_usage_state: Call<None, UsageState>;
   get_usage_dashboard: Call<{ filter: UsageFilter }, Dashboard>;
   /**
-   * How often each provider's attempts failed over the filter's time and
-   * client, and the curves of the provider it names.
+   * How often each provider's attempts failed and how soon it answered, bucket
+   * by bucket over the filter's time and client. Every provider comes with
+   * its own buckets: the one the filter names narrows nothing.
    */
   get_usage_curves: Call<{ filter: UsageFilter }, UsageCurves>;
   /** The history and the saved account periods; the quota is not asked for. */
