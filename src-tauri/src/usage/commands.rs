@@ -70,6 +70,25 @@ pub async fn get_usage_dashboard(r: &Runtime, filter: Filter) -> Result<store::D
         .await
         .map_err(|_| failure("用量查询中断"))?
 }
+/// How often each provider's attempts failed over the filter's range, and
+/// the curves of the one it names. The journal says what failed, the usage
+/// records what succeeded and how soon.
+pub async fn get_usage_curves(r: &Runtime, filter: Filter) -> Result<super::curves::Curves> {
+    let s = r.usage.clone();
+    let journal = r.diagnostics.clone();
+    tokio::task::spawn_blocking(move || {
+        let at = now();
+        let seconds = |ms: i64| ms.max(0) as u64 / 1000;
+        let (since, failures) = journal.upstream_failures(
+            seconds(filter.start.unwrap_or(0)),
+            seconds(filter.end.unwrap_or(at)),
+        );
+        let since = i64::try_from(since.saturating_mul(1000)).unwrap_or(i64::MAX);
+        s.read(|db| db.curves(&filter, since, &failures, at))
+    })
+    .await
+    .map_err(|_| failure("用量曲线查询中断"))?
+}
 /// The history and the account periods as they are saved. Asking for the
 /// quota is `refresh_antigravity_usage_quota`, which the page sends afterwards.
 pub async fn get_antigravity_usage_stats(

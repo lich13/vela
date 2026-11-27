@@ -37,6 +37,7 @@ import type {
   PricingConfig,
   PricingView,
   PricingSearchPage,
+  UsageCurves,
   UsageFilter,
   Totals,
   UsagePage,
@@ -938,6 +939,11 @@ export type SharedCommands = {
   recover_claude_profile: Call<None, ClaudeProfileState>;
   get_usage_state: Call<None, UsageState>;
   get_usage_dashboard: Call<{ filter: UsageFilter }, Dashboard>;
+  /**
+   * How often each provider's attempts failed over the filter's time and
+   * client, and the curves of the provider it names.
+   */
+  get_usage_curves: Call<{ filter: UsageFilter }, UsageCurves>;
   /** The history and the saved account periods; the quota is not asked for. */
   get_antigravity_usage_stats: Call<
     { filter: UsageFilter },
@@ -1110,6 +1116,7 @@ export const sharedCommands = names<SharedCommands>()([
   "recover_claude_profile",
   "get_usage_state",
   "get_usage_dashboard",
+  "get_usage_curves",
   "get_antigravity_usage_stats",
   "refresh_antigravity_usage_quota",
   "get_claude_usage_stats",

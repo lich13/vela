@@ -343,6 +343,67 @@ export type UsagePage = {
   page: number;
   detailSince: number;
 };
+/** Failed attempts by what the provider answered with. */
+export type CurveFailures = {
+  /** 429. */
+  limited: number;
+  /** Any other 4xx. */
+  rejected: number;
+  /** 5xx. */
+  server: number;
+  /**
+   * No error status: it could not be reached, did not answer in time, or
+   * began a response and did not finish it.
+   */
+  broken: number;
+};
+/** Times to the first token in milliseconds, by nearest rank. */
+export type CurveFirstToken = {
+  samples: number;
+  p50: number | null;
+  p90: number | null;
+};
+export type CurveBucket = {
+  at: number;
+  /** Requests the provider completed. */
+  ok: number;
+  /** Null where the journal no longer reaches: unknown, not none. */
+  failures: CurveFailures | null;
+  firstToken: CurveFirstToken;
+};
+export type CurveProvider = {
+  id: string;
+  /** Requests it was the last to be asked for, over the whole range. */
+  requests: number;
+  /** Requests it completed in the time failures are known for. */
+  ok: number;
+  failures: CurveFailures;
+  /** The share of attempts that failed in each stretch of the range. */
+  trend: (number | null)[];
+};
+/**
+ * What succeeded and how soon comes from the usage records, what failed from
+ * the journal, which is kept for less time.
+ */
+export type UsageCurves = {
+  /** Where the first bucket begins and the last one ends. */
+  start: number;
+  end: number;
+  step: number;
+  /** From when failures are known. */
+  failuresSince: number;
+  /** From when requests are kept one by one, as a percentile needs them. */
+  detailSince: number;
+  /** The providers with traffic or failures, the most rate-limited first. */
+  providers: CurveProvider[];
+  /** Of the provider the filter names or, where it names none, the first. */
+  selected: {
+    id: string;
+    firstToken: CurveFirstToken;
+    /** Only those in which something ended, in order of time. */
+    buckets: CurveBucket[];
+  } | null;
+};
 export type UsageSettings = {
   logColumns?: Record<string, boolean>;
   logNumberMode?: "compact" | "exact";

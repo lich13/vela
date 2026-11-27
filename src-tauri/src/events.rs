@@ -1255,6 +1255,55 @@ fn seen_statuses<'a>(
     seen.sort_by_key(|s| (std::cmp::Reverse(s.count), s.status));
     seen
 }
+/// The attempts one journal row says a provider failed: whose they were, over
+/// what time, how many and with which status. Nothing of what was answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpstreamFailure {
+    pub client: ClientId,
+    pub provider: String,
+    pub first_at: u64,
+    pub last_at: u64,
+    pub count: u32,
+    pub status: Option<u16>,
+}
+/// The failed attempts among `records` whose rows reach into `from..=to`. A
+/// gateway tells each attempt a provider failed once, under one of these
+/// reasons; a wait before asking and what a quota check found are told at
+/// admission, about a failure already counted.
+fn upstream_failures<'a>(
+    records: impl Iterator<Item = &'a Record>,
+    from: u64,
+    to: u64,
+) -> Vec<UpstreamFailure> {
+    records
+        .filter(|r| {
+            r.last_at >= from
+                && r.first_at <= to
+                && r.level != Level::Info
+                && r.details.phase != Some(Phase::Admission)
+                && matches!(
+                    r.reason,
+                    Reason::ModelUnavailable
+                        | Reason::Authentication
+                        | Reason::UpstreamService
+                        | Reason::Network
+                        | Reason::RateLimit
+                        | Reason::Capacity
+                        | Reason::ProtocolError
+                )
+        })
+        .filter_map(|r| {
+            Some(UpstreamFailure {
+                client: r.client_id?.active()?,
+                provider: r.provider_id.clone()?,
+                first_at: r.first_at.min(r.last_at),
+                last_at: r.last_at,
+                count: r.count,
+                status: r.status,
+            })
+        })
+        .collect()
+}
 impl Journal {
     fn circuit_causes(&self, cutoff: u64) -> HashSet<&str> {
         self.records
@@ -1772,6 +1821,19 @@ impl Service {
             client,
             providers,
             now().saturating_sub(RETENTION),
+        )
+    }
+    /// The failed upstream attempts of the rows that reach into `from..=to`,
+    /// and the time from which the journal holds them all: what is older has
+    /// been removed, by its age or by clearing the journal.
+    pub fn upstream_failures(&self, from: u64, to: u64) -> (u64, Vec<UpstreamFailure>) {
+        let j = self.journal.lock();
+        let since = now()
+            .saturating_sub(RETENTION)
+            .max(j.cleared.as_ref().map_or(0, |cleared| cleared.at));
+        (
+            since,
+            upstream_failures(j.records.iter().map(|r| &**r), from.max(since), to),
         )
     }
     pub fn query(&self, f: Filter) -> Page {
@@ -2299,6 +2361,75 @@ mod diagnostic_record_tests {
                     basis: Some(ErrorBasis::Tpm),
                     last_at: 300
                 },
+            ]
+        );
+    }
+    #[test]
+    fn upstream_failures_are_the_attempts_a_provider_failed() {
+        const PROVIDER: &str = "00000000-0000-4000-8000-000000000001";
+        let record = |reason, status: Option<u16>, first_at, last_at, count| {
+            let mut r = Record::new(
+                Some(ClientId::Claude),
+                Some(PROVIDER),
+                Some("fixture-model"),
+                reason,
+                Action::RetryingSame,
+                status,
+                Some(1),
+            );
+            r.first_at = first_at;
+            r.last_at = last_at;
+            r.count = count;
+            r.details.phase = Some(Phase::Response);
+            r
+        };
+        let failure = |status, first_at, last_at, count| UpstreamFailure {
+            client: ClientId::Claude,
+            provider: PROVIDER.into(),
+            first_at,
+            last_at,
+            count,
+            status,
+        };
+        // A wait at admission and what a quota check found repeat a failure.
+        let mut waited = record(Reason::RateLimit, Some(429), 150, 150, 4);
+        waited.details.phase = Some(Phase::Admission);
+        let mut checked = record(Reason::Capacity, Some(429), 150, 150, 4);
+        checked.level = Level::Info;
+        // The session files of Claude Code name no provider.
+        let mut session = record(Reason::RateLimit, Some(429), 150, 150, 4);
+        session.client_id = Some(JournalClient::External(ExternalClient::ClaudeCode));
+        session.provider_id = None;
+        let records = [
+            record(Reason::Capacity, Some(429), 100, 380, 9),
+            record(Reason::Network, None, 200, 200, 1),
+            // A response that began and was then cut short.
+            record(Reason::Network, Some(200), 300, 300, 2),
+            waited,
+            checked,
+            session,
+            // What a gateway did about a failure is not another failure.
+            record(Reason::CircuitOpen, Some(429), 150, 150, 1),
+            record(Reason::FailoverExhausted, Some(429), 150, 150, 1),
+            record(Reason::RequestInterrupted, Some(200), 150, 150, 1),
+            // Before and after the time asked about.
+            record(Reason::RateLimit, Some(429), 10, 99, 5),
+            record(Reason::UpstreamService, Some(503), 401, 420, 5),
+        ];
+        assert_eq!(
+            upstream_failures(records.iter(), 100, 400),
+            [
+                failure(Some(429), 100, 380, 9),
+                failure(None, 200, 200, 1),
+                failure(Some(200), 300, 300, 2),
+            ]
+        );
+        // A row counts where any of its time is asked about.
+        assert_eq!(
+            upstream_failures(records.iter(), 99, 100),
+            [
+                failure(Some(429), 100, 380, 9),
+                failure(Some(429), 10, 99, 5)
             ]
         );
     }

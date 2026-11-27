@@ -13,6 +13,7 @@ mod claude_stats_tests;
 #[cfg(feature = "desktop")]
 pub(crate) mod codex_quota;
 pub mod commands;
+mod curves;
 #[cfg(test)]
 mod daily_merge_tests;
 #[cfg(test)]

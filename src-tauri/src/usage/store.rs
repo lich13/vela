@@ -644,6 +644,24 @@ impl Store {
         *self.overview_cache.lock() = Some((key, view.clone()));
         Ok(view)
     }
+    /// The curves of `f`, given what the journal says failed in its range.
+    pub fn curves(
+        &self,
+        f: &Filter,
+        failures_since: i64,
+        failures: &[crate::events::UpstreamFailure],
+        now: i64,
+    ) -> Result<super::curves::Curves> {
+        let _snapshot = self.read_snapshot()?;
+        super::curves::read(
+            &self.connection,
+            f,
+            failures_since,
+            failures,
+            self.detail_since()?,
+            now,
+        )
+    }
     /// Whether the periods differed from the saved ones and were written.
     pub(super) fn save_antigravity_quota(
         &mut self,

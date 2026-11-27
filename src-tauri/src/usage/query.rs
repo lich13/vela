@@ -367,7 +367,7 @@ fn totals(row: &Row<'_>, i: usize) -> rusqlite::Result<Totals> {
     })
 }
 /// `extra` is what else each row of `m` carries, for the one caller that asks.
-fn selection(f: &Filter, extra: &str) -> (String, Vec<Value>) {
+pub(super) fn selection(f: &Filter, extra: &str) -> (String, Vec<Value>) {
     let (condition, mut args) = conditions(f, "r", false);
     let mut daily = vec![
         "d.day>=?".to_string(),

@@ -30,7 +30,7 @@ use crate::{
         calculate_usage_cost, compare_model_prices, configure_pricing, get_antigravity_usage_stats,
         get_claude_requested_models, get_claude_usage_quota, get_claude_usage_stats,
         get_models_dev, get_pricing, get_usage_calculator_models, get_usage_calculator_totals,
-        get_usage_dashboard, get_usage_detail, get_usage_logs, get_usage_state,
+        get_usage_curves, get_usage_dashboard, get_usage_detail, get_usage_logs, get_usage_state,
         refresh_antigravity_usage_quota, reload_pricing, search_pricing, set_usage_settings,
         sync_usage, update_models_dev, update_pricing,
     },
@@ -196,6 +196,7 @@ commands! {
     async recover_claude_profile();
     blocking get_usage_state();
     async get_usage_dashboard(filter);
+    async get_usage_curves(filter);
     async get_antigravity_usage_stats(filter);
     async refresh_antigravity_usage_quota();
     async get_claude_usage_stats(filter);
