@@ -647,6 +647,43 @@ describe("rankings", () => {
       "fixture-no-samples",
     ]);
   });
+
+  it("says over how many requests a success rate stands where only some of them have a result", async () => {
+    const user = userEvent.setup();
+    dashboard.models = [
+      {
+        // Imported sessions: three known failures among thousands unknown.
+        id: "fixture-imported",
+        totals: totals({ requests: 2426, statusKnown: 3, success: 0 }),
+      },
+      {
+        id: "fixture-unknown",
+        totals: totals({ requests: 40, statusKnown: 0, success: 0 }),
+      },
+      {
+        id: "fixture-known",
+        totals: totals({ requests: 20, statusKnown: 20, success: 19 }),
+      },
+      {
+        id: "fixture-partly",
+        totals: totals({ requests: 4000, statusKnown: 1500, success: 1470 }),
+      },
+    ];
+    await renderUsage();
+    await user.click(screen.getByRole("tab", { name: "模型" }));
+    const rates = Object.fromEntries(
+      bodyRows().map((row) => {
+        const cells = within(row).getAllByRole("cell");
+        return [cells[0].textContent, cells[4].textContent];
+      }),
+    );
+    expect(rates).toEqual({
+      "fixture-imported": "0.0%（3 笔已知）",
+      "fixture-unknown": "—",
+      "fixture-known": "95.0%",
+      "fixture-partly": "98.0%（1.5K 笔已知）",
+    });
+  });
 });
 
 describe("request details and sources", () => {

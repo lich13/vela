@@ -1345,11 +1345,7 @@ function Ranking({
                     <NumberValue value={tokenTotal(t.tokens)} />
                   </td>
                   <td title={t.cost}>{money(t.cost)}</td>
-                  <td>
-                    {t.statusKnown
-                      ? `${((t.success / t.statusKnown) * 100).toFixed(1)}%`
-                      : "—"}
-                  </td>
+                  <td>{successRate(t)}</td>
                   <td>
                     <FirstTokenValue totals={t} />
                   </td>
@@ -1367,6 +1363,16 @@ function Ranking({
       />
     </>
   );
+}
+// The share of the requests whose result is known that succeeded. Where only
+// a part of them has one, the rate says over how many it stands: three known
+// failures among thousands of imported requests are not a rate of the whole.
+function successRate(t: Totals) {
+  if (!t.statusKnown) return "—";
+  const rate = `${((t.success / t.statusKnown) * 100).toFixed(1)}%`;
+  return t.statusKnown < t.requests
+    ? `${rate}（${compact(t.statusKnown)} 笔已知）`
+    : rate;
 }
 function FirstTokenValue({ totals }: { totals: Totals }) {
   const [focused, setFocused] = useState(false);
