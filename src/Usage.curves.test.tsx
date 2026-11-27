@@ -93,6 +93,7 @@ const shown = (props: Partial<Shown>): Shown => ({
   curves: null,
   stale: false,
   unread: false,
+  unrecorded: false,
   selected: "",
   name,
   onSelect: () => {},
@@ -148,6 +149,7 @@ describe("provider curves", () => {
     // The journal reaches the whole range: nothing says from when it counts.
     expect(figures().queryByText(/^自 /)).not.toBeInTheDocument();
     expect(screen.queryByText("早于运行日志")).not.toBeInTheDocument();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
     // Two buckets side by side are one stretch of line and the one an hour
     // later another: no line is drawn across the time nothing ended in.
     const total = container.querySelector('.curve-line[data-line="total"]');
@@ -307,6 +309,25 @@ describe("provider curves", () => {
     // Nothing ended in the afternoon: the 429s of the night are not its.
     fireEvent.pointerMove(plot, { clientX: 600 });
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("says what leaves the figures short of what happened", () => {
+    const { rerender } = panel(fixture());
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    rerender(
+      <UsageCurvesPanel
+        {...shown({
+          curves: fixture({ journalError: "运行日志部分记录损坏，已跳过" }),
+          unrecorded: true,
+        })}
+      />,
+    );
+    expect(screen.getAllByRole("note").map((note) => note.textContent)).toEqual(
+      [
+        "运行日志有异常（运行日志部分记录损坏，已跳过），失败次数可能不完整。",
+        "网关记录已关闭：期间成功的请求没有记录，错误率会偏高。",
+      ],
+    );
   });
 
   it("says so where there is nothing to draw", () => {
@@ -579,5 +600,15 @@ describe("the curves tab of the usage page", () => {
     expect(
       within(choices).getAllByRole("option", { name: /本机会话/ }),
     ).toHaveLength(1);
+  });
+
+  it("says that the gateway is not recording what it serves", async () => {
+    const user = userEvent.setup();
+    settings.recording = false;
+    render(<Usage />);
+    await user.click(await screen.findByRole("tab", { name: "曲线" }));
+    expect(await screen.findByRole("note")).toHaveTextContent(
+      "网关记录已关闭：期间成功的请求没有记录，错误率会偏高。",
+    );
   });
 });

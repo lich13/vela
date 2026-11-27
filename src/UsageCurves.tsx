@@ -722,6 +722,7 @@ export default function UsageCurvesPanel({
   curves,
   stale,
   unread,
+  unrecorded,
   selected,
   name,
   onSelect,
@@ -731,6 +732,8 @@ export default function UsageCurvesPanel({
   stale: boolean;
   /** There are none to show because reading them failed. */
   unread: boolean;
+  /** The gateway is not recording what it serves. */
+  unrecorded: boolean;
   /** The provider the page is narrowed to, empty for none. */
   selected: string;
   name: (id: string) => string;
@@ -872,6 +875,16 @@ export default function UsageCurvesPanel({
                 </button>
               </div>
             </header>
+            {curves.journalError && (
+              <p className="curve-note" role="note">
+                运行日志有异常（{curves.journalError}），失败次数可能不完整。
+              </p>
+            )}
+            {unrecorded && (
+              <p className="curve-note" role="note">
+                网关记录已关闭：期间成功的请求没有记录，错误率会偏高。
+              </p>
+            )}
             <dl className="curve-figures" data-since={since ? "" : undefined}>
               <div>
                 <dt>错误率</dt>

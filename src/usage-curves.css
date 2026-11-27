@@ -192,6 +192,13 @@
 .curve-head .segmented button {
   padding: 3px 11px;
 }
+/* What makes the figures below less than they seem */
+.curve-note {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--warning);
+  font-size: 12px;
+}
 .curve-figures {
   display: grid;
   grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr));

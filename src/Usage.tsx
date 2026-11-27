@@ -1003,6 +1003,7 @@ export default function Usage({
           curves={curvesGone ? null : (curves?.data ?? null)}
           stale={curves != null && !curvesRead && !curvesGone}
           unread={curvesGone}
+          unrecorded={state?.settings.recording === false}
           selected={provider}
           name={(id) => name(id === "session" ? null : id)}
           onSelect={(id) => choose(setProvider, id)}
