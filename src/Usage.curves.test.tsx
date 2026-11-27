@@ -150,6 +150,10 @@ describe("provider curves", () => {
     expect(figures().queryByText(/^自 /)).not.toBeInTheDocument();
     expect(screen.queryByText("早于运行日志")).not.toBeInTheDocument();
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    // What the 429s take in is said under the plots.
+    expect(container.querySelector(".curve-foot")).toHaveTextContent(
+      "结果未知的请求不计入；“429 限流”含流内返回的限流与容量不足；淡显的时段样本不足 5 个。",
+    );
     // Two buckets side by side are one stretch of line and the one an hour
     // later another: no line is drawn across the time nothing ended in.
     const total = container.querySelector('.curve-line[data-line="total"]');
