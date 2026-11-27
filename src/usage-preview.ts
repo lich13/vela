@@ -428,8 +428,9 @@ function curvesPreview(f: UsageFilter): UsageCurves {
         buckets.push({
           at,
           ok,
+          // The bucket the journal begins in is known from there on.
           failures:
-            at + minute >= failuresSince
+            at + step > failuresSince
               ? {
                   limited: Math.round(
                     ok * shape.limited * burst * (1.6 + 2 * noise(seed + 2)),
@@ -483,6 +484,7 @@ function curvesPreview(f: UsageFilter): UsageCurves {
           p50: middles[Math.floor(middles.length / 2)] ?? null,
           p90: tops[Math.floor(tops.length * 0.9)] ?? null,
         },
+        summedUntil: null,
         buckets,
       };
     })
@@ -495,7 +497,7 @@ function curvesPreview(f: UsageFilter): UsageCurves {
     end: first + count * step,
     step,
     failuresSince,
-    detailSince: 0,
+    journalError: null,
     providers,
   };
 }

@@ -345,7 +345,10 @@ export type UsagePage = {
 };
 /** Failed attempts by what the provider answered with. */
 export type CurveFailures = {
-  /** 429. */
+  /**
+   * 429, and a limit or a lack of capacity said inside a response that began
+   * as any other: in its stream, or in a frame of a WebSocket.
+   */
   limited: number;
   /** Any other 4xx. */
   rejected: number;
@@ -365,7 +368,10 @@ export type CurveFirstToken = {
 };
 export type CurveBucket = {
   at: number;
-  /** Requests the provider completed. */
+  /**
+   * Requests the provider completed. In the bucket the journal begins in,
+   * those since it began: the ones its failures are counted beside.
+   */
   ok: number;
   /** Null where the journal no longer reaches: unknown, not none. */
   failures: CurveFailures | null;
@@ -382,6 +388,11 @@ export type CurveProvider = {
   trend: (number | null)[];
   /** Over the whole range. */
   firstToken: CurveFirstToken;
+  /**
+   * Until when in the range only its sums by day are left, which have no
+   * time of day and no percentile to take. Null where it has none.
+   */
+  summedUntil: number | null;
   /** Only those in which something ended, in order of time. */
   buckets: CurveBucket[];
 };
@@ -396,8 +407,11 @@ export type UsageCurves = {
   step: number;
   /** From when failures are known. */
   failuresSince: number;
-  /** From when requests are kept one by one, as a percentile needs them. */
-  detailSince: number;
+  /**
+   * What is known to be wrong with the journal, so that failures may be
+   * missing from it. Null where nothing is.
+   */
+  journalError: string | null;
   /**
    * The providers with traffic or failures, the most rate-limited first and
    * each with its buckets: choosing among them asks nothing more.

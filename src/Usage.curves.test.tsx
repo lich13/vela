@@ -1,5 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UsageCurves, UsageFilter } from "./usage-types";
 
@@ -26,7 +27,7 @@ function fixture(overrides: Partial<UsageCurves> = {}): UsageCurves {
     end: start + 48 * half,
     step: half,
     failuresSince: 0,
-    detailSince: 0,
+    journalError: null,
     providers: [
       {
         id: "fixture-limited",
@@ -35,6 +36,7 @@ function fixture(overrides: Partial<UsageCurves> = {}): UsageCurves {
         failures: { ...none, limited: 20, broken: 1 },
         trend: [0.2, 0.9, null, null, 0.5, ...Array(15).fill(null)],
         firstToken: { samples: 10, p50: 1200, p90: 3000 },
+        summedUntil: null,
         buckets: [
           {
             at: start,
@@ -64,6 +66,7 @@ function fixture(overrides: Partial<UsageCurves> = {}): UsageCurves {
         failures: none,
         trend: [null, null, 0, ...Array(17).fill(null)],
         firstToken: { samples: 40, p50: 600, p90: 1500 },
+        summedUntil: null,
         buckets: [
           {
             at: start + 2 * half,
@@ -78,29 +81,27 @@ function fixture(overrides: Partial<UsageCurves> = {}): UsageCurves {
   };
 }
 
+type Shown = ComponentProps<typeof UsageCurvesPanel>;
+const shown = (props: Partial<Shown>): Shown => ({
+  curves: null,
+  stale: false,
+  selected: "",
+  name,
+  onSelect: () => {},
+  ...props,
+});
+
 function panel(
   curves: UsageCurves | null,
   selected = "",
   onSelect: (id: string) => void = vi.fn(),
 ) {
   const view = render(
-    <UsageCurvesPanel
-      curves={curves}
-      stale={false}
-      selected={selected}
-      name={name}
-      onSelect={onSelect}
-    />,
+    <UsageCurvesPanel {...shown({ curves, selected, onSelect })} />,
   );
   const show = (next: string) =>
     view.rerender(
-      <UsageCurvesPanel
-        curves={curves}
-        stale={false}
-        selected={next}
-        name={name}
-        onSelect={onSelect}
-      />,
+      <UsageCurvesPanel {...shown({ curves, selected: next, onSelect })} />,
     );
   const figures = () =>
     within(view.container.querySelector(".curve-figures") as HTMLElement);
@@ -224,28 +225,31 @@ describe("provider curves", () => {
     expect(rows[2]).toHaveTextContent("02:00–02:301000150%——0");
   });
 
+  it("marks the time only the chosen provider's sums by day are left of", () => {
+    const curves = fixture();
+    curves.providers[0].summedUntil = start + 12 * half;
+    const { container, show } = panel(curves);
+    const hatch = screen.getByText("只留有日汇总").parentElement;
+    expect(hatch?.parentElement).toHaveAttribute("data-plot", "time");
+    expect(hatch).toHaveStyle({ width: "25%" });
+    // The other has every request of the range one by one.
+    show("fixture-steady");
+    expect(screen.queryByText("只留有日汇总")).not.toBeInTheDocument();
+    expect(container.querySelector(".curve-blind")).not.toBeInTheDocument();
+  });
+
   it("says so where there is nothing to draw", () => {
     const { rerender } = panel(null);
     expect(screen.getByText("正在读取曲线…")).toBeVisible();
     rerender(
-      <UsageCurvesPanel
-        curves={fixture({ providers: [] })}
-        stale={false}
-        selected=""
-        name={name}
-        onSelect={() => {}}
-      />,
+      <UsageCurvesPanel {...shown({ curves: fixture({ providers: [] }) })} />,
     );
     expect(screen.getByText(/这段时间没有经过网关的请求/)).toBeVisible();
     // The page is narrowed to one that did nothing in the range: the others
     // are still there to choose.
     rerender(
       <UsageCurvesPanel
-        curves={fixture()}
-        stale={false}
-        selected="fixture-idle"
-        name={name}
-        onSelect={() => {}}
+        {...shown({ curves: fixture(), selected: "fixture-idle" })}
       />,
     );
     expect(

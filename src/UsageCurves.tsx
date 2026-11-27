@@ -175,7 +175,11 @@ function ticksOf(start: number, end: number) {
 }
 
 /** Everything of the plots that does not move with the pointer. */
-function draw(curves: UsageCurves, points: Point[]) {
+function draw(
+  curves: UsageCurves,
+  points: Point[],
+  summedUntil: number | null,
+) {
   const span = Math.max(1, curves.end - curves.start);
   const width = curves.step / span;
   const half = Math.max(width * 0.3, 0.0015);
@@ -260,7 +264,7 @@ function draw(curves: UsageCurves, points: Point[]) {
     peak: peak as Point | null,
     peakY: peak ? edge(peak, 0) : 0,
     rateBlind: blind(curves.failuresSince),
-    timeBlind: blind(curves.detailSince),
+    timeBlind: blind(summedUntil ?? 0),
     ratedNone: rated.length === 0,
     timedNone: timed.length === 0,
   };
@@ -352,14 +356,20 @@ const thinTime = (p: Point) => p.p50 != null && p.samples < few;
 function Stage({
   curves,
   points,
+  summedUntil,
   table,
 }: {
   curves: UsageCurves;
   points: Point[];
+  /** Until when only the provider's sums by day are left, null for never. */
+  summedUntil: number | null;
   table: boolean;
 }) {
   const [active, setActive] = useState<number | null>(null);
-  const drawn = useMemo(() => draw(curves, points), [curves, points]);
+  const drawn = useMemo(
+    () => draw(curves, points, summedUntil),
+    [curves, points, summedUntil],
+  );
   const daily = curves.step >= day;
   const within = date(curves.start) === date(curves.end - 1);
   // A mark at midnight says which day begins there.
@@ -917,6 +927,7 @@ export default function UsageCurvesPanel({
               key={chosen.id}
               curves={curves}
               points={points}
+              summedUntil={chosen.summedUntil}
               table={table}
             />
             <p className="curve-foot">
