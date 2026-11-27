@@ -1,6 +1,6 @@
 // 覆盖供应商曲线：分桶、失败分类、首字分位数、日志覆盖范围与无数据。
 use super::super::{model::*, query, store::Store};
-use super::{spread, step, Bucket, Curves, Failures, FirstToken, Provider};
+use super::{spread, step, Bucket, Curves, Failures, FirstToken, Grid, Provider};
 use crate::{
     events::{FailureKind, FailureKind::*, UpstreamFailure},
     gateway::ClientId,
@@ -138,6 +138,25 @@ fn a_range_is_divided_into_at_most_sixty_buckets() {
 }
 
 #[test]
+fn buckets_shorter_than_a_day_keep_one_offset_where_the_clocks_change() {
+    const HOUR: i64 = 60 * MINUTE;
+    // New York on 3 November 2024, at 06:00 UTC: 01:30 came twice an hour
+    // apart, four hours behind UTC and then five. Each moment by its own
+    // offset, the second would begin a bucket an hour into the first one's.
+    let change = 1_730_613_600_000;
+    let grid = Grid {
+        step: 3 * HOUR,
+        offset: -4 * HOUR,
+    };
+    let bucket = change - 2 * HOUR;
+    assert_eq!(grid.bucket(change - HOUR / 2), bucket);
+    assert_eq!(grid.bucket(change + HOUR / 2), bucket);
+    // One ends where the next begins.
+    assert_eq!(grid.end(bucket), change + HOUR);
+    assert_eq!(grid.bucket(change + HOUR), change + HOUR);
+}
+
+#[test]
 fn percentiles_are_values_that_were_measured() {
     let of = |values: &[u64]| FirstToken::of(&mut values.to_vec());
     assert_eq!(of(&[]), none());
@@ -197,7 +216,8 @@ fn failures_are_counted_by_how_the_journal_says_they_ended() {
 fn a_merged_row_is_spread_over_the_buckets_it_reaches() {
     let shares = |row: &UpstreamFailure, start: i64, end: i64| {
         let mut shares = Vec::new();
-        spread(row, start, end, 5 * MINUTE, |bucket, count| {
+        let grid = Grid::new(5 * MINUTE, BASE);
+        spread(row, start, end, grid, |bucket, count| {
             shares.push((bucket - BASE, count))
         });
         shares

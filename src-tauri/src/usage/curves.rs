@@ -13,6 +13,7 @@ use crate::{
     events::{FailureKind, UpstreamFailure},
     storage::Result,
 };
+use chrono::TimeZone;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -41,6 +42,46 @@ const TREND: usize = 20;
 /// both read off the clock, a moment apart. A bucket that begins this little
 /// before the journal does is one the journal covers.
 const SLACK: i64 = MINUTE;
+
+/// Where the buckets of one answer begin and end.
+#[derive(Clone, Copy)]
+struct Grid {
+    step: i64,
+    /// How far local time stood ahead of UTC at the end of the range. Every
+    /// bucket shorter than a day keeps to it: taken anew at each moment,
+    /// those on either side of a change of the clocks would overlap.
+    offset: i64,
+}
+impl Grid {
+    fn new(step: i64, end: i64) -> Self {
+        let offset = chrono::Local
+            .timestamp_millis_opt(end)
+            .single()
+            .map_or(0, |local| {
+                i64::from(local.offset().local_minus_utc()) * 1000
+            });
+        Self { step, offset }
+    }
+    /// Where the bucket `at` falls in begins. A day begins at its own
+    /// midnight, whatever the clocks did within it.
+    fn bucket(self, at: i64) -> i64 {
+        if self.step == DAY {
+            query::bucket(at, DAY)
+        } else {
+            (at + self.offset).div_euclid(self.step) * self.step - self.offset
+        }
+    }
+    /// Where the bucket that begins at `bucket` ends.
+    fn end(self, bucket: i64) -> i64 {
+        if self.step == DAY {
+            // A day lasts from 23 hours to 25, so a day and a half on is in
+            // the next one.
+            query::bucket(bucket.saturating_add(DAY + DAY / 2), DAY)
+        } else {
+            bucket.saturating_add(self.step)
+        }
+    }
+}
 
 /// Failed attempts by how they ended.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -188,11 +229,11 @@ fn before(row: &UpstreamFailure, at: i64) -> u64 {
 /// Gives each bucket the attempts of `row` that fell in it and in
 /// `start..=end`. A row is merged for less time than the narrowest bucket
 /// lasts, so it reaches into two at most.
-fn spread(row: &UpstreamFailure, start: i64, end: i64, step: i64, mut add: impl FnMut(i64, u64)) {
+fn spread(row: &UpstreamFailure, start: i64, end: i64, grid: Grid, mut add: impl FnMut(i64, u64)) {
     let within = |from: i64, to: i64| before(row, to.max(from)) - before(row, from);
     let until = end.saturating_add(1);
-    let first = query::bucket(row.first_at as i64 * 1000, step);
-    let last = query::bucket(row.last_at as i64 * 1000, step);
+    let first = grid.bucket(row.first_at as i64 * 1000);
+    let last = grid.bucket(row.last_at as i64 * 1000);
     let shares = if first == last {
         [(first, within(start, until)), (last, 0)]
     } else {
@@ -209,7 +250,7 @@ fn spread(row: &UpstreamFailure, start: i64, end: i64, step: i64, mut add: impl 
 }
 
 /// The requests of each provider by bucket, as the usage records have them.
-fn usage(c: &Connection, f: &Filter, step: i64) -> Result<BTreeMap<String, BTreeMap<i64, Seen>>> {
+fn usage(c: &Connection, f: &Filter, grid: Grid) -> Result<BTreeMap<String, BTreeMap<i64, Seen>>> {
     // The journal knows a failure's client, provider and time and nothing
     // else of the request, so nothing else narrows what it is compared with.
     let scope = Filter {
@@ -246,7 +287,7 @@ fn usage(c: &Connection, f: &Filter, step: i64) -> Result<BTreeMap<String, BTree
         let seen = providers
             .entry(provider)
             .or_default()
-            .entry(query::bucket(time, step))
+            .entry(grid.bucket(time))
             .or_default();
         seen.requests += requests;
         seen.ok += ok;
@@ -276,7 +317,8 @@ pub fn read(
 ) -> Result<Curves> {
     let asked_end = f.end.unwrap_or(now);
     let step = step(f.start, asked_end);
-    let usage = usage(c, f, step)?;
+    let grid = Grid::new(step, asked_end);
+    let usage = usage(c, f, grid)?;
     let mut failed: BTreeMap<&str, BTreeMap<i64, Failures>> = BTreeMap::new();
     let client = f.client.as_deref().filter(|client| !client.is_empty());
     for row in failures {
@@ -287,7 +329,7 @@ pub fn read(
             row,
             f.start.unwrap_or(i64::MIN),
             asked_end,
-            step,
+            grid,
             |bucket, count| {
                 failed
                     .entry(&row.provider)
@@ -298,7 +340,7 @@ pub fn read(
             },
         );
     }
-    let last = query::bucket(asked_end, step);
+    let last = grid.bucket(asked_end);
     // With no beginning asked for, the range begins where anything is known.
     let first = f.start.map_or_else(
         || {
@@ -315,7 +357,7 @@ pub fn read(
                 .unwrap_or(last)
                 .min(last)
         },
-        |start| query::bucket(start, step),
+        |start| grid.bucket(start),
     );
     // Days differ in length where clocks change, so a bucket's place is the
     // nearest whole number of steps from the first.
@@ -399,7 +441,7 @@ pub fn read(
     });
     Ok(Curves {
         start: first,
-        end: last.saturating_add(step),
+        end: grid.end(last),
         step,
         failures_since,
         detail_since,
