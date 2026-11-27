@@ -454,25 +454,95 @@ fn nothing_is_said_of_failures_before_the_journal_reaches() {
         .collect();
     // Three requests succeeded in the first bucket; whether others failed
     // there is not known, so it has no error rate rather than one of zero.
+    // Of the six rejections that began a minute before the journal does,
+    // the two of that minute are not counted, and nothing else ended there.
     assert_eq!(
         failures,
         [
             (0, 3, None),
-            (25 * MINUTE, 0, None),
             (30 * MINUTE, 0, Some(5)),
             (60 * MINUTE, 0, Some(2)),
         ]
     );
-    let provider = curves.providers.iter().find(|p| p.id == A).unwrap();
+    let provider = of(&curves, A);
     // A rate compares successes and failures of the same time.
     assert_eq!((provider.requests, provider.ok), (5, 0));
     assert_eq!(provider.failures.total(), 7);
     assert_eq!(provider.trend[0], None);
-    // The journal's week and the page's are measured a moment apart.
+}
+
+#[test]
+fn the_bucket_the_journal_begins_within_counts_from_where_it_begins() {
+    let (_dir, store) = store();
+    // After the first of the three requests of the first five minutes.
+    let since = BASE + 2 * MINUTE;
     let curves = store
-        .curves(&range(), BASE + MINUTE, &journal(), BASE + DAY)
+        .curves(&range(), since, &journal(), BASE + DAY)
         .unwrap();
-    assert!(of(&curves, A).buckets[0].failures.is_some());
+    let provider = of(&curves, A);
+    let first = &provider.buckets[0];
+    assert_eq!((first.ok, first.failures), (2, Some(Failures::default())));
+    // What it says of the first token is of all of it.
+    assert_eq!(first.first_token.samples, 3);
+    assert_eq!((provider.requests, provider.ok), (5, 2));
+    assert_eq!(provider.trend[0], Some(0.0));
+}
+
+#[test]
+fn a_day_the_journal_begins_within_still_counts_what_failed_after() {
+    const HOUR: i64 = 60 * MINUTE;
+    let day = query::bucket(BASE, DAY);
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let ok = |id, hours| request("claude", id, A, day + hours * HOUR, Some(200), Some(100));
+    store
+        .write_batch(&[ok("m-1", 9), ok("m-2", 10), ok("e-1", 15)], None)
+        .unwrap();
+    // The journal was cleared at noon. It has the rejections of the
+    // afternoon, and a row of five a minute apart that began two minutes
+    // before: three of them came since.
+    let since = day + 12 * HOUR;
+    let journal = [
+        failed(A, Limited, since - 2 * MINUTE, since + 2 * MINUTE, 5),
+        failed(A, Limited, day + 14 * HOUR, day + 14 * HOUR, 4),
+    ];
+    let filter = Filter {
+        start: None,
+        end: Some(day + DAY - 1),
+        client: Some("claude".into()),
+        ..Filter::default()
+    };
+    let curves = store
+        .curves(&filter, since, &journal, day + 2 * DAY)
+        .unwrap();
+    assert_eq!(
+        (curves.start, curves.end, curves.step),
+        (day, day + DAY, DAY)
+    );
+    let provider = of(&curves, A);
+    // The two successes of the morning are not set against failures the
+    // journal no longer has.
+    assert_eq!(
+        provider.buckets,
+        [Bucket {
+            at: day,
+            ok: 1,
+            failures: Some(Failures {
+                limited: 7,
+                ..Failures::default()
+            }),
+            first_token: FirstToken {
+                samples: 3,
+                p50: Some(100),
+                p90: Some(100)
+            },
+        }]
+    );
+    assert_eq!(
+        (provider.requests, provider.ok, provider.failures.limited),
+        (3, 1, 7)
+    );
+    assert_eq!(provider.trend, [Some(0.875)]);
 }
 
 #[test]
