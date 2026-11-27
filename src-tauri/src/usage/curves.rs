@@ -15,7 +15,7 @@ use crate::{
     storage::Result,
 };
 use chrono::TimeZone;
-use rusqlite::Connection;
+use rusqlite::{types::Value, Connection};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -257,23 +257,38 @@ fn spread(row: &UpstreamFailure, start: i64, end: i64, grid: Grid, mut add: impl
     }
 }
 
+/// What of the usage records the journal's failures are compared with, as
+/// `query::selection` words it. The journal knows a failure's client,
+/// provider and time and nothing else of the request, so nothing else
+/// narrows them.
+fn scope(f: &Filter) -> (String, Vec<Value>) {
+    query::selection(
+        &Filter {
+            source: Some("proxy".into()),
+            start: f.start,
+            end: f.end,
+            client: f.client.clone(),
+            ..Filter::default()
+        },
+        "",
+    )
+}
+/// Whether any of `scope` is a day of which only a total is kept.
+fn summed(c: &Connection, (cte, args): &(String, Vec<Value>)) -> Result<bool> {
+    let sql = query::native_sql(format!(
+        "{cte} SELECT 1 FROM m WHERE kind=1 AND provider IS NOT NULL AND requests>0 LIMIT 1"
+    ));
+    c.prepare(&sql)
+        .and_then(|mut statement| statement.exists(rusqlite::params_from_iter(args.iter())))
+        .map_err(|_| failed())
+}
 /// The requests of each provider by bucket, as the usage records have them.
 fn usage(
     c: &Connection,
-    f: &Filter,
+    (cte, args): &(String, Vec<Value>),
     grid: Grid,
     failures_since: i64,
 ) -> Result<BTreeMap<String, BTreeMap<i64, Seen>>> {
-    // The journal knows a failure's client, provider and time and nothing
-    // else of the request, so nothing else narrows what it is compared with.
-    let scope = Filter {
-        source: Some("proxy".into()),
-        start: f.start,
-        end: f.end,
-        client: f.client.clone(),
-        ..Filter::default()
-    };
-    let (cte, args) = query::selection(&scope, "");
     // Only the last attempt of a request says how the request ended.
     let sql = query::native_sql(format!(
         "{cte} SELECT provider,time,kind,requests,success,first_token_sum_ms,first_token_samples FROM m WHERE provider IS NOT NULL AND requests>0"
@@ -332,9 +347,17 @@ pub fn read(
     now: i64,
 ) -> Result<Curves> {
     let asked_end = f.end.unwrap_or(now);
-    let step = step(f.start, asked_end);
+    let scope = scope(f);
+    let mut step = step(f.start, asked_end);
+    // A day kept only as a total has no time of day to stand at: in narrower
+    // buckets the whole of it would be put at midnight. Such days are all
+    // before `detail_since`, so a range that begins later is not searched
+    // for one.
+    if step < DAY && f.start.is_some_and(|start| start < detail_since) && summed(c, &scope)? {
+        step = DAY;
+    }
     let grid = Grid::new(step, asked_end);
-    let usage = usage(c, f, grid, failures_since)?;
+    let usage = usage(c, &scope, grid, failures_since)?;
     let mut failed: BTreeMap<&str, BTreeMap<i64, Failures>> = BTreeMap::new();
     let client = f.client.as_deref().filter(|client| !client.is_empty());
     // Of a row the journal begins within, only what came since: the rest of

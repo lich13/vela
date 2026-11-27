@@ -594,3 +594,44 @@ fn requests_kept_only_as_daily_totals_count_without_a_percentile() {
     assert_eq!(provider.buckets.iter().map(|b| b.ok).sum::<u64>(), 3);
     assert_eq!(provider.first_token, none());
 }
+
+#[test]
+fn days_kept_only_as_totals_are_drawn_by_the_day() {
+    // Four days are divided into buckets of two hours, in which a day's
+    // total, having no hour, would all stand at midnight.
+    let old = |client: &str| Filter {
+        start: Some(BASE - 2 * DAY),
+        end: Some(BASE + 2 * DAY),
+        client: Some(client.into()),
+        ..Filter::default()
+    };
+    let (_dir, mut store) = store_of("codex");
+    store.compact(BASE + 40 * DAY).unwrap();
+    let curves = store
+        .curves(&old("codex"), 0, &[], BASE + 40 * DAY)
+        .unwrap();
+    assert_eq!(curves.step, DAY);
+    assert_eq!(curves.start, query::bucket(BASE - 2 * DAY, DAY));
+    assert_eq!(of(&curves, A).buckets.iter().map(|b| b.ok).sum::<u64>(), 3);
+    // What came since is still kept one by one, and a range of that alone
+    // is divided as finely as its length allows.
+    let late = request("codex", "late", A, BASE + 39 * DAY, Some(200), Some(70));
+    store.write_batch(&[late], None).unwrap();
+    let recent = Filter {
+        start: Some(BASE + 39 * DAY - 60 * MINUTE),
+        end: Some(BASE + 39 * DAY + 60 * MINUTE),
+        ..old("codex")
+    };
+    let curves = store.curves(&recent, 0, &[], BASE + 40 * DAY).unwrap();
+    assert_eq!(curves.step, 5 * MINUTE);
+    assert_eq!(of(&curves, A).first_token.samples, 1);
+    // Requests of Claude Code are kept one by one for good, so the same old
+    // days of them have no total among them.
+    let (_dir, mut store) = store_of("claude");
+    store.compact(BASE + 40 * DAY).unwrap();
+    let curves = store
+        .curves(&old("claude"), 0, &[], BASE + 40 * DAY)
+        .unwrap();
+    assert_eq!(curves.step, 120 * MINUTE);
+    assert_eq!(of(&curves, A).first_token.samples, 3);
+}
