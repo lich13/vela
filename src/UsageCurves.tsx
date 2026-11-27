@@ -265,6 +265,8 @@ function draw(
     peakY: peak ? edge(peak, 0) : 0,
     rateBlind: blind(curves.failuresSince),
     timeBlind: blind(summedUntil ?? 0),
+    // A pointer further than this from every bucket points at none of them.
+    near: Math.max(width * 1.5, 0.02),
     ratedNone: rated.length === 0,
     timedNone: timed.length === 0,
   };
@@ -427,7 +429,9 @@ function Stage({
     points.forEach((p, i) => {
       if (Math.abs(p.x - at) < Math.abs(points[nearest].x - at)) nearest = i;
     });
-    setActive(nearest);
+    // Only the buckets in which something ended are drawn. Over the time
+    // between them the nearest is not what is pointed at: nothing is read.
+    setActive(Math.abs(points[nearest].x - at) > drawn.near ? null : nearest);
   };
   const keys = (event: KeyboardEvent<HTMLDivElement>) => {
     const last = points.length - 1;

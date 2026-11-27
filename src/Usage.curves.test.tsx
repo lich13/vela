@@ -288,6 +288,27 @@ describe("provider curves", () => {
     expect(container.querySelector(".curve-blind")).not.toBeInTheDocument();
   });
 
+  it("reads nothing out where the pointer is far from every bucket", () => {
+    const { container } = panel(fixture());
+    const plot = container.querySelector('[data-plot="rate"]') as HTMLElement;
+    vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      width: 960,
+    } as DOMRect);
+    // Over the first half hour, and then between the second and the fifth.
+    fireEvent.pointerMove(plot, { clientX: 10 });
+    expect(
+      within(screen.getByRole("status")).getByText("00:00–00:30"),
+    ).toBeVisible();
+    fireEvent.pointerMove(plot, { clientX: 58 });
+    expect(
+      within(screen.getByRole("status")).getByText("00:30–01:00"),
+    ).toBeVisible();
+    // Nothing ended in the afternoon: the 429s of the night are not its.
+    fireEvent.pointerMove(plot, { clientX: 600 });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
   it("says so where there is nothing to draw", () => {
     const { rerender } = panel(null);
     expect(screen.getByText("正在读取曲线…")).toBeVisible();
