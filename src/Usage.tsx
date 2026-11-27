@@ -654,6 +654,13 @@ export default function Usage({
   };
   const name = (id: string | null) =>
     id ? providers[id] || `供应商 ${id.slice(0, 8)}` : "本机会话";
+  // The providers the page can be narrowed to by name.
+  const providerOptions =
+    client === "antigravity" || tab === "antigravity"
+      ? agProviders
+      : client === "claude"
+        ? claudeProviders
+        : providers;
   // Curves read for another time or client stay up, dimmed, until the ones
   // asked for are read. Once reading those has failed they are not what the
   // page is about: it says so in their place until a reading succeeds, and
@@ -842,17 +849,19 @@ export default function Usage({
           onChange={(e) => choose(setProvider, e.target.value)}
         >
           <option value="">全部供应商</option>
-          {Object.entries(
-            client === "antigravity" || tab === "antigravity"
-              ? agProviders
-              : client === "claude"
-                ? claudeProviders
-                : providers,
-          ).map(([id, n]) => (
+          {Object.entries(providerOptions).map(([id, n]) => (
             <option key={id} value={id}>
               {n}
             </option>
           ))}
+          {/* The curves list every provider the records know: one deleted
+              since, and under Antigravity the agy gateway's, where the
+              choices are its accounts. Chosen there, it is a choice here. */}
+          {provider &&
+            provider !== "session" &&
+            !Object.hasOwn(providerOptions, provider) && (
+              <option value={provider}>{name(provider)}</option>
+            )}
           {(client === "antigravity" ||
             tab === "antigravity" ||
             client === "claude" ||

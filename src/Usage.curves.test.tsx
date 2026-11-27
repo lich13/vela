@@ -521,4 +521,42 @@ describe("the curves tab of the usage page", () => {
       screen.queryByRole("button", { name: /Fixture Limited/ }),
     ).not.toBeInTheDocument();
   });
+
+  it("names the provider the curves were narrowed to where it is not among the choices", async () => {
+    const user = userEvent.setup();
+    // The records know a provider no gateway has any more.
+    answer = () => {
+      const curves = fixture();
+      curves.providers[1].id = "fixture-gone";
+      return curves;
+    };
+    render(<Usage />);
+    await user.click(await screen.findByRole("tab", { name: "曲线" }));
+    await user.click(
+      await screen.findByRole("button", { name: /供应商 fixture-/ }),
+    );
+    const choices = screen.getByLabelText("用量供应商");
+    expect(choices).toHaveValue("fixture-gone");
+    expect(
+      within(choices).getByRole("option", { name: "供应商 fixture-" }),
+    ).toHaveProperty("selected", true);
+    // Under Antigravity the choices are its accounts, and the curves are of
+    // the providers of the agy gateway.
+    await user.selectOptions(
+      screen.getByLabelText("用量客户端"),
+      "antigravity",
+    );
+    expect(choices).toHaveValue("");
+    await user.click(
+      await screen.findByRole("button", { name: /Fixture Limited/ }),
+    );
+    expect(choices).toHaveValue("fixture-limited");
+    expect(
+      within(choices).getByRole("option", { name: "Fixture Limited" }),
+    ).toHaveProperty("selected", true);
+    // The session without a provider is listed once.
+    expect(
+      within(choices).getAllByRole("option", { name: /本机会话/ }),
+    ).toHaveLength(1);
+  });
 });
