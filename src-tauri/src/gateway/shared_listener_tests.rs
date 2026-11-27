@@ -719,7 +719,7 @@ async fn turn(socket: &mut yawc::TcpWebSocket) {
 }
 
 #[tokio::test]
-async fn a_connection_passed_through_outlasts_the_key_it_was_opened_with() {
+async fn a_connection_passed_through_outlasts_its_key_and_ends_with_the_gateway() {
     let temp = tempfile::tempdir().unwrap();
     let upstream = Upstream::start().await;
     let (codex, port, home) = running_codex(&temp, &upstream).await;
@@ -770,8 +770,18 @@ async fn a_connection_passed_through_outlasts_the_key_it_was_opened_with() {
     );
     assert_eq!(upstream.seen.lock().len(), 1);
 
-    drop(socket);
+    // It ends when the client's gateway is stopped.
     codex.stop().await.unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match socket.next().await {
+                Some(frame) if frame.opcode() != yawc::OpCode::Close => {}
+                _ => break,
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "a stopped gateway passes nothing on");
     upstream.stop().await;
 }
 

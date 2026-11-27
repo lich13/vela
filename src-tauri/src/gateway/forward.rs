@@ -2890,24 +2890,38 @@ impl Exchange<'_> {
         let g = self.gateway.clone();
         let cfg = self.settings.clone();
         let provider_for_tunnel = route.provider.clone();
+        // Nothing read here says whose the connection is, so it is not ended
+        // with a key. It is ended with the client's gateway.
+        let mut shutdown = g
+            .request_state()
+            .shutdown
+            .as_ref()
+            .map(watch::Sender::subscribe);
         tokio::spawn(async move {
             let _active = active;
             let _traffic = traffic;
             let _slot = slot;
             let mut permits = permits;
-            let connected = tokio::try_join!(upstream_upgrade, downstream);
+            let connected = tokio::select! {
+                biased;
+                _ = stopping(&mut shutdown) => return,
+                connected = async { tokio::try_join!(upstream_upgrade, downstream) } => connected,
+            };
             if let Ok((a, b)) = connected {
+                let (mut a, mut b) = (TokioIo::new(a), TokioIo::new(b));
                 // Opaque tunnel preserves every data/control/close frame, including binary payloads.
-                let result =
-                    tokio::io::copy_bidirectional(&mut TokioIo::new(a), &mut TokioIo::new(b)).await;
-                protocol.finish(
-                    Some(101),
-                    if result.is_ok() {
-                        code::OK
-                    } else {
-                        code::STREAM_INTERRUPTED
-                    },
-                );
+                let ended = tokio::select! {
+                    biased;
+                    _ = stopping(&mut shutdown) => code::GATEWAY_STOPPED,
+                    result = tokio::io::copy_bidirectional(&mut a, &mut b) => {
+                        if result.is_ok() {
+                            code::OK
+                        } else {
+                            code::STREAM_INTERRUPTED
+                        }
+                    }
+                };
+                protocol.finish(Some(101), ended);
                 if protocol.succeeded() {
                     g.persist_success(&provider_for_tunnel).await;
                 }
