@@ -4411,25 +4411,8 @@ async fn forward_inner(
             "/responses" | "/v1/responses"
         );
     if let Some(id) = entry_key {
-        // A handed-out key is for what is counted as its usage and for the
-        // list of models. Whatever else a provider serves is its account's
-        // own, and a tunnel passes uncounted and would outlast the key.
-        let path = request.uri().path();
-        let counted = if websocket {
-            routing::counted_socket(path)
-        } else {
-            routing::counted(request.method(), path)
-                // Antigravity's metric calls are answered below and go nowhere.
-                || (gateway.client_id() == super::ClientId::Agy
-                    && super::gemini::telemetry(path))
-        };
-        if !counted {
-            return error(
-                StatusCode::FORBIDDEN,
-                code::FORBIDDEN,
-                "此 Key 不能访问该接口",
-            );
-        }
+        // A handed-out key is let in wherever the client's own is. What it
+        // asks for is kept under it.
         request.extensions_mut().insert(EntryKeyId(id));
     }
     if gateway.client_id() == super::ClientId::Agy && super::gemini::telemetry(request.uri().path())

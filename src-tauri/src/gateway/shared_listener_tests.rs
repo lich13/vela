@@ -516,7 +516,7 @@ fn assert_only_the_providers_token(request: &SeenRequest, inbound: &str) {
 }
 
 #[tokio::test]
-async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_upstream() {
+async fn a_handed_out_key_is_let_in_wherever_the_clients_own_is_and_stays_out_of_the_upstream() {
     let temp = tempfile::tempdir().unwrap();
     let upstream = Upstream::start().await;
     let (codex, port, home) = running_codex(&temp, &upstream).await;
@@ -580,16 +580,16 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
         assert_only_the_providers_token(request, &key);
     }
 
-    // Whatever else a provider serves, and a connection that passes through
-    // uncounted, are not for a handed-out key.
+    // Whatever else the provider serves, and a connection that is passed
+    // through as it is, are asked for with either key alike. The path goes on
+    // as it was written, whatever a provider would read into it.
     let upgrade = [
         ("Connection", "Upgrade"),
         ("Upgrade", "websocket"),
         ("Sec-WebSocket-Version", "13"),
         ("Sec-WebSocket-Key", "Zml4dHVyZS1ub25jZS0wMQ=="),
     ];
-    let kept_out = [
-        // What the provider keeps for its account.
+    let passed_on = [
         ("GET", "/v1/files"),
         ("POST", "/v1/files"),
         ("GET", "/v1/files/fixture-file/content"),
@@ -608,51 +608,50 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
             "/v1/containers/fixture-container/files/fixture-file/content",
         ),
         ("GET", "/v1/conversations/fixture-conversation/items"),
-        // What it serves without the gateway counting it.
         ("POST", "/v1/embeddings"),
         ("POST", "/v1/images/generations"),
-        // The same, written as only a provider would read it.
         ("GET", "/v1/models/../files"),
         ("GET", "/v1/models/%2e%2e/files"),
         ("GET", "/v1//files"),
         ("GET", "/v1/%66iles"),
         ("POST", "/v1/responses/../files"),
     ];
-    for (method, path) in kept_out {
+    let own_bearer = format!("Bearer {own}");
+    for (credential, authorization) in [(&own, &own_bearer), (&key, &bearer)] {
+        let before = upstream.seen.lock().len();
+        for (method, path) in passed_on {
+            assert_eq!(
+                call(port, method, path, &[("Authorization", authorization)], b"").await,
+                200,
+                "{method} {path}"
+            );
+        }
+        let tunnelled: Vec<_> = [("Authorization", authorization.as_str())]
+            .into_iter()
+            .chain(upgrade)
+            .collect();
         assert_eq!(
-            call(port, method, path, &[("Authorization", &bearer)], b"").await,
-            403,
-            "{method} {path}"
+            call(port, "GET", "/v1/realtime", &tunnelled, b"").await,
+            101
         );
-    }
-    let tunnelled: Vec<_> = [("Authorization", bearer.as_str())]
-        .into_iter()
-        .chain(upgrade)
-        .collect();
-    assert_eq!(
-        call(port, "GET", "/v1/realtime", &tunnelled, b"").await,
-        403
-    );
-    // Nor is what is asked for under a path that is not the one written for
-    // it: a second version or an empty segment is passed on as it came.
-    for (method, path) in [("POST", "/v1/v1/responses"), ("GET", "/v1/v1/models")] {
+        let requests = upstream.seen.lock()[before..].to_vec();
         assert_eq!(
-            call(port, method, path, &[("Authorization", &bearer)], b"").await,
-            403,
-            "{method} {path}"
+            requests
+                .iter()
+                .map(|r| (r.method.as_str(), r.path.as_str()))
+                .collect::<Vec<_>>(),
+            passed_on
+                .into_iter()
+                .chain([("GET", "/v1/realtime")])
+                .collect::<Vec<_>>()
         );
+        for request in &requests {
+            assert_only_the_providers_token(request, credential);
+        }
     }
-    assert_eq!(
-        call(port, "GET", "/v1/responses//", &tunnelled, b"").await,
-        403
-    );
-    assert_eq!(
-        upstream.seen.lock().len(),
-        generated.len(),
-        "a refusal reaches no upstream"
-    );
 
-    // The list of models is.
+    // So is the list of models.
+    let before = upstream.seen.lock().len();
     for path in ["/v1/models", "/v1/models/fixture-model"] {
         assert_eq!(
             call(port, "GET", path, &[("Authorization", &bearer)], b"").await,
@@ -660,46 +659,13 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
             "{path}"
         );
     }
-    let listed = upstream.seen.lock()[generated.len()..].to_vec();
+    let listed = upstream.seen.lock()[before..].to_vec();
     assert_eq!(
         listed.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
         ["/v1/models", "/v1/models/fixture-model"]
     );
     for request in &listed {
         assert_only_the_providers_token(request, &key);
-    }
-
-    // The client's own key is kept out of none of it.
-    let before_own = upstream.seen.lock().len();
-    let own_bearer = format!("Bearer {own}");
-    for (method, path) in kept_out {
-        assert_eq!(
-            call(port, method, path, &[("Authorization", &own_bearer)], b"").await,
-            200,
-            "{method} {path}"
-        );
-    }
-    let own_tunnel: Vec<_> = [("Authorization", own_bearer.as_str())]
-        .into_iter()
-        .chain(upgrade)
-        .collect();
-    assert_eq!(
-        call(port, "GET", "/v1/realtime", &own_tunnel, b"").await,
-        101
-    );
-    let own_requests = upstream.seen.lock()[before_own..].to_vec();
-    assert_eq!(
-        own_requests
-            .iter()
-            .map(|r| (r.method.as_str(), r.path.as_str()))
-            .collect::<Vec<_>>(),
-        kept_out
-            .into_iter()
-            .chain([("GET", "/v1/realtime")])
-            .collect::<Vec<_>>()
-    );
-    for request in &own_requests {
-        assert_only_the_providers_token(request, &own);
     }
 
     // Taken back, the key is no credential at all.
@@ -735,6 +701,80 @@ async fn a_handed_out_key_is_let_in_for_what_is_counted_and_stays_out_of_the_ups
     upstream.stop().await;
 }
 
+/// One turn sent down `socket` and answered to its end.
+async fn turn(socket: &mut yawc::TcpWebSocket) {
+    socket.send(yawc::Frame::text(CREATE)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = socket.next().await.expect("fixture turn should finish");
+            if frame.opcode() == yawc::OpCode::Text
+                && frame.payload().as_ref() == COMPLETED.as_bytes()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("fixture turn should finish in time");
+}
+
+#[tokio::test]
+async fn a_connection_passed_through_outlasts_the_key_it_was_opened_with() {
+    let temp = tempfile::tempdir().unwrap();
+    let upstream = Upstream::start().await;
+    let (codex, port, home) = running_codex(&temp, &upstream).await;
+    let (id, key) = hand_out_key(&codex, &home, "fixture-partner");
+    let bearer = format!("Bearer {key}");
+
+    // Not the Responses protocol's: the gateway passes its bytes on and reads
+    // none of them.
+    let mut socket = tokio::time::timeout(
+        Duration::from_secs(5),
+        yawc::WebSocket::connect(
+            format!("ws://127.0.0.1:{port}/v1/realtime")
+                .parse()
+                .unwrap(),
+        )
+        .with_request(yawc::HttpRequest::builder().header("authorization", bearer.as_str())),
+    )
+    .await
+    .expect("gateway should answer the fixture handshake")
+    .expect("a handed-out key should open a connection that is passed through");
+    turn(&mut socket).await;
+    let requests = upstream.seen.lock().clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/realtime");
+    assert_only_the_providers_token(&requests[0], &key);
+
+    codex
+        .edit(Edit::DeleteEntryKey { id }, &codex.view().revision, &home)
+        .unwrap();
+    // What was opened goes on as it was. Nothing more is opened with the key.
+    turn(&mut socket).await;
+    assert_eq!(
+        call(
+            port,
+            "GET",
+            "/v1/realtime",
+            &[
+                ("Authorization", bearer.as_str()),
+                ("Connection", "Upgrade"),
+                ("Upgrade", "websocket"),
+                ("Sec-WebSocket-Version", "13"),
+                ("Sec-WebSocket-Key", "Zml4dHVyZS1ub25jZS0wMQ=="),
+            ],
+            b""
+        )
+        .await,
+        401
+    );
+    assert_eq!(upstream.seen.lock().len(), 1);
+
+    drop(socket);
+    codex.stop().await.unwrap();
+    upstream.stop().await;
+}
+
 #[tokio::test]
 async fn a_websocket_made_with_a_handed_out_key_shows_the_upstream_none_of_it() {
     let temp = tempfile::tempdir().unwrap();
@@ -759,19 +799,7 @@ async fn a_websocket_made_with_a_handed_out_key_shows_the_upstream_none_of_it() 
     .await
     .expect("gateway should answer the fixture handshake")
     .expect("a handed-out key should open a Responses WebSocket");
-    socket.send(yawc::Frame::text(CREATE)).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let frame = socket.next().await.expect("fixture turn should finish");
-            if frame.opcode() == yawc::OpCode::Text
-                && frame.payload().as_ref() == COMPLETED.as_bytes()
-            {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("fixture turn should finish in time");
+    turn(&mut socket).await;
 
     let requests = upstream.seen.lock().clone();
     assert_eq!(requests.len(), 1);
