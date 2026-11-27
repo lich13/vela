@@ -124,17 +124,51 @@ fn none() -> FirstToken {
 fn a_range_is_divided_into_at_most_sixty_buckets() {
     let of = |span: i64| step(Some(BASE), BASE + span);
     assert_eq!(of(0), 5 * MINUTE);
-    assert_eq!(of(300 * MINUTE), 5 * MINUTE);
-    assert_eq!(of(300 * MINUTE + 1), 10 * MINUTE);
+    // Five hours less a moment end in the sixtieth bucket of five minutes,
+    // and the moment after in a sixty-first.
+    assert_eq!(of(300 * MINUTE - 1), 5 * MINUTE);
+    assert_eq!(of(300 * MINUTE), 10 * MINUTE);
     assert_eq!(of(DAY), 30 * MINUTE);
     assert_eq!(of(7 * DAY), 180 * MINUTE);
     assert_eq!(of(14 * DAY), 360 * MINUTE);
-    assert_eq!(of(30 * DAY), 720 * MINUTE);
-    assert_eq!(of(60 * DAY), DAY);
-    // Beyond that a bucket stays a day, and so does one of a range that has
-    // no beginning to measure from.
+    assert_eq!(of(29 * DAY), 720 * MINUTE);
+    // Thirty days end in a sixty-first bucket of twelve hours. From there a
+    // bucket stays a day, as does one of a range that has no beginning to
+    // measure from.
+    assert_eq!(of(30 * DAY), DAY);
     assert_eq!(of(400 * DAY), DAY);
     assert_eq!(step(None, BASE), DAY);
+}
+
+#[test]
+fn a_range_that_begins_within_a_bucket_is_still_within_sixty() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    // The last five hours, day, week and thirty days as a page asks for
+    // them: from a moment that is the edge of no bucket. Divided by their
+    // length alone, the first and the last would reach into a sixty-first.
+    let start = BASE + 7 * MINUTE + 13_000;
+    for (span, step) in [
+        (300 * MINUTE, 10 * MINUTE),
+        (DAY, 30 * MINUTE),
+        (7 * DAY, 180 * MINUTE),
+        (30 * DAY, DAY),
+    ] {
+        let filter = Filter {
+            start: Some(start),
+            end: Some(start + span),
+            ..Filter::default()
+        };
+        let curves = store.curves(&filter, 0, &[], start + span).unwrap();
+        assert_eq!(curves.step, step);
+        // A day may be an hour longer or shorter than the step.
+        let drawn = (curves.end - curves.start + step / 2) / step;
+        assert!(drawn <= 60, "{drawn} buckets of {step}");
+        if step < DAY {
+            // One more than its length fills.
+            assert_eq!(drawn, span / step + 1);
+        }
+    }
 }
 
 #[test]

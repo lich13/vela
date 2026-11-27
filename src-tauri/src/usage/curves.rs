@@ -200,14 +200,21 @@ struct Seen {
     first_token: Vec<u64>,
 }
 
+/// The narrowest width at which `start..=end` reaches into no more than
+/// `BUCKETS`, the buckets its two ends fall in both counted: a range that
+/// does not begin where a bucket does reaches into one more than its length
+/// fills. One too long for any width is divided into days, however many, as
+/// is one with no beginning to measure from.
 fn step(start: Option<i64>, end: i64) -> i64 {
     let Some(start) = start else {
         return DAY;
     };
-    let span = end.saturating_sub(start).max(0);
     STEPS
         .into_iter()
-        .find(|step| span <= BUCKETS * step)
+        .find(|&step| {
+            let grid = Grid::new(step, end);
+            (grid.bucket(end) - grid.bucket(start)) / step < BUCKETS
+        })
         .unwrap_or(DAY)
 }
 
