@@ -5,6 +5,9 @@ on:
     branches: [main]
 permissions:
   contents: read
+env:
+  # Tests and lints are built without debug information.
+  CARGO_PROFILE_DEV_DEBUG: "0"
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -25,6 +28,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
+          # The tests of a release read what is saved here.
+          shared-key: desktop-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - run: pnpm test
       - run: pnpm build

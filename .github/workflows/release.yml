@@ -5,6 +5,10 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  # Tests and lints are built without debug information; release builds are
+  # another profile.
+  CARGO_PROFILE_DEV_DEBUG: "0"
 jobs:
   notes:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -36,7 +40,54 @@ jobs:
         # Vulnerabilities fail the job. RUSTSEC-2024-0429 is in Linux-only glib 0.18
         # (never compiled on macOS or Windows targets).
         run: cargo audit --file src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429
-  build:
+  # The tests and lints of the desktop app, beside its bundles and not before them.
+  test:
+    needs: notes
+    if: always() && needs.notes.result != 'failure'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Frontend tests and the format check run on macOS only; the Rust tests
+      # and lints run on both and need nothing of Node.
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        if: runner.os == 'macOS'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: runner.os == 'macOS'
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Install repository Rust toolchain
+        run: rustup toolchain install
+      # Shared with the check on main, which is where it is saved.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri
+          shared-key: desktop-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Frontend tests
+        if: runner.os == 'macOS'
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm test
+      - name: Format
+        if: runner.os == 'macOS'
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - name: Rust tests
+        if: runner.os == 'macOS'
+        env:
+          RUST_BACKTRACE: "1"
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Rust tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+  bundle:
     needs: notes
     if: always() && needs.notes.result != 'failure'
     strategy:
@@ -67,25 +118,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
+          shared-key: desktop-bundle
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      # Frontend tests and the format check run on macOS only; the Rust tests
-      # run on both.
-      - name: Frontend tests
-        if: runner.os == 'macOS'
-        run: pnpm test
-      - name: Format
-        if: runner.os == 'macOS'
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - name: Rust tests
-        if: runner.os == 'macOS'
-        env:
-          RUST_BACKTRACE: "1"
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-      - name: Rust tests (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-      - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - name: Installed Windows launch check
         if: runner.os == 'Windows'
@@ -208,6 +243,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
+          shared-key: server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - run: cargo clippy --locked --no-default-features --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: Rust tests
@@ -244,7 +281,7 @@ jobs:
           if-no-files-found: error
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [audit, build, server]
+    needs: [audit, test, bundle, server]
     runs-on: ubuntu-latest
     permissions:
       contents: write
