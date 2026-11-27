@@ -785,11 +785,14 @@ export default function UsageCurvesPanel({
   const edge = (at: number) => (daily ? date(at) : `${date(at)} ${clock(at)}`);
   // Before the journal begins no failure is known, which is not none. Where
   // it begins inside the range, what failed and what succeeded beside it are
-  // counted from there on, and the figures say from when.
+  // counted from there on, and the figures say from when. A range that
+  // reaches as far back as the journal keeps begins a moment before it does,
+  // inside the first bucket: that is the whole of the range, and needs no
+  // saying.
   const known = curves.failuresSince < curves.end;
   const since =
-    known && curves.failuresSince > curves.start
-      ? `自 ${edge(curves.failuresSince)} 起`
+    known && curves.failuresSince >= curves.start + curves.step
+      ? `自 ${date(curves.failuresSince)} ${clock(curves.failuresSince)} 起`
       : null;
   return (
     <section className="usage-curves" aria-busy={stale}>

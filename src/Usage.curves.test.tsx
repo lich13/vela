@@ -250,6 +250,14 @@ describe("provider curves", () => {
     expect(rows[2]).toHaveTextContent("02:00–02:301000150%——0");
   });
 
+  it("says nothing of when the journal begins where it begins with the range", () => {
+    // Seven days back, the range and the journal both begin a moment into
+    // the first bucket.
+    const { figures } = panel(fixture({ failuresSince: start + 60_000 }));
+    expect(figures().getByText("21 / 32 次尝试失败")).toBeVisible();
+    expect(figures().queryByText(/^自 /)).not.toBeInTheDocument();
+  });
+
   it("does not say none failed where the journal reaches none of the range", () => {
     // The journal begins as the range ends.
     const curves = fixture({ failuresSince: start + 48 * half });
