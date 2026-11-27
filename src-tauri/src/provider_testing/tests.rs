@@ -422,6 +422,75 @@ async fn claude_on_vertex_is_tested_at_the_model_address_with_a_google_key() {
     assert_eq!(lock(&seen).len(), 1);
 }
 #[tokio::test]
+async fn a_gemini_relay_with_no_list_of_its_own_is_asked_for_the_one_under_v1() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let capture = seen.clone();
+    let port = server(move |r| {
+        let capture = capture.clone();
+        async move {
+            let uri = r.uri().to_string();
+            let key = r.headers().get("authorization").cloned();
+            lock(&capture).push((uri.clone(), r.headers().contains_key("x-goog-api-key")));
+            let (status, body) = if uri != "/relay/v1/models" {
+                (404, json!({"error":{"message":"Invalid URL"}}))
+            } else if key.as_ref().and_then(|v| v.to_str().ok())
+                != Some("Bearer fixture-test-token")
+            {
+                (401, json!({"error":{"message":"fixture: no key"}}))
+            } else {
+                (
+                    200,
+                    // Every model the relay has, one of them under the key.
+                    json!({"data":[
+                        {"id":"gemini-b","display_name":"fixture-test-token"},
+                        {"id":"gemini-a"},
+                        {"id":"claude-fixture"},
+                        {"id":"maker/gemini-c"},
+                        {"id":"gemini-fixture-test-token"}
+                    ],"success":true}),
+                )
+            };
+            response(status, "application/json", body.to_string())
+        }
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let codex = Gateway::new(dir.path().join("codex")).unwrap();
+    let agy = codex.agy_companion(dir.path().join("antigravity")).unwrap();
+    let service = Service::new(dir.path(), [codex, agy]).unwrap();
+    let gateway = service.gateway(ClientId::Agy);
+    let args = json!({"op":"saveProvider","baseUrl":format!("http://127.0.0.1:{port}/relay/v1beta"),"token":"fixture-test-token","name":"Fixture provider"});
+    gateway
+        .edit(
+            serde_json::from_value(args).unwrap(),
+            &gateway.view().revision,
+            dir.path(),
+        )
+        .unwrap();
+    let id = gateway.view().providers.last().unwrap().id.clone();
+    ua(&service, ClientId::Agy);
+    let models = service
+        .models(ClientId::Agy, &id, &gateway.view().revision, None, true)
+        .await
+        .unwrap();
+    assert_eq!(models.error, None);
+    assert_eq!(
+        models
+            .models
+            .iter()
+            .map(|m| (m.id.as_str(), m.name.as_str()))
+            .collect::<Vec<_>>(),
+        [("gemini-a", "gemini-a"), ("gemini-b", "gemini-b")]
+    );
+    assert_eq!(
+        *lock(&seen),
+        [
+            ("/relay/v1beta/models?pageSize=1000".to_owned(), true),
+            ("/relay/v1/models".to_owned(), false)
+        ]
+    );
+}
+#[tokio::test]
 async fn global_prompt_survives_failure_and_restart_across_clients() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let capture = seen.clone();

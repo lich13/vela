@@ -152,10 +152,22 @@ impl Service {
             .map_err(|_| failure("模型目录地址无效"))?;
             let mut models = Vec::new();
             let mut cursors = std::collections::HashSet::new();
+            // Whether the list is asked for in Gemini's own form. A relay may
+            // speak Gemini's protocol and list its models in OpenAI's alone.
+            let mut native = gemini;
+            let mut headers = target.headers.clone();
+            // An upstream that echoes the key back names no model with it.
+            let keys: Vec<String> = ["authorization", "x-api-key", "x-goog-api-key"]
+                .iter()
+                .filter_map(|name| target.headers.get(*name)?.to_str().ok())
+                .map(|key| key.strip_prefix("Bearer ").unwrap_or(key).to_owned())
+                .filter(|key| !key.is_empty())
+                .collect();
+            let leaks = |text: &str| keys.iter().any(|key| text.contains(key.as_str()));
             loop {
                 let response = client
                     .get(url.clone())
-                    .headers(target.headers.clone())
+                    .headers(headers.clone())
                     .send()
                     .await
                     .map_err(|error| {
@@ -164,6 +176,28 @@ impl Service {
                         error_detail = Some(detail);
                         result
                     })?;
+                if response.status() == reqwest::StatusCode::NOT_FOUND
+                    && native
+                    && cursors.is_empty()
+                {
+                    native = false;
+                    url = url::Url::parse(&target.url("/v1/models")?)
+                        .map_err(|_| failure("模型目录地址无效"))?;
+                    // OpenAI's list is asked for as OpenAI's are: the relay
+                    // that keeps one reads the key from nowhere else.
+                    if let Some(key) = headers.remove("x-goog-api-key") {
+                        if !headers.contains_key(reqwest::header::AUTHORIZATION) {
+                            let mut bearer = b"Bearer ".to_vec();
+                            bearer.extend_from_slice(key.as_bytes());
+                            headers.insert(
+                                reqwest::header::AUTHORIZATION,
+                                reqwest::header::HeaderValue::from_bytes(&bearer)
+                                    .map_err(|_| failure("供应商请求头无效"))?,
+                            );
+                        }
+                    }
+                    continue;
+                }
                 if !response.status().is_success() {
                     let detail = errors::redact(errors::response(response).await, &target);
                     let result = failure(&detail.message);
@@ -214,7 +248,7 @@ impl Service {
                     {
                         continue;
                     }
-                    let id = if gemini {
+                    let id = if native {
                         item["name"]
                             .as_str()
                             .map(|name| name.strip_prefix("models/").unwrap_or(name))
@@ -225,7 +259,16 @@ impl Service {
                             .or_else(|| item.as_str())
                     };
                     if let Some(id) = id.filter(|s| {
-                        !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
+                        !s.is_empty()
+                            && s.len() <= 256
+                            && !s.chars().any(char::is_control)
+                            && !leaks(s)
+                            // A model is named in the address of every request
+                            // made of it in Gemini's protocol, and a list in
+                            // OpenAI's form is of every model the relay has.
+                            && (!gemini
+                                || (crate::gateway::gemini::valid_model(s)
+                                    && (native || crate::gateway::gemini::named(s))))
                     }) {
                         if models.len() >= 10_000 {
                             return Err(failure("上游模型目录超过 10000 项"));
@@ -235,14 +278,14 @@ impl Service {
                             name: item["display_name"]
                                 .as_str()
                                 .or_else(|| item["displayName"].as_str())
-                                .or_else(|| item["name"].as_str().filter(|_| !gemini))
-                                .filter(|s| s.len() <= 256)
+                                .or_else(|| item["name"].as_str().filter(|_| !native))
+                                .filter(|s| s.len() <= 256 && !leaks(s))
                                 .unwrap_or(id)
                                 .into(),
                         });
                     }
                 }
-                let (more, last, after) = if gemini {
+                let (more, last, after) = if native {
                     (
                         data["nextPageToken"]
                             .as_str()

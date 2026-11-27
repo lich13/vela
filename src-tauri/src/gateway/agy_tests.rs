@@ -541,6 +541,64 @@ async fn the_catalog_follows_page_tokens_and_keeps_chat_models_only() {
 }
 
 #[tokio::test]
+async fn a_relay_with_no_gemini_list_is_asked_for_the_one_it_keeps_as_openai_does() {
+    let f = fixture().await;
+    let seen = Seen::default();
+    let port = server({
+        let seen = seen.clone();
+        move |request| {
+            let seen = seen.clone();
+            async move {
+                let uri = request.uri().to_string();
+                let headers = request.headers().clone();
+                seen.lock()
+                    .push((uri.clone(), headers.clone(), Default::default()));
+                // The relay reads a key for this list from one header alone.
+                let (status, body) = if uri != "/v1/models" {
+                    (404, json!({"error":{"message":"Invalid URL"}}))
+                } else if headers.get("authorization").and_then(|v| v.to_str().ok())
+                    != Some("Bearer fixture-upstream")
+                {
+                    (401, json!({"error":{"message":"fixture: no key"}}))
+                } else {
+                    (
+                        200,
+                        json!({"data":[
+                            {"id":"gemini-b","object":"model"},
+                            {"id":"gemini-a","object":"model"},
+                            {"id":"claude-fixture","object":"model"},
+                            {"id":"maker/gemini-c","object":"model"}
+                        ],"success":true}),
+                    )
+                };
+                hyper::Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(replay::full(body.to_string()))
+                    .unwrap()
+            }
+        }
+    })
+    .await;
+    let id = f.save(&format!("http://127.0.0.1:{port}/v1beta"));
+    let models = f.agy.list_models(&id, true).await.unwrap();
+    assert_eq!(models.error, None);
+    // The relay lists every model it has: another maker's is not offered,
+    // nor a name that cannot stand in a request's address.
+    assert_eq!(models.models, ["gemini-a", "gemini-b"]);
+    let seen = seen.lock();
+    assert_eq!(
+        seen.iter()
+            .map(|(uri, ..)| uri.as_str())
+            .collect::<Vec<_>>(),
+        ["/v1beta/models?pageSize=1000", "/v1/models"]
+    );
+    assert_eq!(seen[0].1["x-goog-api-key"], "fixture-upstream");
+    assert!(!seen[0].1.contains_key("authorization"));
+    assert!(!seen[1].1.contains_key("x-goog-api-key"));
+}
+
+#[tokio::test]
 async fn it_runs_with_no_provider_and_answers_that_there_is_none() {
     let f = fixture().await;
     assert!(f.agy.view().providers.is_empty());

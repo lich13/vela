@@ -805,6 +805,9 @@ async fn fetch(
     let mut models = Vec::new();
     let mut total = 0usize;
     let mut cursors = std::collections::HashSet::new();
+    // Whether the list is asked for in Gemini's own form. A relay may speak
+    // Gemini's protocol for its models and list them in OpenAI's form alone.
+    let mut native = gemini;
     loop {
         let mut builder = Request::builder()
             .method("GET")
@@ -822,6 +825,20 @@ async fn fetch(
             connection
                 .authenticate(request.headers_mut(), &input.token)
                 .map_err(|_| fail("供应商请求头无效"))?;
+        }
+        if gemini && !native {
+            // OpenAI's list is asked for as OpenAI's are: the relay that
+            // keeps one reads the key from nowhere else.
+            let headers = request.headers_mut();
+            headers.remove("x-goog-api-key");
+            if !headers.contains_key(header::AUTHORIZATION) {
+                headers.insert(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", input.token)
+                        .parse()
+                        .map_err(|_| fail("供应商地址或 Key 格式无效"))?,
+                );
+            }
         }
         let mut response = input.client.request(request).await.map_err(|e| {
             fail(
@@ -847,6 +864,24 @@ async fn fetch(
         if matches!(status, 401 | 403) {
             return Err(fail(&format!("模型列表认证失败（HTTP {status}）")));
         }
+        if status == 404 && native && cursors.is_empty() {
+            // No list under Gemini's path: the one under `/v1/models`, beside
+            // the same address, is asked for once.
+            native = false;
+            let listed = super::gemini::target(
+                &input.base,
+                &"/v1/models".parse().expect("static model path"),
+            )
+            .map_err(|_| fail("模型接口地址无效"))?;
+            let listed = match connection {
+                Some(connection) => connection
+                    .query_uri(listed)
+                    .map_err(|_| fail("模型接口地址无效"))?,
+                None => listed,
+            };
+            url = url::Url::parse(&listed.to_string()).map_err(|_| fail("模型接口地址无效"))?;
+            continue;
+        }
         if !(200..300).contains(&status) {
             return Err(fail(&format!("模型列表不可用（HTTP {status}）")));
         }
@@ -864,14 +899,22 @@ async fn fetch(
         let value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| fail("模型接口没有返回有效 JSON"))?;
         let data = value
-            .get(if gemini { "models" } else { "data" })
+            .get(if native { "models" } else { "data" })
             .and_then(|v| v.as_array())
             .ok_or_else(|| fail("无法识别模型列表，可手动添加模型 ID"))?;
         let page: Vec<String> = data
             .iter()
             .filter_map(|v| {
-                if !gemini {
-                    return v.get("id").and_then(|v| v.as_str());
+                if !native {
+                    return v
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        // A model is named in the address of every request
+                        // made of it in Gemini's protocol, and the list is
+                        // of every model the relay has.
+                        .filter(|id| {
+                            !gemini || (super::gemini::valid_model(id) && super::gemini::named(id))
+                        });
                 }
                 // Embedding and image models answer no chat request.
                 v["supportedGenerationMethods"]
@@ -894,7 +937,7 @@ async fn fetch(
         if models.len() > 4096 {
             return Err(fail("单供应商模型列表超过 4,096 个"));
         }
-        let (more, last, after) = if gemini {
+        let (more, last, after) = if native {
             (
                 value["nextPageToken"]
                     .as_str()

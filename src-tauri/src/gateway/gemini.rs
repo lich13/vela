@@ -22,6 +22,12 @@ pub fn model(pathname: &str) -> Option<String> {
     }
     valid_model(name).then(|| name.to_owned())
 }
+/// Whether a list of every maker's models names one of Gemini's with
+/// `model`. A list in OpenAI's form says nothing of the protocol a model
+/// answers, and a relay's holds whatever it relays.
+pub fn named(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("gemini")
+}
 pub fn valid_model(model: &str) -> bool {
     !model.is_empty()
         && model.len() <= 256
