@@ -85,6 +85,7 @@ type Shown = ComponentProps<typeof UsageCurvesPanel>;
 const shown = (props: Partial<Shown>): Shown => ({
   curves: null,
   stale: false,
+  unread: false,
   selected: "",
   name,
   onSelect: () => {},
@@ -283,6 +284,12 @@ describe("provider curves", () => {
   it("says so where there is nothing to draw", () => {
     const { rerender } = panel(null);
     expect(screen.getByText("正在读取曲线…")).toBeVisible();
+    // Reading them failed: nothing is on its way.
+    rerender(<UsageCurvesPanel {...shown({ unread: true })} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "曲线没有读到，点右上角“刷新用量”重试",
+    );
+    expect(screen.queryByText("正在读取曲线…")).not.toBeInTheDocument();
     rerender(
       <UsageCurvesPanel {...shown({ curves: fixture({ providers: [] }) })} />,
     );
@@ -304,7 +311,14 @@ describe("provider curves", () => {
 });
 
 describe("the curves tab of the usage page", () => {
+  // What the instance answers a reading of the curves with.
+  let answer: () => UsageCurves | Promise<UsageCurves>;
+  const asked = () =>
+    mock.command.mock.calls.filter(
+      ([command]) => command === "get_usage_curves",
+    );
   beforeEach(() => {
+    answer = () => fixture();
     mock.command.mockReset();
     mock.confirm.mockReset();
     mock.listeners.clear();
@@ -363,7 +377,7 @@ describe("the curves tab of the usage page", () => {
               error: null,
             };
           case "get_usage_curves":
-            return fixture();
+            return answer();
           default:
             throw new Error(`Unexpected fixture command: ${command}`);
         }
@@ -378,10 +392,6 @@ describe("the curves tab of the usage page", () => {
     expect(
       await screen.findByRole("heading", { name: "Fixture Limited" }),
     ).toBeVisible();
-    const asked = () =>
-      mock.command.mock.calls.filter(
-        ([command]) => command === "get_usage_curves",
-      );
     expect(asked()).toHaveLength(1);
     // The time and the client and nothing else: no provider, type or key.
     const filter = (asked()[0][1] as { filter: UsageFilter }).filter;
@@ -407,5 +417,49 @@ describe("the curves tab of the usage page", () => {
       ),
     );
     expect(screen.getByText("估算费用")).toBeVisible();
+  });
+
+  it("shows nothing of another client where reading this one's curves failed", async () => {
+    const user = userEvent.setup();
+    render(<Usage />);
+    await user.click(await screen.findByRole("tab", { name: "曲线" }));
+    expect(
+      await screen.findByRole("heading", { name: "Fixture Limited" }),
+    ).toBeVisible();
+    answer = () => {
+      throw new Error("曲线读取超时");
+    };
+    await user.selectOptions(screen.getByLabelText("用量客户端"), "codex");
+    expect(
+      await screen.findByText("曲线没有读到，点右上角“刷新用量”重试"),
+    ).toHaveAttribute("role", "alert");
+    // Those on the page were every client's: they are not Codex's to choose.
+    expect(
+      screen.queryByRole("heading", { name: "Fixture Limited" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Fixture Steady/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("正在读取曲线…")).not.toBeInTheDocument();
+    expect(screen.getByText("曲线读取超时")).toBeVisible();
+
+    answer = () => fixture();
+    await user.click(screen.getByRole("button", { name: "刷新用量" }));
+    expect(
+      await screen.findByRole("heading", { name: "Fixture Limited" }),
+    ).toBeVisible();
+    expect(screen.queryByText(/曲线没有读到/)).not.toBeInTheDocument();
+    expect(screen.queryByText("曲线读取超时")).not.toBeInTheDocument();
+
+    // Read again and failing, what was read of this client stays as it is.
+    answer = () => {
+      throw new Error("曲线读取超时");
+    };
+    await user.click(screen.getByRole("button", { name: "刷新用量" }));
+    expect(await screen.findByText("曲线读取超时")).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Fixture Limited" }),
+    ).toBeVisible();
+    expect(screen.queryByText(/曲线没有读到/)).not.toBeInTheDocument();
   });
 });

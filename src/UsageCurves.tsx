@@ -717,6 +717,7 @@ function Stage({
 export default function UsageCurvesPanel({
   curves,
   stale,
+  unread,
   selected,
   name,
   onSelect,
@@ -724,6 +725,8 @@ export default function UsageCurvesPanel({
   curves: UsageCurves | null;
   /** What is shown is of another time or client than the one being read. */
   stale: boolean;
+  /** There are none to show because reading them failed. */
+  unread: boolean;
   /** The provider the page is narrowed to, empty for none. */
   selected: string;
   name: (id: string) => string;
@@ -743,7 +746,11 @@ export default function UsageCurvesPanel({
     [curves, chosen],
   );
   if (!curves || !providers)
-    return (
+    return unread ? (
+      <div className="usage-empty" role="alert">
+        曲线没有读到，点右上角“刷新用量”重试
+      </div>
+    ) : (
       <div className="usage-empty" aria-busy="true">
         正在读取曲线…
       </div>

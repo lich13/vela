@@ -163,7 +163,9 @@ export default function Usage({
       scope: string;
       data: UsageCurves;
     } | null>(null),
-    [curvesBusy, setCurvesBusy] = useState(false);
+    [curvesBusy, setCurvesBusy] = useState(false),
+    // The time and client the last reading of them failed for.
+    [curvesLost, setCurvesLost] = useState<string | null>(null);
   const [claudeQuota, setClaudeQuota] = useState<ClaudeUsageQuota | null>(null);
   const [agStats, setAgStats] = useState<AntigravityUsageStats | null>(null),
     [agBusy, setAgBusy] = useState(false),
@@ -325,10 +327,14 @@ export default function Usage({
       });
       if (id === curveSequence.current) {
         setCurves({ scope: curveScope, data });
+        setCurvesLost(null);
         setError("");
       }
     } catch (e) {
-      if (id === curveSequence.current) setError(errorOf(e).message);
+      if (id === curveSequence.current) {
+        setCurvesLost(curveScope);
+        setError(errorOf(e).message);
+      }
     } finally {
       if (id === curveSequence.current) setCurvesBusy(false);
     }
@@ -633,6 +639,12 @@ export default function Usage({
   };
   const name = (id: string | null) =>
     id ? providers[id] || `供应商 ${id.slice(0, 8)}` : "本机会话";
+  // Curves read for another time or client stay up, dimmed, until the ones
+  // asked for are read. Once reading those has failed they are not what the
+  // page is about: it says so in their place until a reading succeeds, and
+  // does not go back and forth as the refreshes come round.
+  const curvesRead = curves?.scope === curveScope;
+  const curvesGone = !curvesRead && curvesLost === curveScope;
   // Every key handed out, under the name usage knows its client by: the agy
   // gateway is antigravity there.
   const keys = keyGateways.flatMap((clientId) =>
@@ -964,8 +976,9 @@ export default function Usage({
         </>
       ) : curved ? (
         <UsageCurvesPanel
-          curves={curves?.data ?? null}
-          stale={curvesBusy && curves?.scope !== curveScope}
+          curves={curvesGone ? null : (curves?.data ?? null)}
+          stale={curves != null && !curvesRead && !curvesGone}
+          unread={curvesGone}
           selected={provider}
           name={(id) => name(id === "session" ? null : id)}
           onSelect={(id) => choose(setProvider, id)}
