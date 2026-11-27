@@ -1,11 +1,13 @@
 import type {
   AntigravityUsageStats,
   Attempt,
+  CurveProvider,
   Dashboard,
   CostCalculatorInput,
   PricingView,
   Tokens,
   Totals,
+  UsageCurves,
   UsageFilter,
   UsageRecord,
   UsageSettings,
@@ -372,9 +374,135 @@ function total(items: UsageRecord[]): Totals {
     generationMs: items.length * 4860,
   };
 }
+/**
+ * Curves made up for the preview: one provider rate-limited in bursts, one
+ * steady, and two with too little traffic to say much.
+ */
+function curvesPreview(f: UsageFilter): UsageCurves {
+  const minute = 60_000;
+  const end = f.end ?? Date.now();
+  const start = f.start ?? end - 30 * 1440 * minute;
+  const step =
+    [5, 10, 15, 30, 60, 120, 180, 360, 720]
+      .map((minutes) => minutes * minute)
+      .find((step) => end - start <= 60 * step) ?? 1440 * minute;
+  // Buckets begin on the hours of this machine's clock.
+  const zone = new Date(end).getTimezoneOffset() * minute;
+  const floor = (at: number) => Math.floor((at - zone) / step) * step + zone;
+  const first = floor(start);
+  const count = Math.round((floor(end) - first) / step) + 1;
+  const failuresSince = end - 7 * 1440 * minute;
+  // The same curve each time it is asked for.
+  const noise = (seed: number) => {
+    const x = Math.sin(seed * 12.9898) * 43758.5453;
+    return x - Math.floor(x);
+  };
+  const shapes = [
+    { id: "claude-primary", client: "claude", load: 44, limited: 0.5, wave: 11, other: 0.03, gaps: 0, slow: 2300 },
+    { id: "primary", client: "codex", load: 80, limited: 0.02, wave: 37, other: 0.02, gaps: 0, slow: 850 },
+    { id: "backup", client: "codex", load: 7, limited: 0.16, wave: 13, other: 0.08, gaps: 0.45, slow: 1500 },
+    { id: "claude-backup", client: "claude", load: 2, limited: 0, wave: 1, other: 0.2, gaps: 0.6, slow: 3200 },
+  ];
+  const scale = step / (60 * minute);
+  const kinds = ["limited", "rejected", "server", "broken"] as const;
+  const providers = shapes
+    .filter((shape) => !f.client || shape.client === f.client)
+    .map((shape, s): CurveProvider => {
+      const buckets: CurveProvider["buckets"] = [];
+      for (let i = 0; i < count; i++) {
+        const seed = i * 7 + s * 101;
+        if (noise(seed) < shape.gaps) continue;
+        const at = first + i * step;
+        const ok = Math.max(
+          1,
+          Math.round(shape.load * scale * (0.35 + 1.3 * noise(seed + 1))),
+        );
+        // Rate limits come in bursts, and what does answer answers late.
+        const burst =
+          Math.max(0, Math.sin((i / shape.wave) * Math.PI * 2 + s)) ** 3;
+        const lost = (share: number, n: number) =>
+          Math.round(ok * shape.other * share * noise(seed + n) * 2);
+        const p50 = Math.round(
+          shape.slow * (0.75 + 0.5 * noise(seed + 6)) * (1 + burst),
+        );
+        buckets.push({
+          at,
+          ok,
+          failures:
+            at + minute >= failuresSince
+              ? {
+                  limited: Math.round(
+                    ok * shape.limited * burst * (1.6 + 2 * noise(seed + 2)),
+                  ),
+                  rejected: lost(0.4, 3),
+                  server: lost(1, 4),
+                  broken: lost(0.6, 5),
+                }
+              : null,
+          firstToken: {
+            samples: ok,
+            p50,
+            p90: Math.round(p50 * (1.7 + noise(seed + 7))),
+          },
+        });
+      }
+      const failures = { limited: 0, rejected: 0, server: 0, broken: 0 };
+      const stretches = Math.min(20, count);
+      const trend = Array.from({ length: stretches }, () => [0, 0]);
+      let ok = 0;
+      for (const bucket of buckets) {
+        const lost = bucket.failures;
+        if (!lost) continue;
+        ok += bucket.ok;
+        const stretch =
+          trend[
+            Math.min(
+              stretches - 1,
+              Math.floor((((bucket.at - first) / step) * stretches) / count),
+            )
+          ];
+        stretch[0] += bucket.ok;
+        for (const kind of kinds) {
+          failures[kind] += lost[kind];
+          stretch[1] += lost[kind];
+        }
+      }
+      const sorted = (pick: (bucket: (typeof buckets)[number]) => number) =>
+        buckets.map(pick).sort((a, b) => a - b);
+      const middles = sorted((bucket) => bucket.firstToken.p50 ?? 0);
+      const tops = sorted((bucket) => bucket.firstToken.p90 ?? 0);
+      const requests = buckets.reduce((sum, bucket) => sum + bucket.ok, 0);
+      return {
+        id: shape.id,
+        requests,
+        ok,
+        failures,
+        trend: trend.map(([ok, lost]) => (ok + lost ? lost / (ok + lost) : null)),
+        firstToken: {
+          samples: requests,
+          p50: middles[Math.floor(middles.length / 2)] ?? null,
+          p90: tops[Math.floor(tops.length * 0.9)] ?? null,
+        },
+        buckets,
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.failures.limited - a.failures.limited || b.requests - a.requests,
+    );
+  return {
+    start: first,
+    end: first + count * step,
+    step,
+    failuresSince,
+    detailSince: 0,
+    providers,
+  };
+}
 export const usageCommands = [
   "get_usage_state",
   "get_usage_dashboard",
+  "get_usage_curves",
   "get_antigravity_usage_stats",
   "refresh_antigravity_usage_quota",
   "get_claude_usage_stats",
@@ -803,6 +931,7 @@ export function usagePreview(
       detailSince: 0,
     };
   }
+  if (name === "get_usage_curves") return curvesPreview(f);
   if (name === "get_usage_dashboard") {
     const group = (key: (r: UsageRecord) => string, of = selected) =>
       [...new Set(of.map(key))].map((id) => ({

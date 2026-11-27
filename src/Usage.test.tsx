@@ -415,7 +415,15 @@ describe("usage records", () => {
       within(screen.getByRole("tablist", { name: "用量明细" }))
         .getAllByRole("tab")
         .map((t) => t.textContent),
-    ).toEqual(["请求日志", "供应商", "模型", "Claude Code", "Antigravity", "定价"]);
+    ).toEqual([
+      "请求日志",
+      "供应商",
+      "曲线",
+      "模型",
+      "Claude Code",
+      "Antigravity",
+      "定价",
+    ]);
     await userEvent.keyboard("{Escape}");
     expect(toolbar.querySelector("details")).not.toHaveAttribute("open");
     expect(columns).toHaveFocus();

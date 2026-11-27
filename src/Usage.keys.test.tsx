@@ -97,6 +97,7 @@ it("says nothing of keys until the instance hands one out or has counted one", a
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "请求日志",
       "供应商",
+      "曲线",
       "模型",
       "Claude Code",
       "Antigravity",
@@ -132,6 +133,7 @@ it("narrows the overview and the request list to the key chosen", async () => {
   expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
     "请求日志",
     "供应商",
+    "曲线",
     "模型",
     "Key",
     "Claude Code",

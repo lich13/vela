@@ -1,0 +1,682 @@
+@layer tokens, base, layout, pages, modifiers;
+@layer pages {
+/*
+ * The four failure colours are a checked set: in this order, neighbours in
+ * the stack stay apart for every kind of colour vision on each theme's
+ * surface. Change one and check the set again.
+ */
+.usage-curves {
+  --curve-limited: #f43f5e;
+  --curve-server: #8b5cf6;
+  --curve-rejected: #d97706;
+  --curve-broken: #3b82f6;
+  --curve-trace: #f8fafc;
+  --curve-trace-glow: rgba(244, 63, 94, 0.62);
+  --curve-time: var(--accent);
+  --curve-time-glow: rgba(56, 189, 248, 0.55);
+  --curve-floor: color-mix(in srgb, var(--canvas) 58%, var(--surface));
+  --curve-band: 0.5;
+  --curve-gutter: 46px;
+  display: grid;
+  grid-template-columns: 252px minmax(0, 1fr);
+  min-width: 0;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--surface-highlight), var(--shadow-sm);
+  overflow: hidden;
+}
+:root[data-theme="light"] .usage-curves {
+  --curve-limited: #e11d48;
+  --curve-server: #7c3aed;
+  --curve-rejected: #d97706;
+  --curve-broken: #2563eb;
+  --curve-trace: #0f172a;
+  --curve-trace-glow: transparent;
+  --curve-time-glow: transparent;
+  --curve-floor: #f6f8fc;
+  --curve-band: 0.4;
+}
+.usage-curves [data-kind="limited"] {
+  --kind: var(--curve-limited);
+}
+.usage-curves [data-kind="server"] {
+  --kind: var(--curve-server);
+}
+.usage-curves [data-kind="rejected"] {
+  --kind: var(--curve-rejected);
+}
+.usage-curves [data-kind="broken"] {
+  --kind: var(--curve-broken);
+}
+
+/* Choosing a provider */
+.curve-rail {
+  position: relative;
+  min-width: 0;
+  min-height: 300px;
+  padding: 10px 8px 8px;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-subtle) 46%, transparent);
+}
+.curve-find {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--muted);
+}
+.curve-find:focus-within {
+  border-color: var(--accent);
+}
+.curve-find > input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  padding: 0;
+  background: transparent;
+  font: inherit;
+}
+.curve-order,
+.curve-none {
+  margin: 8px 4px 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.curve-picks {
+  position: absolute;
+  inset: 68px 8px 8px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.curve-pick {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 8px;
+  width: 100%;
+  padding: 7px 8px 7px 10px;
+  border-radius: var(--radius-xs);
+  text-align: left;
+}
+.curve-pick:hover {
+  background: var(--hover);
+}
+.curve-pick[aria-pressed="true"] {
+  background: var(--selection);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.curve-pick:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.curve-pick-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curve-pick > strong {
+  font-weight: 600;
+}
+.curve-pick-more {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.curve-pick-more > small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curve-spark rect[data-level="hot"] {
+  fill: var(--curve-limited);
+}
+.curve-spark rect[data-level="calm"] {
+  fill: var(--muted);
+  fill-opacity: 0.55;
+}
+.curve-spark rect[data-level="none"] {
+  fill: var(--muted);
+  fill-opacity: 0.2;
+}
+
+/* What the chosen one did */
+.curve-main {
+  min-width: 0;
+  padding: 14px 16px 12px;
+  transition: opacity 0.16s ease;
+}
+.usage-curves[aria-busy="true"] .curve-main {
+  opacity: 0.5;
+}
+.curve-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.curve-head h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 620;
+  letter-spacing: 0;
+  line-height: 20px;
+  text-transform: none;
+}
+.curve-head p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.curve-head .segmented {
+  flex: none;
+}
+.curve-head .segmented button {
+  padding: 3px 11px;
+}
+.curve-figures {
+  display: grid;
+  grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr));
+  align-items: end;
+  margin: 12px 0 0;
+  border-block: 1px solid var(--line);
+}
+.curve-figures > div {
+  min-width: 0;
+  padding: 9px 12px 10px;
+  border-left: 1px solid var(--line);
+}
+.curve-figures > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+.curve-figures dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+.curve-figures dd {
+  margin: 0;
+}
+/* Figures that stand alone are set in the digits' own widths. */
+.curve-figures strong {
+  display: block;
+  font-size: 22px;
+  font-variant-numeric: normal;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  line-height: 30px;
+}
+.curve-figures > div:first-child strong {
+  font-size: 34px;
+  line-height: 40px;
+}
+.curve-figures dd > span {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curve-mix {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.curve-mix-bar {
+  display: flex;
+  gap: 2px;
+  height: 8px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--hover);
+}
+.curve-mix-bar > i {
+  min-width: 3px;
+  background: var(--kind);
+}
+.curve-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  list-style: none;
+}
+.curve-legend > li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.curve-legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--kind);
+}
+.curve-legend b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* The plots */
+.curve-stage {
+  position: relative;
+  margin-top: 4px;
+  border-radius: var(--radius-sm);
+}
+.curve-stage:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+.curve-caption {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0 7px var(--curve-gutter);
+}
+.curve-caption h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.curve-caption > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.curve-key {
+  width: 12px;
+  height: 2px;
+  border-radius: 1px;
+}
+.curve-key[data-line="total"] {
+  background: var(--curve-trace);
+}
+.curve-key[data-line="p50"] {
+  background: var(--curve-time);
+}
+.curve-key[data-line="p90"] {
+  height: 1px;
+  margin-left: 8px;
+  background: var(--curve-time);
+  opacity: 0.6;
+}
+.curve-plot {
+  position: relative;
+  height: 148px;
+  margin-left: var(--curve-gutter);
+  border-radius: 4px;
+  background: var(--curve-floor);
+  touch-action: pan-y;
+}
+.curve-plot[data-plot="volume"] {
+  height: 28px;
+  margin-top: 5px;
+  background: none;
+}
+.curve-plot[data-plot="time"] {
+  height: 124px;
+}
+.curve-ink {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.curve-ink path,
+.curve-ink rect {
+  vector-effect: non-scaling-stroke;
+}
+.curve-grid {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.curve-band {
+  fill: var(--kind);
+  fill-opacity: var(--curve-band);
+}
+.curve-line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+.curve-line[data-line="total"] {
+  stroke: var(--curve-trace);
+}
+.curve-line[data-line="p50"] {
+  stroke: var(--curve-time);
+}
+.curve-line[data-line="p90"] {
+  stroke: var(--curve-time);
+  stroke-opacity: 0.6;
+  stroke-width: 1;
+}
+.curve-reach {
+  fill: var(--curve-time);
+  fill-opacity: 0.16;
+}
+/* The wash is filled from the element: a fragment in a stylesheet is not
+ everywhere taken to be of the page. */
+.curve-wash-from {
+  stop-color: var(--curve-time);
+  stop-opacity: 0.16;
+}
+.curve-wash-to {
+  stop-color: var(--curve-time);
+  stop-opacity: 0;
+}
+.curve-bar {
+  fill: var(--muted);
+  fill-opacity: 0.5;
+}
+/* The one thing that moves by itself: a trace is drawn in when it is chosen. */
+.curve-glow {
+  filter: drop-shadow(0 0 5px var(--curve-trace-glow));
+  animation: curve-sweep 0.52s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.curve-plot[data-plot="time"] > .curve-glow {
+  filter: drop-shadow(0 0 5px var(--curve-time-glow));
+}
+@keyframes curve-sweep {
+  from {
+    clip-path: inset(-10px 100% -10px -10px);
+  }
+  to {
+    clip-path: inset(-10px);
+  }
+}
+.curve-tick-y {
+  position: absolute;
+  right: calc(100% + 8px);
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.curve-blind {
+  position: absolute;
+  inset: 0 auto 0 0;
+  overflow: hidden;
+  border-right: 1px solid var(--line-strong);
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 5px,
+    var(--hover) 5px 6px
+  );
+  pointer-events: none;
+}
+.curve-blind > span {
+  position: absolute;
+  top: 5px;
+  left: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.curve-peak {
+  position: absolute;
+  top: 0;
+  width: 0;
+  border-left: 1px solid
+    color-mix(in srgb, var(--curve-limited) 72%, transparent);
+  pointer-events: none;
+}
+.curve-peak::after {
+  content: "";
+  position: absolute;
+  bottom: -4px;
+  left: -4.5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--curve-limited);
+  box-shadow: 0 0 0 2px var(--curve-floor);
+}
+.curve-peak > span {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  padding: 0 7px;
+  border-radius: var(--radius-pill);
+  background: color-mix(
+    in srgb,
+    var(--curve-limited) 18%,
+    var(--curve-floor)
+  );
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+.curve-peak[data-side="before"] > span {
+  right: 6px;
+  left: auto;
+}
+.curve-hollow {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+.curve-cross {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px solid color-mix(in srgb, var(--ink) 46%, transparent);
+  pointer-events: none;
+}
+.curve-dot {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: var(--curve-time);
+  box-shadow: 0 0 0 2px var(--curve-floor);
+  pointer-events: none;
+}
+.curve-dot[data-of="total"] {
+  background: var(--curve-trace);
+}
+.curve-dot[data-of="p90"] {
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+}
+.curve-axis {
+  position: relative;
+  height: 16px;
+  margin: 6px 0 0 var(--curve-gutter);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+.curve-axis > span {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.curve-axis > span[data-edge="start"] {
+  transform: none;
+}
+.curve-axis > span[data-edge="end"] {
+  transform: translateX(-100%);
+}
+.curve-tip {
+  position: absolute;
+  top: 34px;
+  left: calc(var(--curve-gutter) + (100% - var(--curve-gutter)) * var(--at));
+  z-index: 2;
+  min-width: 172px;
+  padding: 8px 10px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--elevated) 94%, transparent);
+  box-shadow: var(--shadow-md);
+  font-size: 12px;
+  pointer-events: none;
+  transform: translateX(12px);
+  backdrop-filter: blur(6px);
+}
+.curve-tip[data-side="before"] {
+  transform: translateX(calc(-100% - 12px));
+}
+.curve-tip > strong {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.curve-tip dl {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+}
+.curve-tip dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+.curve-tip dt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.curve-tip dt > i {
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--kind);
+}
+.curve-tip dd {
+  margin: 0;
+  color: var(--ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.curve-tip > p {
+  max-width: 220px;
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+/* The same in figures */
+.curve-table {
+  max-height: 420px;
+  margin-top: 14px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.curve-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.curve-table th,
+.curve-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  font-weight: inherit;
+  text-align: right;
+  white-space: nowrap;
+}
+.curve-table th:first-child {
+  text-align: left;
+}
+.curve-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-weight: 560;
+}
+.curve-table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+.curve-foot {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+@container (max-width: 860px) {
+  .usage-curves {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .curve-rail {
+    min-height: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .curve-picks {
+    position: static;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0 6px;
+    max-height: 112px;
+  }
+}
+@container (max-width: 600px) {
+  .curve-figures {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .curve-figures > div:nth-child(odd) {
+    padding-left: 0;
+    border-left: 0;
+  }
+  .curve-figures > div:nth-child(n + 3) {
+    border-top: 1px solid var(--line);
+  }
+  .curve-main {
+    padding: 12px 12px 10px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .curve-glow {
+    animation: none;
+  }
+}
+}

@@ -35,9 +35,11 @@ import { confirmAction } from "./confirmation";
 import Pricing from "./UsagePricing";
 import UsageAntigravity from "./UsageAntigravity";
 import UsageClaudeQuota from "./UsageClaudeQuota";
+import UsageCurvesPanel from "./UsageCurves";
 import {
   type AntigravityUsageStats,
   type ClaudeUsageQuota,
+  type UsageCurves,
   averageFirstToken,
   clientName,
   deletedKeyName,
@@ -150,6 +152,18 @@ export default function Usage({
     [page, setPage] = useState(1);
   const [tab, setTab] = useState("requests");
   const independent = tab === "antigravity" || tab === "claude";
+  // A server from before the curves has no command to read them with.
+  const charted = supports("get_usage_curves");
+  const curved = tab === "curves";
+  // The totals above the tabs are of the requests the filters narrow, which
+  // neither a client's own page nor the curves are.
+  const totalled = !independent && !curved;
+  // The curves on the page, and the time and client they were read for.
+  const [curves, setCurves] = useState<{
+      scope: string;
+      data: UsageCurves;
+    } | null>(null),
+    [curvesBusy, setCurvesBusy] = useState(false);
   const [claudeQuota, setClaudeQuota] = useState<ClaudeUsageQuota | null>(null);
   const [agStats, setAgStats] = useState<AntigravityUsageStats | null>(null),
     [agBusy, setAgBusy] = useState(false),
@@ -227,6 +241,7 @@ export default function Usage({
     quotaSequence = useRef(0),
     quotaHeard = useRef(0),
     stateSequence = useRef(0),
+    curveSequence = useRef(0),
     detailSequence = useRef(0);
   useEffect(
     () => () => {
@@ -256,7 +271,7 @@ export default function Usage({
   useEffect(() => {
     if (!visible) pending.current.clear();
   }, [visible]);
-  const query = useCallback((): UsageFilter => {
+  const span = useCallback(() => {
     const end = live
       ? Math.floor(Date.now() / 1000) * 1000
       : new Date(to).getTime();
@@ -267,15 +282,18 @@ export default function Usage({
       start = d.getTime();
     } else if (range === "custom") start = new Date(from).getTime();
     else if (range !== "all") start = end - Number(range) * 86400000;
-    return {
-      start,
-      end,
+    return { start, end };
+  }, [range, from, to, live]);
+  const query = useCallback(
+    (): UsageFilter => ({
+      ...span(),
       client: client || undefined,
       provider: provider || undefined,
       operation: operation || undefined,
       entryKey: entryKey || undefined,
-    };
-  }, [range, from, to, live, client, provider, operation, entryKey]);
+    }),
+    [span, client, provider, operation, entryKey],
+  );
   const loadOverview = useCallback(async () => {
     const id = ++sequence.current;
     setBusy(true);
@@ -294,6 +312,27 @@ export default function Usage({
       if (id === sequence.current) setBusy(false);
     }
   }, [query, request]);
+  // The journal knows a failure's client, provider and time and nothing else
+  // of the request, so the curves follow the time and the client alone. Every
+  // provider's come at once: choosing one among them reads nothing again.
+  const curveScope = [range, from, to, live, client].join("|");
+  const loadCurves = useCallback(async () => {
+    const id = ++curveSequence.current;
+    setCurvesBusy(true);
+    try {
+      const data = await request("get_usage_curves", {
+        filter: { ...span(), client: client || undefined },
+      });
+      if (id === curveSequence.current) {
+        setCurves({ scope: curveScope, data });
+        setError("");
+      }
+    } catch (e) {
+      if (id === curveSequence.current) setError(errorOf(e).message);
+    } finally {
+      if (id === curveSequence.current) setCurvesBusy(false);
+    }
+  }, [span, client, request, curveScope]);
   const loadRows = useCallback(async () => {
     const id = ++rowsSequence.current;
     setRowsBusy(true);
@@ -390,8 +429,9 @@ export default function Usage({
     (fresh = false, refreshQuota = false) => {
       if (fresh) pending.current.clear();
       return Promise.all([
-        ...(!independent ? [loadOverview()] : []),
+        ...(totalled ? [loadOverview()] : []),
         ...(tab === "requests" ? [loadRows()] : []),
+        ...(curved ? [loadCurves()] : []),
         ...(independent ? [loadClientStats()] : []),
         ...(tab === "claude" ? [loadClaudeQuota(refreshQuota)] : []),
       ]);
@@ -399,9 +439,12 @@ export default function Usage({
     [
       loadOverview,
       loadRows,
+      loadCurves,
       loadClientStats,
       loadClaudeQuota,
       independent,
+      totalled,
+      curved,
       tab,
     ],
   );
@@ -410,11 +453,21 @@ export default function Usage({
     [loadData, loadState],
   );
   useEffect(() => {
-    if (visible && !independent) void loadOverview();
+    if (visible && totalled) void loadOverview();
     return () => {
       sequence.current++;
     };
-  }, [loadOverview, visible, independent]);
+  }, [loadOverview, visible, totalled]);
+  useEffect(() => {
+    if (visible && curved) void loadCurves();
+    return () => {
+      curveSequence.current++;
+      setCurvesBusy(false);
+    };
+  }, [loadCurves, visible, curved]);
+  useEffect(() => {
+    if (curved && !charted) setTab("requests");
+  }, [curved, charted]);
   useEffect(() => {
     if (visible && tab === "requests") void loadRows();
     return () => {
@@ -690,7 +743,7 @@ export default function Usage({
             onClick={(e) => {
               e.currentTarget.focus();
               setSheet(true);
-              if (independent) void loadOverview();
+              if (!totalled) void loadOverview();
             }}
           >
             <Database size={17} />
@@ -698,7 +751,7 @@ export default function Usage({
           <button
             className="icon-button"
             aria-label="刷新用量"
-            disabled={independent ? agBusy : busy}
+            disabled={independent ? agBusy : curved ? curvesBusy : busy}
             onClick={() => {
               void load(true);
               loadKeys();
@@ -713,7 +766,7 @@ export default function Usage({
           {billResult}
         </p>
       )}
-      {!independent && (
+      {totalled && (
         <div className="usage-metrics">
           <Metric label="估算费用" value={money(t?.cost)} title={t?.cost} />
           <Metric
@@ -783,6 +836,8 @@ export default function Usage({
         <select
           aria-label="请求类型"
           value={operation}
+          // The curves know nothing of a request but its client and provider.
+          disabled={curved}
           onChange={(e) => choose(setOperation, e.target.value)}
         >
           <option value="">全部类型</option>
@@ -794,7 +849,7 @@ export default function Usage({
           <select
             aria-label="用量 Key"
             value={entryKey}
-            disabled={independent}
+            disabled={independent || curved}
             onChange={(e) => choose(setEntryKey, e.target.value)}
           >
             <option value="">全部 Key</option>
@@ -847,6 +902,7 @@ export default function Usage({
           {[
             ["requests", "请求日志"],
             ["providers", "供应商"],
+            ...(charted ? [["curves", "曲线"]] : []),
             ["models", "模型"],
             ...(keyed ? [["keys", "Key"]] : []),
             ["claude", "Claude Code"],
@@ -906,6 +962,14 @@ export default function Usage({
             }}
           />
         </>
+      ) : curved ? (
+        <UsageCurvesPanel
+          curves={curves?.data ?? null}
+          stale={curvesBusy && curves?.scope !== curveScope}
+          selected={provider}
+          name={(id) => name(id === "session" ? null : id)}
+          onSelect={(id) => choose(setProvider, id)}
+        />
       ) : tab === "pricing" ? (
         <Pricing
           onDirtyChange={priceDirty}

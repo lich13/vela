@@ -239,6 +239,10 @@
   --tab-tone: var(--accent-blue);
   --tab-soft: var(--accent-blue-soft);
 }
+.usage-tabs > button[data-tab="curves"] {
+  --tab-tone: var(--accent-rose);
+  --tab-soft: var(--accent-rose-soft);
+}
 .usage-tabs > button[data-tab="models"] {
   --tab-tone: var(--accent-emerald);
   --tab-soft: var(--accent-emerald-soft);
