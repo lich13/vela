@@ -596,6 +596,52 @@ fn requests_kept_only_as_daily_totals_count_without_a_percentile() {
 }
 
 #[test]
+fn each_provider_says_up_to_where_only_totals_are_kept_of_it() {
+    let (_dir, mut store) = store_of("codex");
+    store.compact(BASE + 40 * DAY).unwrap();
+    // One request of A since then, kept as it came, and all there is of C.
+    let late = |id, provider, first_token_ms| {
+        let at = BASE + 39 * DAY;
+        request("codex", id, provider, at, Some(200), Some(first_token_ms))
+    };
+    store
+        .write_batch(&[late("late-a", A, 70), late("late-c", C, 90)], None)
+        .unwrap();
+    let filter = Filter {
+        start: Some(BASE - 2 * DAY),
+        end: Some(BASE + 40 * DAY),
+        client: Some("codex".into()),
+        ..Filter::default()
+    };
+    let curves = store.curves(&filter, 0, &[], BASE + 40 * DAY).unwrap();
+    // The end of the day of its last request that was summed.
+    let day_after = |minutes: i64| Some(query::bucket(BASE + minutes * MINUTE, DAY) + DAY);
+    let provider = of(&curves, A);
+    assert_eq!(provider.summed_until, day_after(61));
+    // Its percentiles are of the one kept as it came.
+    assert_eq!(
+        provider.first_token,
+        FirstToken {
+            samples: 1,
+            p50: Some(70),
+            p90: Some(70)
+        }
+    );
+    assert_eq!(of(&curves, B).summed_until, day_after(10));
+    assert_eq!(of(&curves, C).summed_until, None);
+    // Requests of Claude Code are never summed, however old.
+    let (_dir, mut store) = store_of("claude");
+    store.compact(BASE + 40 * DAY).unwrap();
+    let filter = Filter {
+        client: Some("claude".into()),
+        ..filter
+    };
+    let curves = store.curves(&filter, 0, &[], BASE + 40 * DAY).unwrap();
+    assert_eq!(of(&curves, A).summed_until, None);
+    assert_eq!(of(&curves, A).first_token.samples, 3);
+}
+
+#[test]
 fn days_kept_only_as_totals_are_drawn_by_the_day() {
     // Four days are divided into buckets of two hours, in which a day's
     // total, having no hour, would all stand at midnight.

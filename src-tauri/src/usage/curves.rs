@@ -71,13 +71,16 @@ impl Grid {
     /// Where the bucket that begins at `bucket` ends.
     fn end(self, bucket: i64) -> i64 {
         if self.step == DAY {
-            // A day lasts from 23 hours to 25, so a day and a half on is in
-            // the next one.
-            query::bucket(bucket.saturating_add(DAY + DAY / 2), DAY)
+            day_end(bucket)
         } else {
             bucket.saturating_add(self.step)
         }
     }
+}
+/// Where the day that begins at `day` ends. A day lasts from 23 hours to 25,
+/// so a day and a half on is in the next one.
+fn day_end(day: i64) -> i64 {
+    query::bucket(day.saturating_add(DAY + DAY / 2), DAY)
 }
 
 /// Failed attempts by how they ended.
@@ -169,6 +172,11 @@ pub struct Provider {
     pub trend: Vec<Option<f64>>,
     /// Over the whole range.
     pub first_token: FirstToken,
+    /// Where the last day ends of which only a total is kept of some of its
+    /// requests: up to there a percentile of the first token is of the rest
+    /// alone, if any are kept one by one. None where all of them in the
+    /// range are.
+    pub summed_until: Option<i64>,
     /// Only those in which something ended, in order of time.
     pub buckets: Vec<Bucket>,
 }
@@ -183,8 +191,6 @@ pub struct Curves {
     /// From when failures are known. The bucket this falls within counts
     /// what succeeded and what failed from here on.
     pub failures_since: i64,
-    /// From when requests are kept one by one, as a percentile needs them.
-    pub detail_since: i64,
     /// The providers that had traffic or failed, the most rate-limited first.
     /// Each comes with its buckets, so that choosing among them asks nothing
     /// more.
@@ -199,6 +205,13 @@ struct Seen {
     /// Those of `ok` that began once the journal had.
     ok_since: u64,
     first_token: Vec<u64>,
+}
+/// What the usage records say of one provider.
+#[derive(Default)]
+struct Answered {
+    buckets: BTreeMap<i64, Seen>,
+    /// Where the last day begins of which only a total is kept.
+    summed: Option<i64>,
 }
 
 /// The narrowest width at which `start..=end` reaches into no more than
@@ -282,13 +295,14 @@ fn summed(c: &Connection, (cte, args): &(String, Vec<Value>)) -> Result<bool> {
         .and_then(|mut statement| statement.exists(rusqlite::params_from_iter(args.iter())))
         .map_err(|_| failed())
 }
-/// The requests of each provider by bucket, as the usage records have them.
+/// What the usage records have of each provider: its requests by bucket, and
+/// up to where only totals are kept of them.
 fn usage(
     c: &Connection,
     (cte, args): &(String, Vec<Value>),
     grid: Grid,
     failures_since: i64,
-) -> Result<BTreeMap<String, BTreeMap<i64, Seen>>> {
+) -> Result<BTreeMap<String, Answered>> {
     // Only the last attempt of a request says how the request ended.
     let sql = query::native_sql(format!(
         "{cte} SELECT provider,time,kind,requests,success,first_token_sum_ms,first_token_samples FROM m WHERE provider IS NOT NULL AND requests>0"
@@ -297,7 +311,7 @@ fn usage(
     let mut rows = statement
         .query(rusqlite::params_from_iter(args.iter()))
         .map_err(|_| failed())?;
-    let mut providers: BTreeMap<String, BTreeMap<i64, Seen>> = BTreeMap::new();
+    let mut providers: BTreeMap<String, Answered> = BTreeMap::new();
     while let Some(row) = rows.next().map_err(|_| failed())? {
         let read = || -> rusqlite::Result<_> {
             Ok((
@@ -312,19 +326,20 @@ fn usage(
         };
         let (provider, time, kind, requests, ok, first_token, samples) =
             read().map_err(|_| failed())?;
-        let seen = providers
-            .entry(provider)
-            .or_default()
-            .entry(grid.bucket(time))
-            .or_default();
+        let answered = providers.entry(provider).or_default();
+        // A day's total keeps the sum of its requests' times, which no
+        // percentile can be read from.
+        let total = kind == 1;
+        if total {
+            answered.summed = answered.summed.max(Some(query::bucket(time, DAY)));
+        }
+        let seen = answered.buckets.entry(grid.bucket(time)).or_default();
         seen.requests += requests;
         seen.ok += ok;
         if time >= failures_since {
             seen.ok_since += ok;
         }
-        // A daily rollup keeps the sum of its requests' times, which no
-        // percentile can be read from.
-        if kind != 1 && samples == 1 {
+        if !total && samples == 1 {
             seen.first_token.push(first_token);
         }
     }
@@ -337,7 +352,8 @@ fn failed() -> crate::storage::AppError {
 /// The curves of every provider in the filter's range and client, whichever
 /// provider it names. `failures` are the journal's rows that reach into the
 /// range, and `failures_since` the time the journal holds them all from, in
-/// milliseconds.
+/// milliseconds. Before `detail_since` a day's requests may be kept only as
+/// a total.
 pub fn read(
     c: &Connection,
     f: &Filter,
@@ -383,7 +399,7 @@ pub fn read(
             let earliest = |buckets: Option<&i64>| buckets.copied().unwrap_or(last);
             usage
                 .values()
-                .map(|buckets| earliest(buckets.keys().next()))
+                .map(|answered| earliest(answered.buckets.keys().next()))
                 .chain(
                     failed
                         .values()
@@ -412,6 +428,7 @@ pub fn read(
         .into_iter()
         .map(|id| {
             let (answered, lost) = (usage.get(id), failed.get(id));
+            let buckets = answered.map(|answered| &answered.buckets);
             let mut provider = Provider {
                 id: id.to_owned(),
                 requests: 0,
@@ -419,13 +436,14 @@ pub fn read(
                 failures: Failures::default(),
                 trend: Vec::new(),
                 first_token: FirstToken::default(),
+                summed_until: answered.and_then(|answered| answered.summed).map(day_end),
                 buckets: Vec::new(),
             };
             let mut trend = vec![(0u64, 0u64); stretches];
             let stretch = |bucket: i64| (place(bucket) * stretches / count).min(stretches - 1);
             // Both are of the time since the journal began, so that a rate
             // compares attempts of one time.
-            for (bucket, seen) in answered.into_iter().flatten() {
+            for (bucket, seen) in buckets.into_iter().flatten() {
                 provider.requests += seen.requests;
                 provider.ok += seen.ok_since;
                 trend[stretch(*bucket)].0 += seen.ok_since;
@@ -441,7 +459,7 @@ pub fn read(
                         .then(|| (failed as f64 / (ok + failed) as f64 * 1e4).round() / 1e4)
                 })
                 .collect();
-            let times: std::collections::BTreeSet<i64> = answered
+            let times: std::collections::BTreeSet<i64> = buckets
                 .into_iter()
                 .flat_map(|buckets| buckets.keys().copied())
                 .chain(lost.into_iter().flat_map(|buckets| buckets.keys().copied()))
@@ -450,7 +468,7 @@ pub fn read(
             provider.buckets = times
                 .into_iter()
                 .map(|at| {
-                    let seen = answered.and_then(|buckets| buckets.get(&at));
+                    let seen = buckets.and_then(|buckets| buckets.get(&at));
                     let mut first_token =
                         seen.map_or_else(Vec::new, |seen| seen.first_token.clone());
                     all.extend_from_slice(&first_token);
@@ -481,7 +499,6 @@ pub fn read(
         end: grid.end(last),
         step,
         failures_since,
-        detail_since,
         providers,
     })
 }
