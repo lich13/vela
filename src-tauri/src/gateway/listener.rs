@@ -135,15 +135,29 @@ impl Listener {
                 revision: view.revision,
             });
         }
-        let socket = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, view.port))
-            .await
-            .map_err(|_| Self::port_error())?;
+        let socket = Self::bind(view.port).await?;
         let port = socket.local_addr().map_err(storage::io_error)?.port();
         Ok(Prepared {
             socket: Some(socket),
             port,
             revision: view.revision,
         })
+    }
+    /// A socket this process closed a moment ago is still held by a child it
+    /// is starting, until that child becomes its own program. A port in use
+    /// is asked for again for a tenth of a second before it is another's.
+    async fn bind(port: u16) -> Result<TcpListener> {
+        let mut left = 10;
+        loop {
+            match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
+                Ok(socket) => return Ok(socket),
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && left > 0 => {
+                    left -= 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(_) => return Err(Self::port_error()),
+            }
+        }
     }
     fn port_error() -> AppError {
         AppError::new(code::PORT, "无法绑定共享本地端口，请检查端口占用或修改端口")

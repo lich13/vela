@@ -812,6 +812,26 @@ async fn a_websocket_made_with_a_handed_out_key_shows_the_upstream_none_of_it() 
 }
 
 #[tokio::test]
+async fn a_port_let_go_a_moment_after_it_is_asked_for_is_bound() {
+    let temp = tempfile::tempdir().unwrap();
+    let upstream = Upstream::start().await;
+    let (codex, port, home) = running_codex(&temp, &upstream).await;
+    codex.stop().await.unwrap();
+
+    let held = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    let let_go = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        drop(held);
+    });
+    start(&codex, &home).await;
+    let_go.await.unwrap();
+    assert_eq!(codex.listener_view().running_clients, [ClientId::Codex]);
+
+    codex.stop().await.unwrap();
+    upstream.stop().await;
+}
+
+#[tokio::test]
 async fn shared_tcp_listener_isolates_three_clients_and_releases_after_last_stop() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
