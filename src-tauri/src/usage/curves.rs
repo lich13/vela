@@ -9,7 +9,10 @@
 //! nothing is said of failures, which is not the same as there having been
 //! none.
 use super::{model::Filter, query};
-use crate::{events::UpstreamFailure, storage::Result};
+use crate::{
+    events::{FailureKind, UpstreamFailure},
+    storage::Result,
+};
 use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -39,27 +42,28 @@ const TREND: usize = 20;
 /// before the journal does is one the journal covers.
 const SLACK: i64 = MINUTE;
 
-/// Failed attempts by what the provider answered with.
+/// Failed attempts by how they ended.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Failures {
-    /// 429.
+    /// Rate limited or out of capacity: a 429, or the same told within a
+    /// response that had begun.
     pub limited: u64,
     /// Any other 4xx.
     pub rejected: u64,
     /// 5xx.
     pub server: u64,
-    /// No error status: it could not be reached, did not answer in time, or
-    /// began a response and did not finish it.
+    /// Neither a limit nor an error status: it could not be reached, did not
+    /// answer in time, or began a response and did not finish it.
     pub broken: u64,
 }
 impl Failures {
-    fn add(&mut self, status: Option<u16>, count: u64) {
-        *match status {
-            Some(429) => &mut self.limited,
-            Some(400..=499) => &mut self.rejected,
-            Some(500..=599) => &mut self.server,
-            _ => &mut self.broken,
+    fn add(&mut self, kind: FailureKind, count: u64) {
+        *match kind {
+            FailureKind::Limited => &mut self.limited,
+            FailureKind::Rejected => &mut self.rejected,
+            FailureKind::Server => &mut self.server,
+            FailureKind::Broken => &mut self.broken,
         } += count;
     }
     fn merge(&mut self, other: &Self) {
@@ -290,7 +294,7 @@ pub fn read(
                     .or_default()
                     .entry(bucket)
                     .or_default()
-                    .add(row.status, count)
+                    .add(row.kind, count)
             },
         );
     }

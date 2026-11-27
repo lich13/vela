@@ -1,7 +1,10 @@
 // 覆盖供应商曲线：分桶、失败分类、首字分位数、日志覆盖范围与无数据。
 use super::super::{model::*, query, store::Store};
 use super::{spread, step, Bucket, Curves, Failures, FirstToken, Provider};
-use crate::{events::UpstreamFailure, gateway::ClientId};
+use crate::{
+    events::{FailureKind, FailureKind::*, UpstreamFailure},
+    gateway::ClientId,
+};
 
 const MINUTE: i64 = 60_000;
 const DAY: i64 = 86_400_000;
@@ -43,20 +46,14 @@ fn request(
     }
 }
 /// A journal row of `count` failures from `first` to `last`, in milliseconds.
-fn failed(
-    provider: &str,
-    status: Option<u16>,
-    first: i64,
-    last: i64,
-    count: u32,
-) -> UpstreamFailure {
+fn failed(provider: &str, kind: FailureKind, first: i64, last: i64, count: u32) -> UpstreamFailure {
     UpstreamFailure {
         client: ClientId::Claude,
         provider: provider.into(),
         first_at: (first / 1000) as u64,
         last_at: (last / 1000) as u64,
         count,
-        status,
+        kind,
     }
 }
 fn range() -> Filter {
@@ -108,14 +105,14 @@ fn store_of(client: &str) -> (tempfile::TempDir, Store) {
 fn journal() -> Vec<UpstreamFailure> {
     vec![
         // Six rejections four minutes apart in all, across two buckets.
-        failed(A, Some(429), BASE + 29 * MINUTE, BASE + 33 * MINUTE, 6),
-        failed(A, Some(503), BASE + 31 * MINUTE, BASE + 31 * MINUTE, 1),
-        failed(A, None, BASE + 62 * MINUTE, BASE + 62 * MINUTE, 2),
+        failed(A, Limited, BASE + 29 * MINUTE, BASE + 33 * MINUTE, 6),
+        failed(A, Server, BASE + 31 * MINUTE, BASE + 31 * MINUTE, 1),
+        failed(A, Broken, BASE + 62 * MINUTE, BASE + 62 * MINUTE, 2),
         // An endless provider: rejected over and over, never a usage record.
-        failed(C, Some(429), BASE + 40 * MINUTE, BASE + 40 * MINUTE, 9),
+        failed(C, Limited, BASE + 40 * MINUTE, BASE + 40 * MINUTE, 9),
         UpstreamFailure {
             client: ClientId::Codex,
-            ..failed(B, Some(500), BASE + 10 * MINUTE, BASE + 10 * MINUTE, 4)
+            ..failed(B, Server, BASE + 10 * MINUTE, BASE + 10 * MINUTE, 4)
         },
     ]
 }
@@ -172,19 +169,18 @@ fn percentiles_are_values_that_were_measured() {
 }
 
 #[test]
-fn failures_are_classed_by_the_status_answered() {
+fn failures_are_counted_by_how_the_journal_says_they_ended() {
     let mut failures = Failures::default();
-    for (status, count) in [
-        (Some(429), 1),
-        (Some(400), 2),
-        (Some(404), 4),
-        (Some(500), 8),
-        (Some(529), 16),
-        // Never reached, or a response that began and was cut short.
-        (None, 32),
-        (Some(200), 64),
+    for (kind, count) in [
+        (Limited, 1),
+        (Rejected, 2),
+        (Rejected, 4),
+        (Server, 8),
+        (Server, 16),
+        (Broken, 32),
+        (Broken, 64),
     ] {
-        failures.add(status, count);
+        failures.add(kind, count);
     }
     assert_eq!(
         failures,
@@ -207,7 +203,7 @@ fn a_merged_row_is_spread_over_the_buckets_it_reaches() {
         shares
     };
     // At 29:00, 29:48, 30:36, 31:24, 32:12 and 33:00.
-    let row = failed(A, Some(429), BASE + 29 * MINUTE, BASE + 33 * MINUTE, 6);
+    let row = failed(A, Limited, BASE + 29 * MINUTE, BASE + 33 * MINUTE, 6);
     assert_eq!(
         shares(&row, i64::MIN, i64::MAX),
         [(25 * MINUTE, 2), (30 * MINUTE, 4)]
@@ -223,7 +219,7 @@ fn a_merged_row_is_spread_over_the_buckets_it_reaches() {
     );
     assert_eq!(shares(&row, BASE + 34 * MINUTE, i64::MAX), []);
     // One second holds them all.
-    let burst = failed(A, Some(429), BASE + 29 * MINUTE, BASE + 29 * MINUTE, 7);
+    let burst = failed(A, Limited, BASE + 29 * MINUTE, BASE + 29 * MINUTE, 7);
     assert_eq!(shares(&burst, i64::MIN, i64::MAX), [(25 * MINUTE, 7)]);
     assert_eq!(shares(&burst, BASE + 29 * MINUTE + 1, i64::MAX), []);
 }

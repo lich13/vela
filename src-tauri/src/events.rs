@@ -1255,8 +1255,34 @@ fn seen_statuses<'a>(
     seen.sort_by_key(|s| (std::cmp::Reverse(s.count), s.status));
     seen
 }
+/// How a provider's failed attempt ended, as its row's reason and status say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    /// It would take no more for now: a 429, or a rate limit or a shortage of
+    /// capacity told where there is no error status to tell it by, within a
+    /// stream that began with 200 or in a frame of a WebSocket.
+    Limited,
+    /// Any other 4xx.
+    Rejected,
+    /// 5xx.
+    Server,
+    /// Neither a limit nor an error status: it could not be reached, did not
+    /// answer in time, or began a response and did not finish it.
+    Broken,
+}
+impl FailureKind {
+    fn of(reason: Reason, status: Option<u16>) -> Self {
+        let refused = status.filter(|status| (400..600).contains(status));
+        match (reason, refused) {
+            (_, Some(429)) | (Reason::RateLimit, _) | (Reason::Capacity, None) => Self::Limited,
+            (_, Some(400..=499)) => Self::Rejected,
+            (_, Some(_)) => Self::Server,
+            (_, None) => Self::Broken,
+        }
+    }
+}
 /// The attempts one journal row says a provider failed: whose they were, over
-/// what time, how many and with which status. Nothing of what was answered.
+/// what time, how many and how they ended. Nothing of what was answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpstreamFailure {
     pub client: ClientId,
@@ -1264,7 +1290,7 @@ pub struct UpstreamFailure {
     pub first_at: u64,
     pub last_at: u64,
     pub count: u32,
-    pub status: Option<u16>,
+    pub kind: FailureKind,
 }
 /// The failed attempts among `records` whose rows reach into `from..=to`. A
 /// gateway tells each attempt a provider failed once, under one of these
@@ -1299,7 +1325,7 @@ fn upstream_failures<'a>(
                 first_at: r.first_at.min(r.last_at),
                 last_at: r.last_at,
                 count: r.count,
-                status: r.status,
+                kind: FailureKind::of(r.reason, r.status),
             })
         })
         .collect()
@@ -2383,13 +2409,13 @@ mod diagnostic_record_tests {
             r.details.phase = Some(Phase::Response);
             r
         };
-        let failure = |status, first_at, last_at, count| UpstreamFailure {
+        let failure = |kind, first_at, last_at, count| UpstreamFailure {
             client: ClientId::Claude,
             provider: PROVIDER.into(),
             first_at,
             last_at,
             count,
-            status,
+            kind,
         };
         // A wait at admission and what a quota check found repeat a failure.
         let mut waited = record(Reason::RateLimit, Some(429), 150, 150, 4);
@@ -2419,19 +2445,57 @@ mod diagnostic_record_tests {
         assert_eq!(
             upstream_failures(records.iter(), 100, 400),
             [
-                failure(Some(429), 100, 380, 9),
-                failure(None, 200, 200, 1),
-                failure(Some(200), 300, 300, 2),
+                failure(FailureKind::Limited, 100, 380, 9),
+                failure(FailureKind::Broken, 200, 200, 1),
+                failure(FailureKind::Broken, 300, 300, 2),
             ]
         );
         // A row counts where any of its time is asked about.
         assert_eq!(
             upstream_failures(records.iter(), 99, 100),
             [
-                failure(Some(429), 100, 380, 9),
-                failure(Some(429), 10, 99, 5)
+                failure(FailureKind::Limited, 100, 380, 9),
+                failure(FailureKind::Limited, 10, 99, 5)
             ]
         );
+    }
+    #[test]
+    fn a_failure_is_a_limit_wherever_the_provider_said_so() {
+        use FailureKind::*;
+        for (reason, status, kind) in [
+            (Reason::Capacity, Some(429), Limited),
+            (Reason::RateLimit, Some(429), Limited),
+            // Whatever else a 429 was taken for.
+            (Reason::UpstreamService, Some(429), Limited),
+            // Told within a stream that began with 200, in a frame of a
+            // WebSocket opened with 101, or with no status at all.
+            (Reason::RateLimit, Some(200), Limited),
+            (Reason::RateLimit, Some(101), Limited),
+            (Reason::RateLimit, None, Limited),
+            (Reason::Capacity, Some(200), Limited),
+            (Reason::Capacity, Some(101), Limited),
+            (Reason::Capacity, None, Limited),
+            // A shortage answered with an error status of its own is that error.
+            (Reason::Capacity, Some(529), Server),
+            (Reason::Capacity, Some(503), Server),
+            (Reason::Capacity, Some(400), Rejected),
+            (Reason::Authentication, Some(401), Rejected),
+            (Reason::ModelUnavailable, Some(404), Rejected),
+            (Reason::UpstreamService, Some(500), Server),
+            (Reason::ProtocolError, Some(502), Server),
+            // A response that began and went wrong for another reason, or
+            // one that never came.
+            (Reason::UpstreamService, Some(200), Broken),
+            (Reason::Network, Some(200), Broken),
+            (Reason::Network, Some(101), Broken),
+            (Reason::Network, None, Broken),
+        ] {
+            assert_eq!(
+                FailureKind::of(reason, status),
+                kind,
+                "{reason:?} {status:?}"
+            );
+        }
     }
     #[test]
     fn distinct_error_codes_statuses_and_actions_do_not_merge() {
