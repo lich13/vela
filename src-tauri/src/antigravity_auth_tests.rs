@@ -1476,3 +1476,50 @@ fn a_document_vela_did_not_export_imports_nothing() {
         assert_eq!(fs::read(paths.vault_file()).unwrap(), vault);
     }
 }
+
+#[test]
+fn quota_logins_name_the_signed_in_account_and_carry_its_login_as_it_is_now() {
+    let (_tmp, paths) = setup_paths();
+    let login = |token: &str, refresh: &str, email: Option<&str>| {
+        let mut value = serde_json::json!({
+            "token": {
+                "access_token": token,
+                "refresh_token": refresh,
+                "expiry": "2026-01-01T00:00:00.000000000+08:00"
+            },
+            "auth_method": "consumer"
+        });
+        if let Some(email) = email {
+            value["id_token_email"] = email.into();
+        }
+        value.to_string()
+    };
+    let sign_in = |raw: String| write_private_file(&paths.oauth_file(), raw.as_bytes()).unwrap();
+    sign_in(login("tok-1", "refresh-1", Some("u1@example.invalid")));
+    let first = state_at(&paths).unwrap().accounts[0].id.clone();
+    // A login that does not say whose it is still is the signed-in account.
+    sign_in(login("tok-2", "refresh-2", None));
+    let second = active_account_id(&state_at(&paths).unwrap()).unwrap();
+    assert_ne!(first, second);
+    // Antigravity renewed it in place and no poll has saved that yet.
+    sign_in(login("tok-2-renewed", "refresh-2", None));
+    let vault = fs::read(paths.vault_file()).unwrap();
+
+    let logins = quota_logins_at(&paths).unwrap();
+    assert_eq!(
+        logins.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
+        [first.as_str(), second.as_str()]
+    );
+    assert!(!logins[0].current);
+    assert_eq!(logins[0].access_token.as_deref(), Some("tok-1"));
+    assert_eq!(logins[0].expires_at, Some(1_767_196_800_000));
+    assert!(logins[1].current);
+    assert_eq!(logins[1].access_token.as_deref(), Some("tok-2-renewed"));
+
+    // Signed out, every account is still asked with what was saved for it.
+    fs::remove_file(paths.oauth_file()).unwrap();
+    let logins = quota_logins_at(&paths).unwrap();
+    assert!(logins.iter().all(|l| !l.current));
+    assert_eq!(logins[1].access_token.as_deref(), Some("tok-2"));
+    assert_eq!(fs::read(paths.vault_file()).unwrap(), vault);
+}

@@ -66,6 +66,8 @@ mod storage;
 #[cfg(target_os = "macos")]
 mod tray_macos;
 #[cfg(feature = "desktop")]
+mod tray_quota;
+#[cfg(feature = "desktop")]
 mod update;
 mod usage;
 // Only the server speaks it so far, and Windows has none.
@@ -82,9 +84,11 @@ use std::sync::{
     Arc,
 };
 use storage::{AppError, Result};
+// Only macOS has an application menu; the tray's is built in `tray_quota`.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 #[cfg(feature = "desktop")]
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
@@ -454,6 +458,12 @@ impl runtime::Sink for Host {
             Event::ProviderTests => emit_if_main_visible(app, MainSignal::ProviderTests, ()),
             Event::Usage => emit_if_main_visible(app, MainSignal::UsageState, ()),
             Event::Pricing => emit_if_main_visible(app, MainSignal::PricingState, ()),
+            // A page that was hidden reads the periods again when it is shown.
+            Event::AntigravityQuota => {
+                if let Some(window) = main_visible_window(app) {
+                    let _ = window.emit(name, ());
+                }
+            }
         }
     }
     fn attentive(&self) -> bool {
@@ -995,25 +1005,6 @@ pub(crate) fn show(app: &tauri::AppHandle, page: Option<&str>) -> Result<()> {
     Ok(())
 }
 #[cfg(feature = "desktop")]
-fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let menu = Menu::new(app)?;
-    for (id, label) in [
-        ("open", "打开 Vela"),
-        ("config", "编辑配置"),
-        ("gateway", "打开网关"),
-        ("settings", "设置"),
-        ("check_update", "检查更新"),
-        ("github", "GitHub"),
-        ("quit", "退出 Vela"),
-    ] {
-        if id == "quit" {
-            menu.append(&PredefinedMenuItem::separator(app)?)?;
-        }
-        menu.append(&MenuItem::with_id(app, id, label, true, None::<&str>)?)?;
-    }
-    Ok(menu)
-}
-#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn check_for_updates() -> Result<update::Info> {
     update::latest().await
@@ -1509,8 +1500,10 @@ pub fn run() {
             if !start_silently {
                 let _ = show(app.handle(), None);
             }
+            let quota = tray_quota::Tray::new(app.handle(), runtime.clone())?;
+            app.manage(quota.clone());
             let mut tray = TrayIconBuilder::with_id("switch")
-                .menu(&tray_menu(app.handle())?)
+                .menu(quota.menu())
                 .show_menu_on_left_click(false)
                 .tooltip("Vela");
             #[cfg(target_os = "macos")]
@@ -1559,56 +1552,31 @@ pub fn run() {
                                 }
                             });
                         }
-                        #[cfg(target_os = "macos")]
+                        // The menu opens with this press on macOS and with
+                        // its release on Windows.
                         if button == MouseButton::Right && button_state == MouseButtonState::Down {
-                            if let Err(e) = tray_macos::context_menu(tray) {
-                                emit_switch_error(tray.app_handle(), e);
-                            }
+                            tray.app_handle().state::<Arc<tray_quota::Tray>>().opened();
+                            #[cfg(target_os = "macos")]
+                            tray_macos::context_menu(tray);
                         }
                     }
                 })
                 .on_menu_event(|app, e| match e.id().as_ref() {
-                    "quit" => quit(app, &app.state::<Arc<Runtime>>()),
-                    "open" => {
+                    tray_quota::QUIT => quit(app, &app.state::<Arc<Runtime>>()),
+                    id if id.starts_with(tray_quota::ROW) => {
                         let handle = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            if let Err(err) =
-                                open_main(handle.clone(), None, None, None, None, None).await
+                            if let Err(err) = open_main(
+                                handle.clone(),
+                                Some("usage".into()),
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await
                             {
                                 emit_switch_error(&handle, err);
-                            }
-                        });
-                    }
-                    "config" | "gateway" | "settings" => {
-                        let handle = app.clone();
-                        let page = e.id().as_ref().to_owned();
-                        tauri::async_runtime::spawn(async move {
-                            if let Err(err) =
-                                open_main(handle.clone(), Some(page), None, None, None, None).await
-                            {
-                                emit_switch_error(&handle, err);
-                            }
-                        });
-                    }
-                    "github" => {
-                        let _ = update::open_repository();
-                    }
-                    "check_update" => {
-                        let handle = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            match update::latest().await {
-                                Ok(info) if info.has_update => {
-                                    let version =
-                                        info.latest_version.as_deref().unwrap_or("latest");
-                                    emit_switch_notice(&handle, format!("发现新版本 v{version}"));
-                                    let _ = update::open_releases();
-                                }
-                                Ok(_) => {
-                                    emit_switch_notice(&handle, "已是最新版本");
-                                }
-                                Err(error) => {
-                                    emit_switch_error(&handle, error);
-                                }
                             }
                         });
                     }

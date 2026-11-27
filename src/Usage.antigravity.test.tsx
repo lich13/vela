@@ -890,6 +890,71 @@ describe("Usage Antigravity statistics tab", () => {
     expect(calls(quotaCommand)).toHaveLength(1);
   });
 
+  it("reads the periods again when someone else saved them, and still hears its own answer", async () => {
+    const answer = asking();
+    const user = userEvent.setup();
+    await open(user);
+    expect(within(periods()).getByText("配额剩余 74.5%")).toBeInTheDocument();
+    await waitFor(() => expect(calls(quotaCommand)).toHaveLength(1));
+
+    // The tray menu or the session sync saved newer periods meanwhile, so the
+    // answer to this page will say that nothing changed.
+    const next = buildStats();
+    const window = next.accounts[0].tracks[0].burst5h;
+    window.remainingPercent = 61;
+    window.period!.remainingPercent = 61;
+    statsPayload = next;
+    act(() =>
+      mock.listeners
+        .get("antigravity-quota")
+        ?.forEach((listener) => listener(null)),
+    );
+    expect(
+      await within(periods()).findByText("配额剩余 61.0%"),
+    ).toBeInTheDocument();
+    expect(calls(statsCommand)).toHaveLength(2);
+    expect(calls(quotaCommand)).toHaveLength(1);
+
+    await act(async () =>
+      answer({ changed: false, error: "Antigravity 额度查询受限，请稍后重试" }),
+    );
+    expect(within(periods()).getByRole("alert")).toHaveTextContent(
+      "Antigravity 额度查询受限，请稍后重试",
+    );
+    expect(calls(statsCommand)).toHaveLength(2);
+
+    // Nothing is listened for on another tab.
+    await user.click(screen.getByRole("tab", { name: "Claude Code" }));
+    await screen.findByRole("region", { name: "Claude 官方额度" });
+    expect(mock.listeners.get("antigravity-quota")?.size ?? 0).toBe(0);
+  });
+
+  it("reads the periods once where the instance told of the change its answer speaks of", async () => {
+    const answer = asking();
+    const user = userEvent.setup();
+    await open(user);
+    await waitFor(() => expect(calls(quotaCommand)).toHaveLength(1));
+    expect(calls(statsCommand)).toHaveLength(1);
+
+    // The instance saved what this page asked for and told of it first.
+    const next = buildStats();
+    const window = next.accounts[0].tracks[0].burst5h;
+    window.remainingPercent = 61;
+    window.period!.remainingPercent = 61;
+    statsPayload = next;
+    act(() =>
+      mock.listeners
+        .get("antigravity-quota")
+        ?.forEach((listener) => listener(null)),
+    );
+    expect(
+      await within(periods()).findByText("配额剩余 61.0%"),
+    ).toBeInTheDocument();
+    expect(calls(statsCommand)).toHaveLength(2);
+    await act(async () => answer({ changed: true, error: null }));
+    expect(calls(statsCommand)).toHaveLength(2);
+  });
+
   it("drops an answer that arrives after the tab was left, and asks nothing for Claude Code", async () => {
     const answer = asking();
     const user = userEvent.setup();
@@ -1030,6 +1095,36 @@ it("a quota reported without a period says why in place of the period", () => {
   expect(card.getByText("此账号未开放")).toBeInTheDocument();
   expect(card.getByText("未返回重置时间 · 剩余 100.0%")).toBeInTheDocument();
   expect(card.queryByText("未获取当前周期")).not.toBeInTheDocument();
+});
+
+it("shows why the signed-in account was not read only while that account is the one shown", async () => {
+  const user = userEvent.setup();
+  const base = buildStats();
+  const props = {
+    stats: {
+      ...base,
+      accounts: [
+        ...base.accounts,
+        { ...base.accounts[0], id: "b", name: "Fixture B" },
+      ],
+    },
+    busy: false,
+    quotaError: "agy 读取额度超时，请稍后再试",
+  };
+  const view = render(
+    <UsageAntigravity {...props} currentAccountId="ag-oauth-1" />,
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "agy 读取额度超时，请稍后再试",
+  );
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Antigravity 用量账号" }),
+    "b",
+  );
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  // No account is known to be signed in: the reason stands whichever is shown.
+  view.rerender(<UsageAntigravity {...props} currentAccountId={null} />);
+  expect(screen.getByRole("alert")).toBeInTheDocument();
 });
 
 it("selects one account, retains manual selection on refresh, follows the current account and handles deletion", async () => {

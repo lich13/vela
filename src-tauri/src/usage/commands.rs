@@ -82,20 +82,21 @@ pub async fn get_antigravity_usage_stats(
         .await
         .map_err(|_| failure("Antigravity 统计查询中断"))?
 }
-/// What asking for the quota of the signed-in Antigravity account came to.
+/// What asking for the quota of the saved Antigravity accounts came to.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaRefresh {
     /// The saved periods are no longer the ones the statistics were read with.
     pub changed: bool,
-    /// Why the quota could not be read, to show beside the saved periods.
+    /// Why the quota of the signed-in account could not be read, to show
+    /// beside the saved periods. Another account keeps what was last read.
     pub error: Option<String>,
 }
 pub async fn refresh_antigravity_usage_quota(r: &Runtime) -> Result<QuotaRefresh> {
     Ok(match r.usage.refresh_antigravity_quota().await {
-        Ok(changed) => QuotaRefresh {
-            changed,
-            error: None,
+        Ok(round) => QuotaRefresh {
+            changed: round.changed,
+            error: round.current.and_then(|id| round.failed.get(&id).cloned()),
         },
         Err(error) => QuotaRefresh {
             changed: false,

@@ -664,6 +664,45 @@ impl Store {
         }
         Ok(changed)
     }
+    /// The quota periods saved for the account, none where it was never read.
+    fn antigravity_quota(&self, id: &str) -> Result<super::antigravity::quota::Periods> {
+        let raw: Option<String> = db(self
+            .connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key=?1",
+                [format!("antigravity_quota:{id}")],
+                |r| r.get(0),
+            )
+            .optional())?;
+        Ok(raw
+            .map(|s| serde_json::from_str(&s).map_err(|_| failure("已保存的账号周期无法读取")))
+            .transpose()?
+            .unwrap_or_default())
+    }
+    /// The saved accounts in their order, each with the saved periods that
+    /// are running at `now_ms`.
+    #[cfg(feature = "desktop")]
+    pub(super) fn antigravity_quotas(
+        &self,
+        now_ms: i64,
+    ) -> Result<
+        Vec<(
+            super::antigravity::quota::Account,
+            super::antigravity::quota::Periods,
+        )>,
+    > {
+        let Some(data) = self.data_dir() else {
+            return Ok(Vec::new());
+        };
+        crate::antigravity::auth::usage_accounts(data)?
+            .into_iter()
+            .map(|account| {
+                let mut periods = self.antigravity_quota(&account.id)?;
+                periods.retain(|_, period| period.current(now_ms));
+                Ok((account, periods))
+            })
+            .collect()
+    }
     pub(super) fn antigravity_models(&self) -> Result<Option<String>> {
         db(self
             .connection
@@ -715,18 +754,7 @@ impl Store {
         let mut min_time = f.start.unwrap_or(0);
         let mut max_time = f.end.unwrap_or(now_ms);
         for (order, account) in accounts.into_iter().enumerate() {
-            let raw: Option<String> = db(self
-                .connection
-                .query_row(
-                    "SELECT value FROM metadata WHERE key=?1",
-                    [format!("antigravity_quota:{}", account.id)],
-                    |r| r.get(0),
-                )
-                .optional())?;
-            let periods = raw
-                .map(|s| serde_json::from_str(&s).map_err(|_| failure("已保存的账号周期无法读取")))
-                .transpose()?
-                .unwrap_or_default();
+            let periods = self.antigravity_quota(&account.id)?;
             let id = account.id.clone();
             let acc = super::antigravity::quota::AccountAccumulator::new(account, periods, now_ms);
             if let Some(start) = acc.earliest() {

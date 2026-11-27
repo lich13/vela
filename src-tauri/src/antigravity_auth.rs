@@ -1265,6 +1265,65 @@ pub(crate) fn usage_accounts(
             .collect())
     })
 }
+/// What asking Google for an account's quota takes. It never leaves Rust.
+pub(crate) struct QuotaLogin {
+    pub id: String,
+    /// The account Antigravity is signed in to.
+    pub current: bool,
+    pub access_token: Option<String>,
+    /// When the access token ends, in Unix milliseconds.
+    pub expires_at: Option<i64>,
+}
+fn quota_login(id: &str, current: bool, raw: &str) -> QuotaLogin {
+    let value: Value = serde_json::from_str(raw.trim()).unwrap_or_default();
+    let field = |key: &str| {
+        [Some(&value), value.get("token")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object)
+            .find_map(|map| map_str(map, &[key]))
+    };
+    QuotaLogin {
+        id: id.to_owned(),
+        current,
+        access_token: field("access_token"),
+        expires_at: field("expiry")
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(&at).ok())
+            .map(|at| at.timestamp_millis()),
+    }
+}
+/// The saved accounts' logins, for asking each one's quota. The signed-in
+/// account is the one a poll would write the login to, known by its saved
+/// identity even where the login carries no address, and it comes with the
+/// login as it is now: Antigravity renews that one in place.
+pub(crate) fn quota_logins(data: &Path) -> Result<Vec<QuotaLogin>> {
+    quota_logins_at(&Paths::resolve(data)?)
+}
+fn quota_logins_at(paths: &Paths) -> Result<Vec<QuotaLogin>> {
+    with_lock(|| {
+        let (vault, _) = load_vault(paths)?;
+        let live = read_oauth(paths, false)?;
+        let signed_in = live.as_deref().and_then(|raw| {
+            let (_, email) = parse_oauth_metadata(raw).ok()?;
+            find_oauth_idx(
+                &vault,
+                &email,
+                &payload_digest(raw),
+                &oauth_refresh_token(raw),
+            )
+        });
+        Ok(vault
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let current = signed_in == Some(index);
+                let raw = live.as_deref().filter(|_| current);
+                quota_login(&entry.id, current, raw.unwrap_or(&entry.payload))
+            })
+            .collect())
+    })
+}
 pub fn active_account_id(state: &AntigravityAuthState) -> Option<String> {
     state
         .accounts

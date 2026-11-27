@@ -224,6 +224,8 @@ export default function Usage({
   const sequence = useRef(0),
     rowsSequence = useRef(0),
     agSequence = useRef(0),
+    quotaSequence = useRef(0),
+    quotaHeard = useRef(0),
     stateSequence = useRef(0),
     detailSequence = useRef(0);
   useEffect(
@@ -306,41 +308,56 @@ export default function Usage({
       if (id === rowsSequence.current) setRowsBusy(false);
     }
   }, [query, status, page, request]);
-  const loadClientStats = useCallback(
-    async function read(quota = true): Promise<void> {
-      const apart = quota && tab === "antigravity" && quotaApart;
-      // A question under way now may be answered before the statistics are
-      // read, so its answer is the one waited for.
-      const under = apart ? quotaAsked.get(currentInstance()) : undefined;
+  /**
+   * Reads the history and the saved periods. False where that failed; a
+   * reading that a later one overtook did not. With `changed`, the periods
+   * were saved anew since, and a reading under way may have set out before.
+   */
+  const readClientStats = useCallback(
+    async (changed = false): Promise<boolean> => {
       const id = ++agSequence.current;
       setAgBusy(true);
       try {
-        const filter = query();
-        const stats = await request(
+        const name =
           tab === "claude"
             ? "get_claude_usage_stats"
-            : "get_antigravity_usage_stats",
-          { filter },
-        );
-        if (id !== agSequence.current) return;
-        setAgStats(stats);
-        setError("");
+            : "get_antigravity_usage_stats";
+        const params = { filter: query() };
+        if (changed) pending.current.delete(name + JSON.stringify(params));
+        const stats = await request(name, params);
+        if (id === agSequence.current) {
+          setAgStats(stats);
+          setError("");
+        }
+        return true;
       } catch (e) {
         if (id === agSequence.current) setError(errorOf(e).message);
-        return;
+        return false;
       } finally {
         if (id === agSequence.current) setAgBusy(false);
       }
-      if (!apart) return;
-      // The history is on the page. The quota takes its time to be answered
-      // and holds the lock the statistics are read under, so it is asked after.
-      const answer = await (under ?? askQuota());
-      if (id !== agSequence.current) return;
-      setAgQuotaError(answer.error);
-      if (answer.changed) await read(false);
     },
-    [query, request, tab, quotaApart],
+    [query, request, tab],
   );
+  const loadClientStats = useCallback(async () => {
+    const apart = tab === "antigravity" && quotaApart;
+    // A question under way now may be answered before the statistics are
+    // read, so its answer is the one waited for.
+    const under = apart ? quotaAsked.get(currentInstance()) : undefined;
+    const round = ++quotaSequence.current;
+    if (!(await readClientStats()) || !apart) return;
+    if (round !== quotaSequence.current) return;
+    // The history is on the page. The quota takes its time to be answered,
+    // so it is asked after.
+    const heard = quotaHeard.current;
+    const answer = await (under ?? askQuota());
+    if (round !== quotaSequence.current) return;
+    setAgQuotaError(answer.error);
+    // An instance that tells of the periods it saves has had them read
+    // again by now; one from before that tells of them only here.
+    if (answer.changed && heard === quotaHeard.current)
+      await readClientStats(true);
+  }, [readClientStats, tab, quotaApart]);
   const loadClaudeQuota = useCallback(
     async (refresh = false) => {
       try {
@@ -409,8 +426,21 @@ export default function Usage({
     void loadClientStats();
     return () => {
       agSequence.current++;
+      quotaSequence.current++;
     };
   }, [loadClientStats, visible, independent]);
+  useEffect(() => {
+    if (!visible || tab !== "antigravity") return;
+    const events = subscriptions((e) => setError(errorOf(e).message));
+    // Whoever asked, the periods on the page are no longer the saved ones.
+    // They are read again and nothing is asked: the question this page has
+    // out is still answered to it.
+    events.watch("antigravity-quota", () => {
+      quotaHeard.current++;
+      void readClientStats(true);
+    });
+    return () => events.dispose();
+  }, [visible, tab, readClientStats]);
   useEffect(() => {
     if (!visible || tab !== "claude") return;
     void loadClaudeQuota();

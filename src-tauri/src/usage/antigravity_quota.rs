@@ -1,12 +1,18 @@
 //! Observed account quota boundaries. Never extrapolate a new window.
 use super::{time, AntigravityQuotaTrack, AntigravityTrackWindow, Api, WindowAcc};
-use crate::{antigravity::auth, storage::Result};
+use crate::{
+    antigravity::auth,
+    storage::{AppError, Result},
+    usage::model::failure,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
 
 #[path = "antigravity_quota_cli.rs"]
 mod cli;
+#[path = "antigravity_cloud.rs"]
+mod cloud;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", from = "Saved")]
@@ -59,7 +65,7 @@ pub enum Without {
     NoReset,
 }
 impl Period {
-    fn current(&self, now: i64) -> bool {
+    pub(in crate::usage) fn current(&self, now: i64) -> bool {
         self.without.is_some() || (self.start <= now && now < self.end)
     }
     fn contains(&self, at: i64) -> bool {
@@ -198,6 +204,64 @@ impl Api {
         }
         last_error.map_or(Ok(None), Err)
     }
+}
+/// What asking one saved account for its quota came to.
+pub(in crate::usage) struct Asked {
+    pub id: String,
+    /// The account Antigravity is signed in to.
+    pub current: bool,
+    pub answer: std::result::Result<Periods, AppError>,
+}
+/// The quota of every saved account, each asked of Antigravity's service with
+/// its own login and handed to `settle` as soon as it has answered, so that
+/// one that is slow keeps no other waiting. The signed-in account is read
+/// from the running app or through `agy` where the service gave no answer.
+pub(in crate::usage) async fn observe_all<T>(
+    data: &Path,
+    settle: impl Fn(Asked) -> T,
+) -> Result<Vec<T>> {
+    let from = data.to_path_buf();
+    let logins = tokio::task::spawn_blocking(move || auth::quota_logins(&from))
+        .await
+        .map_err(|_| failure("Antigravity 额度查询中断"))??;
+    Ok(ask_all(&logins, cloud::quota, || observe(data), settle).await)
+}
+async fn ask_all<'a, C, CF, O, OF, T>(
+    logins: &'a [auth::QuotaLogin],
+    cloud: C,
+    local: O,
+    settle: impl Fn(Asked) -> T,
+) -> Vec<T>
+where
+    C: Fn(&'a auth::QuotaLogin) -> CF,
+    CF: std::future::Future<Output = std::result::Result<Periods, cloud::Failure>>,
+    O: Fn() -> OF,
+    OF: std::future::Future<Output = Result<Option<(String, Periods)>>>,
+{
+    let (cloud, local, settle) = (&cloud, &local, &settle);
+    futures_util::future::join_all(logins.iter().map(|login| async move {
+        let answer = match cloud(login).await {
+            Ok(periods) => Ok(periods),
+            // The app and `agy` ask the same service, so they are left out
+            // where it wants to be left alone.
+            Err(failure) if login.current && !failure.stands() => match local().await {
+                // They answer for whoever is signed in by now.
+                Ok(Some((found, periods))) if found == login.id => Ok(periods),
+                // The service was not asked, so why they were of no help
+                // is all there is to say.
+                Err(error) if failure.expired() => Err(error),
+                // Otherwise why the service gave nothing says more.
+                Ok(_) | Err(_) => Err(failure.error(true)),
+            },
+            Err(failure) => Err(failure.error(login.current)),
+        };
+        settle(Asked {
+            id: login.id.clone(),
+            current: login.current,
+            answer,
+        })
+    }))
+    .await
 }
 /// The quota of the signed-in account: from the running app, or from the
 /// `agy` CLI when the app has no answer.

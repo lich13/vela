@@ -14,6 +14,32 @@ pub fn now() -> i64 {
 pub fn failure(message: &str) -> AppError {
     AppError::new(code::USAGE, message)
 }
+/// How long a service is left alone where it did not say for how long.
+const WAIT: i64 = 60_000;
+/// The longest a service is left alone, whatever it said.
+const LONGEST: i64 = 3_600_000;
+/// Until when a service that answered 429 is left alone: for as long as it
+/// asked, in seconds or as a date, a minute where it did not say, and no
+/// longer than an hour.
+pub(crate) fn limited_until(headers: &reqwest::header::HeaderMap) -> i64 {
+    let asked = now();
+    let wait = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .and_then(|value| {
+            let seconds = value.parse::<i64>().ok();
+            seconds
+                .map(|seconds| seconds.saturating_mul(1000))
+                .or_else(|| {
+                    let at = httpdate::parse_http_date(value).ok()?;
+                    let at = at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+                    Some(i64::try_from(at).ok()?.saturating_sub(asked))
+                })
+        })
+        .unwrap_or(WAIT);
+    asked.saturating_add(wait.clamp(1000, LONGEST))
+}
 pub fn decimal(value: &str) -> Option<Decimal> {
     Decimal::from_str(value)
         .ok()

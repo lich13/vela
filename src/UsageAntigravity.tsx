@@ -288,11 +288,14 @@ export default function UsageAntigravity({
               ))}
             </select>
           </label>
-          {(quotaError ?? stats.quotaError) && (
-            <p className="form-error" role="alert">
-              {quotaError ?? stats.quotaError}
-            </p>
-          )}
+          {/* Why the signed-in account was not read. Another account
+              shows what was last read for it. */}
+          {(!currentAccountId || accountId === currentAccountId) &&
+            (quotaError ?? stats.quotaError) && (
+              <p className="form-error" role="alert">
+                {quotaError ?? stats.quotaError}
+              </p>
+            )}
           {account && (
             <section
               key={account.id}

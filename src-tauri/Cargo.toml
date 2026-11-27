@@ -100,7 +100,7 @@ yaml-edit = "=0.3.2"
 plist = "1"
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSStatusItem", "NSStatusBarButton", "NSMenu", "NSWorkspace", "NSRunningApplication", "block2"], optional = true }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services", "NSBundle", "NSURL", "NSError", "NSString"], optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services", "NSBundle", "NSURL", "NSError", "NSString", "NSArray", "NSObjCRuntime", "NSRunLoop", "block2"], optional = true }
 block2 = { version = "0.6", optional = true }
 
 [dev-dependencies]

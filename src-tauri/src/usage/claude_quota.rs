@@ -51,6 +51,8 @@ impl Default for Service {
     }
 }
 
+/// What is said where Claude Code holds no official login.
+pub(crate) const SIGNED_OUT: &str = "请先在 Claude Code 登录官方账号";
 fn fail(message: &str) -> crate::storage::AppError {
     super::model::failure(message)
 }
@@ -59,7 +61,7 @@ fn credentials(value: Value) -> Result<Credentials> {
     let token = oauth["accessToken"]
         .as_str()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| fail("请先在 Claude Code 登录官方账号"))?;
+        .ok_or_else(|| fail(SIGNED_OUT))?;
     if oauth["expiresAt"]
         .as_i64()
         .is_some_and(|at| at <= super::model::now())
@@ -83,8 +85,8 @@ fn parse_credentials(raw: &[u8]) -> Result<Credentials> {
 }
 #[cfg(any(test, not(target_os = "macos")))]
 fn file_credentials(home: &Path) -> Result<Credentials> {
-    let raw = storage::read_optional(&home.join(".credentials.json"))?
-        .ok_or_else(|| fail("请先在 Claude Code 登录官方账号"))?;
+    let raw =
+        storage::read_optional(&home.join(".credentials.json"))?.ok_or_else(|| fail(SIGNED_OUT))?;
     parse_credentials(&raw)
 }
 #[cfg(target_os = "macos")]
@@ -126,19 +128,23 @@ async fn read_credentials(home: &Path) -> Result<Credentials> {
         if let Some(raw) = storage::read_optional(&home.join(".credentials.json"))? {
             return parse_credentials(&raw);
         }
-        Err(error.unwrap_or_else(|| fail("请先在 Claude Code 登录官方账号")))
+        Err(error.unwrap_or_else(|| fail(SIGNED_OUT)))
     }
     #[cfg(not(target_os = "macos"))]
     file_credentials(home)
 }
 
+/// An account's address as it is shown where nobody named the account: its
+/// first letter and its domain.
+pub(crate) fn masked(email: &str) -> Option<String> {
+    let (name, domain) = email.split_once('@')?;
+    Some(format!("{}***@{domain}", name.chars().next()?))
+}
 fn account_label(home: &Path) -> Option<String> {
     let global = crate::claude_profile::global_file(home, dirs::home_dir().as_deref());
     let raw = storage::read_optional(&global).ok()??;
     let value: Value = serde_json::from_slice(&raw).ok()?;
-    let email = value.pointer("/oauthAccount/emailAddress")?.as_str()?;
-    let (name, domain) = email.split_once('@')?;
-    Some(format!("{}***@{domain}", name.chars().next()?))
+    masked(value.pointer("/oauthAccount/emailAddress")?.as_str()?)
 }
 
 fn reset(value: &Value) -> Option<i64> {

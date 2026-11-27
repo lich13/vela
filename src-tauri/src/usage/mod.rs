@@ -9,6 +9,9 @@ mod calculator;
 pub(crate) mod claude_quota;
 #[cfg(test)]
 mod claude_stats_tests;
+// The tray menu shows these, and only the desktop app has one.
+#[cfg(feature = "desktop")]
+pub(crate) mod codex_quota;
 pub mod commands;
 #[cfg(test)]
 mod daily_merge_tests;
@@ -21,6 +24,8 @@ mod disconnect_tests;
 mod event_time_tests;
 #[cfg(test)]
 mod first_token_tests;
+#[cfg(feature = "desktop")]
+pub(crate) mod grok_quota;
 #[cfg(test)]
 mod grok_usage_tests;
 mod maintenance;
@@ -29,6 +34,8 @@ pub mod pricing;
 #[cfg(test)]
 mod pricing_mapping_tests;
 mod query;
+#[cfg(test)]
+mod quota_fixture;
 #[cfg(test)]
 mod response_pricing_tests;
 #[cfg(test)]
@@ -84,6 +91,57 @@ struct Inner {
     syncing: Mutex<bool>,
     report: Mutex<std::collections::BTreeMap<String, sessions::Report>>,
     events: broadcast::Sender<()>,
+    antigravity_quota: OneAtATime<Result<QuotaRound>>,
+    /// Told whenever an Antigravity account's saved quota periods change.
+    antigravity_quota_events: broadcast::Sender<()>,
+}
+/// What asking every saved Antigravity account for its quota came to.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct QuotaRound {
+    /// Some account's saved periods are no longer what they were.
+    pub changed: bool,
+    /// The signed-in account, where it is one of the saved ones.
+    pub current: Option<String>,
+    /// Why each account that could not be read could not, by its ID.
+    pub failed: std::collections::BTreeMap<String, String>,
+}
+/// One period of an account's quota as the tray menu shows it: what the
+/// period is called and the percentage of it that is left.
+#[cfg(feature = "desktop")]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Remaining {
+    pub label: String,
+    pub percent: f64,
+}
+/// One question at a time. Whoever arrives while it is being asked waits and
+/// takes its answer instead of asking again.
+struct OneAtATime<T> {
+    answered: std::sync::atomic::AtomicU64,
+    last: tokio::sync::Mutex<Option<T>>,
+}
+impl<T> Default for OneAtATime<T> {
+    fn default() -> Self {
+        Self {
+            answered: Default::default(),
+            last: Default::default(),
+        }
+    }
+}
+impl<T: Clone> OneAtATime<T> {
+    async fn ask<F: std::future::Future<Output = T>>(&self, ask: impl FnOnce() -> F) -> T {
+        use std::sync::atomic::Ordering;
+        let arrived = self.answered.load(Ordering::Acquire);
+        let mut last = self.last.lock().await;
+        if self.answered.load(Ordering::Acquire) != arrived {
+            if let Some(answer) = last.as_ref() {
+                return answer.clone();
+            }
+        }
+        let answer = ask().await;
+        *last = Some(answer.clone());
+        self.answered.fetch_add(1, Ordering::AcqRel);
+        answer
+    }
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -231,6 +289,7 @@ impl Service {
         let (settings, settings_error) = load_settings(&path);
         let (writer, receiver) = mpsc::sync_channel::<Option<Record>>(256);
         let (events, _) = broadcast::channel(32);
+        let (antigravity_quota_events, _) = broadcast::channel(8);
         let _ = std::fs::remove_dir(dir.join("pending"));
         let initial_pending = dir.join("pending").exists();
         let inner = Arc::new(Inner {
@@ -259,6 +318,8 @@ impl Service {
             syncing: Mutex::new(false),
             report: Mutex::new(Default::default()),
             events,
+            antigravity_quota: Default::default(),
+            antigravity_quota_events,
         });
         let weak = Arc::downgrade(&inner);
         std::thread::spawn(move || {
@@ -415,6 +476,10 @@ impl Service {
     pub fn subscribe(&self) -> broadcast::Receiver<()> {
         self.0.events.subscribe()
     }
+    /// Hears of every change to an Antigravity account's saved quota periods.
+    pub(crate) fn subscribe_antigravity_quota(&self) -> broadcast::Receiver<()> {
+        self.0.antigravity_quota_events.subscribe()
+    }
     pub fn settings(&self) -> Settings {
         self.0.settings.read().clone()
     }
@@ -470,13 +535,55 @@ impl Service {
             store::Store::reader_with_cache(&self.0.directory, self.0.overview_cache.clone())?;
         reader.snapshot(|db| f(db))
     }
-    /// Asks for the quota of the signed-in account and saves it; true where
-    /// the saved periods changed.
-    pub(crate) async fn refresh_antigravity_quota(&self) -> Result<bool> {
-        match antigravity::quota::observe(&self.0.data_dir).await? {
-            Some((id, periods)) => self.query(|db| db.save_antigravity_quota(&id, &periods)),
-            None => Ok(false),
+    /// Asks for the quota of every saved Antigravity account. Each account
+    /// is saved, and told of, as soon as it has answered.
+    pub(crate) async fn refresh_antigravity_quota(&self) -> Result<QuotaRound> {
+        self.0
+            .antigravity_quota
+            .ask(|| async {
+                let settled = antigravity::quota::observe_all(&self.0.data_dir, |asked| {
+                    let saved = asked
+                        .answer
+                        .and_then(|periods| self.save_antigravity_quota(&asked.id, &periods));
+                    (asked.id, asked.current, saved)
+                })
+                .await?;
+                let mut round = QuotaRound::default();
+                for (id, current, saved) in settled {
+                    if current {
+                        round.current = Some(id.clone());
+                    }
+                    match saved {
+                        Ok(changed) => round.changed |= changed,
+                        Err(error) => {
+                            round.failed.insert(id, error.message);
+                        }
+                    }
+                }
+                Ok(round)
+            })
+            .await
+    }
+    /// Saves the quota periods read for an Antigravity account and tells of
+    /// them where they are not the saved ones; true where they are not.
+    fn save_antigravity_quota(
+        &self,
+        id: &str,
+        periods: &antigravity::quota::Periods,
+    ) -> Result<bool> {
+        let changed = self.query(|db| db.save_antigravity_quota(id, periods))?;
+        if changed {
+            let _ = self.0.antigravity_quota_events.send(());
         }
+        Ok(changed)
+    }
+    /// The saved accounts in their order, each with the quota periods last
+    /// read for it that are still running.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn antigravity_quotas(
+        &self,
+    ) -> Result<Vec<(antigravity::quota::Account, antigravity::quota::Periods)>> {
+        self.read(|db| db.antigravity_quotas(now()))
     }
     pub(crate) fn recent_gateway_requests(
         &self,
@@ -645,9 +752,7 @@ impl sessions::Repository for SessionStore {
         id: &str,
         periods: &antigravity::quota::Periods,
     ) -> Result<()> {
-        self.service
-            .query(|db| db.save_antigravity_quota(id, periods))
-            .map(|_| ())
+        self.service.save_antigravity_quota(id, periods).map(|_| ())
     }
     fn antigravity_models(&self) -> Result<Option<String>> {
         self.reader.antigravity_models()

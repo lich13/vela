@@ -498,3 +498,172 @@ async fn quota_requires_the_app_identity_to_match_the_selected_account() {
     closing.abort();
     server.await.unwrap();
 }
+
+fn saved_login(id: &str, current: bool) -> auth::QuotaLogin {
+    auth::QuotaLogin {
+        id: id.into(),
+        current,
+        access_token: None,
+        expires_at: None,
+    }
+}
+
+#[tokio::test]
+async fn the_signed_in_account_is_read_locally_only_where_the_service_gave_no_verdict() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let logins = [saved_login("signed-in", true), saved_login("other", false)];
+    let periods = parse(&summary());
+    let asked_locally = AtomicUsize::new(0);
+    let local = |found: Result<Option<(String, Periods)>>| {
+        let asked_locally = &asked_locally;
+        move || {
+            asked_locally.fetch_add(1, Ordering::SeqCst);
+            let found = found.clone();
+            async move { found }
+        }
+    };
+    let unreachable = |_: &auth::QuotaLogin| async { Err(cloud::Failure::Unreachable) };
+    let as_asked = |asked: Asked| asked;
+    let read = || Ok(Some(("signed-in".to_owned(), periods.clone())));
+
+    // The service answers: nothing else is asked, whichever account it is.
+    let asked = ask_all(
+        &logins,
+        |_| async { Ok(parse(&summary())) },
+        local(Err(failure("fixture"))),
+        as_asked,
+    )
+    .await;
+    assert_eq!(asked_locally.load(Ordering::SeqCst), 0);
+    assert!(asked
+        .iter()
+        .all(|a| a.answer.as_ref().ok() == Some(&periods)));
+    assert_eq!(
+        asked
+            .iter()
+            .map(|a| (a.id.as_str(), a.current))
+            .collect::<Vec<_>>(),
+        [("signed-in", true), ("other", false)]
+    );
+
+    // It gives no answer: the app or `agy` is asked for the signed-in one.
+    let asked = ask_all(&logins, unreachable, local(read()), as_asked).await;
+    assert_eq!(asked_locally.swap(0, Ordering::SeqCst), 1);
+    assert_eq!(asked[0].answer.as_ref().ok(), Some(&periods));
+    assert!(asked[1]
+        .answer
+        .as_ref()
+        .is_err_and(|e| e.message.contains("没有应答")));
+
+    // Neither helps, or they answer for an account signed in to since: why
+    // the service gave nothing is what is shown, for the account asked.
+    for found in [
+        Ok(None),
+        Err(failure("agy 未返回额度")),
+        Ok(Some(("signed-in-since".into(), periods.clone()))),
+    ] {
+        let asked = ask_all(&logins, unreachable, local(found), as_asked).await;
+        assert_eq!(asked_locally.swap(0, Ordering::SeqCst), 1);
+        assert_eq!(asked[0].id, "signed-in");
+        assert!(asked[0]
+            .answer
+            .as_ref()
+            .is_err_and(|e| e.message.contains("没有应答")));
+    }
+
+    // With no token the service takes it was not asked. The app or `agy`
+    // is, and why they were of no help is what is shown.
+    let expired = |_: &auth::QuotaLogin| async { Err(cloud::Failure::Expired) };
+    let asked = ask_all(&logins, expired, local(read()), as_asked).await;
+    assert_eq!(asked_locally.swap(0, Ordering::SeqCst), 1);
+    assert_eq!(asked[0].answer.as_ref().ok(), Some(&periods));
+    // An account that is not signed in to is renewed once it is switched to.
+    assert!(asked[1]
+        .answer
+        .as_ref()
+        .is_err_and(|e| e.message == "访问令牌已到期，切换到此账号后更新"));
+    let asked = ask_all(
+        &logins,
+        expired,
+        local(Err(failure("agy 未返回额度"))),
+        as_asked,
+    )
+    .await;
+    assert_eq!(asked_locally.swap(0, Ordering::SeqCst), 1);
+    assert!(asked[0]
+        .answer
+        .as_ref()
+        .is_err_and(|e| e.message == "agy 未返回额度"));
+    let asked = ask_all(&logins, expired, local(Ok(None)), as_asked).await;
+    assert_eq!(asked_locally.swap(0, Ordering::SeqCst), 1);
+    assert!(asked[0]
+        .answer
+        .as_ref()
+        .is_err_and(|e| e.message == "访问令牌已到期，由 Antigravity 续期后更新"));
+
+    // A service that asked to be left alone is not asked through the app or
+    // `agy` either.
+    let asked = ask_all(
+        &logins,
+        |_| async { Err(cloud::Failure::Limited) },
+        local(read()),
+        as_asked,
+    )
+    .await;
+    assert_eq!(asked_locally.load(Ordering::SeqCst), 0);
+    assert!(asked.iter().all(|a| a.answer.is_err()));
+}
+
+#[tokio::test]
+async fn an_account_is_settled_as_soon_as_it_has_answered() {
+    let logins = [saved_login("slow", false), saved_login("fast", false)];
+    let gate = tokio::sync::Notify::new();
+    let settled = parking_lot::Mutex::new(Vec::new());
+    let returned = ask_all(
+        &logins,
+        |login| {
+            let gate = &gate;
+            async move {
+                // The slow one answers only once the fast one is settled.
+                if login.id == "slow" {
+                    gate.notified().await;
+                }
+                Ok(Periods::new())
+            }
+        },
+        || async { Ok(None) },
+        |asked| {
+            settled.lock().push(asked.id.clone());
+            if asked.id == "fast" {
+                gate.notify_one();
+            }
+            asked.id
+        },
+    )
+    .await;
+    assert_eq!(*settled.lock(), ["fast", "slow"]);
+    // What is returned keeps the accounts' own order.
+    assert_eq!(returned, ["slow", "fast"]);
+}
+
+#[tokio::test]
+async fn whoever_asks_while_a_question_is_out_takes_its_answer() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let one = crate::usage::OneAtATime::<u32>::default();
+    let asked = AtomicU32::new(0);
+    let gate = tokio::sync::Notify::new();
+    let ask = || async {
+        let turn = asked.fetch_add(1, Ordering::SeqCst) + 1;
+        gate.notified().await;
+        turn
+    };
+    let (first, second, ()) = tokio::join!(one.ask(ask), one.ask(ask), async {
+        tokio::task::yield_now().await;
+        gate.notify_one();
+    });
+    assert_eq!((first, second), (1, 1));
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    // Once it is answered, the next one asks for itself.
+    gate.notify_one();
+    assert_eq!(one.ask(ask).await, 2);
+}

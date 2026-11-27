@@ -89,6 +89,19 @@ pub struct AccountSubscription {
     pub label: String,
     pub stale: bool,
 }
+/// How a ChatGPT plan is shown.
+pub(crate) fn plan_label(plan: &str) -> &str {
+    match plan {
+        "free" => "Free",
+        "plus" => "Plus",
+        "pro" => "Pro",
+        "team" => "Team",
+        "business" => "Business",
+        "enterprise" => "Enterprise",
+        "edu" => "Edu",
+        other => other,
+    }
+}
 // Display metadata only: never used to authenticate an account or select a route.
 fn account_subscription(raw: &str) -> Option<AccountSubscription> {
     let doc: Value = serde_json::from_str(raw).ok()?;
@@ -115,18 +128,7 @@ fn account_subscription(raw: &str) -> Option<AccountSubscription> {
         .and_then(|v| v["chatgpt_plan_type"].as_str())
         .and_then(crate::events::safe_model)
         .filter(|v| v.len() <= 64);
-    let label = match plan_type.as_deref() {
-        Some("free") => "Free",
-        Some("plus") => "Plus",
-        Some("pro") => "Pro",
-        Some("team") => "Team",
-        Some("business") => "Business",
-        Some("enterprise") => "Enterprise",
-        Some("edu") => "Edu",
-        Some(value) => value,
-        None => "未识别",
-    }
-    .to_owned();
+    let label = plan_type.as_deref().map_or("未识别", plan_label).to_owned();
     let stale = token
         .as_ref()
         .and_then(|v| v["exp"].as_u64())
@@ -135,6 +137,43 @@ fn account_subscription(raw: &str) -> Option<AccountSubscription> {
         plan_type,
         label,
         stale,
+    })
+}
+/// What asking ChatGPT for an account's quota takes. It never leaves Rust.
+#[cfg(feature = "desktop")]
+pub(crate) struct QuotaLogin {
+    /// What tells the account from every other for as long as Vela runs: the
+    /// saved account's ID, or the digest of whose a login is and in which
+    /// workspace where Codex holds one that is not saved. It is never shown.
+    pub key: String,
+    pub name: String,
+    /// The account Codex is signed in to.
+    pub current: bool,
+    /// The plan the login names, as it is shown.
+    pub plan: Option<String>,
+    pub access_token: String,
+    /// The workspace the quota is asked for; empty where the login names none.
+    pub workspace: String,
+    /// When the access token ends, in Unix seconds.
+    pub expires_at: Option<u64>,
+}
+#[cfg(feature = "desktop")]
+fn quota_login(id: Option<&str>, name: &str, current: bool, raw: &str) -> Option<QuotaLogin> {
+    let document: Value = serde_json::from_str(raw).ok()?;
+    let info = auth_info_value(&document)
+        .ok()
+        .filter(|info| info.kind == "chatgpt")?;
+    let access_token = document["tokens"]["access_token"].as_str()?;
+    Some(QuotaLogin {
+        key: id.map_or_else(|| info.identity.clone(), str::to_owned),
+        name: name.to_owned(),
+        current,
+        plan: account_subscription(raw)
+            .filter(|subscription| subscription.plan_type.is_some())
+            .map(|subscription| subscription.label),
+        access_token: access_token.to_owned(),
+        workspace: info.workspace,
+        expires_at: claims(access_token).and_then(|claims| claims["exp"].as_u64()),
     })
 }
 #[cfg(any(feature = "desktop", test))]
@@ -1032,6 +1071,62 @@ impl Core {
             official_mode: self.official_view(),
         })
     }
+    /// The ChatGPT logins a quota can be asked with: the saved accounts in
+    /// their order under the names they were given, then the login Codex
+    /// holds where it is not one of them, under its address with all but the
+    /// first letter left out. Nothing is imported or written. The signed-in
+    /// account comes with the login as it is on disk, which Codex renews in
+    /// place; a file that cannot be read leaves the saved accounts as they
+    /// were saved.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn quota_logins(&mut self) -> Vec<QuotaLogin> {
+        let home = self.home();
+        // Under the gateway the file holds its key, not a login.
+        let polled = if crate::gateway::manages_auth(&self.data_dir, &home) {
+            None
+        } else {
+            self.auth_cache
+                .read_user(&home.join("auth.json"), PolledAuth::parse)
+                .ok()
+        };
+        let live = polled.and_then(|polled| {
+            let raw = std::str::from_utf8(polled.bytes.as_deref()?).ok()?;
+            let info = polled.info.as_ref()?.as_ref().ok()?;
+            Some((raw.to_owned(), info.clone()))
+        });
+        let signed_in = live
+            .as_ref()
+            .and_then(|(_, info)| self.matching_profile(info).ok().flatten());
+        let mut logins: Vec<_> = self
+            .store
+            .profiles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, profile)| {
+                let current = signed_in == Some(index);
+                let raw = live
+                    .as_ref()
+                    .filter(|_| current)
+                    .map(|(raw, _)| raw.as_str());
+                quota_login(
+                    Some(&profile.id),
+                    &profile.name,
+                    current,
+                    raw.unwrap_or(&profile.auth),
+                )
+            })
+            .collect();
+        if let (None, Some((raw, info))) = (signed_in, &live) {
+            // Nobody named this login, so its address is not shown whole.
+            let name = info
+                .email
+                .as_deref()
+                .and_then(crate::usage::claude_quota::masked)
+                .unwrap_or_else(|| "ChatGPT 账号".to_owned());
+            logins.extend(quota_login(None, &name, true, raw));
+        }
+        logins
+    }
     pub fn official_view(&mut self) -> crate::official::OfficialModeView {
         let home = self.home();
         self.official_cache.view(&self.data_dir, &home)
@@ -1199,6 +1294,58 @@ mod tests {
     }
     fn oauth(subject: &str, refresh: &str) -> String {
         json!({"auth_mode":"chatgpt","tokens":{"account_id":"workspace","id_token":jwt(subject),"access_token":jwt(subject),"refresh_token":refresh},"future":{"keep":true}}).to_string()
+    }
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn a_quota_is_asked_with_the_saved_logins_and_with_the_one_codex_holds_that_is_not_saved() {
+        let (_t, mut c) = setup();
+        let saved = c
+            .import_raw(&oauth("a", "old"), Some("work".into()))
+            .unwrap();
+        // Codex holds no login: the saved account is asked with as it was saved.
+        let logins = c.quota_logins();
+        assert_eq!(logins.len(), 1);
+        assert_eq!(
+            (logins[0].key.as_str(), logins[0].current),
+            (saved.as_str(), false)
+        );
+        assert_eq!(logins[0].name, "work");
+        assert_eq!(logins[0].workspace, "workspace");
+
+        // A login nobody saved comes last. It is known by whose it is, which
+        // is not shown, and named by its address with most of it left out.
+        std::fs::write(c.home().join("auth.json"), oauth("b", "other")).unwrap();
+        let logins = c.quota_logins();
+        let keys = |logins: &[QuotaLogin]| -> Vec<String> {
+            logins.iter().map(|login| login.key.clone()).collect()
+        };
+        assert_eq!(logins.len(), 2);
+        assert_eq!(logins[0].key, saved);
+        assert!(logins[1].current && !logins[0].current);
+        assert_eq!(logins[1].name, "t***@example.invalid");
+        let unsaved = logins[1].key.clone();
+        assert_eq!(unsaved.len(), 64);
+        assert!(!unsaved.contains("example") && unsaved != saved);
+        // The same login is known the same way the next time, and another
+        // one that is not saved either is not taken for it. Each file is of
+        // another length, which tells them apart within one tick of a clock.
+        assert_eq!(keys(&c.quota_logins()), keys(&logins));
+        std::fs::write(c.home().join("auth.json"), oauth("c", "another")).unwrap();
+        let other = c.quota_logins();
+        assert_eq!(other.len(), 2);
+        assert_ne!(other[1].key, unsaved);
+
+        // The saved account signed in to is the one marked, under its own ID.
+        std::fs::write(c.home().join("auth.json"), oauth("a", "renewed-login")).unwrap();
+        let logins = c.quota_logins();
+        assert_eq!(keys(&logins), [saved]);
+        assert!(logins[0].current);
+        // Nothing was imported or written on the way.
+        assert_eq!(c.store.profiles.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(c.home().join("auth.json")).unwrap(),
+            oauth("a", "renewed-login")
+        );
     }
     #[test]
     fn switches_preserve_config_and_unknown_auth_fields() {

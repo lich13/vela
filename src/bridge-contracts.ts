@@ -944,8 +944,9 @@ export type SharedCommands = {
     AntigravityUsageStats
   >;
   /**
-   * Asks for the quota of the signed-in account. `changed` says the saved
-   * periods are no longer the ones the statistics were read with.
+   * Asks for the quota of every saved account. `changed` says the saved
+   * periods are no longer the ones the statistics were read with; `error`
+   * is why the signed-in account could not be read.
    */
   refresh_antigravity_usage_quota: Call<
     None,
@@ -1188,6 +1189,8 @@ type SharedEvents = {
   "provider-tests": null;
   "usage-state": null;
   "pricing-state": null;
+  /** The quota periods saved for an Antigravity account changed. */
+  "antigravity-quota": null;
   /** The journal changed; the log page reloads rather than read the payload. */
   "app-event": unknown;
 };
@@ -1225,6 +1228,7 @@ export const sharedEvents = names<SharedEvents>()([
   "provider-tests",
   "usage-state",
   "pricing-state",
+  "antigravity-quota",
   "app-event",
 ]);
 export const desktopEvents = names<DesktopEvents>()([

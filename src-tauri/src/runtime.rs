@@ -46,6 +46,8 @@ pub(crate) enum Event<'a> {
     ProviderTests,
     Usage,
     Pricing,
+    /// The quota periods saved for an Antigravity account changed.
+    AntigravityQuota,
 }
 impl Event<'_> {
     pub(crate) const fn name(&self) -> &'static str {
@@ -63,6 +65,7 @@ impl Event<'_> {
             Self::ProviderTests => "provider-tests",
             Self::Usage => "usage-state",
             Self::Pricing => "pricing-state",
+            Self::AntigravityQuota => "antigravity-quota",
         }
     }
 }
@@ -84,7 +87,9 @@ impl serde::Serialize for Event<'_> {
             Self::Notice(message) => message.serialize(serializer),
             Self::ClaudeProfile(view) => view.serialize(serializer),
             Self::Journal(change) => change.serialize(serializer),
-            Self::ProviderTests | Self::Usage | Self::Pricing => serializer.serialize_unit(),
+            Self::ProviderTests | Self::Usage | Self::Pricing | Self::AntigravityQuota => {
+                serializer.serialize_unit()
+            }
         }
     }
 }
@@ -607,6 +612,13 @@ impl Runtime {
             while let Ok(()) | Err(RecvError::Lagged(_)) = usage.recv().await {
                 coalesce_gateway_events(&mut usage);
                 sink.emit(Event::Usage);
+            }
+        });
+        let mut quota = self.usage.subscribe_antigravity_quota();
+        let sink = self.sink.clone();
+        tokio::spawn(async move {
+            while let Ok(()) | Err(RecvError::Lagged(_)) = quota.recv().await {
+                sink.emit(Event::AntigravityQuota);
             }
         });
     }
