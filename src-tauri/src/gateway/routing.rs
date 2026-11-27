@@ -99,3 +99,21 @@ pub fn resource(method: &hyper::Method, path: &str) -> bool {
         .any(|prefix| under(&path, prefix))
         || (*method == hyper::Method::GET && path.starts_with("/responses/"))
 }
+/// What may be sent a second time when nothing says whether the first
+/// arrived: what a provider keeps as it is however often it is asked, and a
+/// call of a model, which makes nothing that would then be there twice.
+/// Whatever else is posted may have made a file, an upload or a batch already.
+pub fn repeatable(method: &hyper::Method, path: &str) -> bool {
+    method.is_idempotent()
+        || (*method == hyper::Method::POST
+            && (super::gemini::model(path).is_some()
+                || matches!(
+                    unversioned(path.trim_end_matches('/')).as_str(),
+                    "/responses"
+                        | "/responses/compact"
+                        | "/chat/completions"
+                        | "/messages"
+                        | "/messages/count_tokens"
+                        | "/alpha/search"
+                )))
+}

@@ -1596,6 +1596,14 @@ impl Exchange<'_> {
     fn endless(&self, route: &Route) -> bool {
         route.endless()
     }
+    /// A request already sent may be sent again on `route`'s own account:
+    /// endless mode and whole responses ask again for what can be asked
+    /// twice. What may have made something at the provider already ends as
+    /// it does without them.
+    fn asks_again(&self, route: &Route) -> bool {
+        (route.provider.buffer_complete_response || self.endless(route))
+            && routing::repeatable(&self.parts.method, self.parts.uri.path())
+    }
     /// `route` answers this request whole or not at all: a generation call
     /// to a provider that sends complete responses only.
     fn holds(&self, route: &Route) -> bool {
@@ -2790,7 +2798,7 @@ impl Exchange<'_> {
     }
     /// No response head arrived in time.
     async fn headers_timeout(&mut self, mut attempt: Attempt) -> End {
-        if self.endless(&attempt.route) {
+        if self.endless(&attempt.route) && self.asks_again(&attempt.route) {
             attempt
                 .protocol
                 .timeout("response_headers", self.first_byte_seconds());
@@ -2834,6 +2842,9 @@ impl Exchange<'_> {
             ) == Action::TryingNext;
         protocol.timeout("response_headers", self.first_byte_seconds());
         protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
+        // Endless mode counts no failure against its provider, also for a
+        // request it does not ask for again.
+        let counted = !self.endless(&route);
         self.last_error = Some(self.failover.report_failure(Some(&protocol), || {
             admission.permits.report(
                 self.gateway,
@@ -2850,12 +2861,16 @@ impl Exchange<'_> {
                 crate::events::Details {
                     phase: Some(crate::events::Phase::Headers),
                     local_code: Some(code::FIRST_BYTE_TIMEOUT.into()),
-                    counted_failure: Some(true),
+                    counted_failure: Some(counted),
                     ..protocol.observation.error.clone()
                 },
             )
         }));
-        admission.permits.failure(self.settings, None);
+        if counted {
+            admission.permits.failure(self.settings, None);
+        } else {
+            admission.permits.observed(self.settings);
+        }
         if retry_dsh {
             self.last_category = code::FIRST_BYTE_TIMEOUT;
             return End::Again;
@@ -3579,7 +3594,7 @@ impl Exchange<'_> {
         failure_kind: &'static str,
         probe: bool,
     ) -> End {
-        if attempt.route.provider.buffer_complete_response || self.endless(&attempt.route) {
+        if self.asks_again(&attempt.route) {
             let details = attempt.protocol.observation.error.clone();
             return self
                 .retry_here(
@@ -3592,6 +3607,9 @@ impl Exchange<'_> {
                 )
                 .await;
         }
+        // What endless mode does not ask for again leaves the provider it was
+        // fixed to: the rules without it decide where the request goes.
+        self.unpin(false);
         let Attempt {
             mut admission,
             route,
@@ -3600,6 +3618,7 @@ impl Exchange<'_> {
             ..
         } = attempt;
         self.failover.failure(super::failover::Failure::Transport);
+        let counted = !self.endless(&route);
         let fallback = super::attempt::retained_fallback(
             self.gateway,
             &route.provider.id,
@@ -3628,11 +3647,15 @@ impl Exchange<'_> {
             crate::events::Details {
                 phase: Some(crate::events::Phase::Response),
                 local_code: Some(failure_kind.into()),
-                counted_failure: Some(true),
+                counted_failure: Some(counted),
                 ..protocol.observation.error.clone()
             },
         );
-        admission.permits.failure(self.settings, None);
+        if counted {
+            admission.permits.failure(self.settings, None);
+        } else {
+            admission.permits.observed(self.settings);
+        }
         let retry_delay = if failure_kind == code::STREAM_INTERRUPTED
             && self.plan.fixed_dsh.as_deref() == Some(&route.provider.id)
             && !self.plan.unknown_affinity
@@ -4178,9 +4201,7 @@ impl Exchange<'_> {
         }
         if opening.failed
             && (attempt.route.client_id == super::ClientId::Dsh
-                || ((attempt.route.provider.buffer_complete_response
-                    || self.endless(&attempt.route))
-                    && !attempt.protocol.explicit_failure())
+                || (self.asks_again(&attempt.route) && !attempt.protocol.explicit_failure())
                 || super::attempt::transport_retry(
                     opening.prefix_bytes != 0,
                     attempt.protocol.transport_failure(),

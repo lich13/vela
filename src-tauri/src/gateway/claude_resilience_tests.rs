@@ -463,6 +463,80 @@ async fn endless_header_timeout_is_omitted() {
 }
 
 #[tokio::test]
+async fn endless_mode_asks_once_for_what_a_header_timeout_may_have_made_already() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    let upstream = server(move |_, _| {
+        let seen = seen.clone();
+        async move {
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(full(r#"{"id":"file-fixture"}"#))
+                .unwrap()
+        }
+    })
+    .await;
+    let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
+    options(&f, false, true, false);
+    let mut settings = f.gateway.view().settings;
+    settings.first_byte_seconds = 1;
+    f.edit(Edit::Settings { settings });
+    f.start().await;
+    // A file posted and not answered in time may be there: it is not posted again.
+    let response = request(&f.gateway, "/v1/files", br#"{"purpose":"fixture"}"#).await;
+    assert_eq!(response.status(), 504);
+    let bytes = response_bytes(response).await;
+    assert!(String::from_utf8_lossy(&bytes).contains("FIRST_BYTE_TIMEOUT"));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    // Endless mode counts no failure against its provider.
+    assert_eq!(f.gateway.view().providers[0].health.failures, 0);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn endless_mode_asks_once_for_what_was_answered_and_then_fell_silent() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    let upstream = server(move |_, _| {
+        let seen = seen.clone();
+        async move {
+            let first = seen.fetch_add(1, Ordering::SeqCst) == 0;
+            let frames = async_stream::stream! {
+                if first {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                yield Ok::<_, BoxError>(Frame::data(Bytes::from_static(br#"{"id":"file-fixture"}"#)));
+            };
+            Response::builder()
+                .status(201)
+                .header("content-type", "application/json")
+                .body(StreamBody::new(frames).boxed_unsync())
+                .unwrap()
+        }
+    })
+    .await;
+    let f = Fixture::new(ClientId::Claude, &[upstream.url("/v1")]).await;
+    options(&f, false, true, false);
+    let mut settings = f.gateway.view().settings;
+    settings.first_byte_seconds = 1;
+    f.edit(Edit::Settings { settings });
+    f.start().await;
+    // The provider said the file was made and sent nothing after: it is
+    // there, and is not posted again.
+    let response = request(&f.gateway, "/v1/files", br#"{"purpose":"fixture"}"#).await;
+    // As without endless mode: the answer's head goes on, and it breaks off.
+    assert_eq!(response.status(), 201);
+    assert!(response.into_body().collect().await.is_err());
+    settled(&f).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(f.gateway.view().providers[0].health.failures, 0);
+    f.stop().await;
+}
+
+#[tokio::test]
 async fn endless_permanent_rejections_stop_and_consumed_usage_is_kept() {
     for (status, error, billed) in [
         (401, "authentication_error", false),
