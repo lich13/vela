@@ -79,12 +79,14 @@ pub async fn get_usage_curves(r: &Runtime, filter: Filter) -> Result<super::curv
     tokio::task::spawn_blocking(move || {
         let at = now();
         let seconds = |ms: i64| ms.max(0) as u64 / 1000;
-        let (since, failures) = journal.upstream_failures(
+        let (since, failures, error) = journal.upstream_failures(
             seconds(filter.start.unwrap_or(0)),
             seconds(filter.end.unwrap_or(at)),
         );
         let since = i64::try_from(since.saturating_mul(1000)).unwrap_or(i64::MAX);
-        s.read(|db| db.curves(&filter, since, &failures, at))
+        let mut curves = s.read(|db| db.curves(&filter, since, &failures, at))?;
+        curves.journal_error = error;
+        Ok(curves)
     })
     .await
     .map_err(|_| failure("用量曲线查询中断"))?

@@ -1849,10 +1849,16 @@ impl Service {
             now().saturating_sub(RETENTION),
         )
     }
-    /// The failed upstream attempts of the rows that reach into `from..=to`,
-    /// and the time from which the journal holds them all: what is older has
-    /// been removed, by its age or by clearing the journal.
-    pub fn upstream_failures(&self, from: u64, to: u64) -> (u64, Vec<UpstreamFailure>) {
+    /// The time from which the journal holds every failed upstream attempt,
+    /// what is older having been removed by its age or by clearing the
+    /// journal; those of the rows that reach into `from..=to`; and what the
+    /// journal says went wrong with it, if anything. Rows it could not read
+    /// and events it could not take are not among them.
+    pub fn upstream_failures(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> (u64, Vec<UpstreamFailure>, Option<String>) {
         let j = self.journal.lock();
         let since = now()
             .saturating_sub(RETENTION)
@@ -1860,6 +1866,7 @@ impl Service {
         (
             since,
             upstream_failures(j.records.iter().map(|r| &**r), from.max(since), to),
+            j.error.clone(),
         )
     }
     pub fn query(&self, f: Filter) -> Page {
@@ -2496,6 +2503,29 @@ mod diagnostic_record_tests {
                 "{reason:?} {status:?}"
             );
         }
+    }
+    #[test]
+    fn upstream_failures_come_with_where_the_journal_begins_and_what_it_says_went_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(dir.path());
+        let week = now().saturating_sub(RETENTION);
+        let (since, failures, error) = service.upstream_failures(0, u64::MAX);
+        assert!((week..=week + 5).contains(&since));
+        assert!(failures.is_empty());
+        assert_eq!(error, None);
+        // Cleared an hour ago, and since then too full to take an event.
+        let cleared = now() - 3600;
+        {
+            let mut journal = service.journal.lock();
+            journal.cleared = Some(Arc::new(ClearMark {
+                at: cleared,
+                files: Default::default(),
+            }));
+            journal.error = Some("日志队列已满，部分事件未记录".into());
+        }
+        let (since, _, error) = service.upstream_failures(0, u64::MAX);
+        assert_eq!(since, cleared);
+        assert_eq!(error.as_deref(), Some("日志队列已满，部分事件未记录"));
     }
     #[test]
     fn distinct_error_codes_statuses_and_actions_do_not_merge() {

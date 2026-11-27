@@ -191,6 +191,10 @@ pub struct Curves {
     /// From when failures are known. The bucket this falls within counts
     /// what succeeded and what failed from here on.
     pub failures_since: i64,
+    /// What the journal says went wrong with it, if anything: failures it
+    /// could not read or was never told are then missing from the counts.
+    /// The records know nothing of it; whoever asked the journal says so.
+    pub journal_error: Option<String>,
     /// The providers that had traffic or failed, the most rate-limited first.
     /// Each comes with its buckets, so that choosing among them asks nothing
     /// more.
@@ -499,6 +503,7 @@ pub fn read(
         end: grid.end(last),
         step,
         failures_since,
+        journal_error: None,
         providers,
     })
 }

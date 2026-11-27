@@ -434,6 +434,56 @@ fn every_provider_comes_with_its_own_buckets() {
 }
 
 #[test]
+fn the_answer_names_its_parts_as_the_page_reads_them() {
+    let (_dir, store) = store();
+    let curves = store.curves(&range(), 0, &journal(), BASE + DAY).unwrap();
+    let json = serde_json::to_value(&curves).unwrap();
+    let names = |value: &serde_json::Value| {
+        let mut names: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        names(&json),
+        [
+            "end",
+            "failuresSince",
+            "journalError",
+            "providers",
+            "start",
+            "step"
+        ]
+    );
+    let provider = &json["providers"][1];
+    assert_eq!(
+        names(provider),
+        [
+            "buckets",
+            "failures",
+            "firstToken",
+            "id",
+            "ok",
+            "requests",
+            "summedUntil",
+            "trend"
+        ]
+    );
+    assert_eq!(
+        names(&provider["buckets"][0]),
+        ["at", "failures", "firstToken", "ok"]
+    );
+    assert_eq!(
+        names(&provider["failures"]),
+        ["broken", "limited", "rejected", "server"]
+    );
+    assert_eq!(names(&provider["firstToken"]), ["p50", "p90", "samples"]);
+    // The journal has said nothing went wrong, and every request is kept
+    // one by one.
+    assert!(json["journalError"].is_null());
+    assert!(provider["summedUntil"].is_null());
+}
+
+#[test]
 fn nothing_is_said_of_failures_before_the_journal_reaches() {
     let (_dir, store) = store();
     let since = BASE + 30 * MINUTE;
