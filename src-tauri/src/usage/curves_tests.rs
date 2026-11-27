@@ -522,6 +522,29 @@ fn nothing_is_said_of_failures_before_the_journal_reaches() {
 }
 
 #[test]
+fn a_journal_that_begins_after_the_range_knows_none_of_it() {
+    let (_dir, store) = store();
+    // The range stops two minutes into a bucket, and the journal begins a
+    // minute later in the same one.
+    let filter = Filter {
+        end: Some(BASE + 32 * MINUTE - 1),
+        ..range()
+    };
+    let curves = store
+        .curves(&filter, BASE + 33 * MINUTE, &journal(), BASE + DAY)
+        .unwrap();
+    assert_eq!(curves.end, BASE + 35 * MINUTE);
+    // Nothing drawn is of a time the journal has, and it says so: it is
+    // not left to begin before the last bucket ends.
+    assert_eq!(curves.failures_since, curves.end);
+    for provider in &curves.providers {
+        assert_eq!((provider.ok, provider.failures.total()), (0, 0));
+        assert!(provider.buckets.iter().all(|b| b.failures.is_none()));
+    }
+    assert_eq!(of(&curves, A).requests, 4);
+}
+
+#[test]
 fn the_bucket_the_journal_begins_within_counts_from_where_it_begins() {
     let (_dir, store) = store();
     // After the first of the three requests of the first five minutes.

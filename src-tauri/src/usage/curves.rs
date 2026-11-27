@@ -189,7 +189,8 @@ pub struct Curves {
     pub end: i64,
     pub step: i64,
     /// From when failures are known. The bucket this falls within counts
-    /// what succeeded and what failed from here on.
+    /// what succeeded and what failed from here on. At `end` or after it,
+    /// none of the range is known.
     pub failures_since: i64,
     /// What the journal says went wrong with it, if anything: failures it
     /// could not read or was never told are then missing from the counts.
@@ -498,11 +499,19 @@ pub fn read(
             .cmp(&(a.failures.limited, a.failures.total(), a.requests))
             .then_with(|| a.id.cmp(&b.id))
     });
+    let end = grid.end(last);
     Ok(Curves {
         start: first,
-        end: grid.end(last),
+        end,
         step,
-        failures_since,
+        // A journal that begins after the range asked for knows nothing of
+        // it, though it may begin before the last bucket ends. Said to begin
+        // no earlier than that end, it leaves none of what is drawn known.
+        failures_since: if failures_since > asked_end {
+            failures_since.max(end)
+        } else {
+            failures_since
+        },
         journal_error: None,
         providers,
     })
