@@ -115,6 +115,8 @@ jobs:
           rustup toolchain install
           rustup target add ${{ matrix.target }}
           pnpm install --frozen-lockfile
+      # Nothing on main builds a bundle, so this is saved only when the
+      # workflow is run by hand there. A tag reads it and saves none of its own.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
@@ -240,6 +242,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install repository Rust toolchain
         run: rustup toolchain install
+      # Saved as the bundles' is: by a run of this workflow on main.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
