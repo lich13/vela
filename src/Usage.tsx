@@ -244,6 +244,8 @@ export default function Usage({
     quotaHeard = useRef(0),
     stateSequence = useRef(0),
     curveSequence = useRef(0),
+    // The time and client of the curves being read, null while none are.
+    curveFlight = useRef<string | null>(null),
     detailSequence = useRef(0);
   useEffect(
     () => () => {
@@ -318,27 +320,39 @@ export default function Usage({
   // of the request, so the curves follow the time and the client alone. Every
   // provider's come at once: choosing one among them reads nothing again.
   const curveScope = [range, from, to, live, client].join("|");
-  const loadCurves = useCallback(async () => {
-    const id = ++curveSequence.current;
-    setCurvesBusy(true);
-    try {
-      const data = await request("get_usage_curves", {
-        filter: { ...span(), client: client || undefined },
-      });
-      if (id === curveSequence.current) {
-        setCurves({ scope: curveScope, data });
-        setCurvesLost(null);
-        setError("");
+  const loadCurves = useCallback(
+    async (fresh = false) => {
+      // A range that ends now ends a little later each time it is asked for,
+      // so no two readings of it are one request. A reading that is only the
+      // next in turn leaves the one under way to answer: taking its place
+      // each time would leave a reading slower than the turns never answered.
+      if (!fresh && curveFlight.current === curveScope) return;
+      const id = ++curveSequence.current;
+      curveFlight.current = curveScope;
+      setCurvesBusy(true);
+      try {
+        const data = await request("get_usage_curves", {
+          filter: { ...span(), client: client || undefined },
+        });
+        if (id === curveSequence.current) {
+          setCurves({ scope: curveScope, data });
+          setCurvesLost(null);
+          setError("");
+        }
+      } catch (e) {
+        if (id === curveSequence.current) {
+          setCurvesLost(curveScope);
+          setError(errorOf(e).message);
+        }
+      } finally {
+        if (id === curveSequence.current) {
+          curveFlight.current = null;
+          setCurvesBusy(false);
+        }
       }
-    } catch (e) {
-      if (id === curveSequence.current) {
-        setCurvesLost(curveScope);
-        setError(errorOf(e).message);
-      }
-    } finally {
-      if (id === curveSequence.current) setCurvesBusy(false);
-    }
-  }, [span, client, request, curveScope]);
+    },
+    [span, client, request, curveScope],
+  );
   const loadRows = useCallback(async () => {
     const id = ++rowsSequence.current;
     setRowsBusy(true);
@@ -437,7 +451,7 @@ export default function Usage({
       return Promise.all([
         ...(totalled ? [loadOverview()] : []),
         ...(tab === "requests" ? [loadRows()] : []),
-        ...(curved ? [loadCurves()] : []),
+        ...(curved ? [loadCurves(fresh)] : []),
         ...(independent ? [loadClientStats()] : []),
         ...(tab === "claude" ? [loadClaudeQuota(refreshQuota)] : []),
       ]);
@@ -468,6 +482,7 @@ export default function Usage({
     if (visible && curved) void loadCurves();
     return () => {
       curveSequence.current++;
+      curveFlight.current = null;
       setCurvesBusy(false);
     };
   }, [loadCurves, visible, curved]);

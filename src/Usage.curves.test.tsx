@@ -1,7 +1,14 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UsageCurves, UsageFilter } from "./usage-types";
 
 import { mock } from "./test-bridge";
@@ -311,14 +318,22 @@ describe("provider curves", () => {
 });
 
 describe("the curves tab of the usage page", () => {
-  // What the instance answers a reading of the curves with.
+  // What the instance answers a reading of the curves with, and its settings.
   let answer: () => UsageCurves | Promise<UsageCurves>;
+  let settings: { recording: boolean; refreshSeconds: number };
   const asked = () =>
     mock.command.mock.calls.filter(
       ([command]) => command === "get_usage_curves",
     );
+  const flush = () =>
+    act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  afterEach(() => vi.useRealTimers());
   beforeEach(() => {
     answer = () => fixture();
+    settings = { recording: true, refreshSeconds: 0 };
     mock.command.mockReset();
     mock.confirm.mockReset();
     mock.listeners.clear();
@@ -366,11 +381,10 @@ describe("the curves tab of the usage page", () => {
           case "get_usage_state":
             return {
               settings: {
-                recording: true,
                 autoSync: true,
-                refreshSeconds: 0,
                 multiplier: "1",
                 pricingModel: "response",
+                ...settings,
               },
               syncing: false,
               reports: {},
@@ -461,5 +475,50 @@ describe("the curves tab of the usage page", () => {
       screen.getByRole("heading", { name: "Fixture Limited" }),
     ).toBeVisible();
     expect(screen.queryByText(/曲线没有读到/)).not.toBeInTheDocument();
+  });
+
+  it("leaves a reading under way to answer when the next refresh comes round", async () => {
+    vi.useFakeTimers();
+    settings.refreshSeconds = 5;
+    const answers: ((curves: UsageCurves) => void)[] = [];
+    answer = () => new Promise((resolve) => answers.push(resolve));
+    render(<Usage />);
+    await flush();
+    fireEvent.click(screen.getByRole("tab", { name: "曲线" }));
+    await flush();
+    expect(asked()).toHaveLength(1);
+    // The range ends now, later at each refresh: each would be a new request.
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(asked()).toHaveLength(1);
+    await act(async () => answers[0](fixture()));
+    expect(
+      screen.getByRole("heading", { name: "Fixture Limited" }),
+    ).toBeVisible();
+    // Answered, the next refresh reads them again.
+    await act(async () => vi.advanceTimersByTime(5_000));
+    expect(asked()).toHaveLength(2);
+    // Another client's are another reading, whatever is under way.
+    fireEvent.change(screen.getByLabelText("用量客户端"), {
+      target: { value: "codex" },
+    });
+    await flush();
+    expect(asked()).toHaveLength(3);
+    expect((asked()[2][1] as { filter: UsageFilter }).filter.client).toBe(
+      "codex",
+    );
+    // The answer for every client comes late and is not Codex's.
+    await act(async () => answers[1](fixture({ providers: [] })));
+    expect(
+      screen.queryByText(/这段时间没有经过网关的请求/),
+    ).not.toBeInTheDocument();
+    await act(async () =>
+      answers[2](fixture({ providers: fixture().providers.slice(1) })),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Fixture Steady" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /Fixture Limited/ }),
+    ).not.toBeInTheDocument();
   });
 });
