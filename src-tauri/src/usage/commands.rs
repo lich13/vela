@@ -70,9 +70,9 @@ pub async fn get_usage_dashboard(r: &Runtime, filter: Filter) -> Result<store::D
         .await
         .map_err(|_| failure("用量查询中断"))?
 }
-/// How often each provider's attempts failed over the filter's range, and
-/// the curves of the one it names. The journal says what failed, the usage
-/// records what succeeded and how soon.
+/// How often each provider's attempts failed and how soon it answered, bucket
+/// by bucket over the filter's time and client. The journal says what failed,
+/// the usage records what succeeded and how soon.
 pub async fn get_usage_curves(r: &Runtime, filter: Filter) -> Result<super::curves::Curves> {
     let s = r.usage.clone();
     let journal = r.diagnostics.clone();
