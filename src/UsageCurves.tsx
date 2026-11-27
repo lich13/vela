@@ -769,6 +769,14 @@ export default function UsageCurvesPanel({
   const attempts = chosen ? chosen.ok + failed : 0;
   const daily = curves.step >= day;
   const edge = (at: number) => (daily ? date(at) : `${date(at)} ${clock(at)}`);
+  // Before the journal begins no failure is known, which is not none. Where
+  // it begins inside the range, what failed and what succeeded beside it are
+  // counted from there on, and the figures say from when.
+  const known = curves.failuresSince < curves.end;
+  const since =
+    known && curves.failuresSince > curves.start
+      ? `自 ${edge(curves.failuresSince)} 起`
+      : null;
   return (
     <section className="usage-curves" aria-busy={stale}>
       <aside className="curve-rail" aria-label="供应商">
@@ -853,29 +861,39 @@ export default function UsageCurvesPanel({
                 </button>
               </div>
             </header>
-            <dl className="curve-figures">
+            <dl className="curve-figures" data-since={since ? "" : undefined}>
               <div>
                 <dt>错误率</dt>
                 <dd>
                   <strong>
-                    {percent(attempts ? failed / attempts : null)}
+                    {known
+                      ? percent(attempts ? failed / attempts : null)
+                      : "不可知"}
                   </strong>
                   <span>
-                    {attempts
-                      ? `${numeric(failed)} / ${numeric(attempts)} 次尝试失败`
-                      : "没有已知结果的尝试"}
+                    {!known
+                      ? "早于运行日志"
+                      : attempts
+                        ? `${numeric(failed)} / ${numeric(attempts)} 次尝试失败`
+                        : "没有已知结果的尝试"}
                   </span>
+                  {since && <span>{since}</span>}
                 </dd>
               </div>
               <div>
                 <dt>429 限流</dt>
                 <dd>
-                  <strong>{numeric(chosen.failures.limited)}</strong>
+                  <strong>
+                    {known ? numeric(chosen.failures.limited) : "不可知"}
+                  </strong>
                   <span>
-                    {failed
-                      ? `占失败的 ${percent(chosen.failures.limited / failed)}`
-                      : "没有失败"}
+                    {!known
+                      ? "早于运行日志"
+                      : failed
+                        ? `占失败的 ${percent(chosen.failures.limited / failed)}`
+                        : "没有失败"}
                   </span>
+                  {since && <span>{since}</span>}
                 </dd>
               </div>
               <div>
@@ -898,30 +916,36 @@ export default function UsageCurvesPanel({
               </div>
             </dl>
             <div className="curve-mix">
-              <div className="curve-mix-bar" aria-hidden="true">
-                {kinds.map(
-                  ({ key }) =>
-                    chosen.failures[key] > 0 && (
-                      <i
-                        key={key}
-                        data-kind={key}
-                        style={{ flexGrow: chosen.failures[key] }}
-                      />
-                    ),
-                )}
-              </div>
-              <ul className="curve-legend" aria-label="失败构成">
-                {kinds.map(({ key, label }) => (
-                  <li key={key} data-kind={key}>
-                    <i aria-hidden="true" />
-                    {label}
-                    <b>{numeric(chosen.failures[key])}</b>
-                    {failed > 0 && (
-                      <span>{percent(chosen.failures[key] / failed)}</span>
+              {known ? (
+                <>
+                  <div className="curve-mix-bar" aria-hidden="true">
+                    {kinds.map(
+                      ({ key }) =>
+                        chosen.failures[key] > 0 && (
+                          <i
+                            key={key}
+                            data-kind={key}
+                            style={{ flexGrow: chosen.failures[key] }}
+                          />
+                        ),
                     )}
-                  </li>
-                ))}
-              </ul>
+                  </div>
+                  <ul className="curve-legend" aria-label="失败构成">
+                    {kinds.map(({ key, label }) => (
+                      <li key={key} data-kind={key}>
+                        <i aria-hidden="true" />
+                        {label}
+                        <b>{numeric(chosen.failures[key])}</b>
+                        {failed > 0 && (
+                          <span>{percent(chosen.failures[key] / failed)}</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p>这段时间早于运行日志，失败构成不可知</p>
+              )}
             </div>
             <Stage
               key={chosen.id}

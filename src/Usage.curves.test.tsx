@@ -137,6 +137,9 @@ describe("provider curves", () => {
     );
     expect(mix.getByText("中断").closest("li")).toHaveTextContent("中断14.8%");
     expect(screen.getByText("429 峰值 18 次")).toBeVisible();
+    // The journal reaches the whole range: nothing says from when it counts.
+    expect(figures().queryByText(/^自 /)).not.toBeInTheDocument();
+    expect(screen.queryByText("早于运行日志")).not.toBeInTheDocument();
     // Two buckets side by side are one stretch of line and the one an hour
     // later another: no line is drawn across the time nothing ended in.
     const total = container.querySelector('.curve-line[data-line="total"]');
@@ -215,6 +218,14 @@ describe("provider curves", () => {
     const { figures } = panel(curves);
     expect(screen.getByText("早于运行日志")).toBeVisible();
     expect(figures().getByText("1 / 2 次尝试失败")).toBeVisible();
+    // The rate and the 429s are of the time since the journal began, and say
+    // so; the first tokens are of the whole range.
+    const since = figures().getAllByText("自 10-08 02:00 起");
+    expect(
+      since.map(
+        (line) => line.closest("div")?.querySelector("dt")?.textContent,
+      ),
+    ).toEqual(["错误率", "429 限流"]);
     await user.click(screen.getByRole("button", { name: "表格" }));
     const rows = screen.getAllByRole("row").slice(1);
     expect(rows).toHaveLength(3);
@@ -223,6 +234,37 @@ describe("provider curves", () => {
       "00:00–00:308不可知不可知不可知不可知不可知1.20s3.00s8",
     );
     expect(rows[2]).toHaveTextContent("02:00–02:301000150%——0");
+  });
+
+  it("does not say none failed where the journal reaches none of the range", () => {
+    // The journal begins as the range ends.
+    const curves = fixture({ failuresSince: start + 48 * half });
+    for (const provider of curves.providers) {
+      provider.ok = 0;
+      provider.failures = none;
+      provider.trend = provider.trend.map(() => null);
+      for (const bucket of provider.buckets) bucket.failures = null;
+    }
+    const { figures } = panel(curves);
+    const unknown = figures().getAllByText("不可知");
+    expect(
+      unknown.map(
+        (value) => value.closest("div")?.querySelector("dt")?.textContent,
+      ),
+    ).toEqual(["错误率", "429 限流"]);
+    expect(figures().getAllByText("早于运行日志")).toHaveLength(2);
+    expect(figures().queryByText("没有失败")).not.toBeInTheDocument();
+    expect(figures().queryByText(/^自 /)).not.toBeInTheDocument();
+    // No four kinds of failure with none of each.
+    expect(
+      screen.queryByRole("list", { name: "失败构成" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("这段时间早于运行日志，失败构成不可知"),
+    ).toBeVisible();
+    // What the records hold is told all the same.
+    expect(figures().getByText("1.20s")).toBeVisible();
+    expect(figures().getByText("10 个样本")).toBeVisible();
   });
 
   it("marks the time only the chosen provider's sums by day are left of", () => {
