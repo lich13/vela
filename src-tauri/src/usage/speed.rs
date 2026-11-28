@@ -9,6 +9,13 @@
 //! was spent is shown for as much as it was. A request ran its cost up while
 //! it was answered, so it is weighed over that stretch and not at its end,
 //! and a long answer does not read as though it had been spent at once.
+//!
+//! What a gateway recorded is known as it ends. What is read from a client's
+//! sessions is known a reading later, and all of a minute at once: weighed
+//! at the present, spending that held steady would fall to a third between
+//! two readings and leap back with the next. So it is weighed at the moment
+//! its sessions were last read, and stands there until they are read again;
+//! sessions that go unread stand for `HOLD` and fade from then on.
 use super::{antigravity::classify_model_family, storage_v12, store::db};
 use crate::storage::Result;
 use rusqlite::{params, Connection};
@@ -19,6 +26,9 @@ use std::{collections::BTreeMap, path::Path};
 const WINDOW: f64 = 300_000.0;
 /// How long a request takes to fall to about a third of what it first read.
 const FADE: f64 = 60_000.0;
+/// How long the last reading of a client's sessions stands for the present,
+/// in milliseconds: the minute until the next and what that takes to read.
+const HOLD: i64 = 90_000;
 const HOUR: f64 = 3_600_000.0;
 /// The reading the dial ends at, in USD per hour.
 const FULL: f64 = 200.0;
@@ -124,22 +134,29 @@ impl Spent {
     }
 }
 
-/// The reading at `now`. `data` is where the Antigravity accounts are kept:
-/// a request of Antigravity's that names no account is the one's that was
-/// signed in when it ended, as in the account statistics.
-pub(super) fn read(c: &Connection, data: Option<&Path>, now: i64) -> Result<Speed> {
+/// The reading at `now`. `sessions` is when the reading of each client's
+/// sessions that last came to an end began, by the client's name. `data` is
+/// where the Antigravity accounts are kept: a request of Antigravity's that
+/// names no account is the one's that was signed in when it ended, as in the
+/// account statistics.
+pub(super) fn read(
+    c: &Connection,
+    data: Option<&Path>,
+    now: i64,
+    sessions: &BTreeMap<String, i64>,
+) -> Result<Speed> {
     let mut statement = db(c.prepare_cached(
         "SELECT usage_label(r.client),usage_value(p.value),usage_value(m.value),
          CASE WHEN r.client=usage_label('antigravity') THEN s.value END,a.cost,
          coalesce(a.unpriced>0 AND coalesce(a.input,0)+coalesce(a.output,0)+coalesce(a.cache_read,0)+coalesce(a.cache_write,0)>0,0),
-         a.duration,r.time
+         a.duration,r.time,r.source<>0
          FROM v12_records r JOIN v12_all_attempts a ON a.owner=r.rid
          LEFT JOIN v12_dictionary p ON p.id=a.provider
          LEFT JOIN v12_dictionary m ON m.id=a.model
          LEFT JOIN v12_dictionary s ON s.id=a.shape
          WHERE r.effective=1 AND r.time>?1 AND r.time<=?2",
     ))?;
-    let mut rows = db(statement.query(params![now - WINDOW as i64, now]))?;
+    let mut rows = db(statement.query(params![now - HOLD - WINDOW as i64, now]))?;
     let mut total = Spent::default();
     let mut clients = [Spent::default(); CLIENTS.len()];
     let mut accounts: BTreeMap<String, BTreeMap<&'static str, Spent>> = BTreeMap::new();
@@ -148,12 +165,23 @@ pub(super) fn read(c: &Connection, data: Option<&Path>, now: i64) -> Result<Spee
     while let Some(row) = db(rows.next())? {
         let client: String = db(row.get(0))?;
         let ended: i64 = db(row.get(7))?;
+        // The moment it is weighed at: one it had not ended by does not know
+        // of it yet, and one a window later no longer does.
+        let known = if db(row.get(8))? {
+            let read = sessions.get(&client).copied().unwrap_or(i64::MIN);
+            read.clamp(now - HOLD, now)
+        } else {
+            now
+        };
+        if ended > known || known - ended >= WINDOW as i64 {
+            continue;
+        }
         let took = db(row.get::<_, Option<i64>>(6))?.unwrap_or(0).max(0);
         let cost = db(row.get::<_, Option<String>>(4))?
             .and_then(|cost| cost.parse::<f64>().ok())
             .filter(|cost| cost.is_finite() && *cost > 0.0)
             .unwrap_or(0.0);
-        let per_ms = cost * share((now - ended) as f64, took as f64);
+        let per_ms = cost * share((known - ended) as f64, took as f64);
         let unpriced: bool = db(row.get(5))?;
         total.add(per_ms, unpriced);
         let Some(index) = CLIENTS.iter().position(|id| *id == client) else {
@@ -195,36 +223,54 @@ pub(super) fn read(c: &Connection, data: Option<&Path>, now: i64) -> Result<Spee
                 .add(per_ms, unpriced);
         }
     }
-    let named = |id: &str, spent: Spent| Named {
-        id: id.into(),
-        rate: spent.rate(),
-    };
-    Ok(Speed {
-        total: total.rate(),
-        at: now,
-        dial: MARKS
-            .iter()
-            .map(|mark| Mark {
-                label: mark.to_string(),
-                level: level(f64::from(*mark)),
-            })
-            .collect(),
-        clients: CLIENTS
-            .iter()
-            .zip(clients)
-            .map(|(id, spent)| named(id, spent))
-            .collect(),
-        accounts: accounts
-            .into_iter()
-            .map(|(id, tracks)| Account {
-                id,
-                tracks: tracks
-                    .into_iter()
-                    .map(|(track, spent)| named(track, spent))
-                    .collect(),
-            })
-            .collect(),
-    })
+    Ok(Speed::of(now, total, clients, accounts))
+}
+
+impl Speed {
+    /// The reading of nothing being spent: what a dial shows before it has
+    /// been read.
+    #[cfg(any(all(feature = "desktop", target_os = "macos"), test))]
+    pub(crate) fn idle(at: i64) -> Self {
+        Self::of(at, Spent::default(), Default::default(), BTreeMap::new())
+    }
+
+    fn of(
+        at: i64,
+        total: Spent,
+        clients: [Spent; CLIENTS.len()],
+        accounts: BTreeMap<String, BTreeMap<&'static str, Spent>>,
+    ) -> Self {
+        let named = |id: &str, spent: Spent| Named {
+            id: id.into(),
+            rate: spent.rate(),
+        };
+        Self {
+            total: total.rate(),
+            at,
+            dial: MARKS
+                .iter()
+                .map(|mark| Mark {
+                    label: mark.to_string(),
+                    level: level(f64::from(*mark)),
+                })
+                .collect(),
+            clients: CLIENTS
+                .iter()
+                .zip(clients)
+                .map(|(id, spent)| named(id, spent))
+                .collect(),
+            accounts: accounts
+                .into_iter()
+                .map(|(id, tracks)| Account {
+                    id,
+                    tracks: tracks
+                        .into_iter()
+                        .map(|(track, spent)| named(track, spent))
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]

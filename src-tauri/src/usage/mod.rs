@@ -92,6 +92,9 @@ struct Inner {
     pending_error: Mutex<Option<String>>,
     syncing: Mutex<bool>,
     report: Mutex<std::collections::BTreeMap<String, sessions::Report>>,
+    /// When the reading of each client's sessions that last came to an end
+    /// began: all that had ended by then has been read.
+    sessions_read: Mutex<std::collections::BTreeMap<String, i64>>,
     events: broadcast::Sender<()>,
     antigravity_quota: OneAtATime<Result<QuotaRound>>,
     /// Told whenever an Antigravity account's saved quota periods change.
@@ -319,6 +322,7 @@ impl Service {
             pending_error: Mutex::new(None),
             syncing: Mutex::new(false),
             report: Mutex::new(Default::default()),
+            sessions_read: Mutex::new(Default::default()),
             events,
             antigravity_quota: Default::default(),
             antigravity_quota_events,
@@ -596,7 +600,9 @@ impl Service {
     }
     /// How fast the clients are spending right now.
     pub(crate) fn speed(&self) -> Result<speed::Speed> {
-        self.read(|store| store.speed(now()))
+        // Taken first: what it promises has been written by then.
+        let sessions = self.0.sessions_read.lock().clone();
+        self.read(|store| store.speed(now(), &sessions))
     }
     pub fn maintain(&self) -> Result<()> {
         let result = self.query(|store| {
@@ -645,6 +651,7 @@ impl Service {
                 if rebuild.is_some_and(|s| s != client) {
                     continue;
                 }
+                let began = now();
                 let outcome = (|| {
                     let root = root?;
                     let reader = store::Store::reader(&self.0.directory)?;
@@ -667,6 +674,7 @@ impl Service {
                 })();
                 match outcome {
                     Ok(report) => {
+                        self.0.sessions_read.lock().insert(client.clone(), began);
                         self.0.report.lock().insert(client.clone(), report);
                     }
                     Err(error) => {

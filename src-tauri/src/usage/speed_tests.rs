@@ -1,4 +1,4 @@
-// 覆盖即时速率：衰减与窗口、按耗时摊开、各客户端与合计、Antigravity 账号与轨道、未定价、返回字段。
+// 覆盖即时速率：衰减与窗口、按耗时摊开、会话按上次读取时点计、各客户端与合计、Antigravity 账号与轨道、未定价、返回字段。
 use super::super::{model::*, store::Store};
 use super::{level, Rate, Speed, FULL};
 use serde_json::json;
@@ -61,6 +61,10 @@ fn store(records: &[Record]) -> (tempfile::TempDir, Store) {
     store.write_batch(records, None).unwrap();
     (dir, store)
 }
+/// No client's sessions have been read: what the gateways record needs none.
+fn unread() -> BTreeMap<String, i64> {
+    BTreeMap::new()
+}
 fn per_hour(rate: &Rate) -> f64 {
     rate.cost_per_hour.parse().unwrap()
 }
@@ -92,7 +96,14 @@ fn a_request_moves_the_dial_as_it_ends_and_less_the_longer_ago_it_was() {
         Some("fixture-model"),
         Some("0.6"),
     )]);
-    let at = |seconds: i64| per_hour(&store.speed(BASE + seconds * SECOND).unwrap().total);
+    let at = |seconds: i64| {
+        per_hour(
+            &store
+                .speed(BASE + seconds * SECOND, &unread())
+                .unwrap()
+                .total,
+        )
+    };
     // Sixty cents the moment they are known read as some thirty-seven
     // dollars an hour, and a minute later as about a third of that.
     assert!(near(at(0), 0.6 * kick(0.0)), "{}", at(0));
@@ -103,7 +114,7 @@ fn a_request_moves_the_dial_as_it_ends_and_less_the_longer_ago_it_was() {
     assert!(read.windows(2).all(|pair| pair[0] > pair[1]), "{read:?}");
     // The window's last second still reads, and its end no longer.
     assert!(at(299) > 0.0);
-    let ended = store.speed(BASE + 300 * SECOND).unwrap();
+    let ended = store.speed(BASE + 300 * SECOND, &unread()).unwrap();
     assert_eq!(
         ended.total,
         Rate {
@@ -132,7 +143,7 @@ fn spending_that_holds_steady_reads_as_itself() {
         })
         .collect();
     let (_dir, store) = store(&records);
-    let read = per_hour(&store.speed(BASE).unwrap().total);
+    let read = per_hour(&store.speed(BASE, &unread()).unwrap().total);
     assert!((3.57..3.63).contains(&read), "{read}");
 }
 
@@ -156,7 +167,7 @@ fn a_long_answer_is_weighed_over_the_time_it_took() {
             Some("1"),
         ),
     ]);
-    let speed = store.speed(BASE).unwrap();
+    let speed = store.speed(BASE, &unread()).unwrap();
     let (at_once, long) = (
         per_hour(of(&speed, "codex")),
         per_hour(of(&speed, "claude")),
@@ -179,11 +190,72 @@ fn a_long_answer_is_weighed_over_the_time_it_took() {
         Some("fixture-model"),
         Some("1"),
     ));
-    let read = per_hour(&store.speed(BASE).unwrap().total);
+    let read = per_hour(&store.speed(BASE, &unread()).unwrap().total);
     assert!(near(read, 3_600.0 / 600.0), "{read}");
 }
 fn store_of_one(record: Record) -> (tempfile::TempDir, Store) {
     store(&[record])
+}
+
+#[test]
+fn what_sessions_tell_is_weighed_at_their_last_reading_and_stands_until_the_next() {
+    let session = |id: &str, at: i64, cost: &str| Record {
+        source: "claude".into(),
+        ..request("claude", id, at, 0, Some("fixture-model"), Some(cost))
+    };
+    let (_dir, store) = store(&[
+        session("read", BASE - 30 * SECOND, "0.6"),
+        // Written by a reading still under way: it ended after the last began.
+        session("being-read", BASE + 5 * SECOND, "0.9"),
+        // What a gateway recorded of the same moment is known as it ends.
+        request(
+            "codex",
+            "gateway",
+            BASE - 30 * SECOND,
+            0,
+            Some("fixture-model"),
+            Some("0.6"),
+        ),
+    ]);
+    let claude = |now: i64, read: &BTreeMap<String, i64>| {
+        per_hour(of(
+            &store.speed(BASE + now * SECOND, read).unwrap(),
+            "claude",
+        ))
+    };
+    let read_at = |at: i64| BTreeMap::from([("claude".to_owned(), BASE + at * SECOND)]);
+    // Between two readings the sessions' spending stands where it was read,
+    // and the gateway's fades.
+    for seconds in [0, 20, 60, 90] {
+        let speed = store.speed(BASE + seconds * SECOND, &read_at(0)).unwrap();
+        let (sessions, gateway) = (0.6 * kick(30.0), 0.6 * kick(30.0 + seconds as f64));
+        assert!(near(per_hour(of(&speed, "claude")), sessions), "{seconds}");
+        assert!(near(per_hour(of(&speed, "codex")), gateway), "{seconds}");
+        assert!(
+            near(per_hour(&speed.total), sessions + gateway),
+            "{seconds}"
+        );
+    }
+    // The next reading takes in what ended since the last.
+    let both = 0.6 * kick(90.0) + 0.9 * kick(55.0);
+    assert!(near(claude(60, &read_at(60)), both));
+    assert!(near(claude(75, &read_at(60)), both));
+    // Sessions that go unread stand for a minute and a half and fade from
+    // then on, and so do those never read.
+    assert!(near(claude(150, &read_at(0)), both));
+    assert!(near(claude(150, &unread()), both));
+    assert!(near(
+        claude(210, &read_at(0)),
+        0.6 * kick(150.0) + 0.9 * kick(115.0)
+    ));
+    // A window after it ended a request is weighed no more.
+    assert!(near(claude(361, &read_at(0)), 0.9 * kick(266.0)));
+    assert_eq!(claude(395, &read_at(0)), 0.0);
+    // A reading the clock puts ahead of the present is not weighed there.
+    assert!(near(
+        claude(10, &read_at(3_600)),
+        0.6 * kick(40.0) + 0.9 * kick(5.0)
+    ));
 }
 
 #[test]
@@ -231,7 +303,7 @@ fn each_client_reads_for_itself_and_the_total_is_all_of_them() {
             Some("0.2"),
         ),
     ]);
-    let speed = store.speed(BASE).unwrap();
+    let speed = store.speed(BASE, &unread()).unwrap();
     assert_eq!(speed.at, BASE);
     assert_eq!(
         speed
@@ -330,7 +402,7 @@ fn antigravity_reads_by_account_and_quota_track() {
             Some("7"),
         ),
     ]);
-    let speed = store.speed(BASE).unwrap();
+    let speed = store.speed(BASE, &unread()).unwrap();
     assert!(near(per_hour(of(&speed, "antigravity")), 6.0 * kick(0.0)));
     assert_eq!(speed.accounts.len(), 1);
     assert_eq!(speed.accounts[0].id, ACCOUNT);
@@ -374,7 +446,7 @@ fn tokens_nothing_could_price_are_said_to_be_unpriced() {
         // A request that used nothing has nothing left unpriced.
         failed,
     ]);
-    let speed = store.speed(BASE).unwrap();
+    let speed = store.speed(BASE, &unread()).unwrap();
     assert_eq!(
         *of(&speed, "codex"),
         Rate {
@@ -403,7 +475,9 @@ fn the_dial_is_even_for_cents_logarithmic_above_and_ends_at_its_last_reading() {
     assert!((0.23..0.25).contains(&level(1.0)));
     assert!((0.64..0.67).contains(&level(20.0)));
     let (_dir, store) = store(&[]);
-    let speed = store.speed(BASE).unwrap();
+    let speed = store.speed(BASE, &unread()).unwrap();
+    // Nothing recorded reads as nothing being spent.
+    assert_eq!(speed, Speed::idle(BASE));
     assert_eq!(
         speed
             .dial
@@ -429,7 +503,7 @@ fn the_answer_is_written_as_the_pages_read_it() {
         Some("gemini-fixture"),
         Some("0.1"),
     )]);
-    let speed = store.speed(BASE).unwrap();
+    let speed = store.speed(BASE, &unread()).unwrap();
     let written = serde_json::to_value(&speed).unwrap();
     let rate = json!({
         "costPerHour": speed.total.cost_per_hour,
