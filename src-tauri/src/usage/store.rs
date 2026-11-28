@@ -644,12 +644,14 @@ impl Store {
         *self.overview_cache.lock() = Some((key, view.clone()));
         Ok(view)
     }
-    /// The curves of `f`, given what the journal says failed in its range.
+    /// The curves of `f`, given what the journal says failed in its range
+    /// and which host each provider is on.
     pub fn curves(
         &self,
         f: &Filter,
         failures_since: i64,
         failures: &[crate::events::UpstreamFailure],
+        hosts: &BTreeMap<String, String>,
         now: i64,
     ) -> Result<super::curves::Curves> {
         let _snapshot = self.read_snapshot()?;
@@ -658,6 +660,7 @@ impl Store {
             f,
             failures_since,
             failures,
+            hosts,
             self.detail_since()?,
             now,
         )

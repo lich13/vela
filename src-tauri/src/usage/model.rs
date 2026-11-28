@@ -1414,6 +1414,10 @@ pub struct Settings {
     pub refresh_seconds: u32,
     pub multiplier: String,
     pub pricing_model: String,
+    /// The hosts whose providers the curves page lists each by itself, in
+    /// place of the row that takes them as one. The curves are answered the
+    /// same whatever is here: the page chooses by it what to show.
+    pub curve_split: std::collections::BTreeSet<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -1425,6 +1429,7 @@ impl Default for Settings {
             refresh_seconds: 30,
             multiplier: "1".into(),
             pricing_model: "response".into(),
+            curve_split: Default::default(),
         }
     }
 }
@@ -1452,6 +1457,11 @@ impl Settings {
             })
             || !matches!(self.pricing_model.as_str(), "request" | "response")
             || decimal(&self.multiplier).is_none_or(|v| v > Decimal::from(10000))
+            || self.curve_split.len() > 64
+            // A host's name is no longer than 253 and has no space in it.
+            || self.curve_split.iter().any(|host| {
+                !(1..=253).contains(&host.len()) || host.contains(char::is_whitespace)
+            })
         {
             return Err(failure("用量设置无效"));
         }

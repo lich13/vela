@@ -109,6 +109,7 @@ fn successful_configure_clears_only_settings_error() {
         refresh_seconds: 5,
         multiplier: "2.5".into(),
         pricing_model: "request".into(),
+        curve_split: ["relay.example.invalid".to_owned()].into(),
     };
 
     let state = service.configure(settings.clone()).unwrap();
@@ -120,6 +121,7 @@ fn successful_configure_clears_only_settings_error() {
     assert_eq!(state.settings.refresh_seconds, 5);
     assert_eq!(state.settings.multiplier, "2.5");
     assert_eq!(state.settings.pricing_model, "request");
+    assert_eq!(state.settings.curve_split, settings.curve_split);
     let saved = fs::read(&service.0.path).unwrap();
     let saved: Settings = serde_json::from_slice(&saved).unwrap();
     assert!(!saved.recording);
@@ -127,4 +129,68 @@ fn successful_configure_clears_only_settings_error() {
     assert_eq!(saved.refresh_seconds, 5);
     assert_eq!(saved.multiplier, "2.5");
     assert_eq!(saved.pricing_model, "request");
+    assert_eq!(saved.curve_split, settings.curve_split);
+    // The next run reads them back.
+    let (loaded, error) = load_settings(&service.0.path);
+    assert!(error.is_none());
+    assert_eq!(loaded.curve_split, settings.curve_split);
+}
+
+#[test]
+fn hosts_drawn_apart_are_saved_in_order_and_are_none_where_none_were_saved() {
+    use serde_json::json;
+    // A file saved before there were any.
+    let earlier: Settings = serde_json::from_value(json!({ "refreshSeconds": 5 })).unwrap();
+    assert!(earlier.curve_split.is_empty());
+    assert!(earlier.validate().is_ok());
+    let none = serde_json::to_value(Settings::default()).unwrap();
+    assert_eq!(none["curveSplit"], json!([]));
+    // Each host once, in the same order however they came.
+    let chosen = json!({ "curveSplit": [
+        "relay.example.invalid",
+        "eu.relay.example.invalid",
+        "relay.example.invalid",
+    ] });
+    let chosen: Settings = serde_json::from_value(chosen).unwrap();
+    assert!(chosen.validate().is_ok());
+    assert_eq!(
+        serde_json::to_value(&chosen).unwrap()["curveSplit"],
+        json!(["eu.relay.example.invalid", "relay.example.invalid"])
+    );
+}
+
+#[test]
+fn hosts_drawn_apart_are_limited_in_number_and_in_length() {
+    let apart = |hosts: Vec<String>| Settings {
+        curve_split: hosts.into_iter().collect(),
+        ..Settings::default()
+    };
+    let host = |n: usize| format!("relay-{n}.example.invalid");
+    assert!(apart((0..64).map(host).collect()).validate().is_ok());
+    assert!(apart((0..65).map(host).collect()).validate().is_err());
+    assert!(apart(vec!["a".repeat(253)]).validate().is_ok());
+    for refused in [
+        String::new(),
+        "a".repeat(254),
+        "relay example.invalid".into(),
+        "relay.example.invalid\n".into(),
+        "\u{3000}relay.example.invalid".into(),
+    ] {
+        let settings = apart(vec![refused.clone()]);
+        assert!(settings.validate().is_err(), "{refused:?}");
+    }
+
+    // What is refused is not saved, and what was saved stays.
+    let temp = tempfile::tempdir().unwrap();
+    let service = Service::new(temp.path());
+    service
+        .configure(apart(vec!["relay.example.invalid".into()]))
+        .unwrap();
+    assert!(service.configure(apart(vec![String::new()])).is_err());
+    let (kept, error) = load_settings(&service.0.path);
+    assert!(error.is_none());
+    assert_eq!(
+        kept.curve_split.into_iter().collect::<Vec<_>>(),
+        ["relay.example.invalid"]
+    );
 }
