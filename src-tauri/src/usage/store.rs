@@ -1453,6 +1453,14 @@ fn preserve_existing(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Resul
     let existing = storage_v12::record(tx, &incoming.id)?;
     preserve_record(incoming, existing)
 }
+/// Whether the conversation database of a CLI session told anything of this
+/// attempt's step: the line of the session file tells none of these.
+fn told_by_conversation(a: &Attempt) -> bool {
+    a.response_id.is_some()
+        || a.first_token_ms.is_some()
+        || a.tokens.reasoning.is_some()
+        || a.tokens.cache_write.is_some()
+}
 pub(super) fn preserve_record(incoming: &Record, existing: Option<Record>) -> Result<Record> {
     let mut r = incoming.clone();
     if let Some(old) = existing {
@@ -1485,6 +1493,22 @@ pub(super) fn preserve_record(incoming: &Record, existing: Option<Record>) -> Re
                 let Some(b) = previous else {
                     continue;
                 };
+                // A line of a CLI session file read again once its
+                // conversation database is gone is still the line it was:
+                // what the database told of its step stays, and the line
+                // says only how the step ended.
+                if a.transport == "cli_file"
+                    && b.transport == "cli_file"
+                    && told_by_conversation(b)
+                    && !told_by_conversation(a)
+                    && (a.tokens.input, a.tokens.output, a.tokens.cache_read)
+                        == (b.tokens.input, b.tokens.output, b.tokens.cache_read)
+                {
+                    let ended = (std::mem::take(&mut a.outcome), a.error_code.take());
+                    *a = b.clone();
+                    (a.outcome, a.error_code) = ended;
+                    continue;
+                }
                 if r.source == "antigravity" && a.provider.is_none() && b.provider.is_some() {
                     a.provider = b.provider.clone();
                 }

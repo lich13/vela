@@ -680,6 +680,86 @@ fn a_row_stored_before_done_was_a_success_becomes_one_where_it_stands() {
     assert_eq!(f.sync().imported, 0);
 }
 
+// 会话库已不在时整份重读（读法升级或手动补全）：会话库此前给出的响应标识、计时、思考与缓存写入保留，
+// 费用不变，只取行内写明的结果；行内用量变了的步骤仍以新行为准。
+#[test]
+fn a_row_read_again_after_its_conversation_database_went_keeps_what_that_told() {
+    let mut f = Fixture::new();
+    let model = Some("gemini-3.1-pro");
+    f.write(
+        "session",
+        &[
+            planner(1, model, [100, 0, 10]),
+            planner(2, model, [100, 0, 20]),
+        ]
+        .concat(),
+    );
+    let db = f.database("session");
+    save_step(&db, 1, "response-1", 3, 0);
+    save_step(&db, 2, "response-2", 4, 0);
+    drop(db);
+    assert_eq!(f.sync().imported, 2);
+    // The rows as the reading before this one stored them.
+    let before = [1, 2].map(|step| {
+        let mut row = f.row("session", step);
+        row.completed = false;
+        row.attempts[0].outcome = "unknown".into();
+        row
+    });
+    f.store.write_batch(&before, None).unwrap();
+    let before = [1, 2].map(|step| f.row("session", step));
+    for (row, response) in before.iter().zip(["response-1", "response-2"]) {
+        let a = &row.attempts[0];
+        assert_eq!(a.response_id, Some(safe_id(response)));
+        assert_eq!((a.first_token_ms, a.duration_ms), (Some(2014), 4032));
+        assert!(a.tokens.reasoning.is_some());
+        assert_eq!(row.known_success(), None);
+    }
+
+    // agy has removed the conversation, and its transcript stays. The second
+    // step was written again since, with another count.
+    let conversations = f.home().join("antigravity-cli/conversations");
+    for entry in std::fs::read_dir(&conversations).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    f.write(
+        "session",
+        &[
+            planner(1, model, [100, 0, 10]),
+            planner(2, model, [100, 0, 25]),
+        ]
+        .concat(),
+    );
+    let key = f.cursor_key("session");
+    let mut position: Value =
+        serde_json::from_str(&f.store.cursor(&key).unwrap().unwrap()).unwrap();
+    position["reading"] = json!(1);
+    f.store
+        .write_batch(&[], Some((&key, &position.to_string())))
+        .unwrap();
+    assert_eq!(f.sync().errors, 0);
+
+    let kept = f.row("session", 1);
+    assert_eq!(ending(&kept), ("success", true, Some(true), None));
+    // All of the attempt but how it ended is as it was stored.
+    let stored = |a: &Attempt| serde_json::to_value(a).unwrap();
+    assert_eq!(
+        stored(&Attempt {
+            outcome: "unknown".into(),
+            ..kept.attempts[0].clone()
+        }),
+        stored(&before[0].attempts[0])
+    );
+    assert_eq!(kept.cost(), before[0].cost());
+    // Another line than the one the database told of is taken as it reads.
+    let written_again = f.row("session", 2);
+    let a = &written_again.attempts[0];
+    assert_eq!(a.tokens.output, Some(25));
+    assert_eq!((a.response_id.as_ref(), a.first_token_ms), (None, None));
+    assert_eq!(a.tokens.reasoning, None);
+    assert_eq!(f.requests(), 2);
+}
+
 // 会话库没有计时的步骤，以其后第一个其他步骤的行估算耗时：该行是工具结果时取两行创建时间之差，
 // 是用户输入、系统消息或尚无后续行时不估算；会话库已有计时的步骤不估算。估算值不进入耗时与统计。
 #[test]
