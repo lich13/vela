@@ -16,6 +16,7 @@ import type {
   Dashboard,
   UsageRecord,
   UsageSettings,
+  UsageSpeed,
   UsageState,
 } from "./usage-types";
 
@@ -264,7 +265,6 @@ function buildStats(
           reasoningTokens: 16200,
           costUsd: "1.2450",
           unpricedRequests: 0,
-          costPerHour: "0",
         },
         tracks: [
           {
@@ -282,7 +282,6 @@ function buildStats(
               reasoningTokens: 7_200,
               costUsd: "0.4200",
               unpricedRequests: 0,
-              costPerHour: "0.0840",
             },
             weekly7d: {
               period: {
@@ -296,7 +295,6 @@ function buildStats(
               reasoningTokens: 10_400,
               costUsd: "0.6850",
               unpricedRequests: 0,
-              costPerHour: "0.0041",
             },
           },
           {
@@ -314,7 +312,6 @@ function buildStats(
               reasoningTokens: 3_600,
               costUsd: "0.3500",
               unpricedRequests: 0,
-              costPerHour: "0.0700",
             },
             weekly7d: {
               period: {
@@ -328,7 +325,6 @@ function buildStats(
               reasoningTokens: 5_800,
               costUsd: "0.5600",
               unpricedRequests: 0,
-              costPerHour: "0.0033",
             },
           },
         ],
@@ -378,6 +374,17 @@ function buildStats(
   };
 }
 
+/** What an instance says of how fast it spends, for these tracks of accounts. */
+const speeding = (accounts: UsageSpeed["accounts"]): UsageSpeed => ({
+  costPerHour: "0",
+  level: 0,
+  unpriced: false,
+  at: 1_760_000_000_000,
+  dial: [],
+  clients: [],
+  accounts,
+});
+
 type QuotaAnswer = { changed: boolean; error: string | null };
 const instances = (
   active: "local" | "m1",
@@ -403,6 +410,8 @@ const instances = (
 
 describe("Usage Antigravity statistics tab", () => {
   let statsPayload: AntigravityUsageStats;
+  /** How fast the instance says it is spending: nothing, unless a test says. */
+  let speedPayload: UsageSpeed;
   /** What the next questions for the quota are answered with, in turn. */
   let quotaAnswers: (QuotaAnswer | Promise<QuotaAnswer>)[];
   const calls = (name: string) =>
@@ -421,6 +430,7 @@ describe("Usage Antigravity statistics tab", () => {
     mock.command.mockReset();
     mock.listeners.clear();
     statsPayload = buildStats();
+    speedPayload = speeding([]);
     quotaAnswers = [];
     Object.defineProperty(document, "visibilityState", {
       configurable: true,
@@ -532,6 +542,7 @@ describe("Usage Antigravity statistics tab", () => {
           name === "get_claude_usage_stats"
         )
           return statsPayload;
+        if (name === "get_usage_speed") return speedPayload;
         if (name === "refresh_antigravity_usage_quota")
           return quotaAnswers.shift() ?? { changed: false, error: null };
         if (name === "get_claude_usage_quota")
@@ -687,11 +698,13 @@ describe("Usage Antigravity statistics tab", () => {
     expect(within(tracks).getByText("最低剩余 42.0%")).toBeInTheDocument();
     expect(within(tracks).getByText("配额剩余 74.5%")).toBeInTheDocument();
     expect(within(tracks).getByText("配额剩余 42.0%")).toBeInTheDocument();
-    expect(within(tracks).getByText("$0.0840/h")).toHaveAttribute(
-      "title",
-      "0.0840/h",
-    );
-    expect(within(tracks).getByText("$0.0033/h")).toBeInTheDocument();
+    // A period counts what it was spent on; how fast is the dial's to say.
+    expect(
+      [...tracks.querySelectorAll(".usage-ag-window-stats")].map((stats) =>
+        [...stats.querySelectorAll("dt")].map((name) => name.textContent),
+      ),
+    ).toEqual(Array(4).fill(["请求", "Token", "思考"]));
+    expect(within(tracks).queryByText("速率")).not.toBeInTheDocument();
     expect(within(tracks).queryByText(/Token\/h|K\/h/)).not.toBeInTheDocument();
 
     const creds = screen.getByLabelText("账号分布");
@@ -738,13 +751,11 @@ describe("Usage Antigravity statistics tab", () => {
           burst5h: {
             ...t.burst5h,
             costUsd: "0",
-            costPerHour: "0",
             unpricedRequests: t.burst5h.requests,
           },
           weekly7d: {
             ...t.weekly7d,
             costUsd: "0",
-            costPerHour: "0",
             unpricedRequests: t.weekly7d.requests,
           },
         })),
@@ -763,8 +774,8 @@ describe("Usage Antigravity statistics tab", () => {
     const summary = await screen.findByLabelText("Token 构成与缓存节省");
     expect(within(summary).getByText("未定价")).toBeInTheDocument();
     const tracks = screen.getByLabelText("账号周期用量");
-    // Each window shows it twice: the cost badge and the hourly rate.
-    expect(within(tracks).getAllByText("未定价")).toHaveLength(8);
+    // Each window shows it once, on its cost badge.
+    expect(within(tracks).getAllByText("未定价")).toHaveLength(4);
     const creds = screen.getByLabelText("账号分布");
     expect(within(creds).getAllByText("未定价")).toHaveLength(2);
   });
@@ -806,9 +817,12 @@ describe("Usage Antigravity statistics tab", () => {
     );
     await waitFor(() => expect(select).toHaveValue("ag-oauth-2"));
     await waitFor(() => expect(statsReads()).toBeGreaterThan(reads));
-    const count = mock.command.mock.calls.length;
+    // The dials read in their own time; choosing an account reads nothing.
+    const others = () =>
+      mock.command.mock.calls.filter(([name]) => name !== "get_usage_speed");
+    const count = others().length;
     await user.selectOptions(select, "ag-oauth-1");
-    expect(mock.command.mock.calls).toHaveLength(count);
+    expect(others()).toHaveLength(count);
     expect(screen.getByRole("combobox", { name: "用量供应商" })).toHaveValue(
       "",
     );
@@ -1059,6 +1073,159 @@ describe("Usage Antigravity statistics tab", () => {
       order.lastIndexOf(statsCommand),
     );
   });
+
+  const speedCommand = "get_usage_speed";
+  const dial = (track: string) =>
+    within(periods()).findByRole("meter", { name: `${track} 速率` });
+
+  it("reads how fast the shown account's tracks are spending only on the Antigravity page and while the app is on screen", async () => {
+    speedPayload = speeding([
+      {
+        id: "ag-oauth-1",
+        tracks: [
+          { id: "gemini", costPerHour: "0.42", level: 0.15, unpriced: false },
+        ],
+      },
+    ]);
+    const user = userEvent.setup();
+    render(<Usage />);
+    await waitFor(() =>
+      expect(mock.command).toHaveBeenCalledWith(
+        "get_usage_logs",
+        expect.anything(),
+      ),
+    );
+    expect(calls(speedCommand)).toHaveLength(0);
+
+    await user.click(screen.getByRole("tab", { name: "Antigravity" }));
+    await screen.findByLabelText("账号周期用量");
+    const gemini = await dial("Gemini");
+    expect(calls(speedCommand)[0]).toEqual([speedCommand]);
+    expect(gemini).toHaveAttribute("aria-valuenow", "0.15");
+    expect(within(gemini).getByText("$0.42/h")).toHaveAttribute(
+      "title",
+      "0.42/h",
+    );
+    expect(
+      within(await dial("Claude / GPT")).getByText("$0.00/h"),
+    ).toBeInTheDocument();
+
+    // Out of sight nothing is read, and no reading is left to go stale.
+    await act(async () =>
+      mock.listeners
+        .get("app-visibility")
+        ?.forEach((listener) => listener(false)),
+    );
+    expect(
+      within(periods()).queryByRole("meter", { name: "Gemini 速率" }),
+    ).not.toBeInTheDocument();
+    const hidden = calls(speedCommand).length;
+    await act(async () =>
+      mock.listeners
+        .get("app-visibility")
+        ?.forEach((listener) => listener(true)),
+    );
+    expect(calls(speedCommand)).toHaveLength(hidden + 1);
+    await dial("Gemini");
+
+    // Claude Code's page has no dial to read for.
+    await user.click(screen.getByRole("tab", { name: "Claude Code" }));
+    const left = calls(speedCommand).length;
+    await screen.findByRole("region", { name: "Claude 官方额度" });
+    expect(screen.queryByRole("meter", { name: /速率$/ })).toBeNull();
+    expect(calls(speedCommand)).toHaveLength(left);
+  });
+
+  it("shows no dials for a server that cannot say how fast it spends, and asks it nothing", async () => {
+    act(() => setInstanceState(instances("m1", [speedCommand])));
+    const user = userEvent.setup();
+    await open(user);
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Antigravity 用量账号" }),
+      "ag-oauth-1",
+    );
+    await waitFor(() => expect(calls(quotaCommand)).toHaveLength(1));
+    expect(within(periods()).getByText("最低剩余 74.5%")).toBeInTheDocument();
+    expect(
+      within(periods()).queryByRole("meter", { name: "Gemini 速率" }),
+    ).not.toBeInTheDocument();
+    expect(calls(speedCommand)).toHaveLength(0);
+  });
+});
+
+it("reads each track's rate on a dial in its heading, of the account shown, and nothing spent for a track not named", async () => {
+  const user = userEvent.setup();
+  const base = buildStats();
+  const stats = {
+    ...base,
+    accounts: [
+      ...base.accounts,
+      { ...base.accounts[0], id: "b", name: "Fixture B" },
+    ],
+  };
+  const speed = [
+    {
+      id: "ag-oauth-1",
+      tracks: [
+        { id: "gemini", costPerHour: "0.42", level: 0.15, unpriced: false },
+        { id: "claude_gpt", costPerHour: "0", level: 0, unpriced: true },
+      ],
+    },
+    {
+      id: "b",
+      tracks: [
+        {
+          id: "claude_gpt",
+          costPerHour: "123.456",
+          level: 0.92,
+          unpriced: false,
+        },
+      ],
+    },
+  ];
+  const view = render(
+    <UsageAntigravity
+      stats={stats}
+      busy={false}
+      currentAccountId="ag-oauth-1"
+      speed={speed}
+    />,
+  );
+  const dial = (track: string) =>
+    screen.getByRole("meter", { name: `${track} 速率` });
+  // Between the track's name and what is left of its quota.
+  expect(
+    [...dial("Gemini").parentElement!.children].map((part) => part.textContent),
+  ).toEqual(["Gemini", "$0.42/h", "最低剩余 74.5%"]);
+  expect(dial("Gemini").parentElement).toHaveClass("usage-ag-track-head");
+  expect(dial("Gemini")).toHaveAttribute("aria-valuenow", "0.15");
+  expect(within(dial("Gemini")).getByText("$0.42/h")).toHaveAttribute(
+    "title",
+    "0.42/h",
+  );
+  expect(within(dial("Claude / GPT")).getByText("未定价")).toBeInTheDocument();
+
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Antigravity 用量账号" }),
+    "b",
+  );
+  expect(dial("Gemini")).toHaveAttribute("aria-valuenow", "0");
+  expect(within(dial("Gemini")).getByText("$0.00/h")).toHaveAttribute(
+    "title",
+    "0/h",
+  );
+  expect(within(dial("Claude / GPT")).getByText("$123/h")).toHaveAttribute(
+    "title",
+    "123.456/h",
+  );
+  // The periods count what was spent; none of them says how fast.
+  expect(screen.queryByText("速率")).not.toBeInTheDocument();
+
+  // Where the rate is not read there is no dial, rather than one at nothing.
+  view.rerender(
+    <UsageAntigravity stats={stats} busy={false} currentAccountId="b" />,
+  );
+  expect(screen.queryByRole("meter", { name: /速率$/ })).toBeNull();
 });
 
 it("a quota reported without a period says why in place of the period", () => {

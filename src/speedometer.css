@@ -1,0 +1,205 @@
+@layer tokens, base, layout, pages, modifiers;
+@layer layout {
+  /* One dial wherever a rate is read: the track, what is lit of it, the needle
+   and the reading beneath. */
+  .speedometer {
+    --speed-time: 1.05s;
+    --speed-spring: cubic-bezier(0.22, 1.2, 0.36, 1);
+    --speed-glow: 0.9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 0;
+    line-height: 1;
+  }
+
+  :root[data-theme="light"] .speedometer {
+    --speed-glow: 0.6;
+  }
+
+  .speedometer-dial {
+    display: grid;
+    flex: none;
+    width: 40px;
+    aspect-ratio: 100 / 78;
+  }
+
+  .speedometer.is-large .speedometer-dial {
+    width: 88px;
+  }
+
+  .speedometer-dial svg {
+    grid-area: 1 / 1;
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  .speedometer-track,
+  .speedometer-zone,
+  .speedometer-lit {
+    fill: none;
+    stroke-linecap: round;
+  }
+
+  .speedometer-track {
+    stroke: var(--line-strong);
+  }
+
+  .speedometer-zone {
+    stroke: var(--error);
+    stroke-opacity: 0.55;
+  }
+
+  .speedometer-cold {
+    stop-color: var(--accent);
+  }
+
+  .speedometer-warm {
+    stop-color: var(--accent-violet);
+  }
+
+  .speedometer-hot {
+    stop-color: var(--error);
+  }
+
+  /* Lit up to the reading. With nothing to light it is gone, and goes only once
+   it has drawn back: a round end would leave a dot where the scale begins. */
+  .speedometer-lit {
+    stroke-dasharray: 200;
+    opacity: 0;
+    transition:
+      stroke-dashoffset var(--speed-time) var(--speed-spring),
+      opacity 0.2s linear 0.85s;
+    animation: speed-light var(--speed-time) var(--speed-spring);
+  }
+
+  .speedometer.is-live .speedometer-lit {
+    opacity: 1;
+    transition:
+      stroke-dashoffset var(--speed-time) var(--speed-spring),
+      opacity 0.2s linear;
+  }
+
+  .speedometer-aura {
+    filter: blur(2px);
+    opacity: var(--speed-glow);
+  }
+
+  .speedometer.is-large .speedometer-aura {
+    filter: blur(3.5px);
+  }
+
+  /* The one thing that moves between readings: the glow of a dial that is
+   spending breathes. */
+  .speedometer.is-live .speedometer-aura {
+    animation: speed-breathe 2.8s ease-in-out infinite;
+  }
+
+  .speedometer-mark path {
+    fill: none;
+    stroke: var(--muted);
+    stroke-width: 1.2;
+    stroke-linecap: round;
+  }
+
+  .speedometer-mark text {
+    fill: var(--muted);
+    font-size: 8px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    text-anchor: middle;
+    dominant-baseline: central;
+  }
+
+  .speedometer-mark.is-last path {
+    stroke: var(--error);
+  }
+
+  .speedometer-mark.is-last text {
+    fill: var(--error);
+  }
+
+  .speedometer-needle {
+    fill: var(--ink);
+    transform-origin: 50px 50px;
+    transition: transform var(--speed-time) var(--speed-spring);
+    animation: speed-wake var(--speed-time) var(--speed-spring);
+  }
+
+  .speedometer-hub {
+    fill: var(--surface);
+    stroke: var(--ink);
+  }
+
+  .speedometer-name {
+    margin-top: 1px;
+    font-size: 10.5px;
+    line-height: 13px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .speedometer-reading {
+    font-size: 11px;
+    line-height: 14px;
+    font-weight: 620;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    white-space: nowrap;
+    transition: color 0.3s ease;
+  }
+
+  .speedometer.is-live .speedometer-reading {
+    color: var(--ink);
+  }
+
+  /* A large dial reads in its own opening, beneath the hub, where the needle
+   never comes. */
+  .speedometer.is-large .speedometer-name {
+    margin-top: -15px;
+    font-size: 9.5px;
+    line-height: 11px;
+  }
+
+  .speedometer.is-large .speedometer-reading {
+    font-size: 13px;
+    line-height: 15px;
+    font-weight: 680;
+  }
+
+  /* A dial that has just come on sweeps up from nothing to what it reads. */
+  @keyframes speed-wake {
+    from {
+      transform: rotate(150deg);
+    }
+  }
+
+  @keyframes speed-light {
+    from {
+      stroke-dashoffset: 200;
+    }
+  }
+
+  @keyframes speed-breathe {
+    0%,
+    100% {
+      opacity: calc(var(--speed-glow) * 0.45);
+    }
+    50% {
+      opacity: var(--speed-glow);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .speedometer .speedometer-lit,
+    .speedometer.is-live .speedometer-lit,
+    .speedometer.is-live .speedometer-aura,
+    .speedometer .speedometer-needle,
+    .speedometer .speedometer-reading {
+      animation: none;
+      transition: none;
+    }
+  }
+}

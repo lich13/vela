@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
+import Speedometer from "./Speedometer";
 import { date } from "./usage-format";
+import { idleRate, speedColors } from "./usage-speed";
 import { formatRemainingPercent, quotaTone } from "./UsageClaudeQuota";
 import {
   compact,
@@ -7,6 +9,7 @@ import {
   numeric,
   type AntigravityTrackWindow,
   type AntigravityUsageStats,
+  type UsageSpeed,
 } from "./usage-types";
 
 /** True when nothing in the bucket could be priced, so its cost says nothing. */
@@ -61,7 +64,6 @@ function TrackWindowBlock({
     );
   const remaining = windowRemainingPercent(w);
   const tone = remaining != null ? quotaTone(remaining) : null;
-  const unpriced = allUnpriced(w.costUsd, w.unpricedRequests, w.requests);
   return (
     <div
       className={`usage-ag-window${tone ? ` is-${tone}` : ""}`}
@@ -113,12 +115,6 @@ function TrackWindowBlock({
             {compact(w.reasoningTokens)}
           </dd>
         </div>
-        <div>
-          <dt>速率</dt>
-          <dd title={unpriced ? undefined : `${w.costPerHour}/h`}>
-            {unpriced ? "未定价" : `${money(w.costPerHour)}/h`}
-          </dd>
-        </div>
       </dl>
     </div>
   );
@@ -130,6 +126,7 @@ export default function UsageAntigravity({
   busy,
   client = "antigravity",
   currentAccountId,
+  speed,
   selectedProvider,
   providerName,
   onSelectProvider,
@@ -143,6 +140,11 @@ export default function UsageAntigravity({
   quotaError?: string | null;
   busy: boolean;
   currentAccountId: string | null;
+  /**
+   * How fast each account's quota tracks are spending right now, those that
+   * are. Absent where it is not read, and each track's dial with it.
+   */
+  speed?: UsageSpeed["accounts"];
   selectedProvider?: string;
   providerName?: (id: string | null) => string;
   onSelectProvider?: (providerId: string) => void;
@@ -321,6 +323,20 @@ export default function UsageAntigravity({
                     >
                       <header className="usage-ag-track-head">
                         <h3>{track.label}</h3>
+                        {/* A track that is not among those spending now
+                            spends nothing. */}
+                        {speed && (
+                          <Speedometer
+                            rate={
+                              speed
+                                .find((a) => a.id === account.id)
+                                ?.tracks.find((t) => t.id === track.id) ??
+                              idleRate
+                            }
+                            label={`${track.label} 速率`}
+                            color={speedColors.antigravity}
+                          />
+                        )}
                         {trackRemaining != null && trackTone && (
                           <span
                             className={`usage-quota-remaining-pill is-${trackTone}`}

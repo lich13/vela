@@ -1,5 +1,6 @@
 import QuickWaits from "./QuickWaits";
 import QuickFreeze from "./QuickFreeze";
+import QuickSpeed from "./QuickSpeed";
 import { subscriptions } from "./subscriptions";
 import type { GatewayEdit } from "./bridge-contracts";
 import ClientSelection, {
@@ -47,6 +48,8 @@ export default function QuickPanel() {
     <div className="quick-panel">
       <QuickFreeze key={instance} />
       <QuickInstances />
+      {/* Above the platforms and not of any one: choosing one leaves it be. */}
+      <QuickSpeed />
       <QuickContent
         key={`${instance}:${clientId}`}
         clientId={clientId}
