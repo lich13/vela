@@ -9,6 +9,9 @@
 //! nothing is said of failures, which is not the same as there having been
 //! none. Where it begins within a bucket, the bucket counts what succeeded
 //! from there as well, so that a rate is of attempts of one time.
+//!
+//! The providers on one host are given a second time as one, added up. Which
+//! of the two is shown is for whoever reads the answer to choose.
 use super::{model::Filter, query};
 use crate::{
     events::{FailureKind, UpstreamFailure},
@@ -156,11 +159,20 @@ pub struct Bucket {
 }
 
 /// What one provider did over the range: the totals to choose it by and the
-/// buckets to draw it with.
+/// buckets to draw it with. The providers on one host, taken as one, are said
+/// in the same.
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Provider {
     pub id: String,
+    /// The host it is on now. Not said of a provider that no longer exists:
+    /// where it was is kept nowhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The providers taken as one, in the order they are listed in. Not said
+    /// of a provider by itself.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
     /// Requests it was the last to be asked for, over the whole range.
     pub requests: u64,
     /// Requests it completed in the time failures are known for, so that the
@@ -200,6 +212,11 @@ pub struct Curves {
     /// Each comes with its buckets, so that choosing among them asks nothing
     /// more.
     pub providers: Vec<Provider>,
+    /// Every host two or more of those providers are on, with them taken as
+    /// one: `host:` and the host for an id, in the same order. Each of them
+    /// is still among `providers`, which is all a page that knows nothing of
+    /// hosts reads.
+    pub groups: Vec<Provider>,
 }
 
 /// What the usage records say of one provider in one bucket.
@@ -354,16 +371,115 @@ fn failed() -> crate::storage::AppError {
     super::model::failure("用量曲线查询失败")
 }
 
+/// One row of the answer from what `answered` and `lost` have of a provider,
+/// or of several taken as one. Of several, what succeeded and what failed
+/// are added up bucket by bucket before a share is taken of them, and the
+/// times to the first token are put together before a percentile is: neither
+/// is an average of what each of them had. `stretch` says which of the
+/// trend's `stretches` a bucket falls in, and `known` whether what failed in
+/// it is known.
+fn series(
+    id: String,
+    answered: &[&Answered],
+    lost: &[&BTreeMap<i64, Failures>],
+    stretches: usize,
+    stretch: impl Fn(i64) -> usize,
+    known: impl Fn(i64) -> bool,
+) -> Provider {
+    let mut provider = Provider {
+        id,
+        host: None,
+        members: Vec::new(),
+        requests: 0,
+        ok: 0,
+        failures: Failures::default(),
+        trend: Vec::new(),
+        first_token: FirstToken::default(),
+        // The last such day of any of them: up to there some of their times
+        // are missing from the percentiles.
+        summed_until: answered
+            .iter()
+            .filter_map(|answered| answered.summed)
+            .max()
+            .map(day_end),
+        buckets: Vec::new(),
+    };
+    let mut trend = vec![(0u64, 0u64); stretches];
+    // Both are of the time since the journal began, so that a rate
+    // compares attempts of one time.
+    for (bucket, seen) in answered.iter().flat_map(|answered| &answered.buckets) {
+        provider.requests += seen.requests;
+        provider.ok += seen.ok_since;
+        trend[stretch(*bucket)].0 += seen.ok_since;
+    }
+    for (bucket, failures) in lost.iter().flat_map(|lost| lost.iter()) {
+        provider.failures.merge(failures);
+        trend[stretch(*bucket)].1 += failures.total();
+    }
+    provider.trend = trend
+        .into_iter()
+        .map(|(ok, failed)| {
+            (ok + failed > 0).then(|| (failed as f64 / (ok + failed) as f64 * 1e4).round() / 1e4)
+        })
+        .collect();
+    let times: std::collections::BTreeSet<i64> = answered
+        .iter()
+        .flat_map(|answered| answered.buckets.keys())
+        .chain(lost.iter().flat_map(|lost| lost.keys()))
+        .copied()
+        .collect();
+    let mut all = Vec::new();
+    provider.buckets = times
+        .into_iter()
+        .map(|at| {
+            let seen = || {
+                answered
+                    .iter()
+                    .filter_map(|answered| answered.buckets.get(&at))
+            };
+            let mut first_token: Vec<u64> =
+                seen().flat_map(|seen| &seen.first_token).copied().collect();
+            all.extend_from_slice(&first_token);
+            let known = known(at);
+            Bucket {
+                at,
+                ok: seen()
+                    .map(|seen| if known { seen.ok_since } else { seen.ok })
+                    .sum(),
+                failures: known.then(|| {
+                    let mut sum = Failures::default();
+                    for failures in lost.iter().filter_map(|lost| lost.get(&at)) {
+                        sum.merge(failures);
+                    }
+                    sum
+                }),
+                first_token: FirstToken::of(&mut first_token),
+            }
+        })
+        .collect();
+    provider.first_token = FirstToken::of(&mut all);
+    provider
+}
+/// The most rate-limited first, then the one that failed most, then the one
+/// asked most.
+fn order(a: &Provider, b: &Provider) -> std::cmp::Ordering {
+    (b.failures.limited, b.failures.total(), b.requests)
+        .cmp(&(a.failures.limited, a.failures.total(), a.requests))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 /// The curves of every provider in the filter's range and client, whichever
 /// provider it names. `failures` are the journal's rows that reach into the
 /// range, and `failures_since` the time the journal holds them all from, in
-/// milliseconds. Before `detail_since` a day's requests may be kept only as
+/// milliseconds. `hosts` says which host each provider that still exists is
+/// on, by its id. Before `detail_since` a day's requests may be kept only as
 /// a total.
 pub fn read(
     c: &Connection,
     f: &Filter,
     failures_since: i64,
     failures: &[UpstreamFailure],
+    hosts: &BTreeMap<String, String>,
     detail_since: i64,
     now: i64,
 ) -> Result<Curves> {
@@ -421,9 +537,16 @@ pub fn read(
     let place = |bucket: i64| ((bucket - first) as f64 / step as f64).round().max(0.0) as usize;
     let count = place(last) + 1;
     let stretches = count.min(TREND);
+    let stretch = |bucket: i64| (place(bucket) * stretches / count).min(stretches - 1);
     // The journal says what failed in a bucket where the part of it that was
     // asked for reaches past where the journal begins.
     let known = |bucket: i64| grid.end(bucket).min(asked_end.saturating_add(1)) > failures_since;
+    // One row of all the records and the journal have of `members`.
+    let of = |id: String, members: &[&str]| {
+        let answered: Vec<_> = members.iter().filter_map(|id| usage.get(*id)).collect();
+        let lost: Vec<_> = members.iter().filter_map(|id| failed.get(*id)).collect();
+        series(id, &answered, &lost, stretches, stretch, known)
+    };
     let ids: std::collections::BTreeSet<&str> = usage
         .keys()
         .map(String::as_str)
@@ -431,74 +554,30 @@ pub fn read(
         .collect();
     let mut providers: Vec<Provider> = ids
         .into_iter()
-        .map(|id| {
-            let (answered, lost) = (usage.get(id), failed.get(id));
-            let buckets = answered.map(|answered| &answered.buckets);
-            let mut provider = Provider {
-                id: id.to_owned(),
-                requests: 0,
-                ok: 0,
-                failures: Failures::default(),
-                trend: Vec::new(),
-                first_token: FirstToken::default(),
-                summed_until: answered.and_then(|answered| answered.summed).map(day_end),
-                buckets: Vec::new(),
-            };
-            let mut trend = vec![(0u64, 0u64); stretches];
-            let stretch = |bucket: i64| (place(bucket) * stretches / count).min(stretches - 1);
-            // Both are of the time since the journal began, so that a rate
-            // compares attempts of one time.
-            for (bucket, seen) in buckets.into_iter().flatten() {
-                provider.requests += seen.requests;
-                provider.ok += seen.ok_since;
-                trend[stretch(*bucket)].0 += seen.ok_since;
-            }
-            for (bucket, failures) in lost.into_iter().flatten() {
-                provider.failures.merge(failures);
-                trend[stretch(*bucket)].1 += failures.total();
-            }
-            provider.trend = trend
-                .into_iter()
-                .map(|(ok, failed)| {
-                    (ok + failed > 0)
-                        .then(|| (failed as f64 / (ok + failed) as f64 * 1e4).round() / 1e4)
-                })
-                .collect();
-            let times: std::collections::BTreeSet<i64> = buckets
-                .into_iter()
-                .flat_map(|buckets| buckets.keys().copied())
-                .chain(lost.into_iter().flat_map(|buckets| buckets.keys().copied()))
-                .collect();
-            let mut all = Vec::new();
-            provider.buckets = times
-                .into_iter()
-                .map(|at| {
-                    let seen = buckets.and_then(|buckets| buckets.get(&at));
-                    let mut first_token =
-                        seen.map_or_else(Vec::new, |seen| seen.first_token.clone());
-                    all.extend_from_slice(&first_token);
-                    let known = known(at);
-                    Bucket {
-                        at,
-                        ok: seen.map_or(0, |seen| if known { seen.ok_since } else { seen.ok }),
-                        failures: known.then(|| {
-                            lost.and_then(|buckets| buckets.get(&at))
-                                .copied()
-                                .unwrap_or_default()
-                        }),
-                        first_token: FirstToken::of(&mut first_token),
-                    }
-                })
-                .collect();
-            provider.first_token = FirstToken::of(&mut all);
-            provider
+        .map(|id| Provider {
+            host: hosts.get(id).cloned(),
+            ..of(id.to_owned(), &[id])
         })
         .collect();
-    providers.sort_by(|a, b| {
-        (b.failures.limited, b.failures.total(), b.requests)
-            .cmp(&(a.failures.limited, a.failures.total(), a.requests))
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    providers.sort_by(order);
+    // A provider is here only for having had traffic or failed in the range,
+    // so a host comes to a row of its own by two that did.
+    let mut shared: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for provider in &providers {
+        if let Some(host) = &provider.host {
+            shared.entry(host).or_default().push(&provider.id);
+        }
+    }
+    let mut groups: Vec<Provider> = shared
+        .into_iter()
+        .filter(|(_, members)| members.len() > 1)
+        .map(|(host, members)| Provider {
+            host: Some(host.to_owned()),
+            members: members.iter().map(|id| (*id).to_owned()).collect(),
+            ..of(format!("host:{host}"), &members)
+        })
+        .collect();
+    groups.sort_by(order);
     let end = grid.end(last);
     Ok(Curves {
         start: first,
@@ -514,6 +593,7 @@ pub fn read(
         },
         journal_error: None,
         providers,
+        groups,
     })
 }
 

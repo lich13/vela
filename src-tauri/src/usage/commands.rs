@@ -72,10 +72,22 @@ pub async fn get_usage_dashboard(r: &Runtime, filter: Filter) -> Result<store::D
 }
 /// How often each provider's attempts failed and how soon it answered, bucket
 /// by bucket over the filter's time and client. The journal says what failed,
-/// the usage records what succeeded and how soon.
+/// the usage records what succeeded and how soon, and the gateways which host
+/// each provider is on: those on one host are also said as one.
 pub async fn get_usage_curves(r: &Runtime, filter: Filter) -> Result<super::curves::Curves> {
+    use crate::gateway::ClientId;
     let s = r.usage.clone();
     let journal = r.diagnostics.clone();
+    // Every client's, whichever the filter names: a provider is known by its
+    // id alone, and only those with something in the range are drawn.
+    let gateways = [
+        ClientId::Codex,
+        ClientId::Claude,
+        ClientId::Agy,
+        ClientId::Grok,
+        ClientId::Dsh,
+    ]
+    .map(|client| r.gateway(client).clone());
     tokio::task::spawn_blocking(move || {
         let at = now();
         let seconds = |ms: i64| ms.max(0) as u64 / 1000;
@@ -84,7 +96,11 @@ pub async fn get_usage_curves(r: &Runtime, filter: Filter) -> Result<super::curv
             seconds(filter.end.unwrap_or(at)),
         );
         let since = i64::try_from(since.saturating_mul(1000)).unwrap_or(i64::MAX);
-        let mut curves = s.read(|db| db.curves(&filter, since, &failures, at))?;
+        let hosts = gateways
+            .iter()
+            .flat_map(|gateway| gateway.provider_hosts())
+            .collect();
+        let mut curves = s.read(|db| db.curves(&filter, since, &failures, &hosts, at))?;
         curves.journal_error = error;
         Ok(curves)
     })
