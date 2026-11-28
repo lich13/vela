@@ -27,6 +27,7 @@ fn main() {
 #[cfg(feature = "desktop")]
 fn build_quick() {
     println!("cargo:rerun-if-changed=native/quick_panel.swift");
+    println!("cargo:rerun-if-changed=native/tray_menu.swift");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
@@ -74,6 +75,7 @@ fn build_quick() {
             "-sdk",
             sdk,
             "native/quick_panel.swift",
+            "native/tray_menu.swift",
             "-o",
             lib.to_str().unwrap(),
         ],

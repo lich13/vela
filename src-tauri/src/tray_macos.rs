@@ -5,7 +5,11 @@ use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::NSMenu;
 use objc2_foundation::{NSArray, NSRunLoop, NSRunLoopCommonModes};
 use std::cell::{Cell, RefCell};
+use std::ffi::{c_char, c_void, CString};
 use tauri::Manager;
+extern "C" {
+    fn vela_tray_menu_style(menu: *const c_void, first: isize, styles: *const c_char);
+}
 thread_local! { static CONTEXT_MENU: RefCell<Option<Retained<NSMenu>>> = const { RefCell::new(None) }; }
 // Whether a menu is waiting to open or is open. Events are handled meanwhile,
 // another press on the icon among them, and two presses may be handled before
@@ -25,6 +29,33 @@ pub fn install(tray: &tauri::tray::TrayIcon) -> Result<()> {
         Ok(())
     })
     .map_err(|_| AppError::new(code::TRAY, "无法初始化托盘菜单"))?
+}
+/// Draws the items of the icon's menu from `first` on the way `styles` says,
+/// one for each item in their order: see `native/tray_menu.swift`. An item
+/// gets the attributed title its style makes, or loses the one it had. Called
+/// on the main thread, where `install` saved the menu. Before `install` there
+/// is no menu to reach and nothing is done, so the items are styled once more
+/// after it.
+pub fn style(first: usize, styles: &[impl serde::Serialize]) {
+    let Some(menu) = CONTEXT_MENU.with(|saved| saved.borrow().clone()) else {
+        return;
+    };
+    let Some(styles) = serde_json::to_string(styles)
+        .ok()
+        .and_then(|json| CString::new(json).ok())
+    else {
+        return;
+    };
+    // SAFETY: the menu is held for as long as the call lasts, on the thread
+    // that alone touches it. The text is a C string that outlives the call,
+    // which keeps neither.
+    unsafe {
+        vela_tray_menu_style(
+            Retained::as_ptr(&menu).cast(),
+            first as isize,
+            styles.as_ptr(),
+        );
+    }
 }
 /// Opens the icon's menu once the event that asked for it has been handled.
 /// The click that opens it returns when the menu closes. Made inside the

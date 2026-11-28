@@ -528,8 +528,9 @@ impl Tray {
     }
 
     /// Makes the menu's rows what the accounts are now. An item stays where
-    /// there is one, so a menu that is open changes in place.
-    fn draw(&self) -> tauri::Result<()> {
+    /// there is one, so a menu that is open changes in place. Called on the
+    /// main thread.
+    pub(crate) fn draw(&self) -> tauri::Result<()> {
         let rows = rows(&self.accounts.lock().concat());
         let mut shown = self.shown.lock();
         for (index, row) in rows.iter().enumerate() {
@@ -559,6 +560,15 @@ impl Tray {
             let Some((_, item)) = shown.pop() else { break };
             self.menu.remove(&item)?;
         }
+        // Every row is drawn the way it is styled now, or as its text where
+        // it has come to be plain. Setting an item's text leaves what the
+        // item was drawn as, and one that turned from periods into why they
+        // could not be read would go on showing the periods.
+        #[cfg(target_os = "macos")]
+        crate::tray_macos::style(
+            FIRST,
+            &shown.iter().map(|(row, _)| &row.style).collect::<Vec<_>>(),
+        );
         Ok(())
     }
 
