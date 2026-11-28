@@ -36,6 +36,11 @@ struct Cursor {
     #[serde(skip_serializing_if = "String::is_empty")]
     local_stamp: String,
 }
+/// The reading a saved position of a history file stands for. A position an
+/// older reading wrote, as every one written before readings were numbered,
+/// is no position: the file is read from its start, so the rows stored then
+/// take what this one adds.
+const HISTORY_READING: u32 = 1;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct FileCursor {
@@ -47,6 +52,7 @@ struct FileCursor {
     model: Option<String>,
     model_invalid: bool,
     purged_covered: usize,
+    reading: u32,
 }
 fn file_identity(meta: &std::fs::Metadata) -> String {
     #[cfg(unix)]
@@ -837,6 +843,22 @@ fn error_code(v: &Value) -> Option<String> {
         }
     }
     failed(v).then(|| "ANTIGRAVITY_ERROR".into())
+}
+/// What a finished usage line of a session file says of its request. An error
+/// is a failure, and a line marked `DONE` with its input and its output
+/// counted is a success, the measure the app's own API is held to. Any other
+/// line reports consumption and no outcome.
+fn line_outcome(v: &Value, tokens: &Tokens) -> &'static str {
+    if failed(v) {
+        "failed"
+    } else if v["status"].as_str() == Some("DONE")
+        && tokens.input.is_some()
+        && tokens.output.is_some()
+    {
+        "success"
+    } else {
+        "unknown"
+    }
 }
 
 /// Request IDs separate calls sharing one execution. A final usage envelope
@@ -2014,10 +2036,13 @@ fn scan_file(
     learned: &Learned,
 ) -> Result<()> {
     let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
-    let saved_raw = if repair { None } else { store.cursor(&key)? };
-    let mut c: FileCursor = saved_raw
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
+    let saved = if repair { None } else { store.cursor(&key)? };
+    // A position another reading saved is as good as none.
+    let (saved_raw, mut c) = saved
+        .and_then(|raw| {
+            let c: FileCursor = serde_json::from_str(&raw).ok()?;
+            (c.reading == HISTORY_READING).then_some((Some(raw), c))
+        })
         .unwrap_or_default();
     let cascade = cascade_id(brain, path)?;
     let rpc: Cursor = store
@@ -2075,6 +2100,7 @@ fn scan_file(
         c = FileCursor::default();
         verified_tail = None;
     }
+    c.reading = HISTORY_READING;
     c.identity = identity;
     let start_offset = c.offset;
     file.seek(SeekFrom::Start(c.offset))
@@ -2180,7 +2206,17 @@ fn scan_file(
                 let selected = c.model.as_deref().filter(|inherited| {
                     explicit_model.is_none() || model_id(Some(inherited)).is_none()
                 });
-                let is_failed = failed(&v);
+                let tokens = Tokens {
+                    input: number(&v["input_tokens"]),
+                    output: number(&v["output_tokens"]),
+                    cache_read: number(&v["cache_read_tokens"]),
+                    cache_write: number(&v["cache_write_tokens"]),
+                    cache_write_5m: number(&v["cache_write_5m_tokens"]),
+                    cache_write_1h: number(&v["cache_write_1h_tokens"]),
+                    reasoning: number(&v["thinking_output_tokens"]),
+                    ..Tokens::default()
+                };
+                let outcome = line_outcome(&v, &tokens);
                 let mut attempt = Attempt {
                     id: safe_id(&format!("{id}:final")),
                     provider: timeline.provider_at(at).map(str::to_owned),
@@ -2195,20 +2231,11 @@ fn scan_file(
                         .and_then(|a| a.effort)
                         .or(suffix_effort)
                         .map(str::to_owned),
-                    error_code: is_failed.then(|| error_code(&v)).flatten(),
+                    error_code: (outcome == "failed").then(|| error_code(&v)).flatten(),
                     started_at: at,
-                    outcome: if is_failed { "failed" } else { "unknown" }.into(),
+                    outcome: outcome.into(),
                     transport: "history_file".into(),
-                    tokens: Tokens {
-                        input: number(&v["input_tokens"]),
-                        output: number(&v["output_tokens"]),
-                        cache_read: number(&v["cache_read_tokens"]),
-                        cache_write: number(&v["cache_write_tokens"]),
-                        cache_write_5m: number(&v["cache_write_5m_tokens"]),
-                        cache_write_1h: number(&v["cache_write_1h_tokens"]),
-                        reasoning: number(&v["thinking_output_tokens"]),
-                        ..Tokens::default()
-                    },
+                    tokens,
                     usage_status: "reported".into(),
                     parse_reasons: vec!["attempt_time_unreported".into()],
                     ..Attempt::default()
@@ -2221,9 +2248,10 @@ fn scan_file(
                     session_id: Some(safe_id(cascade)),
                     started_at: at,
                     finished_at: Some(at),
-                    // A transcript usage row reports consumption, not the model's
-                    // terminal outcome. Only the API can supplement that evidence.
-                    completed: false,
+                    // A usage row marked neither done nor failed reports
+                    // consumption and no outcome. Only the API can supplement
+                    // that evidence.
+                    completed: outcome == "success",
                     attempts: vec![attempt],
                     ..Record::default()
                 };
@@ -3019,6 +3047,7 @@ mod history_tests {
         let saved = store
             .detail(&safe_id("antigravity:request:request-fixture"))
             .unwrap();
+        // The line is marked neither done nor failed.
         assert_eq!(saved.known_success(), None);
         assert_eq!(saved.attempts[0].measured_duration_ms(), None);
         scan_file_list(

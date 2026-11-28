@@ -17,7 +17,7 @@ const TRANSPORT: &str = "cli_file";
 
 /// The reading a saved position stands for. A position an older reading wrote
 /// starts over, so the rows stored then take what this one adds.
-const READING: u32 = 1;
+const READING: u32 = 2;
 
 /// How far one transcript was read. `database` and `unread` let a conversation
 /// database written after its transcript complete the rows it could not serve.
@@ -455,7 +455,7 @@ impl Pass<'_> {
             }
             rewinds => format!("antigravity:cli:{cascade}:step:{step}:rewind:{rewinds}"),
         });
-        let is_failed = failed(v);
+        let outcome = line_outcome(v, &tokens);
         let attempt = Attempt {
             id: safe_id(&format!("{id}:final")),
             // agy runs on the login it shares with the app.
@@ -471,9 +471,9 @@ impl Pass<'_> {
                 .and_then(|a| a.effort)
                 .or(suffix_effort)
                 .map(str::to_owned),
-            error_code: is_failed.then(|| error_code(v)).flatten(),
+            error_code: (outcome == "failed").then(|| error_code(v)).flatten(),
             started_at: started,
-            outcome: if is_failed { "failed" } else { "unknown" }.into(),
+            outcome: outcome.into(),
             transport: TRANSPORT.into(),
             raw_input_tokens: tokens.input,
             input_basis: Some("exclusive".into()),
@@ -489,9 +489,9 @@ impl Pass<'_> {
             session_id: Some(safe_id(cascade)),
             started_at: started,
             finished_at: Some(started),
-            // As with the app's history file, a usage line reports consumption,
-            // not the request's outcome.
-            completed: false,
+            // As with the app's history file, a usage line marked neither done
+            // nor failed reports consumption and no outcome.
+            completed: outcome == "success",
             attempts: vec![attempt],
             ..Record::default()
         }

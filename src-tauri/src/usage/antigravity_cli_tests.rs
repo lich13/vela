@@ -1,4 +1,4 @@
-// 覆盖 Antigravity CLI 会话用量导入：计量口径、增量与幂等、账号归属、回溯重跑、估算耗时、模型回退与计价、路径归属、只读，以及与网关记录的去重。
+// 覆盖 Antigravity CLI 会话用量导入：计量口径、请求结果、增量与幂等、账号归属、回溯重跑、估算耗时、模型回退与计价、路径归属、只读，以及与网关记录的去重。
 use super::super::super::store::Store;
 use super::*;
 
@@ -304,6 +304,80 @@ fn counts_are_stored_as_written_and_syncing_again_adds_nothing() {
     );
 }
 
+/// How a row's request ended: its outcome, whether it completed, what a
+/// success rate takes it for, and its error code.
+fn ending(row: &Record) -> (&str, bool, Option<bool>, Option<&str>) {
+    let a = &row.attempts[0];
+    (
+        a.outcome.as_str(),
+        row.completed,
+        row.known_success(),
+        a.error_code.as_deref(),
+    )
+}
+
+// 模型步骤标明 DONE 且输入、输出都有计数时记为成功；标错的记为失败；没有状态或缺一项计数的结果未确认，不计入成功率。
+#[test]
+fn a_step_marked_done_with_its_input_and_output_counted_is_a_success() {
+    let mut f = Fixture::new();
+    // A finished model step, less or more than what agy writes for one.
+    let line = |step: u64, change: &dyn Fn(&mut serde_json::Map<String, Value>)| {
+        let written = planner(step, Some("gemini-3.1-pro"), [100, 20, 10]);
+        let mut line: Value = serde_json::from_str(&written).unwrap();
+        change(line.as_object_mut().unwrap());
+        format!("{line}\n")
+    };
+    f.write(
+        "session",
+        &[
+            line(1, &|_| {}),
+            line(2, &|line| {
+                line.insert("status".into(), json!("ERROR"));
+            }),
+            line(3, &|line| {
+                line.remove("status");
+            }),
+            line(4, &|line| {
+                line.remove("output_tokens");
+            }),
+            line(5, &|line| {
+                line.remove("input_tokens");
+            }),
+            // Marked done, with an error beside it.
+            line(6, &|line| {
+                line.insert("error".into(), json!({"code": 429}));
+            }),
+        ]
+        .concat(),
+    );
+    let report = f.sync();
+    assert_eq!((report.errors, report.imported), (0, 6));
+    assert_eq!(
+        ending(&f.row("session", 1)),
+        ("success", true, Some(true), None)
+    );
+    assert_eq!(
+        ending(&f.row("session", 2)),
+        ("failed", false, Some(false), Some("ANTIGRAVITY_ERROR"))
+    );
+    for step in [3, 4, 5] {
+        assert_eq!(
+            ending(&f.row("session", step)),
+            ("unknown", false, None, None),
+            "{step}"
+        );
+    }
+    assert_eq!(
+        ending(&f.row("session", 6)),
+        ("failed", false, Some(false), Some("429"))
+    );
+    let totals = f.store.dashboard(&Filter::default()).unwrap().totals;
+    assert_eq!(
+        (totals.requests, totals.status_known, totals.success),
+        (6, 3, 1)
+    );
+}
+
 // 尾部未写完的行下次再读；同一步骤取最后写入的一行；已归档的明细不再被改写。
 #[test]
 fn an_unfinished_tail_is_read_again_and_the_last_line_of_a_step_wins() {
@@ -543,6 +617,66 @@ fn a_position_saved_by_an_older_reading_starts_over() {
         Some(31)
     );
     assert_eq!(f.requests(), 2);
+    assert_eq!(f.sync().imported, 0);
+}
+
+// 上一版读法把标明 DONE 的步骤记为结果未确认：它保存的同步位置在升级后首次同步时同样作废，
+// 已结束的会话也整份重读，已有记录原位改为成功、标识与价格不变、不新增记录；本版读法保存的位置不重读。
+#[test]
+fn a_row_stored_before_done_was_a_success_becomes_one_where_it_stands() {
+    let mut f = Fixture::new();
+    let model = Some("gemini-3.1-pro");
+    f.write(
+        "session",
+        &[
+            planner(1, model, [100, 0, 10]),
+            planner(2, model, [100, 0, 20]),
+        ]
+        .concat(),
+    );
+    // A session nothing has written to for a while, read to its end.
+    std::fs::File::options()
+        .write(true)
+        .open(f.transcript("session"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+        .unwrap();
+    assert_eq!(f.sync().imported, 2);
+    // The rows as the reading before this one stored them.
+    let before = [1, 2].map(|step| {
+        let mut row = f.row("session", step);
+        row.completed = false;
+        row.attempts[0].outcome = "unknown".into();
+        row
+    });
+    f.store.write_batch(&before, None).unwrap();
+    let rows = |f: &Fixture| [1, 2].map(|step| f.row("session", step));
+    assert_eq!(rows(&f).map(|row| row.known_success()), [None; 2]);
+
+    // The position this reading saved leaves the file alone.
+    assert_eq!(f.sync().imported, 0);
+    assert_eq!(rows(&f).map(|row| row.known_success()), [None; 2]);
+
+    let key = f.cursor_key("session");
+    let mut position: Value =
+        serde_json::from_str(&f.store.cursor(&key).unwrap().unwrap()).unwrap();
+    assert_eq!(position["reading"], json!(READING));
+    position["reading"] = json!(1);
+    f.store
+        .write_batch(&[], Some((&key, &position.to_string())))
+        .unwrap();
+    let report = f.sync();
+    assert_eq!((report.errors, report.imported), (0, 2));
+    for (now, then) in rows(&f).iter().zip(&before) {
+        assert_eq!(ending(now), ("success", true, Some(true), None));
+        assert_eq!(now.id, then.id);
+        assert_eq!(now.attempts[0].tokens, then.attempts[0].tokens);
+        assert_eq!(now.cost(), then.cost());
+    }
+    assert_eq!(f.requests(), 2);
+    assert_eq!(f.store.logs(&Filter::default()).unwrap().total, 2);
+    let totals = f.store.dashboard(&Filter::default()).unwrap().totals;
+    assert_eq!((totals.status_known, totals.success), (2, 2));
     assert_eq!(f.sync().imported, 0);
 }
 
