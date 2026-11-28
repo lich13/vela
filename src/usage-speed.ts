@@ -46,21 +46,22 @@ export function useUsageSpeed(active: boolean): UsageSpeed | null {
     if (!active) return;
     let stopped = false;
     let asking = false;
-    const ask = () => {
+    const ask = async () => {
       // A reading slower than the turns is waited for, not asked for again.
       if (asking) return;
       asking = true;
-      command("get_usage_speed")
+      let speed: UsageSpeed | null = null;
+      try {
+        speed = await command("get_usage_speed");
+      } catch {
         // A failure every two seconds is no news to keep telling: the dials
         // go, and come back with the next reading.
-        .catch(() => null)
-        .then((speed) => {
-          asking = false;
-          if (!stopped) setRead({ instance, speed });
-        });
+      }
+      asking = false;
+      if (!stopped) setRead({ instance, speed });
     };
-    ask();
-    const timer = setInterval(ask, 2000);
+    void ask();
+    const timer = setInterval(() => void ask(), 2000);
     return () => {
       stopped = true;
       clearInterval(timer);
