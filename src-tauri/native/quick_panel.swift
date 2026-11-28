@@ -145,6 +145,26 @@ struct ControlsCardModel: Codable, Equatable {
     let quitBusy: String?
 }
 
+struct SpeedDialModel: Codable, Equatable, Identifiable {
+    let id: String
+    let label: String
+    let reading: String
+    let unit: String
+    let exact: String
+    let level: Double
+}
+
+struct SpeedMarkModel: Codable, Equatable {
+    let label: String
+    let level: Double
+}
+
+struct SpeedCardModel: Codable, Equatable {
+    let total: SpeedDialModel
+    let marks: [SpeedMarkModel]
+    let clients: [SpeedDialModel]
+}
+
 struct QuickPanelViewModel: Codable, Equatable {
     let appearanceMode: String
     let pinned: Bool
@@ -164,6 +184,7 @@ struct QuickPanelViewModel: Codable, Equatable {
     let instanceStatus: String?
     let instanceRetry: Bool
     let remote: Bool
+    let speed: SpeedCardModel?
 
     static let placeholder = QuickPanelViewModel(
         appearanceMode: "system",
@@ -198,7 +219,8 @@ struct QuickPanelViewModel: Codable, Equatable {
         instances: [],
         instanceStatus: nil,
         instanceRetry: false,
-        remote: false
+        remote: false,
+        speed: nil
     )
 }
 
@@ -642,6 +664,285 @@ struct QuickInstanceRowView: View {
                 .padding(.horizontal, 8)
             }
         }
+    }
+}
+
+// MARK: - Speed Card
+
+/// Where a dial's parts stand: its arc runs 240° from the lower left over the
+/// top to the lower right, and a level of 0 to 1 is that far along it.
+private enum DialGeometry {
+    static func angle(_ level: Double) -> Double {
+        (150.0 + 240.0 * min(max(level, 0.0), 1.0)) * .pi / 180.0
+    }
+
+    /// The centre and radius of the arc that fills `rect` drawn `lineWidth` wide.
+    static func fit(_ rect: CGRect, lineWidth: CGFloat) -> (center: CGPoint, radius: CGFloat) {
+        let radius = max(0, min((rect.width - lineWidth) / 2.0, (rect.height - lineWidth) / 1.5))
+        return (CGPoint(x: rect.midX, y: rect.minY + lineWidth / 2.0 + radius), radius)
+    }
+
+    static func point(_ center: CGPoint, _ radius: CGFloat, _ level: Double) -> CGPoint {
+        let a = angle(level)
+        return CGPoint(x: center.x + radius * CGFloat(cos(a)), y: center.y + radius * CGFloat(sin(a)))
+    }
+}
+
+/// The stretch of a dial's arc between two levels.
+private struct DialArc: Shape {
+    var from: Double
+    var to: Double
+    let lineWidth: CGFloat
+
+    var animatableData: AnimatablePair<Double, Double> {
+        get { AnimatablePair(from, to) }
+        set {
+            from = newValue.first
+            to = newValue.second
+        }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard to > from else { return path }
+        let (center, radius) = DialGeometry.fit(rect, lineWidth: lineWidth)
+        path.addArc(
+            center: center,
+            radius: radius,
+            startAngle: .radians(DialGeometry.angle(from)),
+            endAngle: .radians(DialGeometry.angle(to)),
+            clockwise: false
+        )
+        return path
+    }
+}
+
+/// A dial's needle at a level: a blade from `inner` to `outer` of the radius,
+/// `width` wide where it begins.
+private struct DialNeedle: Shape {
+    var level: Double
+    let lineWidth: CGFloat
+    let inner: CGFloat
+    let outer: CGFloat
+    let width: CGFloat
+
+    var animatableData: Double {
+        get { level }
+        set { level = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let (center, radius) = DialGeometry.fit(rect, lineWidth: lineWidth)
+        let a = DialGeometry.angle(level)
+        let along = CGPoint(x: CGFloat(cos(a)), y: CGFloat(sin(a)))
+        let across = CGPoint(x: -along.y, y: along.x)
+        let base = CGPoint(x: center.x + along.x * radius * inner, y: center.y + along.y * radius * inner)
+        let tip = CGPoint(x: center.x + along.x * radius * outer, y: center.y + along.y * radius * outer)
+        var path = Path()
+        path.move(to: tip)
+        path.addLine(to: CGPoint(x: base.x + across.x * width / 2.0, y: base.y + across.y * width / 2.0))
+        path.addLine(to: CGPoint(x: base.x - across.x * width / 2.0, y: base.y - across.y * width / 2.0))
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// The glow of a needle that is off its rest, breathing while it is shown.
+private struct DialGlow: View {
+    let needle: DialNeedle
+    let color: Color
+    let still: Bool
+    @State private var bright = false
+
+    var body: some View {
+        needle
+            .fill(color)
+            .blur(radius: 3)
+            .opacity(still ? 0.6 : (bright ? 0.95 : 0.3))
+            .animation(
+                still ? nil : .easeInOut(duration: 1.25).repeatForever(autoreverses: true),
+                value: bright
+            )
+            .onAppear { bright = true }
+    }
+}
+
+/// One dial: an arc lit as far as its level and a needle standing at it.
+/// The large one carries its marks, its reading and what it is of inside.
+struct QuickSpeedDialView: View {
+    let dial: SpeedDialModel
+    let marks: [SpeedMarkModel]
+    let large: Bool
+    let palette: QuickPalette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var size: CGSize { large ? CGSize(width: 110, height: 78) : CGSize(width: 38, height: 27) }
+    private var lineWidth: CGFloat { large ? 6.0 : 3.5 }
+    private var tint: Color { large ? palette.accentViolet : palette.clientColor(dial.id) }
+
+    var body: some View {
+        let level = min(max(dial.level, 0.0), 1.0)
+        let rect = CGRect(origin: .zero, size: size)
+        let (center, radius) = DialGeometry.fit(rect, lineWidth: lineWidth)
+        let needle = DialNeedle(
+            level: level,
+            lineWidth: lineWidth,
+            inner: large ? 0.70 : 0.0,
+            outer: large ? 1.04 : 0.80,
+            width: large ? 4.4 : 2.8
+        )
+        let redline = marks.last?.level ?? 1.0
+        ZStack(alignment: .topLeading) {
+            DialArc(from: 0, to: 1, lineWidth: lineWidth)
+                .stroke(palette.lineStrong, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+            if large {
+                DialArc(from: redline, to: 1, lineWidth: lineWidth)
+                    .stroke(palette.error.opacity(0.42), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+            }
+            lit(level, center: center)
+                .shadow(color: tint.opacity(level > 0 ? 0.6 : 0.0), radius: large ? 6 : 3.5)
+            if large {
+                ForEach(Array(marks.enumerated()), id: \.offset) { _, mark in
+                    Path { path in
+                        path.move(to: DialGeometry.point(center, radius - lineWidth / 2.0 - 2.0, mark.level))
+                        path.addLine(to: DialGeometry.point(center, radius - lineWidth / 2.0 - 5.5, mark.level))
+                    }
+                    .stroke(palette.muted.opacity(0.75), style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
+                    Text(mark.label)
+                        .font(.system(size: 7.5, weight: .medium, design: .rounded).monospacedDigit())
+                        .foregroundColor(palette.muted)
+                        .fixedSize()
+                        .position(DialGeometry.point(center, radius - lineWidth / 2.0 - 12.0, mark.level))
+                }
+            }
+            if level > 0.001 {
+                DialGlow(needle: needle, color: large ? palette.error : tint, still: reduceMotion)
+            }
+            needle.fill(palette.ink)
+            if large {
+                // Above the needle's reach and below the last mark, so that
+                // neither is ever drawn over the reading.
+                VStack(spacing: 1) {
+                    Text(dial.label)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(palette.muted)
+                        .lineLimit(1)
+                    reading(size: 16, unitSize: 9)
+                }
+                .frame(width: 54)
+                .position(x: center.x, y: center.y + 7)
+            } else {
+                Circle()
+                    .fill(palette.surface)
+                    .overlay(Circle().strokeBorder(level > 0 ? tint : palette.muted, lineWidth: 1.3))
+                    .frame(width: 5.5, height: 5.5)
+                    .position(center)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .animation(reduceMotion ? nil : .interpolatingSpring(stiffness: 62, damping: 10.5), value: level)
+    }
+
+    /// The arc from the dial's rest to its level: the client's colour, or for
+    /// the one of every client cool where it begins and hot where it ends.
+    @ViewBuilder
+    private func lit(_ level: Double, center: CGPoint) -> some View {
+        let arc = DialArc(from: 0, to: level, lineWidth: lineWidth)
+        let style = StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+        if large {
+            arc.stroke(
+                AngularGradient(
+                    gradient: Gradient(stops: [
+                        .init(color: palette.accent, location: 0.0),
+                        .init(color: palette.accentViolet, location: 0.55),
+                        .init(color: palette.error, location: 1.0),
+                    ]),
+                    center: UnitPoint(x: center.x / size.width, y: center.y / size.height),
+                    startAngle: .degrees(150),
+                    endAngle: .degrees(390)
+                ),
+                style: style
+            )
+        } else {
+            arc.stroke(tint, style: style)
+        }
+    }
+
+    func reading(size: CGFloat, unitSize: CGFloat) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 1) {
+            Text(dial.reading)
+                .font(.system(size: size, weight: large ? .bold : .semibold, design: .rounded).monospacedDigit())
+                .foregroundColor(dial.level > 0 || large ? palette.ink : palette.muted)
+            if !dial.unit.isEmpty {
+                Text(dial.unit)
+                    .font(.system(size: unitSize, weight: .medium, design: .rounded))
+                    .foregroundColor(palette.muted)
+            }
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+    }
+}
+
+/// How fast the shown instance is spending: every client together on the
+/// large dial, and each client the panel shows on a small one.
+struct QuickSpeedCardView: View {
+    let speed: SpeedCardModel
+    let palette: QuickPalette
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            QuickSpeedDialView(dial: speed.total, marks: speed.marks, large: true, palette: palette)
+                .help(speed.total.exact)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(speed.total.label)
+                .accessibilityValue(speed.total.reading + speed.total.unit)
+
+            HStack(alignment: .top, spacing: 0) {
+                ForEach(speed.clients) { client in
+                    let small = QuickSpeedDialView(dial: client, marks: [], large: false, palette: palette)
+                    VStack(spacing: 2) {
+                        small
+                        Text(client.label)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(palette.muted)
+                            .lineLimit(1)
+                        small.reading(size: 10.5, unitSize: 8)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .help(client.exact)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(client.label) 速率")
+                    .accessibilityValue(client.reading + client.unit)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.leading, 9)
+        .padding(.trailing, 7)
+        .padding(.vertical, 8)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(palette.surface)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            gradient: Gradient(colors: [
+                                palette.accent.opacity(0.10),
+                                palette.accentViolet.opacity(0.06),
+                                Color.clear,
+                            ]),
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(palette.line, lineWidth: 1)
+        )
     }
 }
 
@@ -2067,6 +2368,10 @@ struct QuickPanelRootView: View {
                         palette: palette,
                         onSelect: { id in store.dispatch(["op": "selectInstance", "id": id]) }
                     )
+                }
+
+                if let speed = store.model.speed {
+                    QuickSpeedCardView(speed: speed, palette: palette)
                 }
 
                 QuickToolbarView(

@@ -8,6 +8,7 @@ use crate::{
     instances::{self, InstanceState},
     power, process_control, quick,
     quick_model::*,
+    usage::speed::{Rate, Speed},
     Runtime,
 };
 use chrono::{Local, TimeZone};
@@ -92,6 +93,39 @@ pub struct ControlsCardModel {
     pub quit_busy: Option<String>,
 }
 
+/// One dial of the speed card.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeedDialModel {
+    /// The client it is of and is coloured as; empty for all of them.
+    pub id: String,
+    pub label: String,
+    /// What it reads as shown, and the unit after it.
+    pub reading: String,
+    pub unit: String,
+    /// The reading in full.
+    pub exact: String,
+    /// How far up the dial the needle stands, from 0 to 1.
+    pub level: f64,
+}
+
+/// A mark of the large dial: `label` stands at `level` of it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeedMarkModel {
+    pub label: String,
+    pub level: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeedCardModel {
+    pub total: SpeedDialModel,
+    /// The marks of the total's dial, as the instance that was read has them.
+    pub marks: Vec<SpeedMarkModel>,
+    pub clients: Vec<SpeedDialModel>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuickPanelViewModel {
@@ -115,6 +149,8 @@ pub struct QuickPanelViewModel {
     pub instance_retry: bool,
     /// A server is shown: what belongs to this machine alone is left out.
     pub remote: bool,
+    /// How fast the shown instance is spending; none where it cannot say.
+    pub speed: Option<SpeedCardModel>,
 }
 
 // MARK: - Pure Derivation & Validation Logic
@@ -309,6 +345,88 @@ pub fn instance_row(
     (tabs, status, offline)
 }
 
+/// How often the speed is read while the panel is up.
+pub const SPEED_INTERVAL: Duration = Duration::from_secs(2);
+/// How long a reading of the speed is shown. One that is older was read
+/// before the panel was last hidden, and the dials rest until the next.
+pub const SPEED_TTL: Duration = Duration::from_secs(6);
+
+/// Whether the shown instance tells how fast it is spending: this machine
+/// does, and a server that is connected and answers the command.
+pub fn speed_supported(state: Option<&InstanceState>) -> bool {
+    state.is_none_or(|state| {
+        state.active == instances::LOCAL
+            || (state.connection.status == instances::Status::Connected
+                && !state
+                    .connection
+                    .unsupported
+                    .iter()
+                    .any(|name| name == "get_usage_speed"))
+    })
+}
+
+fn speed_dial(id: &str, label: &str, rate: &Rate) -> SpeedDialModel {
+    let per_hour: f64 = rate.cost_per_hour.parse().unwrap_or(0.0);
+    // To the cent below ten dollars, to ten cents below a hundred and to the
+    // dollar from there, a half rounding up as it does in the pages.
+    let fixed = |digits: usize| {
+        let scale = 10f64.powi(digits as i32);
+        format!("${:.digits$}", (per_hour * scale).round() / scale)
+    };
+    let (reading, unit) = if rate.unpriced {
+        ("未定价".into(), "")
+    } else if per_hour >= 100.0 {
+        (fixed(0), "/h")
+    } else if per_hour >= 10.0 {
+        (fixed(1), "/h")
+    } else {
+        (fixed(2), "/h")
+    };
+    SpeedDialModel {
+        id: id.into(),
+        label: label.into(),
+        reading,
+        unit: unit.into(),
+        exact: if rate.unpriced {
+            "未定价".into()
+        } else {
+            format!("${}/h", rate.cost_per_hour)
+        },
+        level: rate.level,
+    }
+}
+
+/// The speed card of a reading: the dial of every client taken together, and
+/// one for each of `visible`, in their order.
+pub fn derive_speed_card(speed: &Speed, visible: &[ClientId]) -> SpeedCardModel {
+    SpeedCardModel {
+        total: speed_dial("", "总速率", &speed.total),
+        marks: speed
+            .dial
+            .iter()
+            .map(|mark| SpeedMarkModel {
+                label: mark.label.clone(),
+                level: mark.level,
+            })
+            .collect(),
+        clients: visible
+            .iter()
+            .filter_map(|client| {
+                let named = speed
+                    .clients
+                    .iter()
+                    .find(|named| named.id == client.usage_name())?;
+                let id = serde_json::to_value(client).ok()?;
+                Some(speed_dial(
+                    id.as_str()?,
+                    quick_client_label(*client),
+                    &named.rate,
+                ))
+            })
+            .collect(),
+    }
+}
+
 /// The cards of a server's answer with what only this panel knows laid over
 /// them: the start of each wait in this machine's time, the waits being
 /// interrupted, and a freeze switch that is in use.
@@ -494,6 +612,15 @@ struct EphemeralState {
     /// An answer is on its way, and another is wanted after it.
     server_reading: bool,
     server_stale: bool,
+    speed: Option<SpeedRead>,
+}
+
+/// How fast an instance was spending when it was last asked.
+struct SpeedRead {
+    /// The server that answered; none where this machine did.
+    server: Option<String>,
+    at: Instant,
+    speed: Speed,
 }
 
 struct Host {
@@ -884,6 +1011,16 @@ impl Host {
             .or(gateway_err)
             .or_else(|| accounts.filter(|_| server.is_none()).and_then(|a| a.error));
         let (instances, instance_status, instance_retry) = instance_row(st.instances.as_ref());
+        // The dials rest until the shown instance has been read.
+        let speed = speed_supported(st.instances.as_ref()).then(|| {
+            let read = st.speed.as_ref().filter(|read| {
+                read.server == server && now_inst.saturating_duration_since(read.at) < SPEED_TTL
+            });
+            match read {
+                Some(read) => derive_speed_card(&read.speed, &visible_clients),
+                None => derive_speed_card(&Speed::idle(0), &visible_clients),
+            }
+        });
         let clients = visible_clients
             .iter()
             .map(|&cid| ClientTabModel {
@@ -922,6 +1059,7 @@ impl Host {
             instance_status,
             instance_retry,
             remote: server.is_some(),
+            speed,
         };
         drop(st);
         let json = serde_json::to_string(&vm).ok()?;
@@ -1949,6 +2087,60 @@ impl Host {
             }
         });
     }
+
+    /// Asks the shown instance how fast it is spending and shows the answer.
+    /// One that cannot be had leaves the dials at rest: it is asked again in
+    /// a moment, and nothing is said of it.
+    async fn read_speed(&self) {
+        let server = self.server();
+        let speed = match &server {
+            None => {
+                let Some(r) = self
+                    .app
+                    .try_state::<Arc<Runtime>>()
+                    .map(|r| r.inner().clone())
+                else {
+                    return;
+                };
+                tauri::async_runtime::spawn_blocking(move || r.usage.speed())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            }
+            Some(instance) => {
+                if !speed_supported(self.state.lock().instances.as_ref()) {
+                    return;
+                }
+                self.ask(instance, "get_usage_speed", json!({}))
+                    .await
+                    .ok()
+                    .and_then(|answer| serde_json::from_value(answer).ok())
+            }
+        };
+        self.state.lock().speed = speed.map(|speed| SpeedRead {
+            server,
+            at: Instant::now(),
+            speed,
+        });
+        self.render_if_visible();
+    }
+
+    fn spawn_speed_ticker(self: &Arc<Self>) {
+        let host = self.clone();
+        let mut wake_rx = self.wake_tx.subscribe();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                if !is_visible() {
+                    if wake_rx.changed().await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                host.read_speed().await;
+                tokio::time::sleep(SPEED_INTERVAL).await;
+            }
+        });
+    }
 }
 
 pub fn connect(app: &tauri::AppHandle) {
@@ -1971,6 +2163,7 @@ pub fn connect(app: &tauri::AppHandle) {
         host.spawn_quota_scheduler();
         host.spawn_power_poller();
         host.spawn_wait_ticker();
+        host.spawn_speed_ticker();
     }
 }
 
@@ -2630,6 +2823,9 @@ mod tests {
             "ProviderCardModel",
             "GatewayCardModel",
             "ControlsCardModel",
+            "SpeedDialModel",
+            "SpeedMarkModel",
+            "SpeedCardModel",
             "QuickPanelViewModel",
         ];
         for name in names {
@@ -2701,6 +2897,111 @@ mod tests {
         );
         let connected = state("m1", instances::Status::Connected, None);
         assert_eq!(instance_row(Some(&connected)).1, None);
+
+        // This machine tells how fast it spends, and so does a server that
+        // is connected and answers the command.
+        assert!(speed_supported(None));
+        assert!(speed_supported(Some(&alone)));
+        assert!(speed_supported(Some(&connected)));
+        assert!(!speed_supported(Some(&connecting)));
+        let older = InstanceState {
+            connection: instances::Connection {
+                unsupported: vec!["get_usage_speed".into()],
+                ..connected.connection.clone()
+            },
+            ..connected.clone()
+        };
+        assert!(!speed_supported(Some(&older)));
+    }
+
+    #[test]
+    fn the_speed_card_reads_every_shown_client_and_all_of_them_together() {
+        let rate = |per_hour: &str, level: f64, unpriced: bool| Rate {
+            cost_per_hour: per_hour.into(),
+            level,
+            unpriced,
+        };
+        let mut speed = Speed::idle(0);
+        speed.total = rate("123.4567", 0.93, false);
+        for (id, read) in [
+            ("codex", rate("0.4249", 0.15, false)),
+            ("claude", rate("12.3449", 0.59, false)),
+            ("antigravity", rate("110.5", 0.91, false)),
+            ("grok", rate("0", 0.0, true)),
+        ] {
+            speed
+                .clients
+                .iter_mut()
+                .find(|named| named.id == id)
+                .unwrap()
+                .rate = read;
+        }
+        // DSH is hidden: it has no dial, and is still part of the total.
+        let card = derive_speed_card(
+            &speed,
+            &[
+                ClientId::Codex,
+                ClientId::Claude,
+                ClientId::Agy,
+                ClientId::Grok,
+            ],
+        );
+        let dial = |id: &str, label: &str, reading: &str, unit: &str, exact: &str, level: f64| {
+            SpeedDialModel {
+                id: id.into(),
+                label: label.into(),
+                reading: reading.into(),
+                unit: unit.into(),
+                exact: exact.into(),
+                level,
+            }
+        };
+        assert_eq!(
+            card.total,
+            dial("", "总速率", "$123", "/h", "$123.4567/h", 0.93)
+        );
+        assert_eq!(
+            card.clients,
+            [
+                dial("codex", "Codex", "$0.42", "/h", "$0.4249/h", 0.15),
+                dial("claude", "Claude", "$12.3", "/h", "$12.3449/h", 0.59),
+                dial("agy", "agy", "$111", "/h", "$110.5/h", 0.91),
+                dial("grok", "Grok", "未定价", "", "未定价", 0.0),
+            ]
+        );
+        assert_eq!(
+            card.marks
+                .iter()
+                .map(|mark| (mark.label.as_str(), mark.level))
+                .collect::<Vec<_>>(),
+            speed
+                .dial
+                .iter()
+                .map(|mark| (mark.label.as_str(), mark.level))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(card.marks.len(), 4);
+
+        // Before anything was read every dial rests.
+        let resting = derive_speed_card(&Speed::idle(0), &ALL_CLIENTS);
+        assert_eq!(
+            resting.total,
+            dial("", "总速率", "$0.00", "/h", "$0/h", 0.0)
+        );
+        assert_eq!(
+            resting
+                .clients
+                .iter()
+                .map(|dial| (dial.label.as_str(), dial.reading.as_str(), dial.level))
+                .collect::<Vec<_>>(),
+            [
+                ("Codex", "$0.00", 0.0),
+                ("Claude", "$0.00", 0.0),
+                ("agy", "$0.00", 0.0),
+                ("Grok", "$0.00", 0.0),
+                ("DSH", "$0.00", 0.0),
+            ]
+        );
     }
 
     #[test]
