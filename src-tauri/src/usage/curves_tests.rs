@@ -67,12 +67,15 @@ fn tried(account: Option<&str>, outcome: &str, error_code: Option<&str>) -> Atte
 }
 /// A request of `client` that reached no gateway, as its app or its session
 /// files tell of it, with its attempts in order. It completed where the last
-/// of them succeeded.
+/// of them succeeded. All of a client's are of one session, so that an error
+/// Claude Code wrote down is told to have reached no gateway by the request
+/// before it, whatever a gateway recorded at that time.
 fn told(client: &str, id: &str, at: i64, attempts: Vec<Attempt>) -> Record {
     Record {
         id: id.into(),
         client: client.into(),
         source: client.into(),
+        session_id: Some(format!("{client}-session")),
         started_at: at,
         completed: attempts.last().is_some_and(|a| a.outcome == "success"),
         attempts: attempts
