@@ -11,6 +11,7 @@ import type {
   UsageFilter,
   UsageRecord,
   UsageSettings,
+  UsageSpeed,
   UsageState,
 } from "./usage-types";
 import { ownEntryKey } from "./usage-types";
@@ -558,10 +559,68 @@ function curvesPreview(f: UsageFilter): UsageCurves {
     direct,
   };
 }
+/**
+ * What the preview's clients are spending at this moment: each swells and
+ * falls in its own time and now and then stops, so that the dials have
+ * somewhere to go between one reading and the next.
+ */
+function speedPreview(): UsageSpeed {
+  const seconds = Date.now() / 1000;
+  // The scale an instance reads a rate on: its marks close up as they climb.
+  const level = (perHour: number) =>
+    Math.min(1, Math.log1p(perHour / 0.25) / Math.log1p(200 / 0.25));
+  const rate = (perHour: number, unpriced = false) => ({
+    costPerHour: String(Number(perHour.toFixed(4))),
+    level: level(perHour),
+    unpriced,
+  });
+  // The most each spends in an hour, and how many seconds a swell of it takes.
+  const swells: [string, number, number][] = [
+    ["codex", 16, 47],
+    ["claude", 90, 73],
+    ["antigravity", 7, 37],
+    ["grok", 2.4, 59],
+    ["dsh", 0.8, 83],
+  ];
+  const spent = swells.map(([id, most, period], i) => {
+    const wave = Math.sin((seconds / period + i / 5) * 2 * Math.PI);
+    // Under the line it spends nothing: a fifth of the time.
+    return [id, most * Math.max(0, (wave + 0.8) / 1.8) ** 2] as const;
+  });
+  const antigravity = spent[2][1];
+  const track = (id: string, share: number) => ({
+    id,
+    ...rate(antigravity * share),
+  });
+  return {
+    ...rate(spent.reduce((sum, [, perHour]) => sum + perHour, 0)),
+    at: Date.now(),
+    dial: [1, 5, 20, 100].map((mark) => ({
+      label: String(mark),
+      level: level(mark),
+    })),
+    clients: spent.map(([id, perHour]) => ({
+      id,
+      // DSH is the one whose tokens are at times not priced.
+      ...rate(perHour, id === "dsh" && perHour === 0),
+    })),
+    accounts: [
+      {
+        id: "ag-oauth-1",
+        tracks: [track("gemini", 0.55), track("claude_gpt", 0.3)],
+      },
+      {
+        id: "ag-oauth-2",
+        tracks: [track("gemini", 0.15), track("claude_gpt", 0)],
+      },
+    ],
+  };
+}
 export const usageCommands = [
   "get_usage_state",
   "get_usage_dashboard",
   "get_usage_curves",
+  "get_usage_speed",
   "get_antigravity_usage_stats",
   "refresh_antigravity_usage_quota",
   "get_claude_usage_stats",
@@ -629,6 +688,7 @@ export function usagePreview(
     return state();
   }
   if (name === "get_usage_state" || name === "sync_usage") return state();
+  if (name === "get_usage_speed") return speedPreview();
   if (name === "get_usage_detail") return rows.find((r) => r.id === args.id);
   if (name === "get_usage_calculator_totals") {
     const filter = args.filter as UsageFilter;
