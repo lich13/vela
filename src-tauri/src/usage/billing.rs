@@ -93,7 +93,11 @@ impl Spool {
 }
 pub(super) fn finished(r: &Record) -> bool {
     r.finished_at.is_some()
-        && (r.source != "claude" || r.completed)
+        // A Claude Code message is over once it has a stop reason; an API
+        // error written down in place of one was over when it was written.
+        && (r.source != "claude"
+            || r.completed
+            || r.final_attempt().is_some_and(|a| a.outcome == "failed"))
         && !r.attempts.is_empty()
         && r.final_attempt()
             .is_some_and(|a| !matches!(a.outcome.as_str(), "in_progress" | "pending"))
@@ -569,6 +573,26 @@ mod tests {
             clean: true,
         }
     }
+    /// The fields of one line of a bill.
+    fn fields(line: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut field = String::new();
+        let mut quoted = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' if quoted && chars.peek() == Some(&'"') => {
+                    field.push(c);
+                    chars.next();
+                }
+                '"' => quoted = !quoted,
+                ',' if !quoted => result.push(std::mem::take(&mut field)),
+                _ => field.push(c),
+            }
+        }
+        result.push(field);
+        result
+    }
     #[test]
     fn retains_bill_details_until_export_and_counts_business_failures() {
         let dir = tempfile::tempdir().unwrap();
@@ -595,8 +619,103 @@ mod tests {
                 ..Filter::default()
             })
             .unwrap();
-        assert_eq!(dashboard.totals.success, 0);
-        assert_eq!(dashboard.totals.status_known, 1);
+        // The session's message ended, which is a success; the gateway's
+        // request answered 200 and did not complete, which is an error.
+        assert_eq!(dashboard.totals.success, 1);
+        assert_eq!(dashboard.totals.status_known, 2);
+    }
+    #[test]
+    fn a_claude_request_is_over_once_its_message_ended_or_an_api_error_was_written_down() {
+        let mut r = row("fixture", "claude", BASE);
+        assert!(finished(&r));
+        // Cut short: more of the message may still be written.
+        r.completed = false;
+        r.attempts[0].outcome = "reported".into();
+        assert!(!finished(&r));
+        // An API error is written once, in place of a message.
+        r.attempts[0].outcome = "failed".into();
+        assert!(finished(&r));
+        r.finished_at = None;
+        assert!(!finished(&r));
+    }
+    #[test]
+    fn a_claude_api_error_is_exported_and_cleaned_with_its_period_and_leaves_a_receipt() {
+        const START: i64 = 1_700_000_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(&dir.path().join("store"));
+        let home = dir.path().join("home");
+        let file = home.join("projects/fixture/main.jsonl");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // A turn that was answered and two that ended in an API error, the
+        // last of them two minutes and a second after the first line.
+        std::fs::write(&file, include_str!("fixtures/v015/claude-api-error.jsonl")).unwrap();
+        let pricing = service.prices().unwrap().frozen();
+        let read = |rebuild: bool| {
+            service
+                .query(|store| {
+                    super::super::sessions::sync(
+                        store,
+                        &pricing,
+                        &Settings::default(),
+                        "claude",
+                        &home,
+                        rebuild,
+                    )
+                })
+                .unwrap()
+        };
+        assert_eq!(read(false).imported, 3);
+        let listed = || service.read(|s| s.logs(&Filter::default())).unwrap().total;
+        assert_eq!(listed(), 3);
+
+        let request = Request {
+            clients: vec!["claude".into()],
+            start: START,
+            end: START + 122_000,
+            timezone: "UTC".into(),
+            clean: true,
+        };
+        let path = dir.path().join("bill.csv");
+        let exported = service.export_bill(&request, &path).unwrap();
+        assert_eq!(
+            (exported.requests, exported.cleaned, exported.retained),
+            (3, 3, 0)
+        );
+        assert!(exported.cleanup_error.is_none());
+        let csv = std::fs::read_to_string(&path).unwrap();
+        // A saved bill begins with a byte order mark.
+        let mut lines = csv.trim_start_matches('\u{feff}').lines();
+        let headers = fields(lines.next().unwrap());
+        let bill: Vec<_> = lines.map(fields).collect();
+        let column = |name: &str| headers.iter().position(|header| header == name).unwrap();
+        for (line, status, code) in [
+            ("fixture-error-limited", "429", "rate_limit"),
+            // It came back with no status.
+            ("fixture-error-dropped", "", "server_error"),
+        ] {
+            let id = safe_id(&format!("claude:error:fixture-claude-session:{line}"));
+            let row = bill
+                .iter()
+                .find(|row| row[column("request_id")] == id)
+                .expect(line);
+            assert_eq!(
+                ["outcome", "status", "error_code", "request_completed"]
+                    .map(|name| row[column(name)].as_str()),
+                ["failed", status, code, "false"],
+                "{line}"
+            );
+            // Nothing was consumed that the line tells of, and nothing priced.
+            assert_eq!(
+                ["input_tokens", "output_tokens", "cost"].map(|name| row[column(name)].as_str()),
+                ["", "", ""],
+                "{line}"
+            );
+        }
+        assert_eq!(listed(), 0);
+        // What is left of each is a receipt, so reading the file from its
+        // start again brings none of them back.
+        assert_eq!(read(true).errors, 0);
+        assert_eq!(listed(), 0);
     }
     #[test]
     fn full_csv_seconds_attempts_cleanup_and_concurrent_updates() {
@@ -810,25 +929,6 @@ mod tests {
             assert_eq!((result.requests, result.attempts), (1, 1));
             let csv = String::from_utf8(out).unwrap();
             let mut lines = csv.lines();
-            let fields = |line: &str| -> Vec<String> {
-                let mut result = Vec::new();
-                let mut field = String::new();
-                let mut quoted = false;
-                let mut chars = line.chars().peekable();
-                while let Some(c) = chars.next() {
-                    match c {
-                        '"' if quoted && chars.peek() == Some(&'"') => {
-                            field.push(c);
-                            chars.next();
-                        }
-                        '"' => quoted = !quoted,
-                        ',' if !quoted => result.push(std::mem::take(&mut field)),
-                        _ => field.push(c),
-                    }
-                }
-                result.push(field);
-                result
-            };
             let headers = fields(lines.next().unwrap());
             let values = fields(lines.next().unwrap());
             assert_eq!(headers.len(), values.len());

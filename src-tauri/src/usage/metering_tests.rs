@@ -134,7 +134,7 @@ fn reasoning_survives_original_multiple_attempts_and_reopen_without_schema_chang
         (version, tables)
     };
     let before = schema();
-    assert_eq!(before.0, 14);
+    assert_eq!(before.0, 15);
     let attempt = Attempt {
         id: "fixture-a".into(),
         tokens: Tokens {

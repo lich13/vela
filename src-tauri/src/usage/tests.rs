@@ -424,6 +424,8 @@ fn claude_message_id_updates_replace_partial_usage_without_fabricating_http_stat
     let body = serde_json::to_string(row).unwrap();
     assert!(!body.contains("fixture-content.example.invalid"));
     assert!(!body.contains("fixture-user"));
+    // The message ended, which the session file says and no status does.
+    assert_eq!(row.final_attempt().unwrap().outcome, "success");
     let totals = store.dashboard(&all_time()).unwrap().totals;
     assert_eq!(
         (
@@ -432,7 +434,7 @@ fn claude_message_id_updates_replace_partial_usage_without_fabricating_http_stat
             totals.status_known,
             totals.success
         ),
-        (1, 1, 0, 0)
+        (1, 1, 1, 1)
     );
     assert_eq!(totals.tokens.input, Some(100));
     assert_eq!(totals.tokens.cache_read, Some(40));

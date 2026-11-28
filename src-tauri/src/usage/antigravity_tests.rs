@@ -3229,3 +3229,207 @@ fn an_error_on_the_entry_fails_the_request_and_drops_clocks_nothing_measured() {
         assert_eq!(classify_error_text(text), class, "{text}");
     }
 }
+
+/// Writes the history file of a conversation under `home`.
+fn history(home: &Path, cascade: &str, lines: &str) -> PathBuf {
+    let path = home
+        .join("antigravity/brain")
+        .join(cascade)
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, lines).unwrap();
+    path
+}
+/// One model step as the app writes it once it is done, `step` seconds into
+/// the conversation.
+fn history_step(step: u64) -> Value {
+    json!({
+        "step_index": step, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+        "created_at": format!("2026-01-01T00:00:{step:02}Z"), "model": "gemini-3.1-pro",
+        "input_tokens": 100, "cache_read_tokens": 20, "output_tokens": 10,
+    })
+}
+/// How a row's request ended: its outcome, whether it completed, what a
+/// success rate takes it for, and its error code.
+fn ending(row: &Record) -> (&str, bool, Option<bool>, Option<&str>) {
+    let a = &row.attempts[0];
+    (
+        a.outcome.as_str(),
+        row.completed,
+        row.known_success(),
+        a.error_code.as_deref(),
+    )
+}
+
+#[test]
+fn a_history_line_marked_done_with_its_input_and_output_counted_is_a_success() {
+    let dir = tempfile::tempdir().unwrap();
+    // A finished model step, less or more than what the app writes for one.
+    let line = |step: u64, change: &dyn Fn(&mut serde_json::Map<String, Value>)| {
+        let mut line = history_step(step);
+        change(line.as_object_mut().unwrap());
+        format!("{line}\n")
+    };
+    history(
+        dir.path(),
+        "fixture",
+        &[
+            line(1, &|_| {}),
+            line(2, &|line| {
+                line.insert("status".into(), json!("ERROR"));
+            }),
+            line(3, &|line| {
+                line.remove("status");
+            }),
+            line(4, &|line| {
+                line.remove("output_tokens");
+            }),
+            line(5, &|line| {
+                line.remove("input_tokens");
+            }),
+            // Marked done, with an error beside it.
+            line(6, &|line| {
+                line.insert("error".into(), json!({"code": 429}));
+            }),
+            // A line of a request rather than of a step is told the same way.
+            line(7, &|line| {
+                line.remove("step_index");
+                line.remove("type");
+                line.insert("request_id".into(), json!("request-fixture"));
+            }),
+        ]
+        .concat(),
+    );
+    let mut store = Store::open(&dir.path().join("db")).unwrap();
+    let pricing = Pricing::new(&dir.path().join("db")).unwrap();
+    let mut report = Report::default();
+    scan_home(
+        &mut store,
+        dir.path(),
+        &pricing,
+        &Settings::default(),
+        &mut report,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        (report.errors, report.imported),
+        (0, 7),
+        "{:?}",
+        report.last_error
+    );
+    let row = |request: &str| {
+        store
+            .detail(&safe_id(&format!("antigravity:request:{request}")))
+            .unwrap()
+    };
+    assert_eq!(
+        ending(&row("fixture:step:1")),
+        ("success", true, Some(true), None)
+    );
+    assert_eq!(
+        ending(&row("fixture:step:2")),
+        ("failed", false, Some(false), Some("ANTIGRAVITY_ERROR"))
+    );
+    for step in [3, 4, 5] {
+        assert_eq!(
+            ending(&row(&format!("fixture:step:{step}"))),
+            ("unknown", false, None, None),
+            "{step}"
+        );
+    }
+    assert_eq!(
+        ending(&row("fixture:step:6")),
+        ("failed", false, Some(false), Some("429"))
+    );
+    assert_eq!(
+        ending(&row("request-fixture")),
+        ("success", true, Some(true), None)
+    );
+    let totals = store.dashboard(&Filter::default()).unwrap().totals;
+    assert_eq!(
+        (totals.requests, totals.status_known, totals.success),
+        (7, 4, 2)
+    );
+}
+
+#[test]
+fn a_history_row_stored_before_done_was_a_success_becomes_one_where_it_stands() {
+    let dir = tempfile::tempdir().unwrap();
+    let lines = [1, 2].map(|step| format!("{}\n", history_step(step)));
+    let path = history(dir.path(), "fixture", &lines.concat());
+    // A conversation nothing has written to for a while, read to its end.
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+        .unwrap();
+    let mut store = Store::open(&dir.path().join("db")).unwrap();
+    let pricing = Pricing::new(&dir.path().join("db")).unwrap();
+    let read = |store: &mut Store| {
+        let mut report = Report::default();
+        scan_home(
+            store,
+            dir.path(),
+            &pricing,
+            &Settings::default(),
+            &mut report,
+            false,
+        )
+        .unwrap();
+        (report.errors, report.imported)
+    };
+    assert_eq!(read(&mut store), (0, 2));
+    let rows = |store: &Store| {
+        [1, 2].map(|step| {
+            store
+                .detail(&safe_id(&format!(
+                    "antigravity:request:fixture:step:{step}"
+                )))
+                .unwrap()
+        })
+    };
+    // The rows as the version before this one stored them.
+    let before = rows(&store).map(|mut row| {
+        row.completed = false;
+        row.attempts[0].outcome = "unknown".into();
+        row
+    });
+    store.write_batch(&before, None).unwrap();
+    assert_eq!(rows(&store).map(|row| row.known_success()), [None; 2]);
+
+    // The position this reading saved leaves the file alone.
+    assert_eq!(read(&mut store), (0, 0));
+    assert_eq!(rows(&store).map(|row| row.known_success()), [None; 2]);
+
+    // The position as it was saved before readings were numbered.
+    let key = safe_id(&format!("antigravity:file:{}", path.to_string_lossy()));
+    let mut position: Value = serde_json::from_str(&store.cursor(&key).unwrap().unwrap()).unwrap();
+    assert_eq!(
+        (&position["complete"], &position["reading"]),
+        (&json!(true), &json!(HISTORY_READING))
+    );
+    position.as_object_mut().unwrap().remove("reading");
+    store
+        .write_batch(&[], Some((&key, &position.to_string())))
+        .unwrap();
+    assert_eq!(read(&mut store), (0, 2));
+    for (now, then) in rows(&store).iter().zip(&before) {
+        assert_eq!(ending(now), ("success", true, Some(true), None));
+        assert_eq!(now.id, then.id);
+        assert_eq!(now.attempts[0].tokens, then.attempts[0].tokens);
+        assert_eq!(now.cost(), then.cost());
+    }
+    let totals = store.dashboard(&Filter::default()).unwrap().totals;
+    assert_eq!(
+        (totals.requests, totals.status_known, totals.success),
+        (2, 2, 2)
+    );
+    assert_eq!(store.logs(&Filter::default()).unwrap().total, 2);
+    let saved: FileCursor = serde_json::from_str(&store.cursor(&key).unwrap().unwrap()).unwrap();
+    assert_eq!(saved.reading, HISTORY_READING);
+    assert_eq!(read(&mut store), (0, 0));
+}

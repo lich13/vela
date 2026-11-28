@@ -777,6 +777,9 @@ fn claude(v: &Value, c: &mut Cursor, at: i64) -> Option<Record> {
     if v["type"] != "assistant" {
         return None;
     }
+    if v["isApiErrorMessage"] == true {
+        return claude_error(v, c, parent, at);
+    }
     let m = &v["message"];
     let mid = safe_id(m["id"].as_str()?);
     let u = m.get("usage")?;
@@ -862,8 +865,58 @@ fn claude(v: &Value, c: &mut Cursor, at: i64) -> Option<Record> {
         },
     );
     r.attempts[0].response_id = Some(mid);
+    if complete {
+        // A message with a stop reason ended, which the file says of no other.
+        r.attempts[0].outcome = "success".into();
+    }
     Some(r)
 }
+/// A code such as `rate_limit`, and nothing that could be text of its own.
+fn code(v: &Value) -> Option<String> {
+    v.as_str()
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        })
+        .map(str::to_owned)
+}
+/// An API error Claude Code wrote down in place of an answer: a request that
+/// failed. The line names no model and no consumption, so the record has
+/// neither; its id is the digest of the session and the line together.
+fn claude_error(v: &Value, c: &Cursor, parent: Option<String>, at: i64) -> Option<Record> {
+    let id = safe_id(&format!(
+        "claude:error:{}:{}",
+        v["sessionId"].as_str()?,
+        v["uuid"].as_str()?
+    ));
+    let start = parent.and_then(|id| c.chain.get(&id).map(|(_, at)| *at));
+    let mut r = base(
+        "claude",
+        id,
+        c.session.clone(),
+        None,
+        Tokens::default(),
+        SessionTiming {
+            at,
+            start,
+            complete: false,
+        },
+    );
+    let a = &mut r.attempts[0];
+    a.outcome = "failed".into();
+    a.status = v["apiErrorStatus"]
+        .as_u64()
+        .and_then(|status| u16::try_from(status).ok())
+        .filter(|status| (100..600).contains(status));
+    a.error_code = code(&v["error"]);
+    Some(r)
+}
+
+#[cfg(test)]
+#[path = "claude_failure_tests.rs"]
+mod claude_failure_tests;
 
 #[cfg(test)]
 mod test_support {
