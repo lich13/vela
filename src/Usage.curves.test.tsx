@@ -25,9 +25,12 @@ const none = { limited: 0, rejected: 0, server: 0, broken: 0 };
 const names: Record<string, string> = {
   "fixture-limited": "Fixture Limited",
   "fixture-steady": "Fixture Steady",
+  "fixture-top": "Fixture Top",
 };
 const name = (id: string) => names[id] ?? `供应商 ${id}`;
+const host = "shared.example.invalid";
 
+/** What an instance from before hosts and accounts answers with. */
 function fixture(overrides: Partial<UsageCurves> = {}): UsageCurves {
   return {
     start,
@@ -88,6 +91,40 @@ function fixture(overrides: Partial<UsageCurves> = {}): UsageCurves {
   };
 }
 
+/**
+ * The two providers at one host, with the row that stands for both, and a
+ * third at a host of its own that is rate-limited more than the two together.
+ */
+function hosted(): UsageCurves {
+  const curves = fixture();
+  const [limited, steady] = curves.providers;
+  limited.host = host;
+  steady.host = host;
+  curves.providers.unshift({
+    ...structuredClone(limited),
+    id: "fixture-top",
+    host: "top.example.invalid",
+    failures: { ...none, limited: 90 },
+  });
+  curves.groups = [
+    {
+      id: `host:${host}`,
+      host,
+      members: [limited.id, steady.id],
+      requests: 54,
+      ok: 51,
+      failures: { ...none, limited: 20, broken: 1 },
+      trend: [0.2, 0.9, 0, null, 0.5, ...Array(15).fill(null)],
+      firstToken: { samples: 50, p50: 700, p90: 2000 },
+      summedUntil: null,
+      buckets: [...limited.buckets, ...steady.buckets].sort(
+        (a, b) => a.at - b.at,
+      ),
+    },
+  ];
+  return curves;
+}
+
 type Shown = ComponentProps<typeof UsageCurvesPanel>;
 const shown = (props: Partial<Shown>): Shown => ({
   curves: null,
@@ -95,15 +132,23 @@ const shown = (props: Partial<Shown>): Shown => ({
   unread: false,
   unrecorded: false,
   selected: "",
+  picked: "",
+  split: [],
   name,
   onSelect: () => {},
+  onPart: () => {},
   ...props,
 });
+/** The names of the rows to choose among, in the order they are listed. */
+const listed = () =>
+  [...document.querySelectorAll(".curve-pick-name")].map(
+    (row) => row.textContent,
+  );
 
 function panel(
   curves: UsageCurves | null,
   selected = "",
-  onSelect: (id: string) => void = vi.fn(),
+  onSelect: Shown["onSelect"] = vi.fn(),
 ) {
   const view = render(
     <UsageCurvesPanel {...shown({ curves, selected, onSelect })} />,
@@ -150,9 +195,9 @@ describe("provider curves", () => {
     expect(figures().queryByText(/^自 /)).not.toBeInTheDocument();
     expect(screen.queryByText("早于运行日志")).not.toBeInTheDocument();
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
-    // What the 429s take in is said under the plots.
-    expect(container.querySelector(".curve-foot")).toHaveTextContent(
-      "结果未知的请求不计入；“429 限流”含流内返回的限流与容量不足；淡显的时段样本不足 5 个。",
+    // A figure that needs no count beside it stands alone.
+    expect(figures().getByText("3.00s").closest("dd")).toHaveTextContent(
+      /^3\.00s$/,
     );
     // Two buckets side by side are one stretch of line and the one an hour
     // later another: no line is drawn across the time nothing ended in.
@@ -164,7 +209,7 @@ describe("provider curves", () => {
     const user = userEvent.setup();
     const { figures, show, onSelect } = panel(fixture());
     await user.click(screen.getByRole("button", { name: /Fixture Steady/ }));
-    expect(onSelect).toHaveBeenCalledWith("fixture-steady");
+    expect(onSelect).toHaveBeenCalledWith("fixture-steady", "fixture-steady");
     show("fixture-steady");
     expect(
       screen.getByRole("heading", { name: "Fixture Steady" }),
@@ -195,7 +240,7 @@ describe("provider curves", () => {
     expect(screen.getByText("没有名称包含“nowhere”的供应商")).toBeVisible();
   });
 
-  it("reads each bucket from the keyboard and says when one is too thin to trust", async () => {
+  it("reads each bucket from the keyboard", async () => {
     const user = userEvent.setup();
     panel(fixture());
     screen.getByRole("group", { name: "逐格读数，按左右方向键移动" }).focus();
@@ -208,15 +253,15 @@ describe("provider curves", () => {
     );
     expect(tip().getByText("成功").closest("div")).toHaveTextContent("成功8");
     expect(tip().getByText("1.20s")).toBeVisible();
-    expect(tip().queryByText(/样本不足/)).not.toBeInTheDocument();
-    // Twenty attempts, and two first tokens to take a percentile of.
     await user.keyboard("{ArrowRight}");
     expect(tip().getByText("90%（18 / 20）")).toBeVisible();
-    expect(tip().getByText("样本不足 5 个，仅供参考。")).toBeVisible();
+    // How many first tokens the times are of is told beside them.
+    expect(tip().getByText("首字样本").closest("div")).toHaveTextContent(
+      "首字样本2",
+    );
     await user.keyboard("{End}");
     expect(tip().getByText("02:00–02:30")).toBeVisible();
     expect(tip().getByText("50%（1 / 2）")).toBeVisible();
-    expect(tip().getByText("样本不足 5 个，仅供参考。")).toBeVisible();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
@@ -267,7 +312,7 @@ describe("provider curves", () => {
       provider.trend = provider.trend.map(() => null);
       for (const bucket of provider.buckets) bucket.failures = null;
     }
-    const { figures } = panel(curves);
+    const { figures } = panel(curves, "fixture-limited");
     const unknown = figures().getAllByText("不可知");
     expect(
       unknown.map(
@@ -335,10 +380,7 @@ describe("provider curves", () => {
       />,
     );
     expect(screen.getAllByRole("note").map((note) => note.textContent)).toEqual(
-      [
-        "运行日志有异常（运行日志部分记录损坏，已跳过），失败次数可能不完整。",
-        "网关记录已关闭：期间成功的请求没有记录，错误率会偏高。",
-      ],
+      ["运行日志有异常（运行日志部分记录损坏，已跳过）", "网关记录已关闭"],
     );
   });
 
@@ -354,7 +396,7 @@ describe("provider curves", () => {
     rerender(
       <UsageCurvesPanel {...shown({ curves: fixture({ providers: [] }) })} />,
     );
-    expect(screen.getByText(/这段时间没有经过网关的请求/)).toBeVisible();
+    expect(screen.getByText(/这段时间没有可统计的请求/)).toBeVisible();
     // The page is narrowed to one that did nothing in the range: the others
     // are still there to choose.
     rerender(
@@ -363,18 +405,168 @@ describe("provider curves", () => {
       />,
     );
     expect(
-      screen.getByText(/“供应商 fixture-idle”在这段时间没有经过网关的请求/),
+      screen.getByText(/“供应商 fixture-idle”在这段时间没有可统计的请求/),
     ).toBeVisible();
     expect(
       screen.getByRole("button", { name: /Fixture Limited/ }),
     ).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("shows the providers of one host as one row until they are taken apart", async () => {
+    const user = userEvent.setup();
+    const { figures, rerender } = panel(hosted(), "fixture-steady");
+    expect(listed()).toEqual(["Fixture Top", host]);
+    // Narrowed to one of the two, the page shows the row that holds it: named
+    // by the host, and telling which providers it stands for.
+    const heading = screen.getByRole("heading", { name: host });
+    expect(heading).toHaveAttribute("title", "Fixture Limited、Fixture Steady");
+    expect(figures().getByText("21 / 72 次尝试失败")).toBeVisible();
+    expect(screen.getByRole("button", { name: "拆分" })).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "合并同域" }),
+    ).not.toBeInTheDocument();
+    // The host is found by the name of either.
+    const find = screen.getByRole("searchbox", { name: "筛选供应商" });
+    await user.type(find, "stea");
+    expect(listed()).toEqual([host]);
+    await user.clear(find);
+
+    rerender(
+      <UsageCurvesPanel
+        {...shown({
+          curves: hosted(),
+          selected: "fixture-steady",
+          split: [host],
+        })}
+      />,
+    );
+    expect(listed()).toEqual([
+      "Fixture Top",
+      "Fixture Limited",
+      "Fixture Steady",
+    ]);
+    expect(
+      screen.getByRole("heading", { name: "Fixture Steady" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "合并同域" })).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "拆分" }),
+    ).not.toBeInTheDocument();
+    // One with a host to itself has nothing to be taken apart from.
+    rerender(
+      <UsageCurvesPanel
+        {...shown({ curves: hosted(), selected: "fixture-top" })}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "Fixture Top" })).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /拆分|合并同域/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not bound by the journal what the records tell of", () => {
+    // The journal begins as the range ends and is damaged, and the gateway
+    // records nothing: none of it is of what never passed through a gateway.
+    const curves = fixture({
+      failuresSince: start + 48 * half,
+      journalError: "运行日志部分记录损坏，已跳过",
+    });
+    for (const provider of curves.providers) {
+      provider.ok = 0;
+      provider.failures = none;
+      for (const bucket of provider.buckets) bucket.failures = null;
+    }
+    curves.direct = [
+      {
+        id: "session:claude",
+        recorded: true,
+        requests: 9,
+        ok: 8,
+        failures: { ...none, limited: 1 },
+        trend: [0.5, 0, ...Array(18).fill(null)],
+        firstToken: { samples: 0, p50: null, p90: null },
+        summedUntil: null,
+        buckets: [
+          {
+            at: start,
+            ok: 1,
+            failures: { ...none, limited: 1 },
+            firstToken: { samples: 0, p50: null, p90: null },
+          },
+          {
+            at: start + half,
+            ok: 7,
+            failures: none,
+            firstToken: { samples: 0, p50: null, p90: null },
+          },
+        ],
+      },
+      {
+        ...structuredClone(curves.providers[1]),
+        id: "fixture-account",
+        recorded: true,
+        requests: 3,
+        ok: 0,
+        failures: none,
+        trend: Array(20).fill(null),
+        buckets: [],
+      },
+    ];
+    const view = panel(curves, "session");
+    // The sessions of a client that belong to no account are named by it.
+    expect(
+      screen.getByRole("heading", { name: "Claude Code 本机会话" }),
+    ).toBeVisible();
+    // With no failure known of the others, the busier comes first.
+    expect(listed()).toEqual([
+      "Claude Code 本机会话",
+      "Fixture Steady",
+      "Fixture Limited",
+      "供应商 fixture-account",
+    ]);
+    expect(view.figures().getByText("11.1%")).toBeVisible();
+    expect(view.figures().getByText("1 / 9 次尝试失败")).toBeVisible();
+    expect(view.figures().queryByText("不可知")).not.toBeInTheDocument();
+    expect(screen.queryByText("早于运行日志")).not.toBeInTheDocument();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+    // Of an account nothing is known to have ended either way: that is said
+    // of its results, the journal having nothing to do with it.
+    expect(
+      screen.getByRole("button", { name: /供应商 fixture-account/ }),
+    ).toHaveTextContent("结果未知 · 3 次请求");
+    expect(
+      screen.getByRole("button", { name: /Fixture Steady/ }),
+    ).toHaveTextContent("失败不可知 · 40 次请求");
+    // A provider of the gateway beside it is bounded as before.
+    view.rerender(
+      <UsageCurvesPanel
+        {...shown({ curves, unrecorded: true, picked: "fixture-limited" })}
+      />,
+    );
+    expect(view.figures().getAllByText("不可知")).toHaveLength(2);
+    expect(screen.getAllByRole("note")).toHaveLength(2);
   });
 });
 
 describe("the curves tab of the usage page", () => {
   // What the instance answers a reading of the curves with, and its settings.
   let answer: () => UsageCurves | Promise<UsageCurves>;
-  let settings: { recording: boolean; refreshSeconds: number };
+  let settings: {
+    recording: boolean;
+    refreshSeconds: number;
+    curveSplit?: string[];
+  };
+  const state = () => ({
+    settings: {
+      autoSync: true,
+      multiplier: "1",
+      pricingModel: "response",
+      ...settings,
+    },
+    syncing: false,
+    reports: {},
+    error: null,
+  });
   const asked = () =>
     mock.command.mock.calls.filter(
       ([command]) => command === "get_usage_curves",
@@ -433,17 +625,10 @@ describe("the curves tab of the usage page", () => {
           case "get_usage_logs":
             return { rows: [], total: 0, page: 1, detailSince: 0 };
           case "get_usage_state":
-            return {
-              settings: {
-                autoSync: true,
-                multiplier: "1",
-                pricingModel: "response",
-                ...settings,
-              },
-              syncing: false,
-              reports: {},
-              error: null,
-            };
+            return state();
+          case "set_usage_settings":
+            settings = args.settings as typeof settings;
+            return state();
           case "get_usage_curves":
             return answer();
           default:
@@ -563,7 +748,7 @@ describe("the curves tab of the usage page", () => {
     // The answer for every client comes late and is not Codex's.
     await act(async () => answers[1](fixture({ providers: [] })));
     expect(
-      screen.queryByText(/这段时间没有经过网关的请求/),
+      screen.queryByText(/这段时间没有可统计的请求/),
     ).not.toBeInTheDocument();
     await act(async () =>
       answers[2](fixture({ providers: fixture().providers.slice(1) })),
@@ -614,13 +799,89 @@ describe("the curves tab of the usage page", () => {
     ).toHaveLength(1);
   });
 
+  it("takes a host apart and puts it back, going to the row that stands for what was shown", async () => {
+    const user = userEvent.setup();
+    answer = hosted;
+    const saved = () =>
+      mock.command.mock.calls
+        .filter(([command]) => command === "set_usage_settings")
+        .map(([, args]) => (args as { settings: typeof settings }).settings);
+    render(<Usage />);
+    await user.click(await screen.findByRole("tab", { name: "曲线" }));
+    // The host is second: the one rate-limited the most is shown first.
+    expect(
+      await screen.findByRole("heading", { name: "Fixture Top" }),
+    ).toBeVisible();
+    const choices = screen.getByLabelText("用量供应商");
+    await user.click(screen.getByRole("button", { name: /Fixture Top/ }));
+    expect(choices).toHaveValue("fixture-top");
+    // A host is no provider: the page is narrowed to none while it is shown.
+    await user.click(screen.getByRole("button", { name: new RegExp(host) }));
+    expect(screen.getByRole("heading", { name: host })).toBeVisible();
+    expect(choices).toHaveValue("");
+
+    await user.click(screen.getByRole("button", { name: "拆分" }));
+    expect(
+      await screen.findByRole("heading", { name: "Fixture Limited" }),
+    ).toBeVisible();
+    expect(saved()).toEqual([
+      expect.objectContaining({ recording: true, curveSplit: [host] }),
+    ]);
+    expect(listed()).toEqual([
+      "Fixture Top",
+      "Fixture Limited",
+      "Fixture Steady",
+    ]);
+    expect(choices).toHaveValue("fixture-limited");
+
+    await user.click(screen.getByRole("button", { name: /Fixture Steady/ }));
+    await user.click(screen.getByRole("button", { name: "合并同域" }));
+    expect(await screen.findByRole("heading", { name: host })).toBeVisible();
+    expect(saved()[1]).toEqual(expect.objectContaining({ curveSplit: [] }));
+    expect(listed()).toEqual(["Fixture Top", host]);
+    expect(choices).toHaveValue("");
+    // Chosen at the top of the page, a provider of the host shows the host.
+    await user.click(screen.getByRole("button", { name: /Fixture Top/ }));
+    await user.selectOptions(choices, "fixture-steady");
+    expect(screen.getByRole("heading", { name: host })).toBeVisible();
+    expect(asked()).toHaveLength(1);
+  });
+
+  it("narrows the page to the sessions without an account from their row", async () => {
+    const user = userEvent.setup();
+    answer = () => {
+      const curves = fixture();
+      curves.direct = [
+        {
+          ...structuredClone(curves.providers[1]),
+          id: "session:antigravity",
+          recorded: true,
+        },
+      ];
+      return curves;
+    };
+    render(<Usage />);
+    await user.click(await screen.findByRole("tab", { name: "曲线" }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Antigravity 本机会话（未归属）/,
+      }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Antigravity 本机会话（未归属）" }),
+    ).toBeVisible();
+    const choices = screen.getByLabelText("用量供应商");
+    expect(choices).toHaveValue("session");
+    expect(
+      within(choices).getAllByRole("option", { name: /本机会话/ }),
+    ).toHaveLength(1);
+  });
+
   it("says that the gateway is not recording what it serves", async () => {
     const user = userEvent.setup();
     settings.recording = false;
     render(<Usage />);
     await user.click(await screen.findByRole("tab", { name: "曲线" }));
-    expect(await screen.findByRole("note")).toHaveTextContent(
-      "网关记录已关闭：期间成功的请求没有记录，错误率会偏高。",
-    );
+    expect(await screen.findByRole("note")).toHaveTextContent("网关记录已关闭");
   });
 });

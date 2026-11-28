@@ -376,7 +376,8 @@ function total(items: UsageRecord[]): Totals {
 }
 /**
  * Curves made up for the preview: one provider rate-limited in bursts, one
- * steady, and two with too little traffic to say much.
+ * steady, two with too little traffic to say much, and two that did not pass
+ * through a gateway. The two of Claude Code's gateway are of one host.
  */
 function curvesPreview(f: UsageFilter): UsageCurves {
   const minute = 60_000;
@@ -397,18 +398,66 @@ function curvesPreview(f: UsageFilter): UsageCurves {
     const x = Math.sin(seed * 12.9898) * 43758.5453;
     return x - Math.floor(x);
   };
+  // Those without a host did not pass through a gateway; a client's sessions
+  // tell no time to the first token.
   const shapes = [
-    { id: "claude-primary", client: "claude", load: 44, limited: 0.5, wave: 11, other: 0.03, gaps: 0, slow: 2300 },
-    { id: "primary", client: "codex", load: 80, limited: 0.02, wave: 37, other: 0.02, gaps: 0, slow: 850 },
-    { id: "backup", client: "codex", load: 7, limited: 0.16, wave: 13, other: 0.08, gaps: 0.45, slow: 1500 },
-    { id: "claude-backup", client: "claude", load: 2, limited: 0, wave: 1, other: 0.2, gaps: 0.6, slow: 3200 },
+    { id: "claude-primary", client: "claude", host: "claude.example.com", load: 44, limited: 0.5, wave: 11, other: 0.03, gaps: 0, slow: 2300 },
+    { id: "primary", client: "codex", host: "api.example.com", load: 80, limited: 0.02, wave: 37, other: 0.02, gaps: 0, slow: 850 },
+    { id: "backup", client: "codex", host: "backup.example.com", load: 7, limited: 0.16, wave: 13, other: 0.08, gaps: 0.45, slow: 1500 },
+    { id: "claude-backup", client: "claude", host: "claude.example.com", load: 2, limited: 0, wave: 1, other: 0.2, gaps: 0.6, slow: 3200 },
+    { id: "ag-oauth-1", client: "antigravity", host: null, load: 16, limited: 0.06, wave: 19, other: 0.05, gaps: 0.2, slow: 1900 },
+    { id: "session:claude", client: "claude", host: null, load: 9, limited: 0.03, wave: 23, other: 0.06, gaps: 0.35, slow: 0 },
   ];
   const scale = step / (60 * minute);
   const kinds = ["limited", "rejected", "server", "broken"] as const;
-  const providers = shapes
+  type Buckets = CurveProvider["buckets"];
+  /** A row of the answer from its buckets. */
+  const row = (id: string, buckets: Buckets): CurveProvider => {
+    const failures = { limited: 0, rejected: 0, server: 0, broken: 0 };
+    const stretches = Math.min(20, count);
+    const trend = Array.from({ length: stretches }, () => [0, 0]);
+    let ok = 0;
+    for (const bucket of buckets) {
+      const lost = bucket.failures;
+      if (!lost) continue;
+      ok += bucket.ok;
+      const stretch =
+        trend[
+          Math.min(
+            stretches - 1,
+            Math.floor((((bucket.at - first) / step) * stretches) / count),
+          )
+        ];
+      stretch[0] += bucket.ok;
+      for (const kind of kinds) {
+        failures[kind] += lost[kind];
+        stretch[1] += lost[kind];
+      }
+    }
+    const timed = buckets.filter((bucket) => bucket.firstToken.samples);
+    const sorted = (pick: (bucket: Buckets[number]) => number) =>
+      timed.map(pick).sort((a, b) => a - b);
+    const middles = sorted((bucket) => bucket.firstToken.p50 ?? 0);
+    const tops = sorted((bucket) => bucket.firstToken.p90 ?? 0);
+    return {
+      id,
+      requests: buckets.reduce((sum, bucket) => sum + bucket.ok, 0),
+      ok,
+      failures,
+      trend: trend.map(([ok, lost]) => (ok + lost ? lost / (ok + lost) : null)),
+      firstToken: {
+        samples: timed.reduce((sum, b) => sum + b.firstToken.samples, 0),
+        p50: middles[Math.floor(middles.length / 2)] ?? null,
+        p90: tops[Math.floor(tops.length * 0.9)] ?? null,
+      },
+      summedUntil: null,
+      buckets,
+    };
+  };
+  const rows = shapes
     .filter((shape) => !f.client || shape.client === f.client)
-    .map((shape, s): CurveProvider => {
-      const buckets: CurveProvider["buckets"] = [];
+    .map((shape, s) => {
+      const buckets: Buckets = [];
       for (let i = 0; i < count; i++) {
         const seed = i * 7 + s * 101;
         if (noise(seed) < shape.gaps) continue;
@@ -428,9 +477,10 @@ function curvesPreview(f: UsageFilter): UsageCurves {
         buckets.push({
           at,
           ok,
-          // The bucket the journal begins in is known from there on.
+          // The bucket the journal begins in is known from there on. What
+          // the records tell of is known wherever there are records.
           failures:
-            at + step > failuresSince
+            shape.host == null || at + step > failuresSince
               ? {
                   limited: Math.round(
                     ok * shape.limited * burst * (1.6 + 2 * noise(seed + 2)),
@@ -440,58 +490,63 @@ function curvesPreview(f: UsageFilter): UsageCurves {
                   broken: lost(0.6, 5),
                 }
               : null,
-          firstToken: {
-            samples: ok,
-            p50,
-            p90: Math.round(p50 * (1.7 + noise(seed + 7))),
-          },
+          firstToken: shape.slow
+            ? {
+                samples: ok,
+                p50,
+                p90: Math.round(p50 * (1.7 + noise(seed + 7))),
+              }
+            : { samples: 0, p50: null, p90: null },
         });
       }
-      const failures = { limited: 0, rejected: 0, server: 0, broken: 0 };
-      const stretches = Math.min(20, count);
-      const trend = Array.from({ length: stretches }, () => [0, 0]);
-      let ok = 0;
-      for (const bucket of buckets) {
-        const lost = bucket.failures;
-        if (!lost) continue;
-        ok += bucket.ok;
-        const stretch =
-          trend[
-            Math.min(
-              stretches - 1,
-              Math.floor((((bucket.at - first) / step) * stretches) / count),
-            )
-          ];
-        stretch[0] += bucket.ok;
-        for (const kind of kinds) {
-          failures[kind] += lost[kind];
-          stretch[1] += lost[kind];
+      return { ...row(shape.id, buckets), host: shape.host };
+    });
+  const order = (a: CurveProvider, b: CurveProvider) =>
+    b.failures.limited - a.failures.limited || b.requests - a.requests;
+  const providers = rows
+    .flatMap(({ host, ...provider }) => (host ? [{ ...provider, host }] : []))
+    .sort(order);
+  // The providers of one host together: what each bucket holds is summed, and
+  // the busier one's times stand for both, the preview having no samples.
+  const hosts = new Map<string, CurveProvider[]>();
+  for (const provider of providers)
+    hosts.set(provider.host, [...(hosts.get(provider.host) ?? []), provider]);
+  const groups = [...hosts]
+    .filter(([, members]) => members.length > 1)
+    .map(([host, members]): CurveProvider => {
+      const at = new Map<number, Buckets[number]>();
+      for (const bucket of members.flatMap((member) => member.buckets)) {
+        const sum = at.get(bucket.at);
+        if (!sum) {
+          at.set(bucket.at, structuredClone(bucket));
+          continue;
         }
+        sum.ok += bucket.ok;
+        if (bucket.failures) {
+          sum.failures ??= { limited: 0, rejected: 0, server: 0, broken: 0 };
+          for (const kind of kinds) sum.failures[kind] += bucket.failures[kind];
+        }
+        const samples = sum.firstToken.samples + bucket.firstToken.samples;
+        sum.firstToken =
+          bucket.firstToken.samples > sum.firstToken.samples
+            ? { ...bucket.firstToken, samples }
+            : { ...sum.firstToken, samples };
       }
-      const sorted = (pick: (bucket: (typeof buckets)[number]) => number) =>
-        buckets.map(pick).sort((a, b) => a - b);
-      const middles = sorted((bucket) => bucket.firstToken.p50 ?? 0);
-      const tops = sorted((bucket) => bucket.firstToken.p90 ?? 0);
-      const requests = buckets.reduce((sum, bucket) => sum + bucket.ok, 0);
       return {
-        id: shape.id,
-        requests,
-        ok,
-        failures,
-        trend: trend.map(([ok, lost]) => (ok + lost ? lost / (ok + lost) : null)),
-        firstToken: {
-          samples: requests,
-          p50: middles[Math.floor(middles.length / 2)] ?? null,
-          p90: tops[Math.floor(tops.length * 0.9)] ?? null,
-        },
-        summedUntil: null,
-        buckets,
+        ...row(
+          `host:${host}`,
+          [...at.values()].sort((a, b) => a.at - b.at),
+        ),
+        host,
+        members: members.map((member) => member.id),
       };
     })
-    .sort(
-      (a, b) =>
-        b.failures.limited - a.failures.limited || b.requests - a.requests,
-    );
+    .sort(order);
+  const direct = rows
+    .flatMap(({ host, ...provider }) =>
+      host ? [] : [{ ...provider, recorded: true }],
+    )
+    .sort(order);
   return {
     start: first,
     end: first + count * step,
@@ -499,6 +554,8 @@ function curvesPreview(f: UsageFilter): UsageCurves {
     failuresSince,
     journalError: null,
     providers,
+    groups,
+    direct,
   };
 }
 export const usageCommands = [

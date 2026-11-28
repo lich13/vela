@@ -395,6 +395,19 @@ export type CurveProvider = {
   summedUntil: number | null;
   /** Only those in which something ended, in order of time. */
   buckets: CurveBucket[];
+  /**
+   * The host of its address, in lower case; of a row that stands for several,
+   * the host they share. Absent for a provider deleted since and for what did
+   * not pass through a gateway.
+   */
+  host?: string;
+  /** Of a row that stands for the providers of one host: which they are. */
+  members?: string[];
+  /**
+   * Its failures are of the usage records, as its successes are, and so known
+   * for the whole range: the journal does not bound them.
+   */
+  recorded?: boolean;
 };
 /**
  * What succeeded and how soon comes from the usage records, what failed from
@@ -417,6 +430,17 @@ export type UsageCurves = {
    * each with its buckets: choosing among them asks nothing more.
    */
   providers: CurveProvider[];
+  /**
+   * One row for each host that two or more of `providers` share, summed over
+   * them. An instance from before them has none.
+   */
+  groups?: CurveProvider[];
+  /**
+   * What did not pass through a gateway: an account a client signed in with,
+   * or a client's sessions that belong to none. An instance from before them
+   * has none.
+   */
+  direct?: CurveProvider[];
 };
 export type UsageSettings = {
   logColumns?: Record<string, boolean>;
@@ -426,6 +450,8 @@ export type UsageSettings = {
   refreshSeconds: number;
   multiplier: string;
   pricingModel: "response" | "request";
+  /** The hosts whose providers the curves show apart. */
+  curveSplit?: string[];
 };
 export type UsageState = {
   settings: UsageSettings;

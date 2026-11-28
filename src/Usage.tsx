@@ -110,6 +110,8 @@ type RankingView = {
 };
 const initialRanking: RankingView = { page: 1, sort: "requests", asc: false };
 const empty: UsagePage = { rows: [], page: 1, total: 0, detailSince: 0 };
+/** No host has its providers shown apart: what an instance that keeps none says. */
+const unsplit: string[] = [];
 /** The gateways that hand keys out, in the order the page lists their keys. */
 const keyGateways = ["codex", "claude", "grok", "dsh", "agy"] as const;
 type QuotaAnswer = CommandResult<"refresh_antigravity_usage_quota">;
@@ -165,7 +167,11 @@ export default function Usage({
     } | null>(null),
     [curvesBusy, setCurvesBusy] = useState(false),
     // The time and client the last reading of them failed for.
-    [curvesLost, setCurvesLost] = useState<string | null>(null);
+    [curvesLost, setCurvesLost] = useState<string | null>(null),
+    // The row chosen among them. The providers of a host together are no
+    // provider the page can be narrowed to, so it is kept beside the filter
+    // and let go wherever the filter is set from outside the curves.
+    [curvePick, setCurvePick] = useState("");
   const [claudeQuota, setClaudeQuota] = useState<ClaudeUsageQuota | null>(null);
   const [agStats, setAgStats] = useState<AntigravityUsageStats | null>(null),
     [agBusy, setAgBusy] = useState(false),
@@ -227,6 +233,7 @@ export default function Usage({
       if (next !== client) {
         setClient(next);
         setProvider("");
+        setCurvePick("");
       }
     }
     if (next !== tab) {
@@ -833,6 +840,7 @@ export default function Usage({
             const next = e.target.value;
             choose(setClient, next);
             setProvider("");
+            setCurvePick("");
             setEntryKey("");
           }}
         >
@@ -846,7 +854,10 @@ export default function Usage({
         <select
           aria-label="用量供应商"
           value={provider}
-          onChange={(e) => choose(setProvider, e.target.value)}
+          onChange={(e) => {
+            choose(setProvider, e.target.value);
+            setCurvePick("");
+          }}
         >
           <option value="">全部供应商</option>
           {Object.entries(providerOptions).map(([id, n]) => (
@@ -994,6 +1005,7 @@ export default function Usage({
             onSelectProvider={(nextProvider) => {
               if (nextProvider) setClient(tab);
               setProvider(nextProvider);
+              setCurvePick("");
               resetPages();
             }}
           />
@@ -1005,8 +1017,27 @@ export default function Usage({
           unread={curvesGone}
           unrecorded={state?.settings.recording === false}
           selected={provider}
+          picked={curvePick}
+          split={state?.settings.curveSplit ?? unsplit}
           name={(id) => name(id === "session" ? null : id)}
-          onSelect={(id) => choose(setProvider, id)}
+          onSelect={(id, filter) => {
+            setCurvePick(id);
+            choose(setProvider, filter);
+          }}
+          onPart={(split, id, filter) => {
+            // The rows change once the instance has kept the choice, and the
+            // row to go to is among them only then.
+            if (state)
+              void command("set_usage_settings", {
+                settings: { ...state.settings, curveSplit: split },
+              })
+                .then((next) => {
+                  setState(next);
+                  setCurvePick(id);
+                  choose(setProvider, filter);
+                })
+                .catch((e) => setError(errorOf(e).message));
+          }}
         />
       ) : tab === "pricing" ? (
         <Pricing
@@ -1477,7 +1508,9 @@ function Ranking({
                     <NumberValue value={tokenTotal(t.tokens)} />
                   </td>
                   <td title={t.cost}>{money(t.cost)}</td>
-                  <td>{successRate(t)}</td>
+                  <td>
+                    <SuccessRate totals={t} />
+                  </td>
                   <td>
                     <FirstTokenValue totals={t} />
                   </td>
@@ -1496,15 +1529,28 @@ function Ranking({
     </>
   );
 }
-// The share of the requests whose result is known that succeeded. Where only
-// a part of them has one, the rate says over how many it stands: three known
-// failures among thousands of imported requests are not a rate of the whole.
-function successRate(t: Totals) {
-  if (!t.statusKnown) return "—";
-  const rate = `${((t.success / t.statusKnown) * 100).toFixed(1)}%`;
-  return t.statusKnown < t.requests
-    ? `${rate}（${compact(t.statusKnown)} 笔已知）`
-    : rate;
+// Those that succeeded out of those that succeeded or failed: a request cut
+// short, or one whose end was never told, counts as neither. How many stand
+// on each side is told on hover and on focus.
+function SuccessRate({ totals }: { totals: Totals }) {
+  const [focused, setFocused] = useState(false);
+  if (!totals.statusKnown) return <>—</>;
+  const rate = `${((totals.success / totals.statusKnown) * 100).toFixed(1)}%`;
+  const counts = `成功 ${numeric(totals.success)} · 错误 ${numeric(
+    totals.statusKnown - totals.success,
+  )}`;
+  return (
+    <span
+      tabIndex={0}
+      className="usage-number"
+      title={counts}
+      aria-label={`${rate}，${counts}`}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+    >
+      {focused ? counts : rate}
+    </span>
+  );
 }
 function FirstTokenValue({ totals }: { totals: Totals }) {
   const [focused, setFocused] = useState(false);

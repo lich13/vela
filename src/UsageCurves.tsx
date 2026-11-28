@@ -7,6 +7,7 @@ import {
 } from "react";
 import { Search } from "lucide-react";
 import {
+  clientName,
   compact,
   firstTokenLabel,
   numeric,
@@ -42,6 +43,64 @@ const timeTops = [
 
 const failedOf = (failures: CurveFailures) =>
   failures.limited + failures.rejected + failures.server + failures.broken;
+
+/**
+ * A row of the list: a provider of a gateway, the providers of one host
+ * together, or what did not pass through a gateway.
+ */
+type Series = CurveProvider & {
+  kind: "provider" | "group" | "direct";
+  /** What the page's provider filter is with it: a host is no provider. */
+  filter: string;
+};
+/** The most rate-limited first, as the instance orders each of its lists. */
+const byTrouble = (a: CurveProvider, b: CurveProvider) =>
+  b.failures.limited - a.failures.limited ||
+  failedOf(b.failures) - failedOf(a.failures) ||
+  b.requests - a.requests ||
+  (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+/**
+ * The rows to choose among. The providers of a host stand as one row unless
+ * the host is in `split`; then each stands for itself, as one with a host of
+ * its own always does.
+ */
+function seriesOf(curves: UsageCurves, split: string[]): Series[] {
+  const groups = (curves.groups ?? []).filter(
+    (group) => group.host != null && !split.includes(group.host),
+  );
+  const merged = new Set(groups.flatMap((group) => group.members ?? []));
+  return [
+    ...groups.map((group) => ({
+      ...group,
+      kind: "group" as const,
+      filter: "",
+    })),
+    ...curves.providers
+      .filter((provider) => !merged.has(provider.id))
+      .map((provider) => ({
+        ...provider,
+        kind: "provider" as const,
+        filter: provider.id,
+      })),
+    ...(curves.direct ?? []).map((direct) => ({
+      ...direct,
+      kind: "direct" as const,
+      filter: direct.id.startsWith("session:") ? "session" : direct.id,
+    })),
+  ].sort(byTrouble);
+}
+/**
+ * What a row is called: a host by itself, a client's sessions that belong to
+ * no account by the client, anything else by its own name.
+ */
+function labelOf(row: Series, name: (id: string) => string) {
+  if (row.kind === "group") return row.host ?? row.id;
+  if (!row.id.startsWith("session:")) return name(row.id);
+  const client = row.id.slice("session:".length);
+  return client === "antigravity"
+    ? "Antigravity 本机会话（未归属）"
+    : `${clientName(client)} 本机会话`;
+}
 
 function percent(share: number | null) {
   if (share == null) return "—";
@@ -179,6 +238,7 @@ function draw(
   curves: UsageCurves,
   points: Point[],
   summedUntil: number | null,
+  failuresSince: number,
 ) {
   const span = Math.max(1, curves.end - curves.start);
   const width = curves.step / span;
@@ -263,7 +323,7 @@ function draw(
     ticks,
     peak: peak as Point | null,
     peakY: peak ? edge(peak, 0) : 0,
-    rateBlind: blind(curves.failuresSince),
+    rateBlind: blind(failuresSince),
     timeBlind: blind(summedUntil ?? 0),
     // A pointer further than this from every bucket points at none of them.
     near: Math.max(width * 1.5, 0.02),
@@ -359,18 +419,21 @@ function Stage({
   curves,
   points,
   summedUntil,
+  failuresSince,
   table,
 }: {
   curves: UsageCurves;
   points: Point[];
   /** Until when only the provider's sums by day are left, null for never. */
   summedUntil: number | null;
+  /** From when its failures are known: the start where the records tell. */
+  failuresSince: number;
   table: boolean;
 }) {
   const [active, setActive] = useState<number | null>(null);
   const drawn = useMemo(
-    () => draw(curves, points, summedUntil),
-    [curves, points, summedUntil],
+    () => draw(curves, points, summedUntil, failuresSince),
+    [curves, points, summedUntil, failuresSince],
   );
   const daily = curves.step >= day;
   const within = date(curves.start) === date(curves.end - 1);
@@ -473,10 +536,6 @@ function Stage({
     "aria-hidden": true,
   } as const;
   const failed = shown?.failures ? failedOf(shown.failures) : 0;
-  const thin =
-    shown != null &&
-    ((shown.attempts != null && shown.attempts < few) ||
-      (shown.p50 != null && shown.samples < few));
   return (
     <div
       className="curve-stage"
@@ -491,7 +550,7 @@ function Stage({
         <h3>错误率</h3>
         <span>
           <i className="curve-key" data-line="total" />
-          合计，色带为各类失败
+          合计
         </span>
       </div>
       <div className="curve-plot" data-plot="rate" onPointerMove={move}>
@@ -707,11 +766,7 @@ function Stage({
               <dd>{numeric(shown.samples)}</dd>
             </div>
           </dl>
-          {!shown.failures ? (
-            <p>早于运行日志，这一格失败了多少次不可知。</p>
-          ) : (
-            thin && <p>样本不足 {few} 个，仅供参考。</p>
-          )}
+          {!shown.failures && <p>早于运行日志</p>}
         </div>
       )}
     </div>
@@ -724,8 +779,11 @@ export default function UsageCurvesPanel({
   unread,
   unrecorded,
   selected,
+  picked,
+  split,
   name,
   onSelect,
+  onPart,
 }: {
   curves: UsageCurves | null;
   /** What is shown is of another time or client than the one being read. */
@@ -736,23 +794,43 @@ export default function UsageCurvesPanel({
   unrecorded: boolean;
   /** The provider the page is narrowed to, empty for none. */
   selected: string;
+  /** The row chosen here, empty for none: a host is no provider to narrow to. */
+  picked: string;
+  /** The hosts whose providers are shown apart. */
+  split: string[];
   name: (id: string) => string;
-  onSelect: (id: string) => void;
+  /** A row was chosen: which, and what the page's provider filter is with it. */
+  onSelect: (id: string, filter: string) => void;
+  /** The hosts to show apart from now on, and the row to go to. */
+  onPart: (split: string[], id: string, filter: string) => void;
 }) {
   const [find, setFind] = useState("");
   const [table, setTable] = useState(false);
-  const providers = curves?.providers;
-  // Where the page names none, the one rate-limited the most is the one to
-  // look at first.
-  const chosen =
-    (selected
-      ? providers?.find((provider) => provider.id === selected)
-      : providers?.[0]) ?? null;
+  const series = useMemo(
+    () => (curves ? seriesOf(curves, split) : null),
+    [curves, split],
+  );
+  // The row chosen here comes first. Without one the page's filter says which,
+  // and a provider shown under its host is that host's row. With neither, the
+  // one rate-limited the most is the one to look at first.
+  const chosen = useMemo(
+    () =>
+      series?.find((row) => row.id === picked) ??
+      (selected
+        ? series?.find((row) =>
+            selected === "session"
+              ? row.kind === "direct" && row.filter === "session"
+              : row.id === selected || row.members?.includes(selected),
+          )
+        : series?.[0]) ??
+      null,
+    [series, picked, selected],
+  );
   const points = useMemo(
     () => (curves && chosen ? pointsOf(chosen, curves) : []),
     [curves, chosen],
   );
-  if (!curves || !providers)
+  if (!curves || !series)
     return unread ? (
       <div className="usage-empty" role="alert">
         曲线没有读到，点右上角“刷新用量”重试
@@ -762,38 +840,53 @@ export default function UsageCurvesPanel({
         正在读取曲线…
       </div>
     );
-  if (!providers.length)
+  if (!series.length)
     return (
       <div className="usage-empty">
-        这段时间没有经过网关的请求。换一个时间范围或客户端再看。
+        这段时间没有可统计的请求。换一个时间范围或客户端再看。
       </div>
     );
+  const label = (row: Series) => labelOf(row, name);
+  // A host's row is told apart by the providers it stands for.
+  const hint = (row: Series) =>
+    row.kind === "group" && row.members?.length
+      ? row.members.map(name).join("、")
+      : label(row);
+  // A host is found by the name of any provider it stands for.
   const wanted = find.trim().toLowerCase();
-  const listed = providers.filter((provider) =>
-    name(provider.id).toLowerCase().includes(wanted),
+  const listed = series.filter((row) =>
+    [label(row), hint(row)].some((text) => text.toLowerCase().includes(wanted)),
   );
   // One scale for every row, so that the rows compare.
   const sparkTop = Math.max(
     0.02,
-    ...providers.flatMap((provider) =>
-      provider.trend.map((share) => share ?? 0),
-    ),
+    ...series.flatMap((row) => row.trend.map((share) => share ?? 0)),
   );
   const failed = chosen ? failedOf(chosen.failures) : 0;
   const attempts = chosen ? chosen.ok + failed : 0;
   const daily = curves.step >= day;
   const edge = (at: number) => (daily ? date(at) : `${date(at)} ${clock(at)}`);
+  // What did not pass through a gateway has its failures in the usage
+  // records, beside its successes: all of the range is known, and nothing the
+  // journal lacks or the gateway did not record takes from it.
+  const recorded = chosen?.recorded === true;
+  const failuresSince = recorded ? curves.start : curves.failuresSince;
   // Before the journal begins no failure is known, which is not none. Where
   // it begins inside the range, what failed and what succeeded beside it are
   // counted from there on, and the figures say from when. A range that
   // reaches as far back as the journal keeps begins a moment before it does,
   // inside the first bucket: that is the whole of the range, and needs no
   // saying.
-  const known = curves.failuresSince < curves.end;
+  const known = failuresSince < curves.end;
   const since =
-    known && curves.failuresSince >= curves.start + curves.step
-      ? `自 ${date(curves.failuresSince)} ${clock(curves.failuresSince)} 起`
+    known && failuresSince >= curves.start + curves.step
+      ? `自 ${date(failuresSince)} ${clock(failuresSince)} 起`
       : null;
+  // A provider shown apart from the others of its host can go back to them.
+  const whole =
+    chosen?.kind === "provider"
+      ? curves.groups?.find((group) => group.members?.includes(chosen.id))
+      : undefined;
   return (
     <section className="usage-curves" aria-busy={stale}>
       <aside className="curve-rail" aria-label="供应商">
@@ -807,38 +900,39 @@ export default function UsageCurvesPanel({
             onChange={(event) => setFind(event.target.value)}
           />
         </label>
-        <p className="curve-order">被限流最多的排在前面</p>
         {listed.length ? (
           <ul className="curve-picks">
-            {listed.map((provider) => {
-              const lost = failedOf(provider.failures);
-              const ended = provider.ok + lost;
+            {listed.map((row) => {
+              const lost = failedOf(row.failures);
+              const ended = row.ok + lost;
               return (
-                <li key={provider.id}>
+                <li key={row.id}>
                   <button
                     type="button"
                     className="curve-pick"
-                    aria-pressed={provider.id === chosen?.id}
-                    onClick={() => onSelect(provider.id)}
+                    aria-pressed={row.id === chosen?.id}
+                    onClick={() => onSelect(row.id, row.filter)}
                   >
-                    <span className="curve-pick-name" title={name(provider.id)}>
-                      {name(provider.id)}
+                    <span className="curve-pick-name" title={hint(row)}>
+                      {label(row)}
                     </span>
                     <strong>{percent(ended ? lost / ended : null)}</strong>
                     <span className="curve-pick-more">
-                      <Spark trend={provider.trend} top={sparkTop} />
+                      <Spark trend={row.trend} top={sparkTop} />
                       <small>
-                        {provider.failures.limited
-                          ? `429 ${compact(provider.failures.limited)} 次`
+                        {row.failures.limited
+                          ? `429 ${compact(row.failures.limited)} 次`
                           : lost
                             ? `失败 ${compact(lost)} 次`
                             : ended
                               ? "无失败"
-                              : "失败不可知"}
+                              : row.recorded
+                                ? "结果未知"
+                                : "失败不可知"}
                         {" · "}
                         {ended
                           ? `共 ${compact(ended)}`
-                          : `${compact(provider.requests)} 次请求`}
+                          : `${compact(row.requests)} 次请求`}
                       </small>
                     </span>
                   </button>
@@ -855,7 +949,44 @@ export default function UsageCurvesPanel({
           <>
             <header className="curve-head">
               <div>
-                <h2>{name(chosen.id)}</h2>
+                <div className="curve-title">
+                  <h2 title={hint(chosen)}>{label(chosen)}</h2>
+                  {chosen.kind === "group" && chosen.host != null && (
+                    <button
+                      type="button"
+                      className="curve-part"
+                      onClick={() => {
+                        const first = curves.providers
+                          .filter((provider) =>
+                            chosen.members?.includes(provider.id),
+                          )
+                          .sort(byTrouble)[0];
+                        onPart(
+                          [...split, chosen.host as string].sort(),
+                          first?.id ?? "",
+                          first?.id ?? "",
+                        );
+                      }}
+                    >
+                      拆分
+                    </button>
+                  )}
+                  {whole && (
+                    <button
+                      type="button"
+                      className="curve-part"
+                      onClick={() =>
+                        onPart(
+                          split.filter((host) => host !== whole.host),
+                          whole.id,
+                          "",
+                        )
+                      }
+                    >
+                      合并同域
+                    </button>
+                  )}
+                </div>
                 <p>
                   {edge(curves.start)} 至 {edge(curves.end)}，每格{" "}
                   {stepLabel(curves.step)}
@@ -878,14 +1009,14 @@ export default function UsageCurvesPanel({
                 </button>
               </div>
             </header>
-            {curves.journalError && (
+            {!recorded && curves.journalError && (
               <p className="curve-note" role="note">
-                运行日志有异常（{curves.journalError}），失败次数可能不完整。
+                运行日志有异常（{curves.journalError}）
               </p>
             )}
-            {unrecorded && (
+            {!recorded && unrecorded && (
               <p className="curve-note" role="note">
-                网关记录已关闭：期间成功的请求没有记录，错误率会偏高。
+                网关记录已关闭
               </p>
             )}
             <dl className="curve-figures" data-since={since ? "" : undefined}>
@@ -938,7 +1069,6 @@ export default function UsageCurvesPanel({
                 <dt>首字 P90</dt>
                 <dd>
                   <strong>{firstTokenLabel(chosen.firstToken.p90)}</strong>
-                  <span>九成请求不慢于此</span>
                 </dd>
               </div>
             </dl>
@@ -979,19 +1109,13 @@ export default function UsageCurvesPanel({
               curves={curves}
               points={points}
               summedUntil={chosen.summedUntil}
+              failuresSince={failuresSince}
               table={table}
             />
-            <p className="curve-foot">
-              错误率按每次尝试计：失败 ÷（成功 +
-              失败），结果未知的请求不计入；“429
-              限流”含流内返回的限流与容量不足；淡显的时段样本不足 {few}{" "}
-              个。失败取自运行日志（只保留最近 7
-              天），成功与首字取自用量记录；请求类型与 Key 筛选对曲线不生效。
-            </p>
           </>
         ) : (
           <div className="usage-empty">
-            “{name(selected)}”在这段时间没有经过网关的请求，换一家看看。
+            “{name(selected)}”在这段时间没有可统计的请求，换一家看看。
           </div>
         )}
       </div>

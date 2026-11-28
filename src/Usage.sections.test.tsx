@@ -648,7 +648,7 @@ describe("rankings", () => {
     ]);
   });
 
-  it("says over how many requests a success rate stands where only some of them have a result", async () => {
+  it("tells on hover and on focus how many succeeded and how many failed behind a success rate", async () => {
     const user = userEvent.setup();
     dashboard.models = [
       {
@@ -678,11 +678,19 @@ describe("rankings", () => {
       }),
     );
     expect(rates).toEqual({
-      "fixture-imported": "0.0%（3 笔已知）",
+      "fixture-imported": "0.0%",
       "fixture-unknown": "—",
       "fixture-known": "95.0%",
-      "fixture-partly": "98.0%（1.5K 笔已知）",
+      "fixture-partly": "98.0%",
     });
+    // Those cut short or never told of stand on neither side.
+    const rate = screen.getByText("98.0%");
+    expect(rate).toHaveAttribute("title", "成功 1,470 · 错误 30");
+    expect(rate).toHaveAccessibleName("98.0%，成功 1,470 · 错误 30");
+    act(() => rate.focus());
+    expect(rate).toHaveTextContent("成功 1,470 · 错误 30");
+    act(() => rate.blur());
+    expect(rate).toHaveTextContent("98.0%");
   });
 });
 
