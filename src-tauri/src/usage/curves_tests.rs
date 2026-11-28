@@ -1,6 +1,6 @@
 // 覆盖供应商曲线：分桶、失败分类、首字分位数、日志覆盖范围、同域合并、不经网关的序列与无数据。
 use super::super::{commands::get_usage_curves, model::*, query, store::Store};
-use super::{spread, step, Bucket, Curves, Failures, FirstToken, Grid, Provider};
+use super::{kind, spread, step, Bucket, Curves, Failures, FirstToken, Grid, Provider};
 use crate::{
     events::{FailureKind, FailureKind::*, UpstreamFailure},
     gateway::{form, ClientId},
@@ -14,6 +14,9 @@ const A: &str = "00000000-0000-4000-8000-00000000000a";
 const B: &str = "00000000-0000-4000-8000-00000000000b";
 const C: &str = "00000000-0000-4000-8000-00000000000c";
 const D: &str = "00000000-0000-4000-8000-00000000000d";
+/// Two accounts Antigravity is signed in to, which no gateway serves.
+const ACCOUNT: &str = "00000000-0000-4000-8000-0000000000a1";
+const OTHER: &str = "00000000-0000-4000-8000-0000000000a2";
 const RELAY: &str = "relay.example.invalid";
 /// A subdomain of `RELAY`, which makes it another host.
 const REGIONAL: &str = "eu.relay.example.invalid";
@@ -71,7 +74,6 @@ fn told(client: &str, id: &str, at: i64, attempts: Vec<Attempt>) -> Record {
         client: client.into(),
         source: client.into(),
         started_at: at,
-        finished_at: Some(at),
         completed: attempts.last().is_some_and(|a| a.outcome == "success"),
         attempts: attempts
             .into_iter()
@@ -105,6 +107,13 @@ fn range() -> Filter {
         ..Filter::default()
     }
 }
+/// `range`, of every client.
+fn every_client() -> Filter {
+    Filter {
+        client: None,
+        ..range()
+    }
+}
 /// The provider `id` as `curves` has it.
 fn of<'a>(curves: &'a Curves, id: &str) -> &'a Provider {
     curves.providers.iter().find(|p| p.id == id).unwrap()
@@ -113,6 +122,10 @@ fn of<'a>(curves: &'a Curves, id: &str) -> &'a Provider {
 fn group<'a>(curves: &'a Curves, host: &str) -> &'a Provider {
     let id = format!("host:{host}");
     curves.groups.iter().find(|g| g.id == id).unwrap()
+}
+/// What reached no gateway under `id`, as `curves` has it.
+fn direct<'a>(curves: &'a Curves, id: &str) -> &'a Provider {
+    curves.direct.iter().find(|p| p.id == id).unwrap()
 }
 /// Which host each of `providers` is on.
 fn on(providers: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -148,6 +161,45 @@ fn store_of(client: &str) -> (tempfile::TempDir, Store) {
                 // Nothing was recorded of how this one ended.
                 request("a-5", A, 61, None, None),
                 request("b-1", B, 10, Some(200), None),
+            ],
+            None,
+        )
+        .unwrap();
+    (dir, store)
+}
+/// A store of nothing but `records`.
+fn holding(records: &[Record]) -> (tempfile::TempDir, Store) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    store.write_batch(records, None).unwrap();
+    (dir, store)
+}
+/// `store`, and beside its requests what reached no gateway: an account of
+/// Antigravity answered in the first five minutes and, half an hour on, was
+/// limited once before it did; a session of Claude Code ended two messages in
+/// the first five minutes and wrote down an error an hour on.
+fn store_and_direct() -> (tempfile::TempDir, Store) {
+    let (dir, mut store) = store();
+    let at = |minutes: i64| BASE + minutes * MINUTE;
+    let ok = |account| tried(account, "success", None);
+    let limited = tried(Some(ACCOUNT), "failed", Some("429"));
+    let overloaded = Attempt {
+        status: Some(529),
+        ..tried(None, "failed", None)
+    };
+    store
+        .write_batch(
+            &[
+                told("antigravity", "g-1", at(1), vec![ok(Some(ACCOUNT))]),
+                told(
+                    "antigravity",
+                    "g-2",
+                    at(31),
+                    vec![limited, ok(Some(ACCOUNT))],
+                ),
+                told("claude", "s-1", at(2), vec![ok(None)]),
+                told("claude", "s-2", at(3), vec![ok(None)]),
+                told("claude", "s-3", at(61), vec![overloaded]),
             ],
             None,
         )
@@ -1319,6 +1371,565 @@ fn saying_where_providers_are_changes_nothing_else_that_is_said_of_them() {
             (apart.start, apart.end, apart.step, apart.failures_since)
         );
     }
+}
+
+#[test]
+fn a_request_that_reached_no_gateway_is_drawn_from_its_record_attempt_by_attempt() {
+    // Antigravity was limited once and answered when it asked again: one
+    // request, which succeeded, and two attempts, of which one failed.
+    let streamed = |first_token_ms, attempt| Attempt {
+        stream: true,
+        first_token_ms: Some(first_token_ms),
+        ..attempt
+    };
+    let retried = told(
+        "antigravity",
+        "retried",
+        BASE + MINUTE,
+        vec![
+            streamed(900, tried(Some(ACCOUNT), "failed", Some("429"))),
+            streamed(120, tried(Some(ACCOUNT), "success", None)),
+        ],
+    );
+    let (_dir, store) = holding(&[retried]);
+    let filter = Filter {
+        client: Some("antigravity".into()),
+        ..range()
+    };
+    // The totals count the request, as its last attempt ended.
+    let totals = store.dashboard(&filter).unwrap().totals;
+    assert_eq!(
+        (totals.requests, totals.success, totals.status_known),
+        (1, 1, 1)
+    );
+    let curves = store.curves(&filter, 0, &[], &NOWHERE, BASE + DAY).unwrap();
+    // It is none of a gateway's.
+    assert!(curves.providers.is_empty() && curves.groups.is_empty());
+    assert_eq!(curves.direct.len(), 1);
+    let account = direct(&curves, ACCOUNT);
+    assert!(account.recorded);
+    assert_eq!((account.host.as_deref(), account.members.len()), (None, 0));
+    assert_eq!(
+        (account.requests, account.ok, account.summed_until),
+        (1, 1, None)
+    );
+    let limited = Failures {
+        limited: 1,
+        ..Failures::default()
+    };
+    assert_eq!(account.failures, limited);
+    // The time to the first token is that of the attempt that answered.
+    let first_token = FirstToken {
+        samples: 1,
+        p50: Some(120),
+        p90: Some(120),
+    };
+    assert_eq!(account.first_token, first_token);
+    assert_eq!(
+        account.buckets,
+        [Bucket {
+            at: BASE,
+            ok: 1,
+            failures: Some(limited),
+            first_token,
+        }]
+    );
+    // One of its two attempts failed.
+    assert_eq!(account.trend.len(), 20);
+    assert_eq!(account.trend[0], Some(0.5));
+    assert_eq!(account.trend.iter().flatten().count(), 1);
+}
+
+#[test]
+fn an_attempt_that_failed_is_counted_against_the_account_that_made_it() {
+    let (_dir, store) = holding(&[
+        // One account was limited and the other answered.
+        told(
+            "antigravity",
+            "moved",
+            BASE + MINUTE,
+            vec![
+                tried(Some(OTHER), "failed", Some("RESOURCE_EXHAUSTED")),
+                tried(Some(ACCOUNT), "success", None),
+            ],
+        ),
+        // An attempt that answered, and one whose end nothing tells, are no
+        // failures for the request having failed after them.
+        told(
+            "antigravity",
+            "lost",
+            BASE + 2 * MINUTE,
+            vec![
+                tried(Some(OTHER), "success", None),
+                tried(Some(OTHER), "unknown", None),
+                tried(Some(ACCOUNT), "failed", Some("503")),
+            ],
+        ),
+    ]);
+    let curves = store
+        .curves(&every_client(), 0, &[], &NOWHERE, BASE + DAY)
+        .unwrap();
+    // The most rate-limited first, as a gateway's providers are listed.
+    let listed: Vec<_> = curves.direct.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(listed, [OTHER, ACCOUNT]);
+    let (account, other) = (direct(&curves, ACCOUNT), direct(&curves, OTHER));
+    // A request is one of the account that was asked last.
+    assert_eq!((account.requests, account.ok), (2, 1));
+    assert_eq!(
+        account.failures,
+        Failures {
+            server: 1,
+            ..Failures::default()
+        }
+    );
+    // Of the other there is the attempt that failed, and no request.
+    assert_eq!((other.requests, other.ok), (0, 0));
+    let limited = Failures {
+        limited: 1,
+        ..Failures::default()
+    };
+    assert_eq!(other.failures, limited);
+    assert_eq!(
+        other.buckets,
+        [Bucket {
+            at: BASE,
+            ok: 0,
+            failures: Some(limited),
+            first_token: none(),
+        }]
+    );
+    assert_eq!((account.trend[0], other.trend[0]), (Some(0.5), Some(1.0)));
+}
+
+#[test]
+fn a_failure_the_records_tell_of_is_of_the_kind_its_status_or_its_error_says() {
+    for (status, error, expected) in [
+        (Some(429), None, Limited),
+        (Some(400), None, Rejected),
+        (Some(500), None, Server),
+        // The status first, whatever the error is called.
+        (Some(403), Some("server_error"), Rejected),
+        (Some(529), Some("rate_limit"), Server),
+        // Antigravity writes the status it was answered with as the error.
+        (None, Some("429"), Limited),
+        (None, Some("403"), Rejected),
+        (None, Some("503"), Server),
+        // What it calls the rest, and what Claude Code calls its own.
+        (None, Some("RESOURCE_EXHAUSTED"), Limited),
+        (None, Some("rate_limit"), Limited),
+        (None, Some("UNAUTHENTICATED"), Rejected),
+        (None, Some("authentication_failed"), Rejected),
+        (None, Some("invalid_request"), Rejected),
+        (None, Some("billing_error"), Rejected),
+        (None, Some("UPSTREAM_ERROR"), Server),
+        (None, Some("server_error"), Server),
+        // Anything else says only that the attempt did not end well.
+        (None, Some("STREAM_TIMEOUT"), Broken),
+        (None, Some("unknown"), Broken),
+        (None, None, Broken),
+        // Three digits are a status, and no more or fewer are.
+        (None, Some("4290"), Broken),
+        (None, Some("42"), Broken),
+        (None, Some("200"), Broken),
+        // A status that is not an error's leaves it to the error.
+        (Some(200), Some("rate_limit"), Limited),
+        (Some(200), None, Broken),
+    ] {
+        assert_eq!(kind(status, error), expected, "{status:?} {error:?}");
+    }
+}
+
+#[test]
+fn what_failed_is_counted_by_the_status_and_the_error_its_record_keeps() {
+    // What Antigravity wrote of eight attempts that failed, and what Claude
+    // Code did of eight more, with the status of those it kept one of.
+    let antigravity = [
+        Some("429"),
+        Some("RESOURCE_EXHAUSTED"),
+        Some("403"),
+        Some("UNAUTHENTICATED"),
+        Some("503"),
+        Some("UPSTREAM_ERROR"),
+        Some("STREAM_TIMEOUT"),
+        None,
+    ];
+    let claude = [
+        (Some(429), Some("rate_limit")),
+        (None, Some("rate_limit")),
+        (None, Some("authentication_failed")),
+        (None, Some("invalid_request")),
+        (None, Some("billing_error")),
+        (Some(529), Some("server_error")),
+        (None, Some("server_error")),
+        (None, Some("unknown")),
+    ];
+    let mut records = Vec::new();
+    for (index, error) in antigravity.into_iter().enumerate() {
+        let failed = tried(Some(ACCOUNT), "failed", error);
+        let id = format!("g-{index}");
+        records.push(told("antigravity", &id, BASE + MINUTE, vec![failed]));
+    }
+    for (index, (status, error)) in claude.into_iter().enumerate() {
+        let failed = Attempt {
+            status,
+            ..tried(None, "failed", error)
+        };
+        let id = format!("c-{index}");
+        records.push(told("claude", &id, BASE + MINUTE, vec![failed]));
+    }
+    let (_dir, store) = holding(&records);
+    let curves = store
+        .curves(&every_client(), 0, &[], &NOWHERE, BASE + DAY)
+        .unwrap();
+    let account = direct(&curves, ACCOUNT);
+    assert_eq!((account.requests, account.ok), (8, 0));
+    assert_eq!(
+        account.failures,
+        Failures {
+            limited: 2,
+            rejected: 2,
+            server: 2,
+            broken: 2
+        }
+    );
+    let session = direct(&curves, "session:claude");
+    assert_eq!((session.requests, session.ok), (8, 0));
+    assert_eq!(
+        session.failures,
+        Failures {
+            limited: 2,
+            rejected: 3,
+            server: 2,
+            broken: 1
+        }
+    );
+}
+
+#[test]
+fn what_names_no_account_is_drawn_under_its_client() {
+    let (_dir, mut store) = store();
+    let hosts = on(&[(A, RELAY), (C, RELAY)]);
+    let read = |store: &Store| {
+        store
+            .curves(&every_client(), 0, &journal(), &hosts, BASE + DAY)
+            .unwrap()
+    };
+    let before = read(&store);
+    assert!(before.direct.is_empty());
+    let ok = |client, id, account| {
+        let answered = tried(account, "success", None);
+        told(client, id, BASE + MINUTE, vec![answered])
+    };
+    let overloaded = Attempt {
+        status: Some(529),
+        ..tried(None, "failed", None)
+    };
+    let limited = tried(Some(OTHER), "failed", Some("429"));
+    store
+        .write_batch(
+            &[
+                // A session of Claude Code names no account.
+                ok("claude", "c-1", None),
+                ok("claude", "c-2", None),
+                told("claude", "c-3", BASE + 6 * MINUTE, vec![overloaded]),
+                // Nor does what Antigravity wrote while nothing told which
+                // account it was signed in to.
+                ok("antigravity", "g-1", None),
+                ok("antigravity", "g-2", Some(ACCOUNT)),
+                told("antigravity", "g-3", BASE + MINUTE, vec![limited]),
+            ],
+            None,
+        )
+        .unwrap();
+    let curves = read(&store);
+    let listed: Vec<_> = curves
+        .direct
+        .iter()
+        .map(|p| (p.id.as_str(), p.requests, p.ok, p.failures.total()))
+        .collect();
+    // The most rate-limited first, then the one that failed most, and the
+    // rest by their ids.
+    assert_eq!(
+        listed,
+        [
+            (OTHER, 1, 0, 1),
+            ("session:claude", 3, 2, 1),
+            (ACCOUNT, 1, 1, 0),
+            ("session:antigravity", 1, 1, 0),
+        ]
+    );
+    assert!(curves
+        .direct
+        .iter()
+        .all(|p| p.recorded && p.host.is_none() && p.members.is_empty()));
+    // What is said of a gateway's providers, and of those on one host taken
+    // as one, is what it was.
+    assert_eq!(curves.providers, before.providers);
+    assert_eq!(curves.groups, before.groups);
+    assert_eq!(curves.groups.len(), 1);
+    let mut gateways = curves.providers.iter().chain(&curves.groups);
+    assert!(gateways.all(|p| !p.recorded));
+    assert_eq!(
+        (curves.start, curves.end, curves.step, curves.failures_since),
+        (before.start, before.end, before.step, before.failures_since)
+    );
+}
+
+#[test]
+fn only_the_client_narrows_what_reached_no_gateway() {
+    let ok = |client, id, account| {
+        let answered = tried(account, "success", None);
+        told(client, id, BASE + MINUTE, vec![answered])
+    };
+    let (_dir, store) = holding(&[
+        ok("claude", "c-1", None),
+        ok("antigravity", "g-1", None),
+        ok("antigravity", "g-2", Some(ACCOUNT)),
+    ]);
+    let listed = |filter: Filter| -> Vec<String> {
+        let curves = store.curves(&filter, 0, &[], &NOWHERE, BASE + DAY).unwrap();
+        curves.direct.into_iter().map(|p| p.id).collect()
+    };
+    let of_client = |client: &str| Filter {
+        client: Some(client.into()),
+        ..range()
+    };
+    let all = [ACCOUNT, "session:antigravity", "session:claude"];
+    assert_eq!(listed(every_client()), all);
+    // A client with no name is none asked for.
+    assert_eq!(listed(of_client("")), all);
+    assert_eq!(listed(of_client("claude")), ["session:claude"]);
+    assert_eq!(
+        listed(of_client("antigravity")),
+        [ACCOUNT, "session:antigravity"]
+    );
+    // All that is drawn of the other clients went through a gateway.
+    for client in ["codex", "grok", "dsh"] {
+        assert!(listed(of_client(client)).is_empty(), "{client}");
+    }
+    // Nothing else that is asked for narrows them, as nothing else narrows
+    // what a gateway's providers are compared by.
+    let named = Filter {
+        provider: Some(A.into()),
+        model: Some("fixture-model".into()),
+        source: Some("proxy".into()),
+        status: Some("5xx".into()),
+        ..every_client()
+    };
+    assert_eq!(listed(named), all);
+}
+
+#[test]
+fn a_request_whose_end_its_record_does_not_tell_is_counted_and_nothing_more() {
+    let ended = |client: &str, account, outcome: &str| {
+        let id = format!("{client}-{outcome}");
+        let attempt = tried(account, outcome, None);
+        told(client, &id, BASE + MINUTE, vec![attempt])
+    };
+    let (_dir, store) = holding(&[
+        ended("antigravity", Some(ACCOUNT), "unknown"),
+        ended("antigravity", Some(ACCOUNT), "in_progress"),
+        ended("antigravity", Some(ACCOUNT), "cancelled"),
+        // A message of Claude Code that was cut short, and one imported
+        // before its sessions told how a message ended.
+        ended("claude", None, "reported"),
+        Record {
+            completed: true,
+            ..ended("claude", None, "completed")
+        },
+    ]);
+    let curves = store
+        .curves(&every_client(), 0, &[], &NOWHERE, BASE + DAY)
+        .unwrap();
+    for (id, requests) in [(ACCOUNT, 3), ("session:claude", 2)] {
+        let row = direct(&curves, id);
+        assert_eq!(
+            (row.requests, row.ok, row.failures),
+            (requests, 0, Failures::default()),
+            "{id}"
+        );
+        // Nothing failed there, which is known, and nothing succeeded: there
+        // is no rate to draw of it.
+        assert_eq!(
+            row.buckets,
+            [Bucket {
+                at: BASE,
+                ok: 0,
+                failures: Some(Failures::default()),
+                first_token: none(),
+            }]
+        );
+        assert!(row.trend.iter().all(Option::is_none));
+    }
+}
+
+#[test]
+fn what_reached_no_gateway_is_known_wherever_the_journal_begins() {
+    let (_dir, store) = store_and_direct();
+    let read = |since| {
+        store
+            .curves(&every_client(), since, &journal(), &NOWHERE, BASE + DAY)
+            .unwrap()
+    };
+    let drawn = |provider: &Provider| -> Vec<_> {
+        let buckets = provider.buckets.iter();
+        buckets
+            .map(|b| (b.at - BASE, b.ok, b.failures.map(|f| f.total())))
+            .collect()
+    };
+    let known = read(0);
+    let account = direct(&known, ACCOUNT);
+    assert_eq!(
+        (account.requests, account.ok, account.failures.limited),
+        (2, 2, 1)
+    );
+    assert_eq!(drawn(account), [(0, 1, Some(0)), (30 * MINUTE, 1, Some(1))]);
+    assert_eq!((account.trend[0], account.trend[6]), (Some(0.0), Some(0.5)));
+    let session = direct(&known, "session:claude");
+    assert_eq!(
+        (session.requests, session.ok, session.failures.server),
+        (3, 2, 1)
+    );
+    assert_eq!(drawn(session), [(0, 2, Some(0)), (60 * MINUTE, 0, Some(1))]);
+    // The journal begins half an hour in. Of a gateway's provider nothing is
+    // said of what failed before, and what it completed then is set against
+    // nothing.
+    let since = BASE + 30 * MINUTE;
+    let partly = read(since);
+    assert_eq!(partly.failures_since, since);
+    let provider = of(&partly, A);
+    assert_eq!(
+        drawn(provider),
+        [
+            (0, 3, None),
+            (30 * MINUTE, 0, Some(5)),
+            (60 * MINUTE, 0, Some(2))
+        ]
+    );
+    assert_eq!((provider.ok, provider.trend[0]), (0, None));
+    // The records have all of what reached no gateway, of the time before
+    // the journal as of the time since.
+    assert_eq!(partly.direct, known.direct);
+    // So they do where the journal begins after all of the range.
+    let since = BASE + 2 * DAY;
+    let after = read(since);
+    assert_eq!(after.failures_since, since);
+    for provider in &after.providers {
+        assert_eq!((provider.ok, provider.failures.total()), (0, 0));
+        assert!(provider.buckets.iter().all(|b| b.failures.is_none()));
+    }
+    assert_eq!(after.direct, known.direct);
+    let mut buckets = after.direct.iter().flat_map(|p| &p.buckets);
+    assert!(buckets.all(|b| b.failures.is_some()));
+}
+
+#[test]
+fn a_range_without_a_beginning_starts_where_what_reached_no_gateway_does() {
+    let (_dir, mut store) = store();
+    // Three days before a gateway had a request, a session of Claude Code
+    // wrote down an error.
+    let early = BASE - 3 * DAY + MINUTE;
+    let limited = tried(None, "failed", Some("rate_limit"));
+    store
+        .write_batch(&[told("claude", "early", early, vec![limited])], None)
+        .unwrap();
+    let filter = Filter {
+        start: None,
+        ..range()
+    };
+    let curves = store
+        .curves(&filter, 0, &journal(), &NOWHERE, BASE + DAY)
+        .unwrap();
+    assert_eq!(curves.step, DAY);
+    assert_eq!(curves.start, query::bucket(early, DAY));
+    let session = direct(&curves, "session:claude");
+    assert_eq!(session.buckets.len(), 1);
+    assert_eq!(session.buckets[0].at, curves.start);
+    assert_eq!(session.trend[0], Some(1.0));
+    // What a gateway's provider did is drawn where it was.
+    let provider = of(&curves, A);
+    assert_eq!(provider.buckets[0].at, query::bucket(BASE + MINUTE, DAY));
+    assert_eq!(provider.trend[0], None);
+}
+
+#[test]
+fn a_session_s_copy_of_a_request_a_gateway_recorded_is_not_drawn_apart() {
+    let (_dir, mut store) = store();
+    // Antigravity asked a gateway once, in a terminal.
+    let through = request("antigravity", "p-1", D, BASE + MINUTE, Some(200), None);
+    store.write_batch(&[through], None).unwrap();
+    // The session of each client wrote the request down too, with the id
+    // its answer had. That of Antigravity names the account that was signed
+    // in, which the gateway's provider is not.
+    let copy = |client, id, account, response: &str, transport: &str| {
+        let attempt = Attempt {
+            response_id: Some(response.into()),
+            transport: transport.into(),
+            ..tried(account, "success", None)
+        };
+        told(client, id, BASE + MINUTE, vec![attempt])
+    };
+    // And each wrote down one more, which no gateway saw.
+    let own = |client, id, account| {
+        let answered = tried(account, "success", None);
+        told(client, id, BASE + 2 * MINUTE, vec![answered])
+    };
+    store
+        .write_batch(
+            &[
+                copy("claude", "copy-c", None, "a-1-response", "session"),
+                copy(
+                    "antigravity",
+                    "copy-g",
+                    Some(ACCOUNT),
+                    "p-1-response",
+                    "cli_file",
+                ),
+                own("claude", "own-c", None),
+                own("antigravity", "own-g", Some(ACCOUNT)),
+            ],
+            None,
+        )
+        .unwrap();
+    for (copy, original) in [("copy-c", "a-1"), ("copy-g", "p-1")] {
+        let copy = store.detail(copy).unwrap();
+        assert_eq!(copy.duplicate_of.as_deref(), Some(original));
+    }
+    let curves = store
+        .curves(&every_client(), 0, &journal(), &NOWHERE, BASE + DAY)
+        .unwrap();
+    // Each is the gateway's request, and is counted there once.
+    assert_eq!((of(&curves, A).requests, of(&curves, D).requests), (5, 1));
+    let listed: Vec<_> = curves
+        .direct
+        .iter()
+        .map(|p| (p.id.as_str(), p.requests, p.ok))
+        .collect();
+    assert_eq!(listed, [(ACCOUNT, 1, 1), ("session:claude", 1, 1)]);
+}
+
+#[test]
+fn what_reached_no_gateway_is_kept_one_by_one_however_old() {
+    let (_dir, mut store) = store_and_direct();
+    let filter = Filter {
+        start: Some(BASE - 2 * DAY),
+        end: Some(BASE + 2 * DAY),
+        ..Filter::default()
+    };
+    let read = |store: &Store| {
+        store
+            .curves(&filter, 0, &[], &NOWHERE, BASE + 40 * DAY)
+            .unwrap()
+    };
+    let before = read(&store);
+    assert_eq!(before.direct.len(), 2);
+    store.compact(BASE + 40 * DAY).unwrap();
+    // No day of them is kept as a total: they are drawn as finely as they
+    // were, and nothing is missing from their percentiles.
+    let after = read(&store);
+    assert_eq!((after.step, before.step), (120 * MINUTE, 120 * MINUTE));
+    assert_eq!(after.direct, before.direct);
+    assert!(after.direct.iter().all(|p| p.summed_until.is_none()));
 }
 
 /// A runtime whose every directory is under `root`. Nothing of it runs in
