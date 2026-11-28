@@ -96,11 +96,11 @@ fn providers_are_on_one_host_whatever_else_their_addresses_say() {
     // The providers a form is told the met statuses of are found the same way.
     assert_eq!(
         g.same_host_providers(Some(&relayed), None),
-        [plain.clone(), relayed.clone()]
+        [plain.as_str(), relayed.as_str()]
     );
     assert_eq!(
         g.same_host_providers(None, Some("http://eu.api.example.invalid:8080")),
-        [regional.clone()]
+        [regional.as_str()]
     );
     assert!(g
         .same_host_providers(None, Some("https://example.invalid"))
