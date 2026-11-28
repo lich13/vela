@@ -184,7 +184,8 @@ pub struct Provider {
     pub members: Vec<String>,
     /// Said of what reached no gateway alone: its failures are read from the
     /// usage records, as its successes are, and so are known over the whole
-    /// range, wherever the journal begins.
+    /// range, wherever the journal begins. Every bucket of it has them, and
+    /// counts all that it completed there.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub recorded: bool,
     /// Requests it was the last to be asked for, over the whole range.
@@ -442,6 +443,7 @@ fn direct(
         // Whether the request completed is said of its last attempt alone.
         let completed = attempt.completed || !attempt.is_final;
         let ended = verdict(attempt.source, attempt.status, attempt.outcome, completed);
+        // An attempt another followed is counted only where it failed.
         if !attempt.is_final && ended != Some(false) {
             return Ok(());
         }
@@ -572,11 +574,11 @@ fn order(a: &Provider, b: &Provider) -> std::cmp::Ordering {
 }
 
 /// The curves of every provider in the filter's range and client, whichever
-/// provider it names. `failures` are the journal's rows that reach into the
-/// range, and `failures_since` the time the journal holds them all from, in
-/// milliseconds. `hosts` says which host each provider that still exists is
-/// on, by its id. Before `detail_since` a day's requests may be kept only as
-/// a total.
+/// provider it names, and of what reached no gateway there. `failures` are
+/// the journal's rows that reach into the range, and `failures_since` the
+/// time the journal holds them all from, in milliseconds. `hosts` says which
+/// host each provider that still exists is on, by its id. Before
+/// `detail_since` a day's requests may be kept only as a total.
 pub fn read(
     c: &Connection,
     f: &Filter,
@@ -687,11 +689,11 @@ pub fn read(
     // The records say what failed of these in every bucket, whatever the
     // journal has.
     let mut direct: Vec<Provider> = direct
-        .iter()
+        .into_iter()
         .map(|(id, direct)| Provider {
             recorded: true,
             ..series(
-                id.clone(),
+                id,
                 &[&direct.answered],
                 &[&direct.lost],
                 stretches,

@@ -664,6 +664,7 @@ pub(super) fn scan_direct_attempts(
     mut visit: impl FnMut(DirectAttempt<'_>) -> Result<()>,
 ) -> Result<()> {
     use std::collections::btree_map::{BTreeMap, Entry};
+    // One client is named twice, so that the statement is the same for it.
     let clients = match client {
         None => ["antigravity", "claude"],
         Some(client @ ("antigravity" | "claude")) => [client; 2],
