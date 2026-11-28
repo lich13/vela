@@ -655,9 +655,15 @@ impl Store {
         }
         let tx = db(self.connection.transaction())?;
         let mut changed = false;
+        let mut failures = Vec::new();
         for r in records {
-            changed |= insert(&tx, r)?;
+            if claude_failure(r) {
+                failures.push(r);
+            } else {
+                changed |= insert(&tx, r)?;
+            }
         }
+        changed |= insert_claude_failures(&tx, failures)?;
         changed |= Self::remove_superseded_in_tx(&tx, superseded_ids)?;
         if let Some((id, body)) = cursor {
             db(tx.execute("INSERT INTO cursors(id,body) VALUES(?1,usage_compress(?2)) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE cursors.body<>excluded.body",params![id,body]))?;
@@ -1306,6 +1312,7 @@ impl Store {
         dedup::reset_source_supplements(&tx, source)?;
         storage_v12::remove_source(&tx, source)?;
         let mut after = String::new();
+        let mut failures = Vec::new();
         loop {
             let rows = {
                 let mut s=db(tx.prepare("SELECT id,body FROM source_stage WHERE source=?1 AND id>?2 ORDER BY id LIMIT 256"))?;
@@ -1320,11 +1327,16 @@ impl Store {
             for (_, body) in &rows {
                 let r = storage_v12::decode_stage(body)?;
                 if source == "claude" || !archived || r.started_at >= cutoff {
-                    insert(&tx, &r)?;
+                    if claude_failure(&r) {
+                        failures.push(r);
+                    } else {
+                        insert(&tx, &r)?;
+                    }
                 }
             }
             after = rows.last().unwrap().0.clone();
         }
+        insert_claude_failures(&tx, failures.iter().collect())?;
         // Older cursors have no source tag. The generation invalidates those
         // safely if a missing file returns, without touching another source.
         db(tx.execute(
@@ -1345,6 +1357,45 @@ impl Store {
         query::changed(&tx)?;
         db(tx.commit())
     }
+}
+/// An API error Claude Code wrote into a session file in place of an answer.
+fn claude_failure(r: &Record) -> bool {
+    r.source == "claude" && r.final_attempt().is_some_and(|a| a.outcome == "failed")
+}
+/// Claude Code writes an API error down whichever way the request went, and
+/// of one that went through the gateway the gateway keeps its own record. The
+/// way it went is that of the request before it: the last one its session
+/// made in the six hours before, which went through the gateway where its row
+/// is one of a gateway record's; and with no such request, through the
+/// gateway where the gateway recorded a failure of the client in the minute
+/// before. What came after says nothing, a failure being what routes are
+/// changed for. So these are written once everything else of the same write
+/// is, each after those that happened before it, and one that went through
+/// the gateway is not written, nor left where an earlier reading wrote it.
+fn insert_claude_failures(
+    tx: &rusqlite::Transaction<'_>,
+    mut failures: Vec<&Record>,
+) -> Result<bool> {
+    failures.sort_by_key(|r| (r.event_time(), &r.id));
+    let mut changed = false;
+    for r in failures {
+        let at = r.event_time();
+        let before = match r.session_id.as_deref() {
+            Some(session) => storage_v12::claude_route(tx, &r.id, session, at)?,
+            None => None,
+        };
+        let through_gateway = match before {
+            Some(through_gateway) => through_gateway,
+            None => storage_v12::gateway_failed_before(tx, &r.client, at)?,
+        };
+        if !through_gateway {
+            changed |= insert(tx, r)?;
+        } else if storage_v12::owner(tx, &r.id)?.is_some() {
+            storage_v12::remove_record(tx, &r.id)?;
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<bool> {
     if db(tx.query_row(

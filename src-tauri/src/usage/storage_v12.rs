@@ -1834,6 +1834,47 @@ pub(super) fn has_local_api_for_session(c: &Connection, session_id: &str) -> Res
     }
     Ok(false)
 }
+/// The row a Claude Code session wrote last before a time, within six hours
+/// of it, and whether that row is one of a gateway record's. The range is
+/// read off `v12_time` from its end, so the first row found is the nearest.
+pub(super) const CLAUDE_ROUTE: &str = "SELECT duplicate IS NOT NULL OR archived_duplicate IS NOT NULL FROM v12_rows WHERE time BETWEEN ?1 AND ?2 AND source=usage_label('claude') AND session=?3 AND key<>?4 ORDER BY time DESC,rid DESC LIMIT 1";
+/// What the gateway recorded of a client within the minute before a time.
+pub(super) const GATEWAY_BEFORE: &str =
+    "SELECT rid FROM v12_rows WHERE time BETWEEN ?1 AND ?2 AND source=0 AND client=usage_label(?3)";
+/// Whether the request a Claude Code session made last before `at` went
+/// through the gateway; `None` where it made none in the six hours before.
+/// `id` is the row asking, which is not a request before itself.
+pub(super) fn claude_route(
+    c: &Connection,
+    id: &str,
+    session: &str,
+    at: i64,
+) -> Result<Option<bool>> {
+    db(db(c.prepare_cached(CLAUDE_ROUTE))?
+        .query_row(
+            params![at.saturating_sub(6 * 3_600_000), at, key(session), key(id)],
+            |row| row.get(0),
+        )
+        .optional())
+}
+/// Whether a request of `client` that the gateway recorded in the minute
+/// before `at` ended in what counts as an error.
+pub(super) fn gateway_failed_before(c: &Connection, client: &str, at: i64) -> Result<bool> {
+    let rids = {
+        let mut statement = db(c.prepare_cached(GATEWAY_BEFORE))?;
+        let rows = db(statement
+            .query_map(params![at.saturating_sub(60_000), at, client], |row| {
+                row.get::<_, i64>(0)
+            }))?;
+        db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+    };
+    for rid in rids {
+        if load_record(c, rid)?.known_success() == Some(false) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 pub(super) fn remove_record(c: &Connection, id: &str) -> Result<()> {
     let Some(rid) = owner(c, id)? else {
         return Ok(());
