@@ -13,6 +13,7 @@ use crate::{
     },
 };
 use parking_lot::Mutex;
+use serde::Serialize;
 use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -25,8 +26,13 @@ pub(crate) const QUIT: &str = "quit";
 /// What the ID of every row of the quota starts with. One that can be chosen
 /// opens the usage page.
 pub(crate) const ROW: &str = "quota-";
-/// How many cells a bar has.
+/// Where the rows of the quota start in the menu: they are its first, and
+/// its separator and Quit come after them.
+const FIRST: usize = 0;
+/// How many cells a bar has where the menu shows text alone.
 const CELLS: usize = 8;
+/// How many it has where the menu draws the row.
+const DRAWN: usize = 12;
 const READING: &str = "读取中…";
 const NOBODY: &str = "没有已登录的官方账号";
 /// What every row under a title starts with.
@@ -81,12 +87,38 @@ impl Reading {
 struct Account {
     /// What tells it from the other accounts of its client.
     id: String,
-    title: String,
+    title: Title,
     /// The periods each row under the title shows.
     lines: Vec<Line>,
     /// What is said under them: that the account is being read, or why it
     /// could not be.
     note: Option<String>,
+}
+/// Whose the rows under it are.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+struct Title {
+    client: &'static str,
+    name: Option<String>,
+    plan: Option<String>,
+    /// The account the client is signed in to, where it lists more than one.
+    current: bool,
+}
+impl Title {
+    /// `client · name（plan）`, with a mark on the account signed in to.
+    fn text(&self) -> String {
+        let mut text = self.client.to_owned();
+        if let Some(name) = &self.name {
+            text.push_str(" · ");
+            text.push_str(name);
+        }
+        if let Some(plan) = &self.plan {
+            text.push_str(&format!("（{plan}）"));
+        }
+        if self.current {
+            text.push_str(" ✓");
+        }
+        text
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Line {
@@ -121,95 +153,167 @@ impl Account {
 /// A row of the menu.
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
+    /// What it says. Where the menu shows text alone this is the row; where
+    /// it draws the row from `style`, this is still what is read out and
+    /// searched.
     text: String,
     /// A title only says whose the rows under it are, and cannot be chosen.
     enabled: bool,
+    style: Style,
 }
-
-/// What is left as a bar and a number. The number is a whole percentage, and
-/// the bar says what the number does: it is empty only where that reads 0%
-/// and full only where it reads 100%, and has from one cell to seven between
-/// the two. The number is as wide as three digits, so that what follows it
-/// starts at the same place in every row.
-fn bar(percent: f64) -> String {
-    let percent = percent.round().clamp(0.0, 100.0);
-    let filled = if percent <= 0.0 {
-        0
-    } else if percent >= 100.0 {
-        CELLS
-    } else {
-        ((percent / 100.0 * CELLS as f64).round() as usize).clamp(1, CELLS - 1)
-    };
-    let number = format!("{percent:.0}%");
-    format!(
-        "{}{} {}{number}",
-        "▰".repeat(filled),
-        "▱".repeat(CELLS - filled),
-        "\u{2007}".repeat(4 - number.chars().count()),
-    )
+/// How a row is drawn where the menu draws more than text. The menu is told
+/// as JSON: see `native/tray_menu.swift`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum Style {
+    Title(Title),
+    /// The periods of an account, and what they are of where the account has
+    /// more than one row of them.
+    Detail {
+        name: Option<&'static str>,
+        periods: Vec<Gauge>,
+    },
+    /// Whatever else is said: that an account is being read, why it could
+    /// not be, that nobody is signed in. It is drawn as the text it is.
+    Plain,
 }
-/// The bars come first and what they are of last, so that the bars of every
-/// row stand under each other.
-fn line(line: &Line) -> String {
-    let periods = line
+/// A period in a row: what it is called and what is left of it, where the
+/// service said.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct Gauge {
+    label: String,
+    left: Option<Left>,
+}
+/// What is left of a period, as a number and a bar. The number is a whole
+/// percentage, and the bar says what the number does: it is empty only where
+/// that reads 0% and full only where it reads 100%, and has from one cell to
+/// all but one between the two.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+struct Left {
+    percent: u8,
+    /// How many cells of the bar that is drawn are filled.
+    filled: usize,
+    tone: Tone,
+}
+/// What the colour of a bar says of how little is left. It goes by the
+/// number, as the bar does.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum Tone {
+    Normal,
+    /// A fifth is left, or less.
+    Orange,
+    /// A tenth, or less.
+    Red,
+}
+impl Left {
+    fn of(percent: f64) -> Self {
+        let percent = percent.round().clamp(0.0, 100.0) as u8;
+        Self {
+            percent,
+            filled: filled(percent, DRAWN),
+            tone: match percent {
+                0..=10 => Tone::Red,
+                11..=20 => Tone::Orange,
+                _ => Tone::Normal,
+            },
+        }
+    }
+    /// The number and then the bar, where the menu shows text alone. The
+    /// number is as wide as three digits, so that the bar starts at the same
+    /// place in every row.
+    fn text(&self) -> String {
+        let number = format!("{}%", self.percent);
+        let filled = filled(self.percent, CELLS);
+        format!(
+            "{}{number} {}{}",
+            "\u{2007}".repeat(4 - number.chars().count()),
+            "▰".repeat(filled),
+            "▱".repeat(CELLS - filled),
+        )
+    }
+}
+/// How many of `cells` are filled where the number reads `percent`.
+fn filled(percent: u8, cells: usize) -> usize {
+    match percent {
+        0 => 0,
+        100.. => cells,
+        _ => ((f64::from(percent) / 100.0 * cells as f64).round() as usize).clamp(1, cells - 1),
+    }
+}
+/// A row of periods: what it says, and how it is drawn. Each period is what
+/// it is called, the number and the bar, and one the service gave no number
+/// for says so. What the periods are of comes last, so that the periods of
+/// every row stand under each other.
+fn detail(line: &Line) -> (String, Style) {
+    let periods: Vec<Gauge> = line
         .periods
         .iter()
-        .map(|(label, percent)| match percent {
-            Some(percent) => format!("{label} {}", bar(*percent)),
-            None => format!("{label} —"),
+        .map(|(label, percent)| Gauge {
+            label: label.clone(),
+            left: percent.map(Left::of),
+        })
+        .collect();
+    let mut text = periods
+        .iter()
+        .map(|period| match &period.left {
+            Some(left) => format!("{} {}", period.label, left.text()),
+            None => format!("{} —", period.label),
         })
         .collect::<Vec<_>>()
-        .join(" · ");
-    match line.name {
-        Some(name) => format!("{periods}   {name}"),
-        None => periods,
+        .join("   ");
+    if let Some(name) = line.name {
+        text.push_str("   ");
+        text.push_str(name);
     }
+    let style = Style::Detail {
+        name: line.name,
+        periods,
+    };
+    (text, style)
 }
 fn rows(accounts: &[Account]) -> Vec<Row> {
     if accounts.is_empty() {
         return vec![Row {
             text: NOBODY.into(),
             enabled: false,
+            style: Style::Plain,
         }];
     }
     let mut rows = Vec::new();
     for account in accounts {
         rows.push(Row {
-            text: account.title.clone(),
+            text: account.title.text(),
             enabled: false,
+            style: Style::Title(account.title.clone()),
         });
-        let mut under: Vec<String> = account
+        let mut under: Vec<(String, Style)> = account
             .lines
             .iter()
             .filter(|line| !line.periods.is_empty())
-            .map(line)
+            .map(detail)
             .collect();
-        under.extend(account.note.clone());
+        under.extend(account.note.clone().map(|note| (note, Style::Plain)));
         if under.is_empty() {
-            under.push("—".into());
+            under.push(("—".into(), Style::Plain));
         }
-        rows.extend(under.into_iter().map(|text| Row {
+        rows.extend(under.into_iter().map(|(text, style)| Row {
             text: format!("{INDENT}{text}"),
             enabled: true,
+            style,
         }));
     }
     rows
 }
-/// `client · name（plan）`, with a mark on the account signed in to where the
-/// client lists more than one.
-fn title(client: ClientId, name: Option<&str>, plan: Option<&str>, marked: bool) -> String {
-    let mut title = client.name().to_owned();
-    if let Some(name) = name {
-        title.push_str(" · ");
-        title.push_str(name);
+/// The title of an account of `client`, with a mark on the account signed in
+/// to where the client lists more than one.
+fn title(client: ClientId, name: Option<&str>, plan: Option<&str>, current: bool) -> Title {
+    Title {
+        client: client.name(),
+        name: name.map(str::to_owned),
+        plan: plan.map(str::to_owned),
+        current,
     }
-    if let Some(plan) = plan {
-        title.push_str(&format!("（{plan}）"));
-    }
-    if marked {
-        title.push_str(" ✓");
-    }
-    title
 }
 /// A plan as Claude Code's login names it, the way the other plans are written.
 fn capitalized(plan: &str) -> String {
@@ -288,7 +392,7 @@ fn grok_account(earlier: Option<Account>, quota: Option<grok_quota::Quota>) -> O
 /// The account with `id` as it was listed before, its title apart: what was
 /// read of it stays until it is read again, so that a menu opened again does
 /// not go blank first.
-fn listed(earlier: &[Account], id: String, title: String) -> Account {
+fn listed(earlier: &[Account], id: String, title: Title) -> Account {
     let earlier = earlier.iter().find(|account| account.id == id);
     let lines = earlier
         .map(|account| account.lines.clone())
@@ -437,7 +541,7 @@ impl Tray {
                     row.enabled,
                     None::<&str>,
                 )?;
-                self.menu.insert(&item, index)?;
+                self.menu.insert(&item, FIRST + index)?;
                 shown.push((row.clone(), item));
                 continue;
             };
@@ -449,6 +553,7 @@ impl Tray {
                 item.set_enabled(row.enabled)?;
                 was.enabled = row.enabled;
             }
+            was.style.clone_from(&row.style);
         }
         while shown.len() > rows.len() {
             let Some((_, item)) = shown.pop() else { break };
