@@ -875,7 +875,6 @@ export function usagePreview(
       reasoningTokens: 0,
       costUsd: "0",
       unpricedRequests: 0,
-      costPerHour: "0",
     };
     const previewStats: AntigravityUsageStats = {
       requests: 18,
@@ -917,7 +916,6 @@ export function usagePreview(
                 reasoningTokens: 8200,
                 costUsd: "0.492",
                 unpricedRequests: 0,
-                costPerHour: "0.0984",
               },
               weekly7d: {
                 period: {
@@ -931,7 +929,6 @@ export function usagePreview(
                 reasoningTokens: 11800,
                 costUsd: "0.784",
                 unpricedRequests: 0,
-                costPerHour: "0.0047",
               },
             },
             {
@@ -949,7 +946,6 @@ export function usagePreview(
                 reasoningTokens: 5400,
                 costUsd: "0.4686",
                 unpricedRequests: 0,
-                costPerHour: "0.0937",
               },
               weekly7d: {
                 period: {
@@ -963,7 +959,6 @@ export function usagePreview(
                 reasoningTokens: 6600,
                 costUsd: "0.6986",
                 unpricedRequests: 0,
-                costPerHour: "0.0042",
               },
             },
           ],

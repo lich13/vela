@@ -123,7 +123,7 @@ export default function Speedometer({
             />
           )}
           {marks?.map((mark) => {
-            const [x, y] = point(inner - 12.5, mark.level);
+            const [x, y] = point(inner - 14.5, mark.level);
             return (
               <g
                 key={mark.label}

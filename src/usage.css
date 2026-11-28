@@ -1695,6 +1695,20 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* How fast the track is spending now: its dial beside its name, the reading
+   to the right of the dial. */
+.usage-ag-track-head .speedometer {
+  flex-direction: row;
+  flex-shrink: 0;
+  gap: 6px;
+  margin-right: auto;
+}
+.usage-ag-track-head .speedometer-dial {
+  width: 34px;
+}
+.usage-ag-track-head .speedometer-reading {
+  font-size: 12px;
+}
 .usage-ag-windows {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1766,8 +1780,8 @@
 .usage-ag-window-stats {
   margin: 2px 0 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px 18px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 14px;
   padding-top: 8px;
   border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
 }

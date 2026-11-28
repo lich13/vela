@@ -5,6 +5,7 @@ import Sources from "./UsageSources";
 import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
 import { subscriptions } from "./subscriptions";
 import { useVisible } from "./visibility";
+import { useUsageSpeed } from "./usage-speed";
 import type {
   AntigravityAuthState,
   CommandName,
@@ -244,6 +245,11 @@ export default function Usage({
     setTab(next);
   };
   const visible = useVisible("app-visibility", (message) => setError(message));
+  // How fast the tracks of an Antigravity account are spending, on the dials
+  // of its page; an instance from before them has no command to say.
+  const speed = useUsageSpeed(
+    visible && tab === "antigravity" && supports("get_usage_speed"),
+  );
   const sequence = useRef(0),
     rowsSequence = useRef(0),
     agSequence = useRef(0),
@@ -1000,6 +1006,7 @@ export default function Usage({
             quotaError={agQuotaError}
             busy={agBusy}
             currentAccountId={agCurrentAccount}
+            speed={speed?.accounts}
             selectedProvider={provider}
             providerName={name}
             onSelectProvider={(nextProvider) => {

@@ -266,8 +266,6 @@ export type AntigravityTrackWindow = {
   reasoningTokens: number;
   costUsd: string;
   unpricedRequests: number;
-  /** USD per hour over the period, formatted like `costUsd`; "0" without a period. */
-  costPerHour: string;
 };
 
 type AntigravityQuotaTrack = {
