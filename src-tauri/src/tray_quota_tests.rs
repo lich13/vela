@@ -1,12 +1,19 @@
 use super::*;
 use crate::usage::antigravity::quota::Period;
 
-fn account(id: &str, title: &str, lines: Vec<Line>, note: Option<&str>) -> Account {
+fn account(id: &str, title: Title, lines: Vec<Line>, note: Option<&str>) -> Account {
     Account {
         id: id.into(),
-        title: title.into(),
+        title,
         lines,
         note: note.map(str::to_owned),
+    }
+}
+/// A title that says no more than whose the account is.
+fn titled(client: &'static str) -> Title {
+    Title {
+        client,
+        ..Title::default()
     }
 }
 fn periods(name: Option<&'static str>, periods: &[(&str, Option<f64>)]) -> Line {
@@ -23,58 +30,124 @@ fn texts(rows: &[Row]) -> Vec<(&str, bool)> {
         .map(|row| (row.text.as_str(), row.enabled))
         .collect()
 }
-
-#[test]
-fn a_bar_is_empty_only_where_it_reads_0_and_full_only_where_it_reads_100() {
-    assert_eq!(bar(0.0), "▱▱▱▱▱▱▱▱ \u{2007}\u{2007}0%");
-    // The bar goes by the number, which is a whole percentage.
-    assert_eq!(bar(0.4), "▱▱▱▱▱▱▱▱ \u{2007}\u{2007}0%");
-    // Too little for a cell, and a cell all the same: the number is not 0%.
-    assert_eq!(bar(0.5), "▰▱▱▱▱▱▱▱ \u{2007}\u{2007}1%");
-    assert_eq!(bar(1.0), "▰▱▱▱▱▱▱▱ \u{2007}\u{2007}1%");
-    assert_eq!(bar(50.0), "▰▰▰▰▱▱▱▱ \u{2007}50%");
-    assert_eq!(bar(72.4), "▰▰▰▰▰▰▱▱ \u{2007}72%");
-    assert_eq!(bar(99.0), "▰▰▰▰▰▰▰▱ \u{2007}99%");
-    assert_eq!(bar(99.4), "▰▰▰▰▰▰▰▱ \u{2007}99%");
-    assert_eq!(bar(99.6), "▰▰▰▰▰▰▰▰ 100%");
-    // A service that counts past its own limit is not shown past the ends.
-    assert_eq!(bar(-3.0), bar(0.0));
-    assert_eq!(bar(140.0), bar(100.0));
+fn styles(rows: &[Row]) -> Vec<&Style> {
+    rows.iter().map(|row| &row.style).collect()
 }
-
-#[test]
-fn every_account_has_a_title_that_cannot_be_chosen_and_rows_under_it_that_can() {
-    let rows = rows(&[
+fn gauge(label: &str, left: Option<(u8, usize, Tone)>) -> Gauge {
+    Gauge {
+        label: label.into(),
+        left: left.map(|(percent, filled, tone)| Left {
+            percent,
+            filled,
+            tone,
+        }),
+    }
+}
+/// Accounts of every kind the menu lists: read, partly read with a failure
+/// beside it, not read yet, and with no period at all.
+fn several() -> Vec<Row> {
+    rows(&[
         account(
             "work",
-            "Codex · work（Plus）",
+            title(ClientId::Codex, Some("work"), Some("Plus"), false),
             vec![periods(None, &[("5h", Some(72.0)), ("7d", Some(31.0))])],
             None,
         ),
         account(
             "agy",
-            "Antigravity · work ✓",
+            title(ClientId::Agy, Some("work"), None, true),
             vec![
                 periods(Some("Gemini"), &[("5h", Some(82.0)), ("7d", None)]),
                 periods(Some("Claude / GPT"), &[]),
             ],
             Some("Antigravity 额度查询受限，请稍后重试"),
         ),
-        account("new", "Codex · new", Vec::new(), Some(READING)),
-        account("bare", "Grok Build", vec![periods(None, &[])], None),
-    ]);
+        account(
+            "new",
+            title(ClientId::Codex, Some("new"), None, false),
+            Vec::new(),
+            Some(READING),
+        ),
+        account(
+            "bare",
+            title(ClientId::Grok, None, None, false),
+            vec![periods(None, &[])],
+            None,
+        ),
+    ])
+}
+
+#[test]
+fn a_bar_is_empty_only_where_it_reads_0_and_full_only_where_it_reads_100() {
+    let text = |percent: f64| Left::of(percent).text();
+    assert_eq!(text(0.0), "\u{2007}\u{2007}0% ▱▱▱▱▱▱▱▱");
+    // The bar goes by the number, which is a whole percentage.
+    assert_eq!(text(0.4), "\u{2007}\u{2007}0% ▱▱▱▱▱▱▱▱");
+    // Too little for a cell, and a cell all the same: the number is not 0%.
+    assert_eq!(text(0.5), "\u{2007}\u{2007}1% ▰▱▱▱▱▱▱▱");
+    assert_eq!(text(1.0), "\u{2007}\u{2007}1% ▰▱▱▱▱▱▱▱");
+    assert_eq!(text(50.0), "\u{2007}50% ▰▰▰▰▱▱▱▱");
+    assert_eq!(text(72.4), "\u{2007}72% ▰▰▰▰▰▰▱▱");
+    assert_eq!(text(99.0), "\u{2007}99% ▰▰▰▰▰▰▰▱");
+    assert_eq!(text(99.4), "\u{2007}99% ▰▰▰▰▰▰▰▱");
+    assert_eq!(text(99.6), "100% ▰▰▰▰▰▰▰▰");
+    // A service that counts past its own limit is not shown past the ends.
+    assert_eq!(Left::of(-3.0), Left::of(0.0));
+    assert_eq!(Left::of(140.0), Left::of(100.0));
+}
+
+#[test]
+fn the_bar_that_is_drawn_has_twelve_cells_and_goes_by_the_number_as_well() {
+    let filled = |percent: f64| Left::of(percent).filled;
+    assert_eq!(filled(0.0), 0);
+    assert_eq!(filled(0.4), 0);
+    // It reads 1%: a cell, though that is far less than a twelfth.
+    assert_eq!(filled(0.5), 1);
+    assert_eq!(filled(4.0), 1);
+    // A cell is a twelfth, and the nearest count of them is taken.
+    assert_eq!(filled(12.0), 1);
+    assert_eq!(filled(13.0), 2);
+    assert_eq!(filled(50.0), 6);
+    assert_eq!(filled(72.4), 9);
+    // Nearer twelve cells than eleven, and eleven all the same: the number
+    // is not 100%.
+    assert_eq!(filled(96.0), 11);
+    assert_eq!(filled(99.4), 11);
+    assert_eq!(filled(99.6), 12);
+    assert_eq!(filled(140.0), 12);
+}
+
+#[test]
+fn a_bar_is_red_with_a_tenth_left_or_less_and_orange_with_a_fifth_or_less() {
+    let tone = |percent: f64| Left::of(percent).tone;
+    assert_eq!(tone(0.0), Tone::Red);
+    assert_eq!(tone(10.0), Tone::Red);
+    // It goes by the number as it reads: 10.4 reads 10%, and 10.5 reads 11%.
+    assert_eq!(tone(10.4), Tone::Red);
+    assert_eq!(tone(10.5), Tone::Orange);
+    assert_eq!(tone(11.0), Tone::Orange);
+    assert_eq!(tone(20.0), Tone::Orange);
+    assert_eq!(tone(20.4), Tone::Orange);
+    assert_eq!(tone(20.5), Tone::Normal);
+    assert_eq!(tone(21.0), Tone::Normal);
+    assert_eq!(tone(100.0), Tone::Normal);
+}
+
+#[test]
+fn every_account_has_a_title_that_cannot_be_chosen_and_rows_under_it_that_can() {
     assert_eq!(
-        texts(&rows),
+        texts(&several()),
         [
             ("Codex · work（Plus）", false),
+            // What a period is called, the number, the bar.
             (
-                "    5h ▰▰▰▰▰▰▱▱ \u{2007}72% · 7d ▰▰▱▱▱▱▱▱ \u{2007}31%",
+                "    5h \u{2007}72% ▰▰▰▰▰▰▱▱   7d \u{2007}31% ▰▰▱▱▱▱▱▱",
                 true
             ),
             ("Antigravity · work ✓", false),
             // A row without a period is left out; one whose service gave no
             // number says so.
-            ("    5h ▰▰▰▰▰▰▰▱ \u{2007}82% · 7d —   Gemini", true),
+            ("    5h \u{2007}82% ▰▰▰▰▰▰▰▱   7d —   Gemini", true),
             ("    Antigravity 额度查询受限，请稍后重试", true),
             ("Codex · new", false),
             ("    读取中…", true),
@@ -82,7 +155,136 @@ fn every_account_has_a_title_that_cannot_be_chosen_and_rows_under_it_that_can() 
             ("    —", true),
         ]
     );
-    assert_eq!(texts(&super::rows(&[])), [(NOBODY, false)]);
+    assert_eq!(texts(&rows(&[])), [(NOBODY, false)]);
+}
+
+#[test]
+fn a_row_is_drawn_as_the_title_or_the_periods_it_is_and_whatever_else_as_its_text() {
+    assert_eq!(
+        styles(&several()),
+        [
+            &Style::Title(title(ClientId::Codex, Some("work"), Some("Plus"), false)),
+            &Style::Detail {
+                name: None,
+                periods: vec![
+                    gauge("5h", Some((72, 9, Tone::Normal))),
+                    gauge("7d", Some((31, 4, Tone::Normal))),
+                ],
+            },
+            &Style::Title(title(ClientId::Agy, Some("work"), None, true)),
+            // A period without a number has neither a bar nor a tone.
+            &Style::Detail {
+                name: Some("Gemini"),
+                periods: vec![gauge("5h", Some((82, 10, Tone::Normal))), gauge("7d", None)],
+            },
+            // Why the account could not be read, that it is being read, that
+            // it has no period.
+            &Style::Plain,
+            &Style::Title(title(ClientId::Codex, Some("new"), None, false)),
+            &Style::Plain,
+            &Style::Title(title(ClientId::Grok, None, None, false)),
+            &Style::Plain,
+        ]
+    );
+    assert_eq!(styles(&rows(&[])), [&Style::Plain]);
+}
+
+#[test]
+fn a_row_that_turns_from_periods_into_a_failure_is_drawn_as_its_text() {
+    // The second row of the menu stays the same item whatever it comes to
+    // say, and what the item was drawn as before must not stay with it.
+    let second = |account: &Account| {
+        let mut rows = rows(std::slice::from_ref(account));
+        assert_eq!(rows.len(), 2);
+        rows.remove(1)
+    };
+    let mut account = listed(&[], "a".into(), titled("A"));
+    assert_eq!(second(&account).text, "    读取中…");
+    assert_eq!(second(&account).style, Style::Plain);
+
+    account.lines = vec![periods(None, &[("5h", Some(15.0))])];
+    account.note = None;
+    assert_eq!(
+        second(&account).style,
+        Style::Detail {
+            name: None,
+            periods: vec![gauge("5h", Some((15, 2, Tone::Orange)))],
+        }
+    );
+
+    account.failed(codex_quota::OVER.into(), true);
+    assert_eq!(second(&account).text, "    登录已过期，请重新登录");
+    assert_eq!(second(&account).style, Style::Plain);
+
+    account.lines = vec![periods(None, &[("5h", Some(9.0))])];
+    account.note = None;
+    assert_eq!(
+        second(&account).style,
+        Style::Detail {
+            name: None,
+            periods: vec![gauge("5h", Some((9, 1, Tone::Red)))],
+        }
+    );
+}
+
+#[test]
+fn the_menu_is_told_how_each_row_is_drawn_as_json() {
+    let rows = rows(&[account(
+        "agy",
+        title(ClientId::Agy, Some("work"), Some("Pro"), true),
+        vec![periods(Some("Gemini"), &[("5h", Some(8.0)), ("7d", None)])],
+        Some(READING),
+    )]);
+    assert_eq!(
+        serde_json::to_value(styles(&rows)).unwrap(),
+        serde_json::json!([
+            {
+                "kind": "title",
+                "client": "Antigravity",
+                "name": "work",
+                "plan": "Pro",
+                "current": true,
+            },
+            {
+                "kind": "detail",
+                "name": "Gemini",
+                "periods": [
+                    {"label": "5h", "left": {"percent": 8, "filled": 1, "tone": "red"}},
+                    {"label": "7d", "left": null},
+                ],
+            },
+            {"kind": "plain"},
+        ])
+    );
+    // What a title or a row of periods lacks is told as lacking.
+    assert_eq!(
+        serde_json::to_value(Style::Title(titled("Grok Build"))).unwrap(),
+        serde_json::json!({
+            "kind": "title",
+            "client": "Grok Build",
+            "name": null,
+            "plan": null,
+            "current": false,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(Style::Detail {
+            name: None,
+            periods: vec![gauge("周", Some((20, 2, Tone::Orange)))],
+        })
+        .unwrap(),
+        serde_json::json!({
+            "kind": "detail",
+            "name": null,
+            "periods": [
+                {"label": "周", "left": {"percent": 20, "filled": 2, "tone": "orange"}},
+            ],
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(Left::of(21.0)).unwrap(),
+        serde_json::json!({"percent": 21, "filled": 3, "tone": "normal"})
+    );
 }
 
 #[test]
@@ -90,13 +292,13 @@ fn as_many_rows_of_other_accounts_differ_in_which_of_them_can_be_chosen() {
     // Two accounts of two rows each and three of one: six rows either way.
     let line = || vec![periods(None, &[("5h", Some(50.0))])];
     let two = rows(&[
-        account("a", "A", [line(), line()].concat(), None),
-        account("b", "B", [line(), line()].concat(), None),
+        account("a", titled("A"), [line(), line()].concat(), None),
+        account("b", titled("B"), [line(), line()].concat(), None),
     ]);
     let three = rows(&[
-        account("a", "A", line(), None),
-        account("b", "B", line(), None),
-        account("c", "C", line(), None),
+        account("a", titled("A"), line(), None),
+        account("b", titled("B"), line(), None),
+        account("c", titled("C"), line(), None),
     ]);
     assert_eq!(two.len(), three.len());
     let chosen = |rows: &[Row]| rows.iter().map(|row| row.enabled).collect::<Vec<_>>();
@@ -107,14 +309,17 @@ fn as_many_rows_of_other_accounts_differ_in_which_of_them_can_be_chosen() {
 #[test]
 fn a_title_names_the_client_the_account_its_plan_and_the_one_signed_in_to() {
     assert_eq!(
-        title(ClientId::Codex, Some("work"), Some("Plus"), true),
+        title(ClientId::Codex, Some("work"), Some("Plus"), true).text(),
         "Codex · work（Plus） ✓"
     );
     assert_eq!(
-        title(ClientId::Claude, Some("f***@example.invalid"), None, false),
+        title(ClientId::Claude, Some("f***@example.invalid"), None, false).text(),
         "Claude Code · f***@example.invalid"
     );
-    assert_eq!(title(ClientId::Grok, None, None, false), "Grok Build");
+    assert_eq!(
+        title(ClientId::Grok, None, None, false).text(),
+        "Grok Build"
+    );
     assert_eq!(capitalized("max"), "Max");
     assert_eq!(capitalized(""), "");
 }
@@ -155,25 +360,25 @@ fn an_account_listed_again_keeps_what_was_read_of_it_until_it_is_read_again() {
     let earlier = [
         account(
             "read",
-            "old title",
+            titled("old title"),
             vec![periods(None, &[("5h", Some(40.0))])],
             Some("查询受限，请稍后重试"),
         ),
         account(
             "failed",
-            "old title",
+            titled("old title"),
             Vec::new(),
             Some("登录已过期，请重新登录"),
         ),
     ];
-    let read = listed(&earlier, "read".into(), "new title".into());
-    assert_eq!(read.title, "new title");
+    let read = listed(&earlier, "read".into(), titled("new title"));
+    assert_eq!(read.title, titled("new title"));
     assert_eq!(read.lines, earlier[0].lines);
     // Why it could not be read last time stands beside what was read before.
     assert_eq!(read.note.as_deref(), Some("查询受限，请稍后重试"));
     // With nothing to show, the account says that it is being read.
     for id in ["failed", "new"] {
-        let account = listed(&earlier, id.into(), "title".into());
+        let account = listed(&earlier, id.into(), titled("title"));
         assert!(account.lines.is_empty());
         assert_eq!(account.note.as_deref(), Some(READING));
     }
@@ -181,7 +386,14 @@ fn an_account_listed_again_keeps_what_was_read_of_it_until_it_is_read_again() {
 
 #[test]
 fn a_failure_is_said_under_what_was_read_before_and_a_login_that_is_over_shows_only_that() {
-    let read = || account("a", "A", vec![periods(None, &[("5h", Some(40.0))])], None);
+    let read = || {
+        account(
+            "a",
+            titled("A"),
+            vec![periods(None, &[("5h", Some(40.0))])],
+            None,
+        )
+    };
     let mut limited = read();
     limited.failed("查询受限，请稍后重试".into(), false);
     assert_eq!(limited.lines, read().lines);
@@ -214,7 +426,7 @@ fn a_grok_period_that_could_not_be_asked_for_stays_as_it_was_read_before() {
     assert_eq!(grok_account(None, None), None);
     let read = grok_account(None, Some(grok("a", Some(66.0), Some(88.0), None))).unwrap();
     assert_eq!(read.id, "a");
-    assert_eq!(read.title, "Grok Build");
+    assert_eq!(read.title, title(ClientId::Grok, None, None, false));
     let both = [periods(None, &[("周", Some(66.0)), ("月", Some(88.0))])];
     assert_eq!(
         (read.lines.as_slice(), read.note.as_deref()),

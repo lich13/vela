@@ -1585,6 +1585,10 @@ pub fn run() {
                 .build(app)?;
             #[cfg(target_os = "macos")]
             tray_macos::install(&tray)?;
+            // The first rows were made before there was a menu to draw them
+            // in the way they are styled: see `tray_macos::style`.
+            #[cfg(target_os = "macos")]
+            quota.draw()?;
             #[cfg(not(target_os = "macos"))]
             let _ = tray;
             Ok(())
