@@ -47,6 +47,77 @@ fn provider_secrets_never_appear_in_view() {
     assert!(!json.contains("localToken"));
 }
 #[test]
+fn providers_are_on_one_host_whatever_else_their_addresses_say() {
+    assert_eq!(
+        host("https://api.example.invalid/v1").as_deref(),
+        Some("api.example.invalid")
+    );
+    // Another scheme, port and path, and the name in capitals.
+    assert_eq!(
+        host("http://API.Example.invalid:8443/relay/v1/"),
+        host("https://api.example.invalid/v1")
+    );
+    // A subdomain is a host of its own.
+    assert_eq!(
+        host("https://eu.api.example.invalid/v1").as_deref(),
+        Some("eu.api.example.invalid")
+    );
+    for nowhere in [
+        "",
+        "api.example.invalid/v1",
+        "mailto:fixture@example.invalid",
+    ] {
+        assert_eq!(host(nowhere), None, "{nowhere}");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let g = Gateway::new(temp.path().to_path_buf()).unwrap();
+    let edit = |edit| g.edit(edit, &g.view().revision, temp.path()).unwrap();
+    let add = |address: &str| {
+        let view = edit(form(serde_json::json!({ "baseUrl": address })));
+        view.providers.last().unwrap().id.clone()
+    };
+    let plain = add("https://api.example.invalid/v1");
+    let relayed = add("http://API.Example.invalid:8443/relay/v1");
+    let regional = add("https://eu.api.example.invalid/v1");
+    let hosts = |of: &[(&String, &str)]| -> BTreeMap<String, String> {
+        of.iter()
+            .map(|(id, name)| ((*id).clone(), (*name).into()))
+            .collect()
+    };
+    assert_eq!(
+        g.provider_hosts(),
+        hosts(&[
+            (&plain, "api.example.invalid"),
+            (&relayed, "api.example.invalid"),
+            (&regional, "eu.api.example.invalid"),
+        ])
+    );
+    // The providers a form is told the met statuses of are found the same way.
+    assert_eq!(
+        g.same_host_providers(Some(&relayed), None),
+        [plain.clone(), relayed.clone()]
+    );
+    assert_eq!(
+        g.same_host_providers(None, Some("http://eu.api.example.invalid:8080")),
+        [regional.clone()]
+    );
+    assert!(g
+        .same_host_providers(None, Some("https://example.invalid"))
+        .is_empty());
+    // One that is deleted is on no host any more.
+    edit(Edit::DeleteProvider {
+        id: relayed.clone(),
+    });
+    assert_eq!(
+        g.provider_hosts(),
+        hosts(&[
+            (&plain, "api.example.invalid"),
+            (&regional, "eu.api.example.invalid"),
+        ])
+    );
+}
+#[test]
 fn url_suffix_and_hop_headers() {
     assert_eq!(
         forward::target(

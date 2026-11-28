@@ -506,6 +506,15 @@ impl Route {
 fn pkey(p: &Provider) -> String {
     format!("provider:{}:{}", p.id, p.version)
 }
+/// The host an address names, in lower case. Providers are on one host where
+/// it is the same, whatever the scheme, port and path beside it, and on
+/// another where it differs at all, by a subdomain as much as by a domain.
+/// None where the address names no host.
+fn host(address: &str) -> Option<String> {
+    url::Url::parse(address)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+}
 impl Gateway {
     pub fn freeze_gate(&self) -> freeze::Gate {
         self.0.registry.freeze.clone()
@@ -2405,11 +2414,6 @@ impl Gateway {
     /// Ids of this client's providers on the same host as the given provider,
     /// or as the address of one that is not saved yet.
     pub fn same_host_providers(&self, id: Option<&str>, base_url: Option<&str>) -> Vec<String> {
-        let host = |address: &str| {
-            url::Url::parse(address)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-        };
         let s = self.0.inner.lock();
         let providers = &s.store.providers;
         let Some(target) = id
@@ -2424,6 +2428,16 @@ impl Gateway {
             .iter()
             .filter(|p| host(&p.base_url).as_ref() == Some(&target))
             .map(|p| p.id.clone())
+            .collect()
+    }
+    /// The host each of this client's providers is on, by the provider's id.
+    /// One whose address names no host is left out.
+    pub fn provider_hosts(&self) -> BTreeMap<String, String> {
+        let s = self.0.inner.lock();
+        s.store
+            .providers
+            .iter()
+            .filter_map(|p| Some((p.id.clone(), host(&p.base_url)?)))
             .collect()
     }
     pub async fn list_models(&self, id: &str, force: bool) -> Result<catalog::View> {
