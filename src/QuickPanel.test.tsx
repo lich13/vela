@@ -643,3 +643,44 @@ it("signals quick_ready once on top-level mount without repeating on client tab 
     mock.command.mock.calls.filter(([name]) => name === "quick_ready"),
   ).toHaveLength(1);
 });
+
+it("keeps the live rate above the platforms, and the same one through a change of platform", async () => {
+  const original = mock.command.getMockImplementation()!;
+  mock.command.mockImplementation(
+    async (name: string, args: Record<string, unknown> = {}) =>
+      name === "get_usage_speed"
+        ? {
+            costPerHour: "1.5",
+            level: 0.29,
+            unpriced: false,
+            at: 1_760_000_000_000,
+            dial: [],
+            clients: [
+              {
+                id: "claude",
+                costPerHour: "1.5",
+                level: 0.29,
+                unpriced: false,
+              },
+            ],
+            accounts: [],
+          }
+        : original(name, args),
+  );
+  const user = userEvent.setup();
+  render(<QuickPanel />);
+  const card = await screen.findByRole("region", { name: "实时速率" });
+  expect(within(card).getByRole("meter", { name: "总速率" })).toHaveAttribute(
+    "aria-valuetext",
+    "$1.50/h",
+  );
+  expect(
+    card.compareDocumentPosition(
+      screen.getByRole("navigation", { name: "客户端" }),
+    ) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Claude" }));
+  await screen.findByText(claudeGatewayDemo.providers[0].name);
+  // Not a card of the platform's, drawn again from nothing with each one.
+  expect(screen.getByRole("region", { name: "实时速率" })).toBe(card);
+});

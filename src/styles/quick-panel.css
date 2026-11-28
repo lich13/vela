@@ -259,6 +259,42 @@
   flex-basis: 100%;
 }
 
+/* Live rate card: every platform together on the large dial, each on its own */
+.quick-speed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(
+      120% 150% at 0% 0%,
+      color-mix(in srgb, var(--accent) 10%, transparent),
+      transparent 58%
+    ),
+    radial-gradient(
+      110% 140% at 100% 100%,
+      color-mix(in srgb, var(--accent-violet) 8%, transparent),
+      transparent 60%
+    ),
+    var(--surface);
+  box-shadow: var(--surface-highlight), var(--shadow-sm);
+}
+
+.quick-speed-clients {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
+.quick-speed-clients .speedometer {
+  flex: 1 1 0;
+}
+
 /* Scrollable body */
 .quick-scroll {
   min-height: 0;
