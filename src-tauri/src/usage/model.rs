@@ -1264,6 +1264,28 @@ impl Attempt {
         }
     }
 }
+/// Whether a request succeeded, as far as its source says: `None` where it
+/// does not, which counts as neither a success nor an error. `status` and
+/// `outcome` are those of the request's last attempt. The gateway saw the
+/// answer itself; a request the client gave up, or one whose end nothing was
+/// seen of, is not the provider's failure. The Antigravity sources and a
+/// Claude session say which requests ended well and which did not, and
+/// nothing of the rest; no other session file says how a request ended.
+pub fn verdict(source: &str, status: Option<u16>, outcome: &str, completed: bool) -> Option<bool> {
+    match source {
+        "proxy" => match outcome {
+            "cancelled" | "unknown" => None,
+            "rejected" | "model_unavailable" | "failure" => Some(false),
+            _ => status.map(|status| ((200..300).contains(&status) || status == 101) && completed),
+        },
+        "antigravity" | "claude" => match outcome {
+            "success" => Some(completed),
+            "failed" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
@@ -1325,17 +1347,7 @@ impl Record {
 
     pub fn known_success(&self) -> Option<bool> {
         let a = self.final_attempt()?;
-        if let Some(status) = a.status {
-            return Some(((200..300).contains(&status) || status == 101) && self.completed);
-        }
-        if self.source == "antigravity" {
-            return match a.outcome.as_str() {
-                "success" => Some(self.completed),
-                "failed" | "cancelled" | "rejected" => Some(false),
-                _ => None,
-            };
-        }
-        None
+        verdict(&self.source, a.status, &a.outcome, self.completed)
     }
     pub fn gateway_only(&mut self) {
         if let (Some(original), Some(last)) =
@@ -1571,3 +1583,7 @@ impl Totals {
             .saturating_add(o.cache_input_eligible);
     }
 }
+
+#[cfg(test)]
+#[path = "verdict_tests.rs"]
+mod verdict_tests;
