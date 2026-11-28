@@ -43,6 +43,7 @@ import type {
   UsagePage,
   UsageRecord,
   UsageSettings,
+  UsageSpeed,
   UsageState,
 } from "./usage-types";
 import type { EventRecord, EventPage } from "./EventLog";
@@ -945,6 +946,11 @@ export type SharedCommands = {
    * its own buckets: the one the filter names narrows nothing.
    */
   get_usage_curves: Call<{ filter: UsageFilter }, UsageCurves>;
+  /**
+   * How fast the clients are spending right now. A page asks every couple of
+   * seconds while a dial is on screen.
+   */
+  get_usage_speed: Call<None, UsageSpeed>;
   /** The history and the saved account periods; the quota is not asked for. */
   get_antigravity_usage_stats: Call<
     { filter: UsageFilter },
@@ -1118,6 +1124,7 @@ export const sharedCommands = names<SharedCommands>()([
   "get_usage_state",
   "get_usage_dashboard",
   "get_usage_curves",
+  "get_usage_speed",
   "get_antigravity_usage_stats",
   "refresh_antigravity_usage_quota",
   "get_claude_usage_stats",

@@ -442,6 +442,33 @@ export type UsageCurves = {
    */
   direct?: CurveProvider[];
 };
+/** How fast something is spending right now. */
+export type UsageRate = {
+  /** USD per hour, written like a cost ("12.3456"); "0" when idle. */
+  costPerHour: string;
+  /** How far up the dial that is, from 0 to 1. */
+  level: number;
+  /** Tokens are being used that could not be priced, and the rate is 0. */
+  unpriced: boolean;
+};
+/**
+ * How fast the clients are spending, read from the last few minutes: what a
+ * request cost counts for most as it ends and for nothing a while later.
+ * The rate at the top is of every client together.
+ */
+export type UsageSpeed = UsageRate & {
+  /** When it was read, in Unix milliseconds. */
+  at: number;
+  /** The dial's labelled marks: `label` USD per hour stands at `level`. */
+  dial: { label: string; level: number }[];
+  /** Every client, idle or not: codex, claude, antigravity, grok, dsh. */
+  clients: ({ id: string } & UsageRate)[];
+  /**
+   * Antigravity by account and quota track ("gemini" or "claude_gpt"); only
+   * those spending now.
+   */
+  accounts: { id: string; tracks: ({ id: string } & UsageRate)[] }[];
+};
 export type UsageSettings = {
   logColumns?: Record<string, boolean>;
   logNumberMode?: "compact" | "exact";
