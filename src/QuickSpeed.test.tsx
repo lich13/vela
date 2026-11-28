@@ -73,7 +73,10 @@ it("reads the total on the large dial and each platform on its own, by the names
   const total = within(card).getByRole("meter", { name: "总速率" });
   expect(total).toHaveClass("is-large");
   expect(total).toHaveAttribute("aria-valuenow", "0.64");
-  expect(within(total).getByText("$18.1/h")).toHaveAttribute("title", "18.1/h");
+  expect(within(total).getByText("$18.1/h")).toHaveAttribute(
+    "title",
+    "$18.1/h",
+  );
   expect(within(total).getByText("总速率")).toBeInTheDocument();
   // Only the total has the scale's marks.
   expect(card.querySelectorAll(".speedometer-mark")).toHaveLength(4);
@@ -90,7 +93,7 @@ it("reads the total on the large dial and each platform on its own, by the names
   expect(within(claude).getByText("Claude")).toBeInTheDocument();
   expect(within(claude).getByText("$12.3/h")).toHaveAttribute(
     "title",
-    "12.3456/h",
+    "$12.3456/h",
   );
   // Usage knows the Antigravity gateway by its long name; the panel by `agy`.
   const agy = within(card).getByRole("meter", { name: "agy 速率" });

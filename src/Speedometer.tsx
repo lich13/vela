@@ -156,7 +156,7 @@ export default function Speedometer({
       {name && <span className="speedometer-name">{name}</span>}
       <span
         className="speedometer-reading"
-        title={rate.unpriced ? undefined : `${rate.costPerHour}/h`}
+        title={rate.unpriced ? undefined : `$${rate.costPerHour}/h`}
       >
         {reading}
       </span>

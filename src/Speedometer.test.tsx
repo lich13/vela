@@ -28,7 +28,7 @@ it("reads a rate as a meter from nothing to the top of the scale", () => {
   // The figures are rounded to fit; the whole of it is a hover away.
   expect(within(meter).getByText("$12.3/h")).toHaveAttribute(
     "title",
-    "12.3456/h",
+    "$12.3456/h",
   );
 });
 

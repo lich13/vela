@@ -1104,7 +1104,7 @@ describe("Usage Antigravity statistics tab", () => {
     expect(gemini).toHaveAttribute("aria-valuenow", "0.15");
     expect(within(gemini).getByText("$0.42/h")).toHaveAttribute(
       "title",
-      "0.42/h",
+      "$0.42/h",
     );
     expect(
       within(await dial("Claude / GPT")).getByText("$0.00/h"),
@@ -1201,7 +1201,7 @@ it("reads each track's rate on a dial in its heading, of the account shown, and 
   expect(dial("Gemini")).toHaveAttribute("aria-valuenow", "0.15");
   expect(within(dial("Gemini")).getByText("$0.42/h")).toHaveAttribute(
     "title",
-    "0.42/h",
+    "$0.42/h",
   );
   expect(within(dial("Claude / GPT")).getByText("未定价")).toBeInTheDocument();
 
@@ -1212,11 +1212,11 @@ it("reads each track's rate on a dial in its heading, of the account shown, and 
   expect(dial("Gemini")).toHaveAttribute("aria-valuenow", "0");
   expect(within(dial("Gemini")).getByText("$0.00/h")).toHaveAttribute(
     "title",
-    "0/h",
+    "$0/h",
   );
   expect(within(dial("Claude / GPT")).getByText("$123/h")).toHaveAttribute(
     "title",
-    "123.456/h",
+    "$123.456/h",
   );
   // The periods count what was spent; none of them says how fast.
   expect(screen.queryByText("速率")).not.toBeInTheDocument();
