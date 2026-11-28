@@ -278,6 +278,10 @@ fn retained(key: &str) -> bool {
             | "limit_id"
             | "tools"
             | "messages"
+            // What a Claude Code session file says of an API error it wrote
+            // down in place of an answer.
+            | "isApiErrorMessage"
+            | "apiErrorStatus"
     )
 }
 fn content(key: &str) -> bool {
