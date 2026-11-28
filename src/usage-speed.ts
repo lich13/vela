@@ -33,10 +33,12 @@ export function speedLabel(rate: UsageRate): string {
  * How fast the instance shown is spending, read at once and then every two
  * seconds for as long as `active`. Null until it is read, where a reading
  * fails and once it is no longer asked for: a dial reads what is being spent
- * now, or is not there.
+ * now, or is not there. A server that is not connected is not asked: asking
+ * is what reaches for it again, and the dials are no reason to.
  */
-export function useUsageSpeed(active: boolean): UsageSpeed | null {
-  const instance = useInstance().key;
+export function useUsageSpeed(wanted: boolean): UsageSpeed | null {
+  const { key: instance, remote, state } = useInstance();
+  const active = wanted && (!remote || state.connection.status === "connected");
   // The reading, and the instance it was asked of.
   const [read, setRead] = useState<{
     instance: string;

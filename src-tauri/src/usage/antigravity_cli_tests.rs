@@ -760,6 +760,52 @@ fn a_row_read_again_after_its_conversation_database_went_keeps_what_that_told() 
     assert_eq!(f.requests(), 2);
 }
 
+#[test]
+fn a_row_read_again_after_its_conversation_database_went_keeps_a_model_that_alone_told() {
+    let mut f = Fixture::new();
+    f.write("session", &planner(1, None, [100, 0, 10]));
+    let db = f.database("session");
+    save_generator(
+        &db,
+        1,
+        "MODEL_PLACEHOLDER_M902",
+        "fixture-carbon-max",
+        "Fixture Carbon",
+    );
+    // Of the step the database tells what generated it, and nothing else.
+    db.execute(
+        "INSERT OR REPLACE INTO steps VALUES (1, 15, ?1)",
+        [proto::bytes(20, &proto::number(3, 1))],
+    )
+    .unwrap();
+    drop(db);
+    assert_eq!(f.sync().imported, 1);
+    let before = f.row("session", 1);
+    assert_eq!(
+        model(&before),
+        (Some("fixture-carbon"), Some("Fixture Carbon"), Some("max"))
+    );
+    let a = &before.attempts[0];
+    assert_eq!((a.response_id.as_ref(), a.first_token_ms), (None, None));
+
+    let conversations = f.home().join("antigravity-cli/conversations");
+    for entry in std::fs::read_dir(&conversations).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let key = f.cursor_key("session");
+    let mut position: Value =
+        serde_json::from_str(&f.store.cursor(&key).unwrap().unwrap()).unwrap();
+    position["reading"] = json!(1);
+    f.store
+        .write_batch(&[], Some((&key, &position.to_string())))
+        .unwrap();
+    assert_eq!(f.sync().errors, 0);
+
+    let kept = f.row("session", 1);
+    assert_eq!(model(&kept), model(&before));
+    assert_eq!(ending(&kept), ("success", true, Some(true), None));
+}
+
 // 会话库没有计时的步骤，以其后第一个其他步骤的行估算耗时：该行是工具结果时取两行创建时间之差，
 // 是用户输入、系统消息或尚无后续行时不估算；会话库已有计时的步骤不估算。估算值不进入耗时与统计。
 #[test]

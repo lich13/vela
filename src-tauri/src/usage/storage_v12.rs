@@ -1921,9 +1921,11 @@ pub(super) fn has_local_api_for_session(c: &Connection, session_id: &str) -> Res
 /// of it, and whether that row is one of a gateway record's. The range is
 /// read off `v12_time` from its end, so the first row found is the nearest.
 pub(super) const CLAUDE_ROUTE: &str = "SELECT duplicate IS NOT NULL OR archived_duplicate IS NOT NULL FROM v12_rows WHERE time BETWEEN ?1 AND ?2 AND source=usage_label('claude') AND session=?3 AND key<>?4 ORDER BY time DESC,rid DESC LIMIT 1";
-/// What the gateway recorded of a client within the minute before a time.
+/// What the gateway recorded of a client within the minute before a time,
+/// but for what came in under an access key: a key is given to a client
+/// elsewhere, whose sessions are not read here.
 pub(super) const GATEWAY_BEFORE: &str =
-    "SELECT rid FROM v12_rows WHERE time BETWEEN ?1 AND ?2 AND source=0 AND client=usage_label(?3)";
+    "SELECT rid FROM v12_rows WHERE time BETWEEN ?1 AND ?2 AND source=0 AND client=usage_label(?3) AND entry IS NULL";
 /// Whether the request a Claude Code session made last before `at` went
 /// through the gateway; `None` where it made none in the six hours before.
 /// `id` is the row asking, which is not a request before itself.

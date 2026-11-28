@@ -250,6 +250,9 @@ fn an_error_line_gives_a_status_and_a_code_only_where_it_names_them() {
         line("fixture-error-high", 23, r#","error":"unknown","apiErrorStatus":600"#),
         // A sentence is not a code.
         line("fixture-error-worded", 24, r#","error":"fixture-content.example.invalid said no","apiErrorStatus":500"#),
+        // Nor is the name of a host, or what could be a key.
+        line("fixture-error-host", 27, r#","error":"relay.example.invalid","apiErrorStatus":502"#),
+        line("fixture-error-key", 28, r#","error":"fixture-Key-0123","apiErrorStatus":401"#),
         line("fixture-error-bare", 25, ""),
         // Not marked as an error, and with no usage: no request at all.
         r#"{"type":"assistant","sessionId":"fixture-claude-session","uuid":"fixture-plain","timestamp":"2023-11-14T22:13:26.000Z","message":{"id":"fixture-synthetic","model":"<synthetic>","stop_reason":"stop_sequence","usage":{"input_tokens":0,"output_tokens":0}},"isApiErrorMessage":false,"apiErrorStatus":500}"#.to_owned(),
@@ -260,7 +263,7 @@ fn an_error_line_gives_a_status_and_a_code_only_where_it_names_them() {
         &lines.map(|line| line + "\n").concat(),
     );
     let report = read(&mut store, &prices, &home, false);
-    assert_eq!((report.imported, report.skipped, report.errors), (5, 0, 0));
+    assert_eq!((report.imported, report.skipped, report.errors), (7, 0, 0));
 
     let rows = rows(&store);
     let told = |line: &str| {
@@ -283,8 +286,10 @@ fn an_error_line_gives_a_status_and_a_code_only_where_it_names_them() {
     assert_eq!(told("fixture-error-low"), (None, Some("unknown".into())));
     assert_eq!(told("fixture-error-high"), (None, Some("unknown".into())));
     assert_eq!(told("fixture-error-worded"), (Some(500), None));
+    assert_eq!(told("fixture-error-host"), (Some(502), None));
+    assert_eq!(told("fixture-error-key"), (Some(401), None));
     assert_eq!(told("fixture-error-bare"), (None, None));
-    assert_eq!(counted(&store), (5, 5, 0));
+    assert_eq!(counted(&store), (7, 7, 0));
 }
 
 #[test]
@@ -478,6 +483,36 @@ fn with_no_request_before_it_a_failure_is_the_gateways_where_the_gateway_recorde
                 "{name} rebuild={rebuild}"
             );
         }
+    }
+}
+
+#[test]
+fn what_the_gateway_recorded_under_an_access_key_tells_nothing_of_a_session_here() {
+    let (dir, mut store, prices) = fixture();
+    let home = dir.path().join("home");
+    write(
+        &home,
+        "projects/fixture/fixture-session.jsonl",
+        &file(&[error("fixture-session", "fixture-error", BASE)]),
+    );
+    // A client elsewhere was rejected a second before the line was written.
+    let elsewhere = Record {
+        entry_key: Some("fixture-key".into()),
+        ..gateway(
+            "fixture-gateway",
+            "claude",
+            BASE - 1_000,
+            Some(429),
+            "rejected",
+        )
+    };
+    store.write_batch(&[elsewhere], None).unwrap();
+    for rebuild in [false, true] {
+        assert_eq!(read(&mut store, &prices, &home, rebuild).errors, 0);
+        assert!(
+            kept(&store, &error_id("fixture-session", "fixture-error")),
+            "rebuild={rebuild}"
+        );
     }
 }
 

@@ -40,7 +40,10 @@ const reading = (costPerHour: string, level: number): UsageSpeed => ({
   clients: [],
   accounts: [],
 });
-const instances = (active: "local" | "m1"): InstanceState => ({
+const instances = (
+  active: "local" | "m1",
+  status: "connected" | "offline" = "connected",
+): InstanceState => ({
   revision: `r-${active}`,
   active,
   machines: [
@@ -56,12 +59,7 @@ const instances = (active: "local" | "m1"): InstanceState => ({
   connection:
     active === "local"
       ? { status: "local", version: null, error: null, unsupported: [] }
-      : {
-          status: "connected",
-          version: "0.49.0",
-          error: null,
-          unsupported: [],
-        },
+      : { status, version: "0.49.0", error: null, unsupported: [] },
 });
 
 describe("useUsageSpeed", () => {
@@ -129,6 +127,26 @@ describe("useUsageSpeed", () => {
     unmount();
     await pass(6000);
     expect(asked()).toBe(2);
+  });
+
+  it("asks nothing of a server that is not connected, and reads again once it is", async () => {
+    const first = reading("1.5", 0.29);
+    mock.command.mockResolvedValue(first);
+    act(() => setInstanceState(instances("m1")));
+    const { result } = renderHook(() => useUsageSpeed(true));
+    await pass(0);
+    expect(asked()).toBe(1);
+    expect(result.current).toEqual(first);
+
+    act(() => setInstanceState(instances("m1", "offline")));
+    expect(result.current).toBeNull();
+    await pass(6000);
+    expect(asked()).toBe(1);
+
+    act(() => setInstanceState(instances("m1")));
+    expect(asked()).toBe(2);
+    await pass(0);
+    expect(result.current).toEqual(first);
   });
 
   it("waits for a slow reading rather than ask again", async () => {

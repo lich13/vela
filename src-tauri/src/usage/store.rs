@@ -759,6 +759,7 @@ impl Store {
             hosts,
             self.detail_since()?,
             now,
+            self.data_dir(),
         )
     }
     /// Whether the periods differed from the saved ones and were written.
@@ -1496,11 +1497,13 @@ pub(super) fn preserve_record(incoming: &Record, existing: Option<Record>) -> Re
                 // A line of a CLI session file read again once its
                 // conversation database is gone is still the line it was:
                 // what the database told of its step stays, and the line
-                // says only how the step ended.
+                // says only how the step ended. Of a line that names no
+                // model the database may have told the model and no more.
                 if a.transport == "cli_file"
                     && b.transport == "cli_file"
-                    && told_by_conversation(b)
                     && !told_by_conversation(a)
+                    && (told_by_conversation(b)
+                        || (a.response_model.is_none() && b.response_model.is_some()))
                     && (a.tokens.input, a.tokens.output, a.tokens.cache_read)
                         == (b.tokens.input, b.tokens.output, b.tokens.cache_read)
                 {

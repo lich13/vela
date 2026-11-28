@@ -29,7 +29,7 @@ use crate::{
 use chrono::TimeZone;
 use rusqlite::{types::Value, Connection};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 const MINUTE: i64 = 60_000;
 const DAY: i64 = 86_400_000;
@@ -425,8 +425,10 @@ fn kind(status: Option<u16>, error_code: Option<&str>) -> FailureKind {
 }
 /// What the usage records have of what reached no gateway in the filter's
 /// range and client: each attempt under the account that made it, or under
-/// `session:` and its client where it names none. A request is one of its
-/// last attempt's and ended as `verdict` says of that. An attempt another
+/// `session:` and its client where it names none. One of Antigravity's that
+/// names none is the account's that was signed in at its time, as in the
+/// account statistics; `data` is where the accounts are kept. A request is
+/// one of its last attempt's and ended as `verdict` says of that. An attempt another
 /// followed failed where its own status and outcome say so, whatever became
 /// of the request: it is counted where the request is, against its own
 /// account.
@@ -435,8 +437,11 @@ fn direct(
     f: &Filter,
     client: Option<&str>,
     grid: Grid,
+    data: Option<&Path>,
 ) -> Result<BTreeMap<String, Direct>> {
     let mut series: BTreeMap<String, Direct> = BTreeMap::new();
+    // Read where an attempt needs it, and then once.
+    let mut timeline = None;
     // The same times `scope` has the gateway's requests of.
     let (start, end) = (f.start.unwrap_or(0), f.end.unwrap_or(i64::MAX));
     storage_v12::scan_direct_attempts(c, client, start, end, |attempt| {
@@ -447,8 +452,18 @@ fn direct(
         if !attempt.is_final && ended != Some(false) {
             return Ok(());
         }
+        let signed_in = || {
+            timeline
+                .get_or_insert_with(|| {
+                    data.map(|data| crate::antigravity::auth::provider_timeline(data, None))
+                        .unwrap_or_default()
+                })
+                .provider_at(attempt.time)
+                .map(str::to_owned)
+        };
         let id = attempt
             .provider
+            .or_else(|| (attempt.client == "antigravity").then(signed_in).flatten())
             .unwrap_or_else(|| format!("session:{}", attempt.client));
         let told = series.entry(id).or_default();
         let bucket = grid.bucket(attempt.time);
@@ -578,7 +593,9 @@ fn order(a: &Provider, b: &Provider) -> std::cmp::Ordering {
 /// the journal's rows that reach into the range, and `failures_since` the
 /// time the journal holds them all from, in milliseconds. `hosts` says which
 /// host each provider that still exists is on, by its id. Before
-/// `detail_since` a day's requests may be kept only as a total.
+/// `detail_since` a day's requests may be kept only as a total. `data` is
+/// where the Antigravity accounts are kept.
+#[allow(clippy::too_many_arguments)]
 pub fn read(
     c: &Connection,
     f: &Filter,
@@ -587,6 +604,7 @@ pub fn read(
     hosts: &BTreeMap<String, String>,
     detail_since: i64,
     now: i64,
+    data: Option<&Path>,
 ) -> Result<Curves> {
     let asked_end = f.end.unwrap_or(now);
     let scope = scope(f);
@@ -602,7 +620,7 @@ pub fn read(
     let usage = usage(c, &scope, grid, failures_since)?;
     let mut failed: BTreeMap<&str, BTreeMap<i64, Failures>> = BTreeMap::new();
     let client = f.client.as_deref().filter(|client| !client.is_empty());
-    let direct = direct(c, f, client, grid)?;
+    let direct = direct(c, f, client, grid, data)?;
     // Of a row the journal begins within, only what came since: the rest of
     // that time has gone from it.
     let failed_from = f.start.unwrap_or(i64::MIN).max(failures_since);

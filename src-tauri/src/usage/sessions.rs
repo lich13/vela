@@ -871,14 +871,12 @@ fn claude(v: &Value, c: &mut Cursor, at: i64) -> Option<Record> {
     }
     Some(r)
 }
-/// A code such as `rate_limit`, and nothing that could be text of its own.
+/// A code such as `rate_limit`: a word or a few in small letters, and
+/// nothing that could be text of its own, the name of a host or a key.
 fn code(v: &Value) -> Option<String> {
     v.as_str()
         .filter(|s| {
-            !s.is_empty()
-                && s.len() <= 64
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
         })
         .map(str::to_owned)
 }

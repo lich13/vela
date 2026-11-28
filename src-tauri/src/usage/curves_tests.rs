@@ -1679,6 +1679,55 @@ fn what_names_no_account_is_drawn_under_its_client() {
 }
 
 #[test]
+fn what_antigravity_wrote_naming_no_account_is_the_account_s_signed_in_at_its_time() {
+    let dir = tempfile::tempdir().unwrap();
+    // The first account was signed in two minutes in, the other ten.
+    let accounts = serde_json::json!({
+        "schema": 1,
+        "entries": [],
+        "activations": [
+            { "accountId": ACCOUNT, "sinceMs": BASE + 2 * MINUTE },
+            { "accountId": OTHER, "sinceMs": BASE + 10 * MINUTE }
+        ]
+    });
+    std::fs::write(
+        dir.path().join("antigravity-accounts.json"),
+        serde_json::to_vec(&accounts).unwrap(),
+    )
+    .unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let ok = |client, id, minutes, account| {
+        let answered = tried(account, "success", None);
+        told(client, id, BASE + minutes * MINUTE, vec![answered])
+    };
+    store
+        .write_batch(
+            &[
+                ok("antigravity", "g-1", 3, None),
+                ok("antigravity", "g-2", 12, None),
+                // One that names its account is that account's whenever it was.
+                ok("antigravity", "g-3", 13, Some(ACCOUNT)),
+                // No account is signed in to Claude Code.
+                ok("claude", "c-1", 3, None),
+            ],
+            None,
+        )
+        .unwrap();
+    let curves = store
+        .curves(&every_client(), 0, &[], &NOWHERE, BASE + DAY)
+        .unwrap();
+    let listed: Vec<_> = curves
+        .direct
+        .iter()
+        .map(|p| (p.id.as_str(), p.requests, p.ok))
+        .collect();
+    assert_eq!(
+        listed,
+        [(ACCOUNT, 2, 2), (OTHER, 1, 1), ("session:claude", 1, 1)]
+    );
+}
+
+#[test]
 fn only_the_client_narrows_what_reached_no_gateway() {
     let ok = |client, id, account| {
         let answered = tried(account, "success", None);
