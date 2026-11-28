@@ -1,4 +1,4 @@
-// 覆盖供应商曲线：分桶、失败分类、首字分位数、日志覆盖范围、同域合并与无数据。
+// 覆盖供应商曲线：分桶、失败分类、首字分位数、日志覆盖范围、同域合并、不经网关的序列与无数据。
 use super::super::{commands::get_usage_curves, model::*, query, store::Store};
 use super::{spread, step, Bucket, Curves, Failures, FirstToken, Grid, Provider};
 use crate::{
@@ -49,6 +49,39 @@ fn request(
             transport: "http".into(),
             ..Attempt::default()
         }],
+        ..Record::default()
+    }
+}
+/// An attempt of a request that reached no gateway: the account that made it,
+/// where it names one, how it ended and the error it gave.
+fn tried(account: Option<&str>, outcome: &str, error_code: Option<&str>) -> Attempt {
+    Attempt {
+        provider: account.map(Into::into),
+        outcome: outcome.into(),
+        error_code: error_code.map(Into::into),
+        ..Attempt::default()
+    }
+}
+/// A request of `client` that reached no gateway, as its app or its session
+/// files tell of it, with its attempts in order. It completed where the last
+/// of them succeeded.
+fn told(client: &str, id: &str, at: i64, attempts: Vec<Attempt>) -> Record {
+    Record {
+        id: id.into(),
+        client: client.into(),
+        source: client.into(),
+        started_at: at,
+        finished_at: Some(at),
+        completed: attempts.last().is_some_and(|a| a.outcome == "success"),
+        attempts: attempts
+            .into_iter()
+            .enumerate()
+            .map(|(index, attempt)| Attempt {
+                id: format!("{id}-{index}"),
+                started_at: at,
+                ..attempt
+            })
+            .collect(),
         ..Record::default()
     }
 }
@@ -514,7 +547,15 @@ fn every_provider_comes_with_its_own_buckets() {
 
 #[test]
 fn the_answer_names_its_parts_as_the_page_reads_them() {
-    let (_dir, store) = store();
+    let (_dir, mut store) = store();
+    // A session of Claude Code tells of one request no gateway saw.
+    let session = told(
+        "claude",
+        "session",
+        BASE + MINUTE,
+        vec![tried(None, "success", None)],
+    );
+    store.write_batch(&[session], None).unwrap();
     // C and A are on one host, and B no longer exists.
     let hosts = on(&[(A, RELAY), (C, RELAY)]);
     let curves = store
@@ -529,6 +570,7 @@ fn the_answer_names_its_parts_as_the_page_reads_them() {
     assert_eq!(
         names(&json),
         [
+            "direct",
             "end",
             "failuresSince",
             "groups",
@@ -590,7 +632,28 @@ fn the_answer_names_its_parts_as_the_page_reads_them() {
     assert_eq!(group["id"], "host:relay.example.invalid");
     assert_eq!(group["host"], RELAY);
     assert_eq!(group["members"], serde_json::json!([C, A]));
-    for row in [provider, group] {
+    // What reached no gateway says that the records tell what failed of it,
+    // which no row of a gateway's does, and nothing of a host or of members.
+    let direct = &json["direct"][0];
+    assert_eq!(
+        names(direct),
+        [
+            "buckets",
+            "failures",
+            "firstToken",
+            "id",
+            "ok",
+            "recorded",
+            "requests",
+            "summedUntil",
+            "trend"
+        ]
+    );
+    assert_eq!(direct["id"], "session:claude");
+    assert_eq!(direct["recorded"], true);
+    assert!(direct["summedUntil"].is_null());
+    assert!(direct["buckets"][0]["failures"].is_object());
+    for row in [provider, group, direct] {
         assert_eq!(
             names(&row["buckets"][0]),
             ["at", "failures", "firstToken", "ok"]
@@ -611,6 +674,15 @@ fn the_answer_names_its_parts_as_the_page_reads_them() {
         .unwrap();
     assert_eq!(
         serde_json::to_value(&apart).unwrap()["groups"],
+        serde_json::json!([])
+    );
+    // So is that of what reached no gateway, where nothing did.
+    let (_dir, store) = self::store();
+    let through = store
+        .curves(&range(), 0, &journal(), &NOWHERE, BASE + DAY)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&through).unwrap()["direct"],
         serde_json::json!([])
     );
 }

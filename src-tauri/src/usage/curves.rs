@@ -12,7 +12,16 @@
 //!
 //! The providers on one host are given a second time as one, added up. Which
 //! of the two is shown is for whoever reads the answer to choose.
-use super::{model::Filter, query};
+//!
+//! What reached no gateway is given apart: the requests of an Antigravity
+//! account and those of a Claude Code session. The journal knows nothing of
+//! them. The usage records tell of every attempt of theirs, of one that
+//! failed as of one that succeeded, so what failed is read from the records
+//! and is known over the whole range.
+use super::{
+    model::{verdict, Filter},
+    query, storage_v12,
+};
 use crate::{
     events::{FailureKind, UpstreamFailure},
     storage::Result,
@@ -173,6 +182,11 @@ pub struct Provider {
     /// of a provider by itself.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<String>,
+    /// Said of what reached no gateway alone: its failures are read from the
+    /// usage records, as its successes are, and so are known over the whole
+    /// range, wherever the journal begins.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub recorded: bool,
     /// Requests it was the last to be asked for, over the whole range.
     pub requests: u64,
     /// Requests it completed in the time failures are known for, so that the
@@ -217,6 +231,10 @@ pub struct Curves {
     /// is still among `providers`, which is all a page that knows nothing of
     /// hosts reads.
     pub groups: Vec<Provider>,
+    /// What reached no gateway, and so is none of `providers`: the attempts
+    /// of an Antigravity account under the account's id, and those that name
+    /// no account under `session:` and their client. In the same order.
+    pub direct: Vec<Provider>,
 }
 
 /// What the usage records say of one provider in one bucket.
@@ -234,6 +252,14 @@ struct Answered {
     buckets: BTreeMap<i64, Seen>,
     /// Where the last day begins of which only a total is kept.
     summed: Option<i64>,
+}
+/// What the usage records say of one account that reached no gateway, or of
+/// the sessions of one client that name none.
+#[derive(Default)]
+struct Direct {
+    answered: Answered,
+    /// What failed, by bucket.
+    lost: BTreeMap<i64, Failures>,
 }
 
 /// The narrowest width at which `start..=end` reaches into no more than
@@ -367,6 +393,82 @@ fn usage(
     }
     Ok(providers)
 }
+/// How an attempt the usage records say failed ended: by its status where
+/// that is one of an error, and by the error it gave where not. Antigravity
+/// writes a status it was answered with as that error; the names are those
+/// it and Claude Code give a limit, a refusal and a fault of the service.
+fn kind(status: Option<u16>, error_code: Option<&str>) -> FailureKind {
+    let refused = |status: u16| match status {
+        429 => Some(FailureKind::Limited),
+        400..=499 => Some(FailureKind::Rejected),
+        500..=599 => Some(FailureKind::Server),
+        _ => None,
+    };
+    let written = error_code
+        .filter(|code| code.len() == 3 && code.bytes().all(|digit| digit.is_ascii_digit()))
+        .and_then(|code| code.parse().ok());
+    if let Some(kind) = status
+        .and_then(refused)
+        .or_else(|| written.and_then(refused))
+    {
+        return kind;
+    }
+    match error_code {
+        Some("RESOURCE_EXHAUSTED" | "rate_limit") => FailureKind::Limited,
+        Some("UNAUTHENTICATED" | "authentication_failed" | "invalid_request" | "billing_error") => {
+            FailureKind::Rejected
+        }
+        Some("UPSTREAM_ERROR" | "server_error") => FailureKind::Server,
+        _ => FailureKind::Broken,
+    }
+}
+/// What the usage records have of what reached no gateway in the filter's
+/// range and client: each attempt under the account that made it, or under
+/// `session:` and its client where it names none. A request is one of its
+/// last attempt's and ended as `verdict` says of that. An attempt another
+/// followed failed where its own status and outcome say so, whatever became
+/// of the request: it is counted where the request is, against its own
+/// account.
+fn direct(
+    c: &Connection,
+    f: &Filter,
+    client: Option<&str>,
+    grid: Grid,
+) -> Result<BTreeMap<String, Direct>> {
+    let mut series: BTreeMap<String, Direct> = BTreeMap::new();
+    // The same times `scope` has the gateway's requests of.
+    let (start, end) = (f.start.unwrap_or(0), f.end.unwrap_or(i64::MAX));
+    storage_v12::scan_direct_attempts(c, client, start, end, |attempt| {
+        // Whether the request completed is said of its last attempt alone.
+        let completed = attempt.completed || !attempt.is_final;
+        let ended = verdict(attempt.source, attempt.status, attempt.outcome, completed);
+        if !attempt.is_final && ended != Some(false) {
+            return Ok(());
+        }
+        let id = attempt
+            .provider
+            .unwrap_or_else(|| format!("session:{}", attempt.client));
+        let told = series.entry(id).or_default();
+        let bucket = grid.bucket(attempt.time);
+        if attempt.is_final {
+            let seen = told.answered.buckets.entry(bucket).or_default();
+            seen.requests += 1;
+            if ended == Some(true) {
+                seen.ok += 1;
+                // The records know all of the range, wherever the journal begins.
+                seen.ok_since += 1;
+            }
+            seen.first_token.extend(attempt.first_token);
+        }
+        if ended == Some(false) {
+            let lost = told.lost.entry(bucket).or_default();
+            lost.add(kind(attempt.status, attempt.error_code), 1);
+        }
+        Ok(())
+    })
+    .map_err(|_| failed())?;
+    Ok(series)
+}
 fn failed() -> crate::storage::AppError {
     super::model::failure("用量曲线查询失败")
 }
@@ -390,6 +492,7 @@ fn series(
         id,
         host: None,
         members: Vec::new(),
+        recorded: false,
         requests: 0,
         ok: 0,
         failures: Failures::default(),
@@ -497,6 +600,7 @@ pub fn read(
     let usage = usage(c, &scope, grid, failures_since)?;
     let mut failed: BTreeMap<&str, BTreeMap<i64, Failures>> = BTreeMap::new();
     let client = f.client.as_deref().filter(|client| !client.is_empty());
+    let direct = direct(c, f, client, grid)?;
     // Of a row the journal begins within, only what came since: the rest of
     // that time has gone from it.
     let failed_from = f.start.unwrap_or(i64::MIN).max(failures_since);
@@ -520,10 +624,12 @@ pub fn read(
             let earliest = |buckets: Option<&i64>| buckets.copied().unwrap_or(last);
             usage
                 .values()
+                .chain(direct.values().map(|direct| &direct.answered))
                 .map(|answered| earliest(answered.buckets.keys().next()))
                 .chain(
                     failed
                         .values()
+                        .chain(direct.values().map(|direct| &direct.lost))
                         .map(|buckets| earliest(buckets.keys().next())),
                 )
                 .min()
@@ -578,6 +684,23 @@ pub fn read(
         })
         .collect();
     groups.sort_by(order);
+    // The records say what failed of these in every bucket, whatever the
+    // journal has.
+    let mut direct: Vec<Provider> = direct
+        .iter()
+        .map(|(id, direct)| Provider {
+            recorded: true,
+            ..series(
+                id.clone(),
+                &[&direct.answered],
+                &[&direct.lost],
+                stretches,
+                stretch,
+                |_| true,
+            )
+        })
+        .collect();
+    direct.sort_by(order);
     let end = grid.end(last);
     Ok(Curves {
         start: first,
@@ -594,6 +717,7 @@ pub fn read(
         journal_error: None,
         providers,
         groups,
+        direct,
     })
 }
 
