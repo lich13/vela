@@ -591,7 +591,8 @@ fn entry_columns(c: &rusqlite::Connection) -> i64 {
 
 /// Puts the receipts and cursors of a database back into the tables that
 /// version 13 kept them in: identifiers and cursor bodies as text. No record
-/// of that version kept a gateway key either.
+/// of that version kept a gateway key either, and its view judged a request
+/// by the status alone.
 fn into_version_13(dir: &Path) {
     without_entry_column(dir);
     let c = rusqlite::Connection::open(dir.join("usage.sqlite")).unwrap();
@@ -611,6 +612,7 @@ fn into_version_13(dir: &Path) {
          COMMIT;",
     )
     .unwrap();
+    super::storage_v12::metrics_view_of_version_14(&c);
 }
 
 #[test]
@@ -720,7 +722,7 @@ fn receipts_and_cursors_of_version_13_are_taken_over_and_still_match() {
         .connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     // Version 13 goes all the way: its records and receipts have the column
     // for a key too.
     assert_eq!(entry_columns(&store.connection), 2);
@@ -1129,7 +1131,7 @@ fn v2_migration_and_codex_rebuild_preserve_gateway_price_snapshots() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     assert_eq!(
         migrated.detail(&gateway.id).unwrap().attempts[0]
             .price
@@ -2083,8 +2085,8 @@ fn a_copy_written_before_keys_opens_with_its_records_under_the_own_key(dir: &Pat
     let store =
         Store::open(copy.path()).unwrap_or_else(|_| panic!("the copy could not be taken over"));
     assert!(
-        state(&store.connection) == (14, 2, records, rollups),
-        "taking the copy over changed more than the two columns"
+        state(&store.connection) == (15, 2, records, rollups),
+        "taking the copy over changed more than the version and the two columns"
     );
     let overview = store
         .dashboard(&Filter::default())
@@ -2151,6 +2153,10 @@ fn a_database_written_before_keys_gains_the_column_and_keeps_its_records_under_t
     without_entry_column(dir.path());
     {
         let old = rusqlite::Connection::open(&path).unwrap();
+        // A database written before keys is of version 14 at the latest, and
+        // has that version's view.
+        super::storage_v12::metrics_view_of_version_14(&old);
+        old.pragma_update(None, "user_version", 14).unwrap();
         assert_eq!((version(&old), entry_columns(&old)), (14, 0));
     }
     // A copy of it is taken over, as one of a real database is before a
@@ -2164,7 +2170,7 @@ fn a_database_written_before_keys_gains_the_column_and_keeps_its_records_under_t
     let mut store = Store::open(dir.path()).unwrap();
     assert_eq!(
         (version(&store.connection), entry_columns(&store.connection)),
-        (14, 2)
+        (15, 2)
     );
     // What it held reads as it did, all of it under the client's own key.
     assert_eq!(

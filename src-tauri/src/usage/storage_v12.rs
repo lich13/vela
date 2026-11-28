@@ -787,7 +787,7 @@ pub(super) fn initialize(c: &Connection) -> Result<()> {
     create_views(c)?;
     db(c.execute_batch("CREATE INDEX v12_daily_unpacked ON daily(id) WHERE json_extract(body,'$._usageArchive') IS NULL;
       INSERT INTO metadata VALUES('storage_v12','ready'),('record_sequence','0');
-      PRAGMA user_version=14;"))
+      PRAGMA user_version=15;"))
 }
 /// Version 13 kept the identifiers of a receipt and the cursors as text.
 /// The same rows are written again with identifiers as keys and cursors
@@ -805,6 +805,24 @@ pub(super) fn upgrade_v13(c: &Connection) -> Result<()> {
          INSERT INTO cursors(id,body) SELECT id,usage_compress(body) FROM cursors_v13;
          DROP TABLE receipts_v13; DROP TABLE cursors_v13;
          PRAGMA user_version=14;",
+    ))
+}
+/// Version 14 judged a request by its status alone: one the client gave up
+/// counted as failed, and a failure that came with no status as nothing. The
+/// view is made again with the judgment every source now gets, and each daily
+/// rollup counts its successes and known outcomes by it. A Claude session
+/// file says which messages ended and which API errors were written down,
+/// neither of which version 14 kept, so the files that are left are read
+/// again: the next generation invalidates their cursors, as a rebuild does.
+pub(super) fn upgrade_v14(c: &Connection) -> Result<()> {
+    db(c.execute_batch("DROP VIEW usage_metrics;"))?;
+    create_metrics_view(c)?;
+    super::store::rejudge_daily(c)?;
+    // Every summary may read differently from here on.
+    query::changed(c)?;
+    db(c.execute_batch(
+        "INSERT INTO metadata VALUES('source_generation_claude','1') ON CONFLICT(key) DO UPDATE SET value=cast(value AS INTEGER)+1;
+         PRAGMA user_version=15;",
     ))
 }
 /// Whether `table` has a column for the gateway key a request came in with.
@@ -1308,8 +1326,8 @@ fn metric_select(table: &str, kind: i64) -> String {
     let cache_input = "CASE WHEN r.source=usage_label('antigravity') AND input IS NOT NULL THEN coalesce(inclusive_input,input+coalesce(cache_read,0)+coalesce(cache_write,0)) ELSE coalesce(inclusive_input,input+cache_read+cache_write) END";
     format!("SELECT {kind} kind,a.owner,ordinal,usage_value(p.value) provider,usage_value(m.value) model,
       CASE WHEN ordinal=r.last THEN 1 ELSE 0 END requests,repeat_count attempts,
-      CASE WHEN ordinal=r.last AND ((status BETWEEN 200 AND 299 OR status=101) OR (r.source=usage_label('antigravity') AND usage_app_outcome(shape_value.value)=1)) AND r.completed THEN 1 ELSE 0 END success,
-      CASE WHEN ordinal=r.last AND (status IS NOT NULL OR (r.source=usage_label('antigravity') AND usage_app_outcome(shape_value.value) IS NOT NULL)) THEN 1 ELSE 0 END status_known,
+      CASE WHEN ordinal=r.last AND usage_verdict(r.source,status,shape_value.value,r.completed)=1 THEN 1 ELSE 0 END success,
+      CASE WHEN ordinal=r.last AND usage_verdict(r.source,status,shape_value.value,r.completed) IS NOT NULL THEN 1 ELSE 0 END status_known,
       CASE WHEN ordinal=r.last AND r.source<>0 THEN 1 ELSE 0 END sessions,
       input,output,cache_read,cache_write,cache_write_5m,cache_write_1h,image_input,image_output,audio_input,audio_output,
       coalesce(cost,'0') cost,unpriced,
@@ -1332,11 +1350,44 @@ const RECORD_VIEWS: &str = "CREATE VIEW v12_records AS SELECT r.rid,r.key,r.clie
       CREATE VIEW records AS SELECT usage_text(r.key) id,r.rid,r.client client_code,r.source source_code,usage_label(r.client) client,usage_label(r.source) source,r.time,usage_value(p.value) provider,usage_value(m.value) model,dim.status status,usage_text(r.response) response,usage_signature(r.client,s.value,measure.input,measure.output,measure.cache_read,measure.cache_write,dim.operation) signature,r.effective,r.duplicate,r.archived_duplicate,r.time+r.ended ended,coalesce(usage_text(d.key),r.archived_duplicate) duplicate_of,r.sequence local_sequence,
       json_object('_usageRow',r.rid,'attempts',json_array(json_object('operation',CASE dim.operation WHEN 1 THEN 'compaction' WHEN 2 THEN 'web_search' ELSE 'model' END,'compactionKind',CASE WHEN r.compaction THEN 'legacy' ELSE NULL END,'price',CASE WHEN measure.cost IS NULL THEN NULL ELSE json('{}') END)), 'gatewayReported',CASE WHEN r.original THEN json('{}') ELSE NULL END,'mergedSources',CASE WHEN EXISTS(SELECT 1 FROM v12_rows child WHERE child.duplicate=r.rid) THEN json('[\"session\"]') ELSE json('[]') END) body,r.entry
       FROM v12_records r LEFT JOIN v12_attempt_rows a ON a.owner=r.rid AND a.ordinal=r.last LEFT JOIN v12_session_rows b ON b.owner=r.rid AND b.ordinal=r.last LEFT JOIN v12_dimensions dim ON dim.shape=coalesce(a.shape,b.shape) LEFT JOIN v12_measures measure ON measure.id=coalesce(a.measure,b.measure) LEFT JOIN v12_dictionary p ON p.id=dim.provider LEFT JOIN v12_dictionary m ON m.id=dim.model LEFT JOIN v12_dictionary s ON s.id=coalesce(a.shape,b.shape) LEFT JOIN v12_rows d ON d.rid=r.duplicate;";
-fn create_views(c: &Connection) -> Result<()> {
-    db(c.execute_batch(RECORD_VIEWS))?;
+/// The view every summary reads: a row for each attempt that is kept, and the
+/// rows the daily rollups project. A new database is given this text, and so
+/// is one that judged a request's outcome as an earlier version did.
+fn create_metrics_view(c: &Connection) -> Result<()> {
     let original = metric_select("v12_raw_attempts", 2)
         + " WHERE EXISTS(SELECT 1 FROM v12_original o WHERE o.owner=r.rid AND o.metrics_changed)";
-    db(c.execute_batch(&format!("CREATE VIEW usage_metrics AS {} UNION ALL {} UNION ALL {original} UNION ALL SELECT * FROM usage_daily_metrics;",metric_select("v12_attempts",0),metric_select("v12_sessions",0))))?;
+    db(c.execute_batch(&format!("CREATE VIEW usage_metrics AS {} UNION ALL {} UNION ALL {original} UNION ALL SELECT * FROM usage_daily_metrics;",metric_select("v12_attempts",0),metric_select("v12_sessions",0))))
+}
+/// Puts the view back as versions 13 and 14 made it, for a test that takes
+/// such a database over: it judged by the status alone, and by a function
+/// that is no longer registered.
+#[cfg(test)]
+pub(super) fn metrics_view_of_version_14(c: &Connection) {
+    let judged = "ordinal=r.last AND usage_verdict(r.source,status,shape_value.value,r.completed)";
+    let now: String = c
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='usage_metrics'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let then = now
+        .replace(
+            &format!("{judged}=1 THEN"),
+            "ordinal=r.last AND ((status BETWEEN 200 AND 299 OR status=101) OR (r.source=usage_label('antigravity') AND usage_app_outcome(shape_value.value)=1)) AND r.completed THEN",
+        )
+        .replace(
+            &format!("{judged} IS NOT NULL THEN"),
+            "ordinal=r.last AND (status IS NOT NULL OR (r.source=usage_label('antigravity') AND usage_app_outcome(shape_value.value) IS NOT NULL)) THEN",
+        );
+    assert_eq!(then.matches("usage_app_outcome").count(), 6);
+    assert!(!then.contains("usage_verdict"));
+    c.execute_batch(&format!("DROP VIEW usage_metrics; {then};"))
+        .unwrap();
+}
+fn create_views(c: &Connection) -> Result<()> {
+    db(c.execute_batch(RECORD_VIEWS))?;
+    create_metrics_view(c)?;
     for column in ["provider", "model", "operation"] {
         db(c.execute_batch(&format!(
             "CREATE INDEX v12_dimensions_{column} ON v12_dimensions({column});"
@@ -1365,19 +1416,43 @@ pub(super) fn register_values(c: &Connection) -> Result<()> {
                 .map_err(|_| rusqlite::Error::InvalidQuery)
         },
     ))?;
+    // What `verdict` says of a request, from a record's source, its last
+    // attempt's status and shape, and whether it completed: 1 for a success,
+    // 0 for an error and NULL for neither. SQL and a record judge alike.
+    // A shape is kept once for all the attempts alike in it and begins with
+    // its own digest, so the outcome it holds is read once for each shape
+    // rather than once for each row a summary reads.
+    let outcomes = parking_lot::Mutex::new(std::collections::HashMap::<[u8; 32], Box<str>>::new());
     db(c.create_scalar_function(
-        "usage_app_outcome",
-        1,
+        "usage_verdict",
+        4,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| {
-            let bytes: Option<Vec<u8>> = ctx.get(0)?;
-            Ok(bytes
-                .and_then(|b| shared_value(&b))
-                .and_then(|v| match v["outcome"].as_str() {
-                    Some("success") => Some(1),
-                    Some("failed" | "cancelled" | "rejected") => Some(0),
-                    _ => None,
-                }))
+        move |ctx| {
+            let source = label_text(ctx.get(0)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let status = ctx
+                .get::<Option<i64>>(1)?
+                .and_then(|status| u16::try_from(status).ok());
+            let completed = ctx.get::<Option<bool>>(3)?.unwrap_or(false);
+            let mut outcomes = outcomes.lock();
+            let outcome: &str = match ctx.get_raw(2) {
+                rusqlite::types::ValueRef::Blob(bytes) => match bytes.first_chunk::<32>() {
+                    Some(digest) => {
+                        if !outcomes.contains_key(digest) {
+                            if outcomes.len() >= 4096 {
+                                outcomes.clear();
+                            }
+                            let outcome = shared_value(bytes)
+                                .and_then(|shape| shape["outcome"].as_str().map(Box::from))
+                                .unwrap_or_default();
+                            outcomes.insert(*digest, outcome);
+                        }
+                        &outcomes[digest]
+                    }
+                    None => "",
+                },
+                _ => "",
+            };
+            Ok(verdict(&source, status, outcome, completed).map(i64::from))
         },
     ))?;
     db(c.create_scalar_function(

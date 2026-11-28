@@ -222,6 +222,90 @@ fn held_sums(mut body: Value) -> Result<Vec<query::Sum>> {
     }
     serde_json::from_value(held).map_err(|_| failure("用量记录无效"))
 }
+/// Counts the successes and the known outcomes of every daily rollup again,
+/// by what `verdict` says of its requests. Those are alike in their source,
+/// in how their last attempt ended and in whether they completed, all of it
+/// part of what tells one rollup from another, so the example decides for
+/// each of them.
+///
+/// Only the two counts change, in the row a rollup projects for its last
+/// attempt and where the rollup holds them itself. What a rollup projects is
+/// what every summary reads, also where its example would give something
+/// else, so no row is worked out from the example again: its id, its
+/// requests, its cost and what an earlier attempt adds stay as they are. A
+/// count that is so already is not written.
+pub(super) fn rejudge_daily(c: &Connection) -> Result<()> {
+    let mut rollups = {
+        let mut statement = db(c.prepare("SELECT id,body FROM daily"))?;
+        let rows = db(statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }))?;
+        db(rows.collect::<rusqlite::Result<Vec<_>>>())?
+    };
+    // Payloads are packed in blocks in the order they were written. Read in
+    // that order, a block is unpacked once.
+    rollups.sort_by_cached_key(|(_, body)| {
+        serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|stored| stored["_usageArchive"].as_i64())
+    });
+    let mut projected = db(c.prepare(
+        "UPDATE usage_daily_metrics SET success=?3*requests,status_known=?4*requests WHERE kind=1 AND owner=?1 AND ordinal=?2 AND (success<>?3*requests OR status_known<>?4*requests)",
+    ))?;
+    for (id, body) in rollups {
+        let mut payload = bodies::unpack(c, &body)?;
+        let example = &payload["example"];
+        let Some(attempts) = example["attempts"].as_array().filter(|a| !a.is_empty()) else {
+            continue;
+        };
+        let last = attempts.len() - 1;
+        let judged = verdict(
+            example["source"].as_str().unwrap_or_default(),
+            attempts[last]["status"]
+                .as_u64()
+                .and_then(|status| u16::try_from(status).ok()),
+            attempts[last]["outcome"].as_str().unwrap_or_default(),
+            example["completed"].as_bool().unwrap_or(false),
+        );
+        // Every request of the rollup is a success, and known, or none is.
+        let (success, known) = (u64::from(judged == Some(true)), u64::from(judged.is_some()));
+        db(projected.execute(params![id, last as i64, success, known]))?;
+        // A shared rollup holds what it projects for each attempt, and is not
+        // a record to be read as one; any other holds its totals.
+        let held = if payload.get("sums").is_some() {
+            payload
+                .get_mut("sums")
+                .and_then(|sums| sums.get_mut(last))
+                .and_then(|sum| sum.get_mut("totals"))
+        } else {
+            payload.get_mut("totals")
+        };
+        let Some(held) = held.and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let requests = held.get("requests").and_then(Value::as_u64).unwrap_or(0);
+        let counts = [
+            ("success", success * requests),
+            ("statusKnown", known * requests),
+        ];
+        if counts
+            .iter()
+            .all(|(field, count)| held.get(*field).and_then(Value::as_u64) == Some(*count))
+        {
+            continue;
+        }
+        for (field, count) in counts {
+            held.insert(field.into(), count.into());
+        }
+        // The payload this one replaces goes with it.
+        bodies::retire(c, &body)?;
+        db(c.execute(
+            "UPDATE daily SET body=?2 WHERE id=?1",
+            params![id, bodies::encode(c, &payload)?],
+        ))?;
+    }
+    Ok(())
+}
 /// A cursor's body is compressed (`usage_compress`); the identifiers of a
 /// receipt are keys (`usage_key`), as those of a stored record are, the
 /// gateway key its request came in with among them.
@@ -261,7 +345,7 @@ impl Store {
         db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
         query::register(&connection)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-        if version > 14 {
+        if version > 15 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         if version != 0 {
@@ -276,6 +360,12 @@ impl Store {
             if !storage_v12::has_entry_columns(&connection)? {
                 let tx = db(connection.transaction())?;
                 storage_v12::add_entry_columns(&tx)?;
+                db(tx.commit())?;
+            }
+            // Version 13 goes on from where version 14 stood.
+            if version < 15 {
+                let tx = db(connection.transaction())?;
+                storage_v12::upgrade_v14(&tx)?;
                 db(tx.commit())?;
             }
             return Ok(Self {

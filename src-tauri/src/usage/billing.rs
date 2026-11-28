@@ -595,8 +595,10 @@ mod tests {
                 ..Filter::default()
             })
             .unwrap();
-        assert_eq!(dashboard.totals.success, 0);
-        assert_eq!(dashboard.totals.status_known, 1);
+        // The session's message ended, which is a success; the gateway's
+        // request answered 200 and did not complete, which is an error.
+        assert_eq!(dashboard.totals.success, 1);
+        assert_eq!(dashboard.totals.status_known, 2);
     }
     #[test]
     fn full_csv_seconds_attempts_cleanup_and_concurrent_updates() {
