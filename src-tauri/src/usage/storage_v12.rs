@@ -665,7 +665,7 @@ fn dictionary(c: &Connection, id: i64) -> Result<Value> {
     )?;
     shared_value(&bytes).ok_or_else(|| failure("用量共享元数据损坏"))
 }
-fn shared_value(bytes: &[u8]) -> Option<Value> {
+pub(super) fn shared_value(bytes: &[u8]) -> Option<Value> {
     if bytes.len() < 32 || bytes.len() > LIMIT + 32 {
         return None;
     }

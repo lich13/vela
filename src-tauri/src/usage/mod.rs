@@ -44,6 +44,7 @@ mod routing_outcome_tests;
 mod sessions;
 #[cfg(test)]
 mod source_dedup_tests;
+pub(crate) mod speed;
 mod storage_v12;
 #[cfg(test)]
 mod storage_v12_tests;
@@ -592,6 +593,10 @@ impl Service {
         at: i64,
     ) -> Result<std::collections::BTreeMap<String, u64>> {
         self.read(|store| store.recent_gateway_requests(client, at))
+    }
+    /// How fast the clients are spending right now.
+    pub(crate) fn speed(&self) -> Result<speed::Speed> {
+        self.read(|store| store.speed(now()))
     }
     pub fn maintain(&self) -> Result<()> {
         let result = self.query(|store| {

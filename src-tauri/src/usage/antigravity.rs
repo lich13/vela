@@ -2432,7 +2432,7 @@ pub struct AntigravityUsageStats {
     pub families: Vec<AntigravityFamilyGroup>,
 }
 
-fn classify_model_family(
+pub(super) fn classify_model_family(
     model: Option<&str>,
     display_name: Option<&str>,
 ) -> (

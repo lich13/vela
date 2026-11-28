@@ -797,6 +797,11 @@ impl Store {
         )?;
         Ok(agg.finish())
     }
+    /// How fast the clients are spending at `now_ms`.
+    pub fn speed(&self, now_ms: i64) -> Result<super::speed::Speed> {
+        let _snapshot = self.read_snapshot()?;
+        super::speed::read(&self.connection, self.data_dir(), now_ms)
+    }
     pub fn detail_since(&self) -> Result<i64> {
         let value: Option<String> = db(self
             .connection

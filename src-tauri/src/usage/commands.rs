@@ -107,6 +107,14 @@ pub async fn get_usage_curves(r: &Runtime, filter: Filter) -> Result<super::curv
     .await
     .map_err(|_| failure("用量曲线查询中断"))?
 }
+/// How fast the clients are spending right now. It is asked every couple of
+/// seconds while a dial is on screen, and reads the last few minutes only.
+pub async fn get_usage_speed(r: &Runtime) -> Result<super::speed::Speed> {
+    let s = r.usage.clone();
+    tokio::task::spawn_blocking(move || s.speed())
+        .await
+        .map_err(|_| failure("用量速率查询中断"))?
+}
 /// The history and the account periods as they are saved. Asking for the
 /// quota is `refresh_antigravity_usage_quota`, which the page sends afterwards.
 pub async fn get_antigravity_usage_stats(
