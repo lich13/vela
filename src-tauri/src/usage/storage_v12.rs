@@ -633,6 +633,89 @@ pub(super) fn scan_client_attempts(
     flush(&mut attempts, request_operation, &mut visit)
 }
 
+/// One attempt of a request that reached no gateway, as the Antigravity app,
+/// either kind of its session files or a Claude Code session tells of it.
+pub(super) struct DirectAttempt<'a> {
+    pub client: &'a str,
+    pub source: &'a str,
+    /// The time of its request.
+    pub time: i64,
+    /// Whether its request completed.
+    pub completed: bool,
+    /// Whether it is the last of its request.
+    pub is_final: bool,
+    pub provider: Option<String>,
+    pub status: Option<u16>,
+    pub outcome: &'a str,
+    pub error_code: Option<&'a str>,
+    /// How long its first token took, where the totals take that for a sample.
+    pub first_token: Option<u64>,
+}
+
+/// Every attempt of the requests in `min_time..=max_time` that reached no
+/// gateway, in no order: those of `client`, or of both clients that have such
+/// requests where none is named. A session's copy of a request a gateway
+/// recorded counts with the gateway's and is not among them.
+pub(super) fn scan_direct_attempts(
+    c: &Connection,
+    client: Option<&str>,
+    min_time: i64,
+    max_time: i64,
+    mut visit: impl FnMut(DirectAttempt<'_>) -> Result<()>,
+) -> Result<()> {
+    use std::collections::btree_map::{BTreeMap, Entry};
+    // One client is named twice, so that the statement is the same for it.
+    let clients = match client {
+        None => ["antigravity", "claude"],
+        Some(client @ ("antigravity" | "claude")) => [client; 2],
+        Some(_) => return Ok(()),
+    };
+    // The first token is a sample where `metric_select` counts it one. No
+    // order is asked for: with one, the view of both attempt tables is read
+    // in whole rather than by the requests of the range.
+    let mut stmt = db(c.prepare_cached(
+        "SELECT usage_label(r.client),usage_label(r.source),r.time,r.completed,a.ordinal=r.last,
+         usage_value(p.value),a.status,a.shape,
+         CASE WHEN a.ordinal=r.last AND r.source=usage_label('antigravity') AND a.stream AND a.operation=0 THEN a.first_token END
+         FROM v12_records r
+         JOIN v12_all_attempts a ON a.owner=r.rid
+         LEFT JOIN v12_dictionary p ON p.id=a.provider
+         WHERE r.effective=1 AND r.time>=?1 AND r.time<=?2
+         AND r.client IN (usage_label(?3),usage_label(?4))
+         AND r.source IN (usage_label('antigravity'),usage_label('claude'))",
+    ))?;
+    // How an attempt ended and the error it gave are kept in its shape, which
+    // many attempts share.
+    let mut shapes: BTreeMap<i64, (String, Option<String>)> = BTreeMap::new();
+    let mut rows = db(stmt.query(params![min_time, max_time, clients[0], clients[1]]))?;
+    while let Some(row) = db(rows.next())? {
+        let shape: i64 = db(row.get(7))?;
+        let (outcome, error_code) = match shapes.entry(shape) {
+            Entry::Occupied(read) => read.into_mut(),
+            Entry::Vacant(unread) => {
+                let value = dictionary(c, shape)?;
+                let text = |key: &str| value[key].as_str().map(str::to_owned);
+                unread.insert((text("outcome").unwrap_or_default(), text("errorCode")))
+            }
+        };
+        let client: String = db(row.get(0))?;
+        let source: String = db(row.get(1))?;
+        visit(DirectAttempt {
+            client: &client,
+            source: &source,
+            time: db(row.get(2))?,
+            completed: db(row.get(3))?,
+            is_final: db(row.get(4))?,
+            provider: db(row.get(5))?,
+            status: db(row.get(6))?,
+            outcome,
+            error_code: error_code.as_deref(),
+            first_token: db(row.get(8))?,
+        })?;
+    }
+    Ok(())
+}
+
 fn intern(c: &Connection, v: &Value) -> Result<i64> {
     let payload = wire::encode_v13(v);
     if payload.len() > LIMIT {
