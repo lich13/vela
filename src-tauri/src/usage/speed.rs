@@ -6,9 +6,11 @@
 //! longer does. The weight of an age falls off as `exp(-age / FADE)`, lowered
 //! so that it reaches nothing where the window ends, and over the window it
 //! adds up to one: spending that holds steady reads as itself, and whatever
-//! was spent is shown for as much as it was. A request ran its cost up while
-//! it was answered, so it is weighed over that stretch and not at its end,
-//! and a long answer does not read as though it had been spent at once.
+//! was spent is shown for as much as it was. Nothing is known of a request
+//! before it ends, so however long it took, all of it is weighed from its
+//! end: to weigh it over the time it ran would leave out what that time had
+//! of it before anything was known. A request still under way is no part of
+//! the reading.
 //!
 //! What a gateway recorded is known as it ends. What is read from a client's
 //! sessions is known a reading later, and all of a minute at once: weighed
@@ -29,6 +31,9 @@ const FADE: f64 = 60_000.0;
 /// How long the last reading of a client's sessions stands for the present,
 /// in milliseconds: the minute until the next and what that takes to read.
 const HOLD: i64 = 90_000;
+/// How long a request that is kept under the time it began may have taken and
+/// still be found, in milliseconds.
+const LONGEST: i64 = 600_000;
 const HOUR: f64 = 3_600_000.0;
 /// The reading the dial ends at, in USD per hour.
 const FULL: f64 = 200.0;
@@ -84,19 +89,11 @@ pub struct Speed {
 }
 
 /// What of a cost the dial shows, per millisecond, when the request ended
-/// `age` milliseconds ago and took `took` of them.
-fn share(age: f64, took: f64) -> f64 {
+/// `age` milliseconds ago.
+fn share(age: f64) -> f64 {
     let edge = (-WINDOW / FADE).exp();
     let whole = FADE * (1.0 - edge) - WINDOW * edge;
-    // The weights of every age up to this one, added up.
-    let gathered = |age: f64| {
-        let age = age.clamp(0.0, WINDOW);
-        (FADE * (1.0 - (-age / FADE).exp()) - age * edge) / whole
-    };
-    let age = age.max(0.0);
-    if took >= 1.0 {
-        (gathered(age + took) - gathered(age)) / took
-    } else if age < WINDOW {
+    if (0.0..WINDOW).contains(&age) {
         ((-age / FADE).exp() - edge) / whole
     } else {
         0.0
@@ -149,14 +146,14 @@ pub(super) fn read(
         "SELECT usage_label(r.client),usage_value(p.value),usage_value(m.value),
          CASE WHEN r.client=usage_label('antigravity') THEN s.value END,a.cost,
          coalesce(a.unpriced>0 AND coalesce(a.input,0)+coalesce(a.output,0)+coalesce(a.cache_read,0)+coalesce(a.cache_write,0)>0,0),
-         a.duration,r.time,r.source<>0
+         a.duration,r.time,r.source<>0,r.started
          FROM v12_records r JOIN v12_all_attempts a ON a.owner=r.rid
          LEFT JOIN v12_dictionary p ON p.id=a.provider
          LEFT JOIN v12_dictionary m ON m.id=a.model
          LEFT JOIN v12_dictionary s ON s.id=a.shape
          WHERE r.effective=1 AND r.time>?1 AND r.time<=?2",
     ))?;
-    let mut rows = db(statement.query(params![now - HOLD - WINDOW as i64, now]))?;
+    let mut rows = db(statement.query(params![now - HOLD - WINDOW as i64 - LONGEST, now]))?;
     let mut total = Spent::default();
     let mut clients = [Spent::default(); CLIENTS.len()];
     let mut accounts: BTreeMap<String, BTreeMap<&'static str, Spent>> = BTreeMap::new();
@@ -164,7 +161,12 @@ pub(super) fn read(
     let mut timeline = None;
     while let Some(row) = db(rows.next())? {
         let client: String = db(row.get(0))?;
-        let ended: i64 = db(row.get(7))?;
+        // A request is kept under the time it ended, or where its source
+        // tells no more than when it began, under that: it ended then as
+        // long after as it took.
+        let time: i64 = db(row.get(7))?;
+        let took = db(row.get::<_, Option<i64>>(6))?.unwrap_or(0);
+        let ended = time + (db(row.get::<_, i64>(9))? + took).max(0);
         // The moment it is weighed at: one it had not ended by does not know
         // of it yet, and one a window later no longer does.
         let known = if db(row.get(8))? {
@@ -176,12 +178,22 @@ pub(super) fn read(
         if ended > known || known - ended >= WINDOW as i64 {
             continue;
         }
-        let took = db(row.get::<_, Option<i64>>(6))?.unwrap_or(0).max(0);
+        // What Antigravity has of a request still under way is kept under
+        // the time it began, and written again when it ends.
+        let shape = db(row.get::<_, Option<Vec<u8>>>(3))?
+            .as_deref()
+            .and_then(storage_v12::shared_value);
+        if shape
+            .as_ref()
+            .is_some_and(|shape| shape["outcome"] == "in_progress")
+        {
+            continue;
+        }
         let cost = db(row.get::<_, Option<String>>(4))?
             .and_then(|cost| cost.parse::<f64>().ok())
             .filter(|cost| cost.is_finite() && *cost > 0.0)
             .unwrap_or(0.0);
-        let per_ms = cost * share((known - ended) as f64, took as f64);
+        let per_ms = cost * share((known - ended) as f64);
         let unpriced: bool = db(row.get(5))?;
         total.add(per_ms, unpriced);
         let Some(index) = CLIENTS.iter().position(|id| *id == client) else {
@@ -194,9 +206,8 @@ pub(super) fn read(
         let model: Option<String> = db(row.get(2))?;
         // The name it is shown by tells the track of a model with no id.
         let shown = if model.as_deref().is_none_or(|model| model.trim().is_empty()) {
-            db(row.get::<_, Option<Vec<u8>>>(3))?
-                .as_deref()
-                .and_then(storage_v12::shared_value)
+            shape
+                .as_ref()
                 .and_then(|shape| shape["modelDisplayName"].as_str().map(str::to_owned))
         } else {
             None

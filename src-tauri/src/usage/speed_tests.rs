@@ -1,4 +1,4 @@
-// 覆盖即时速率：衰减与窗口、按耗时摊开、会话按上次读取时点计、各客户端与合计、Antigravity 账号与轨道、未定价、返回字段。
+// 覆盖即时速率：衰减与窗口、长请求自结束时计、进行中的不计、会话按上次读取时点计、各客户端与合计、Antigravity 账号与轨道、未定价、返回字段。
 use super::super::{model::*, store::Store};
 use super::{level, Rate, Speed, FULL};
 use serde_json::json;
@@ -8,8 +8,9 @@ const SECOND: i64 = 1_000;
 const BASE: i64 = 20_000 * 86_400_000;
 const ACCOUNT: &str = "00000000-0000-4000-8000-00000000000a";
 
-/// One request of `client` that ended at `at` having taken `took`, of the
-/// model `model` at `cost`; unpriced where `cost` is none.
+/// One request of `client` that began at `at`, which is the time it is kept
+/// under, and took `took`, of the model `model` at `cost`; unpriced where
+/// `cost` is none.
 fn request(
     client: &str,
     id: &str,
@@ -148,7 +149,7 @@ fn spending_that_holds_steady_reads_as_itself() {
 }
 
 #[test]
-fn a_long_answer_is_weighed_over_the_time_it_took() {
+fn a_long_answer_is_weighed_from_its_end_like_any_other() {
     let (_dir, store) = store(&[
         request(
             "codex",
@@ -158,43 +159,103 @@ fn a_long_answer_is_weighed_over_the_time_it_took() {
             Some("fixture-model"),
             Some("1"),
         ),
+        // Kept under the time it began, two minutes before it ended.
         request(
             "claude",
             "two-minutes",
-            BASE,
+            BASE - 120 * SECOND,
             120_000,
             Some("fixture-model"),
             Some("1"),
         ),
     ]);
     let speed = store.speed(BASE, &unread()).unwrap();
-    let (at_once, long) = (
-        per_hour(of(&speed, "codex")),
-        per_hour(of(&speed, "claude")),
-    );
-    assert!(near(at_once, kick(0.0)), "{at_once}");
-    // The mean of what each second of the two minutes reads as now.
-    let edge = (-5.0f64).exp();
-    let gathered = |age: f64| {
-        (60.0 * (1.0 - (-age / 60.0).exp()) - age * edge) / (60.0 * (1.0 - edge) - 300.0 * edge)
+    assert!(near(per_hour(of(&speed, "codex")), kick(0.0)));
+    assert!(near(per_hour(of(&speed, "claude")), kick(0.0)));
+    // Nothing was known of it while it ran.
+    let before = store.speed(BASE - 60 * SECOND, &unread()).unwrap();
+    assert_eq!(of(&before, "claude").cost_per_hour, "0");
+    // A window after its end it is weighed no more, however long ago it began.
+    let after = |seconds: i64| {
+        per_hour(of(
+            &store.speed(BASE + seconds * SECOND, &unread()).unwrap(),
+            "claude",
+        ))
     };
-    let expected = 3_600.0 * gathered(120.0) / 120.0;
-    assert!(near(long, expected), "{long} {expected}");
-    assert!(long < at_once * 0.5);
-    // An answer longer than the window is not shown for more than was spent.
-    let (_dir, store) = store_of_one(request(
-        "codex",
-        "ten-minutes",
-        BASE,
-        600_000,
-        Some("fixture-model"),
-        Some("1"),
-    ));
-    let read = per_hour(&store.speed(BASE, &unread()).unwrap().total);
-    assert!(near(read, 3_600.0 / 600.0), "{read}");
+    assert!(near(after(299), kick(299.0)));
+    assert_eq!(after(300), 0.0);
 }
-fn store_of_one(record: Record) -> (tempfile::TempDir, Store) {
-    store(&[record])
+
+#[test]
+fn long_answers_that_hold_steady_read_as_themselves() {
+    // A cent's answer ending every ten seconds, each two minutes in the
+    // making, is $3.60 an hour all the same.
+    let records: Vec<Record> = (0..60)
+        .map(|n| {
+            request(
+                "claude",
+                &format!("steady-{n}"),
+                BASE - 125 * SECOND - n * 10 * SECOND,
+                120_000,
+                Some("fixture-model"),
+                Some("0.01"),
+            )
+        })
+        .collect();
+    let (_dir, store) = store(&records);
+    let read = per_hour(&store.speed(BASE, &unread()).unwrap().total);
+    assert!((3.57..3.63).contains(&read), "{read}");
+}
+
+#[test]
+fn a_step_antigravity_keeps_under_the_time_it_began_is_weighed_once_it_has_ended() {
+    let step = |id: &str, began: i64, took: u64, outcome: &str, cost: &str| {
+        let told = request(
+            "antigravity",
+            id,
+            began,
+            took,
+            Some("gemini-fixture"),
+            Some(cost),
+        );
+        Record {
+            source: "antigravity".into(),
+            finished_at: Some(began),
+            completed: outcome == "success",
+            attempts: vec![Attempt {
+                outcome: outcome.into(),
+                ..told.attempts[0].clone()
+            }],
+            ..told
+        }
+    };
+    let (_dir, store) = store(&[
+        // Three minutes in the making, over twenty seconds ago.
+        step("done", BASE - 200 * SECOND, 180_000, "success", "0.6"),
+        // What a request still under way has used so far.
+        step("running", BASE - 30 * SECOND, 0, "in_progress", "5"),
+    ]);
+    let read = |now: i64| {
+        let at = BASE + now * SECOND;
+        let sessions = BTreeMap::from([("antigravity".to_owned(), at)]);
+        store.speed(at, &sessions).unwrap()
+    };
+    let speed = read(0);
+    assert!(near(per_hour(of(&speed, "antigravity")), 0.6 * kick(20.0)));
+    assert!(near(per_hour(&speed.total), 0.6 * kick(20.0)));
+    assert_eq!(speed.accounts.len(), 1);
+    assert!(near(
+        per_hour(&speed.accounts[0].tracks[0].rate),
+        0.6 * kick(20.0)
+    ));
+    // A reading made while the step ran knows nothing of it.
+    assert_eq!(of(&read(-60), "antigravity").cost_per_hour, "0");
+    // Found by the time it began, it is weighed a window on from its end.
+    assert!(near(
+        per_hour(of(&read(270), "antigravity")),
+        0.6 * kick(290.0)
+    ));
+    assert_eq!(of(&read(280), "antigravity").cost_per_hour, "0");
 }
 
 #[test]
